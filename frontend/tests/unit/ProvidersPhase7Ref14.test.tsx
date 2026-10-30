@@ -12,7 +12,10 @@ function LocationProbe() {
   return <output data-testid="location-probe">{location.pathname}</output>
 }
 
-function createMockClient(modelsByProvider: Record<string, Array<{ model_id: string; display_name: string }>> = {}) {
+function createMockClient(
+  modelsByProvider: Record<string, Array<{ model_id: string; display_name: string }>> = {},
+  enabledProviders: string[] = ['openai', 'openrouter'],
+) {
   const fetchImpl = vi.fn<typeof fetch>((input) => {
     const url = String(input)
     if (url.endsWith('/settings/vision-model')) {
@@ -65,7 +68,7 @@ function createMockClient(modelsByProvider: Record<string, Array<{ model_id: str
     const providerMatch = /\/v1\/providers\/([^/]+)$/.exec(url)
     if (providerMatch) {
       const provider = providerMatch[1]
-      const enabled = provider === 'openai' || provider === 'openrouter'
+      const enabled = enabledProviders.includes(provider)
       return Promise.resolve(
         new Response(JSON.stringify({ provider, enabled }), {
           status: 200,
@@ -126,8 +129,18 @@ describe('ProvidersSection Phase 7 (ref-14.png: Modelos e provedores)', () => {
     expect(screen.getByText('Escolha a IA que trabalha com você.')).toBeInTheDocument()
   })
 
-  it('keeps getByRole("link", { name: /OpenAI/ }) strictly unique to ProviderGrid while rendering Gerenciar as a button', async () => {
+  it('lists only genuinely configured providers in Provedores conectados and shows empty state when none are configured', async () => {
     const user = userEvent.setup()
+    const { unmount } = renderProvidersSection({ client: createMockClient({}, []) })
+
+    const emptyCard = screen.getByTestId('providers-connected-card')
+    expect(within(emptyCard).getByTestId('providers-connected-empty')).toHaveTextContent(
+      'Nenhum provedor conectado ainda. Conecte um provedor abaixo para começar.',
+    )
+    expect(within(emptyCard).queryByText('OpenAI')).not.toBeInTheDocument()
+    expect(within(emptyCard).queryByText(/Ollama/)).not.toBeInTheDocument()
+    unmount()
+
     renderProvidersSection()
 
     const openAiLinks = screen.getAllByRole('link', { name: /OpenAI/ })
@@ -136,8 +149,9 @@ describe('ProvidersSection Phase 7 (ref-14.png: Modelos e provedores)', () => {
 
     const connectedCard = screen.getByTestId('providers-connected-card')
     expect(within(connectedCard).getByRole('heading', { level: 3, name: 'Provedores conectados' })).toBeInTheDocument()
-    expect(within(connectedCard).getByText('OpenAI')).toBeInTheDocument()
-    expect(within(connectedCard).getByText(/Ollama/)).toBeInTheDocument()
+    expect(await within(connectedCard).findByText('OpenAI')).toBeInTheDocument()
+    expect(within(connectedCard).getByText('OpenRouter')).toBeInTheDocument()
+    expect(within(connectedCard).queryByText(/Ollama/)).not.toBeInTheDocument()
 
     const manageOpenAiBtn = screen.getByTestId('providers-manage-openai')
     expect(manageOpenAiBtn.tagName).toBe('BUTTON')
@@ -169,7 +183,7 @@ describe('ProvidersSection Phase 7 (ref-14.png: Modelos e provedores)', () => {
     await user.selectOptions(providerSelect, 'anthropic')
     expect(providerSelect.value).toBe('anthropic')
     expect(modelSelect.value).toBe('claude-sonnet-4-5')
-    expect( await within(modelSelect).findByRole('option', { name: 'Claude Opus 4.1 API' })).toBeInTheDocument()
+    expect(await within(modelSelect).findByRole('option', { name: 'Claude Opus 4.1 API' })).toBeInTheDocument()
 
     await user.selectOptions(providerSelect, 'google')
     expect(modelSelect.value).toBe('gemini-2.5-pro')

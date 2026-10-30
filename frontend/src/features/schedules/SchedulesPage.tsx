@@ -33,50 +33,6 @@ type ScheduleTab = 'active' | 'paused' | 'completed'
 type RecurrenceMode = 'once' | 'repeat'
 type FrequencyPreset = 'weekdays' | 'friday' | 'every30m' | 'daily' | 'custom'
 
-type ShowcaseScheduleRow = {
-  id: string
-  title: string
-  subtitle: string
-  cron: string
-  project: string
-  statusLabel: 'Ativa' | 'Monitorando' | 'Pausada' | 'Concluída'
-  statusClass: 'is-active' | 'is-monitoring' | 'is-paused' | 'is-completed'
-  tab: ScheduleTab
-}
-
-const SHOWCASE_ROWS: ShowcaseScheduleRow[] = [
-  {
-    id: 'demo-sales',
-    title: 'Resumo diário das vendas',
-    subtitle: 'Enviado no chat e por voz',
-    cron: '0 9 * * 1-5',
-    project: 'Auryly',
-    statusLabel: 'Ativa',
-    statusClass: 'is-active',
-    tab: 'active',
-  },
-  {
-    id: 'demo-weekly',
-    title: 'Relatório semanal da Auryly',
-    subtitle: 'Gera PDF e salva no projeto',
-    cron: '0 18 * * 5',
-    project: 'Auryly',
-    statusLabel: 'Ativa',
-    statusClass: 'is-active',
-    tab: 'active',
-  },
-  {
-    id: 'demo-uptime',
-    title: 'Checar site no ar',
-    subtitle: 'Avisa apenas se encontrar erro',
-    cron: '*/30 * * * *',
-    project: 'Orin Core',
-    statusLabel: 'Monitorando',
-    statusClass: 'is-monitoring',
-    tab: 'active',
-  },
-]
-
 function buildCronExpression(preset: FrequencyPreset, time: string, customCron: string): string {
   if (preset === 'every30m') return '*/30 * * * *'
   if (preset === 'custom') {
@@ -152,7 +108,7 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
   }
 
   function handleTestNow() {
-    const promptPreview = message.trim() || 'Resumo diário das vendas'
+    const promptPreview = message.trim() || 'Execução de teste da rotina'
     const cronExpr = buildCronExpression(frequencyPreset, time, customCron)
     const scheduleDesc = mode === 'once' && fireAt ? `Uma vez (${fireAt})` : formatHumanCron(cronExpr)
     setTestFeedback(`Simulação pronta: "${promptPreview}" · ${scheduleDesc} (${timezone})`)
@@ -203,8 +159,7 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
   const pausedApiItems = items.filter((item) => item.state === 'PAUSED')
   const completedApiItems = items.filter((item) => item.state !== 'ACTIVE' && item.state !== 'PAUSED')
 
-  const isShowcase = items.length === 0
-  const activeCount = isShowcase ? SHOWCASE_ROWS.length : activeApiItems.length
+  const activeCount = activeApiItems.length
   const pausedCount = pausedApiItems.length
   const completedCount = completedApiItems.length
 
@@ -214,8 +169,6 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
       : activeTab === 'paused'
         ? pausedApiItems
         : completedApiItems
-
-  const visibleShowcaseRows = isShowcase ? SHOWCASE_ROWS.filter((row) => row.tab === activeTab) : []
 
   const content = (
     <section className="schedules-page schedules-ref09__surface" aria-labelledby="schedules-title">
@@ -299,35 +252,8 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
                 <th scope="col">STATUS</th>
               </tr>
             </thead>
-            <tbody>
-              {isShowcase ? (
-                visibleShowcaseRows.length > 0 ? (
-                  visibleShowcaseRows.map((row) => (
-                    <tr key={row.id} className="schedules-table__row">
-                      <td>
-                        <strong className="schedules-table__action-title">{row.title}</strong>
-                        <span className="schedules-table__action-sub">{row.subtitle}</span>
-                      </td>
-                      <td>
-                        <span className="schedules-table__when-main">{formatHumanCron(row.cron)}</span>
-                        <span className="schedules-table__cron-meta">cron {row.cron}</span>
-                      </td>
-                      <td>
-                        <span className="schedules-table__project-pill">{row.project}</span>
-                      </td>
-                      <td>
-                        <span className={`schedules-status-pill ${row.statusClass}`}>{row.statusLabel}</span>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr className="schedules-table__row">
-                    <td colSpan={4}>
-                      <span className="schedules-table__action-sub">Nenhuma ação neste filtro.</span>
-                    </td>
-                  </tr>
-                )
-              ) : visibleApiItems.length > 0 ? (
+            <tbody data-testid="schedules-table-body">
+              {visibleApiItems.length > 0 ? (
                 visibleApiItems.map((item) => (
                   <ApiScheduleTableRow
                     key={item.schedule_id}
@@ -337,9 +263,9 @@ export function SchedulesPage({ embedded = false }: { embedded?: boolean }) {
                   />
                 ))
               ) : (
-                <tr className="schedules-table__row">
-                  <td colSpan={4}>
-                    <span className="schedules-table__action-sub">Nenhuma ação neste filtro.</span>
+                <tr>
+                  <td colSpan={4} className="schedules-table__empty" data-testid="schedules-empty-state">
+                    Nenhuma ação agendada neste filtro. Use o painel ao lado para criar uma rotina.
                   </td>
                 </tr>
               )}

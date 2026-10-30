@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import process from 'node:process'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   CodeWorkbenchPanel,
@@ -66,7 +67,7 @@ const SAMPLE_TERMINAL: CodeWorkbenchTerminalEntry[] = [
 ]
 
 describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => {
-  it('starts on Prévia tab, renders the Auryly preview card, and does not mount file paths while on Prévia', () => {
+  it('starts on Prévia tab, renders iframe when local server URL is detected in terminal (or empty state when none), and does not mount file paths while on Prévia', () => {
     render(
       <CodeWorkbenchPanel
         files={SAMPLE_FILES}
@@ -96,22 +97,19 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
     expect(screen.queryByTestId('workbench-files-view')).not.toBeInTheDocument()
     expect(screen.queryByTestId('workbench-terminal-view')).not.toBeInTheDocument()
 
-    // Preview stage content (ref-08.png)
+    // Preview stage content: auto-detected from SAMPLE_TERMINAL
     const stage = screen.getByTestId('workbench-preview-stage')
     expect(stage).toHaveAttribute('data-viewport', 'desktop')
-    expect(within(stage).getByText('Auryly')).toBeInTheDocument()
-    expect(within(stage).getByText('Trilha de aprendizado')).toBeInTheDocument()
-    expect(within(stage).getByText('Transforme ideias em projetos com IA')).toBeInTheDocument()
-    expect(within(stage).getByText(/Explorar a trilha/)).toBeInTheDocument()
-    expect(within(stage).getByText(/Assistir ao trailer/)).toBeInTheDocument()
-    expect(within(stage).getByText(/O que você vai aprender/)).toBeInTheDocument()
-    expect(within(stage).getByText(/3 aulas/)).toBeInTheDocument()
-    expect(within(stage).getByText('Panorama das ferramentas')).toBeInTheDocument()
-    expect(within(stage).getByText('12 min')).toBeInTheDocument()
-    expect(within(stage).getByText('Do prompt ao protótipo')).toBeInTheDocument()
-    expect(within(stage).getByText('18 min')).toBeInTheDocument()
-    expect(within(stage).getByText('Projeto prático: seu primeiro app')).toBeInTheDocument()
-    expect(within(stage).getByText('25 min')).toBeInTheDocument()
+    const iframe = within(stage).getByTestId('workbench-preview-iframe')
+    expect(iframe).toHaveAttribute('src', 'http://localhost:3000/trilhas/ferramentas-do-hype')
+
+    // When no URL is provided or detected, renders clean empty state
+    cleanup()
+    render(<CodeWorkbenchPanel files={SAMPLE_FILES} terminalEntries={[]} />)
+    expect(screen.getByTestId('workbench-preview-empty')).toHaveTextContent(
+      'Nenhuma prévia ativa no momento. Informe uma URL http(s) acima ou inicie um servidor local no terminal.',
+    )
+    expect(screen.queryByTestId('workbench-preview-iframe')).not.toBeInTheDocument()
   })
 
   it('toggles viewport between desktop and mobile and reloads the preview stage', () => {
@@ -166,8 +164,9 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
     )
 
     const urlInput = screen.getByTestId('workbench-preview-url-input') as HTMLInputElement
-    // Unsafe initialPreviewUrl must fall back to the default safe http:// URL
-    expect(urlInput.value).toBe('http://localhost:3000/trilhas/ferramentas-do-hype')
+    // Unsafe initialPreviewUrl must fall back to empty string and render empty state
+    expect(urlInput.value).toBe('')
+    expect(screen.getByTestId('workbench-preview-empty')).toBeInTheDocument()
 
     // Attempt XSS via javascript: protocol
     fireEvent.change(urlInput, { target: { value: 'javascript:alert(1)' } })
@@ -277,7 +276,7 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
 
   it('contains no prohibited dark-only utility classes in CodeWorkbenchPanel.tsx', () => {
     const source = readFileSync(
-      resolve(__dirname, '../CodeWorkbenchPanel.tsx'),
+      resolve(process.cwd(), 'src/features/conversations/CodeWorkbenchPanel.tsx'),
       'utf-8',
     )
     expect(source).not.toMatch(/\btext-white\b|\bbg-black\b|\bborder-white\b/)

@@ -8,7 +8,7 @@ afterEach(() => {
 })
 
 describe('TeamActivityView (ref-10.png)', () => {
-  it('renderiza o Hero, subtítulo, botão Pausar equipe, Voltar à conversa e Stepper padrão (3 de 5 etapas)', () => {
+  it('renderiza o Hero, subtítulo, botão Pausar equipe, Voltar à conversa e estados vazios limpos por padrão (0 de 0 etapas)', () => {
     const onPauseTeam = vi.fn()
     const onBackToChat = vi.fn()
 
@@ -40,11 +40,19 @@ describe('TeamActivityView (ref-10.png)', () => {
     expect(onBackToChat).toHaveBeenCalledTimes(1)
 
     const stepper = screen.getByTestId('team-stepper')
-    expect(stepper.textContent).toContain('3 de 5 etapas')
+    expect(stepper.textContent).toContain('0 de 0 etapas')
     expect(stepper.textContent).toContain('Em andamento')
-    expect(within(stepper).getAllByText('✓').length).toBe(3)
-    expect(within(stepper).getByText('4')).toBeTruthy()
-    expect(within(stepper).getByText('5')).toBeTruthy()
+
+    expect(screen.getByTestId('team-agents-empty').textContent).toContain(
+      'Nenhum subagente em execução neste momento.',
+    )
+    expect(screen.queryByTestId('team-decision-card')).toBeNull()
+    expect(screen.getByTestId('team-final-deliverable-card').textContent).toContain(
+      'Nenhum entregável gerado ainda',
+    )
+    expect(screen.getByTestId('team-recent-activity').textContent).toContain(
+      'Nenhuma atividade registrada ainda.',
+    )
   })
 
   it('alterna o texto do botão para "Retomar equipe" quando paused=true e calcula etapas a partir de todos', () => {
@@ -65,8 +73,46 @@ describe('TeamActivityView (ref-10.png)', () => {
     expect(within(stepper).getAllByText('✓').length).toBe(4)
   })
 
-  it('renderiza os 3 especialistas canônicos de ref-10.png e permite expandir/recolher "Ver atividade ⌄"', () => {
-    render(<TeamActivityView />)
+  it('renderiza os especialistas fornecidos via prop agents e permite expandir/recolher "Ver atividade ⌄"', () => {
+    render(
+      <TeamActivityView
+        agents={[
+          {
+            id: 'pesquisador',
+            roleName: 'Pesquisador',
+            currentTask: 'Comparando referências',
+            status: 'running',
+            durationLabel: '18 min',
+            icon: 'search',
+            activities: [
+              {
+                id: 'pesq-act-1',
+                label: 'Analisou 12 referências sobre ferramentas de mercado',
+                detail: '14:32',
+              },
+            ],
+          },
+          {
+            id: 'analista',
+            roleName: 'Analista',
+            currentTask: 'Organizando oportunidades',
+            status: 'running',
+            durationLabel: '12 min',
+            icon: 'chart',
+            activities: [],
+          },
+          {
+            id: 'revisor',
+            roleName: 'Revisor',
+            currentTask: 'Aguardando análise',
+            status: 'queued',
+            durationLabel: '3 min',
+            icon: 'document',
+            activities: [],
+          },
+        ]}
+      />,
+    )
 
     const agentsList = screen.getByTestId('team-agents-list')
     expect(agentsList).toBeTruthy()
@@ -169,6 +215,30 @@ describe('TeamActivityView (ref-10.png)', () => {
 
     const { rerender } = render(
       <TeamActivityView
+        pendingDecision={{
+          id: 'decision-paid-tools',
+          question: 'Incluir ferramentas pagas na comparação?',
+          context: 'Encontramos boas opções pagas que podem ampliar o escopo da análise.',
+          options: [
+            {
+              id: 'opt-include-paid',
+              label: 'Incluir opções pagas',
+              value: 'Incluir opções pagas',
+              primary: true,
+            },
+            {
+              id: 'opt-free-only',
+              label: 'Somente gratuitas',
+              value: 'Somente gratuitas',
+              primary: false,
+            },
+          ],
+        }}
+        finalDeliverable={{
+          fileName: 'Relatório de oportunidades.md',
+          status: 'preparing',
+          statusLabel: 'Em preparação',
+        }}
         onResolveDecision={onResolveDecision}
         onOpenDeliverable={onOpenDeliverable}
       />,
@@ -238,7 +308,23 @@ describe('TeamActivityView (ref-10.png)', () => {
   it('renderiza o rodapé Atividade recente com horários HH:mm e botão "Ver todas as atividades ›"', () => {
     const onViewAllActivities = vi.fn()
 
-    render(<TeamActivityView onViewAllActivities={onViewAllActivities} />)
+    render(
+      <TeamActivityView
+        recentActivities={[
+          {
+            id: 'rec-1',
+            time: '14:32',
+            text: 'Pesquisador analisou 12 referências sobre ferramentas de mercado.',
+          },
+          {
+            id: 'rec-2',
+            time: '14:28',
+            text: 'Analista organizou oportunidades por categoria.',
+          },
+        ]}
+        onViewAllActivities={onViewAllActivities}
+      />,
+    )
 
     const recentSection = screen.getByTestId('team-recent-activity')
     expect(recentSection.textContent).toContain('Atividade recente')
@@ -248,8 +334,6 @@ describe('TeamActivityView (ref-10.png)', () => {
     )
     expect(recentSection.textContent).toContain('14:28')
     expect(recentSection.textContent).toContain('Analista organizou oportunidades por categoria.')
-    expect(recentSection.textContent).toContain('14:25')
-    expect(recentSection.textContent).toContain('Equipe iniciada por Carlos.')
 
     const viewAllBtn = screen.getByTestId('team-view-all-activities')
     expect(viewAllBtn.textContent).toContain('Ver todas as atividades')
@@ -293,7 +377,11 @@ describe('TeamActivityView (ref-10.png)', () => {
     }).not.toThrow()
 
     const view = screen.getByTestId('team-activity-view')
-    expect(view.textContent).not.toMatch(/[\u0000-\u001F\u007F]/)
+    const hasControlChars = Array.from(view.textContent ?? '').some((ch) => {
+      const code = ch.charCodeAt(0)
+      return code <= 0x1f || code === 0x7f
+    })
+    expect(hasControlChars).toBe(false)
     expect(view.textContent).toContain('AgenteSecreto')
     expect(view.textContent).toContain('Analisando dados críticos')
   })

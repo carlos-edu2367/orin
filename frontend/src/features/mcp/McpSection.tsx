@@ -5,7 +5,7 @@ import { McpServerCard } from './McpServerCard'
 import { McpServerForm } from './McpServerForm'
 
 type ConnectionTab = 'apps' | 'permissions' | 'mcp'
-type UseInScope = 'Projeto Auryly' | 'Todos os projetos'
+type UseInScope = 'Todos os projetos' | 'Apenas no projeto atual'
 
 type ConnectionPermissionItem = {
   id: string
@@ -19,50 +19,14 @@ type BuiltinConnectionItem = {
   name: string
   subtitle: string
   icon: string
-  iconMod: 'is-auryly' | 'is-browser' | 'is-files'
-  statusLabel: 'Conectado' | 'Ativo' | 'Restrito'
-  statusMod: 'is-connected' | 'is-active' | 'is-restricted'
+  iconMod: 'is-browser' | 'is-files'
+  statusLabel: 'Ativo' | 'Restrito'
+  statusMod: 'is-active' | 'is-restricted'
   defaultUseIn: UseInScope
   permissions: ReadonlyArray<ConnectionPermissionItem>
 }
 
 const BUILTIN_CONNECTIONS: ReadonlyArray<BuiltinConnectionItem> = [
-  {
-    id: 'conn-auryly',
-    name: 'Auryly',
-    subtitle: 'Acesso a produtos, pedidos e campanhas',
-    icon: 'A',
-    iconMod: 'is-auryly',
-    statusLabel: 'Conectado',
-    statusMod: 'is-connected',
-    defaultUseIn: 'Projeto Auryly',
-    permissions: [
-      {
-        id: 'auryly-read',
-        label: 'Ver produtos, estoque e pedidos',
-        description: 'Somente leitura',
-        defaultChecked: true,
-      },
-      {
-        id: 'auryly-draft',
-        label: 'Criar rascunhos de campanhas e cupons',
-        description: 'Não publica sem sua aprovação',
-        defaultChecked: true,
-      },
-      {
-        id: 'auryly-publish',
-        label: 'Publicar alterações na loja',
-        description: 'Pede confirmação antes de cada publicação',
-        defaultChecked: false,
-      },
-      {
-        id: 'auryly-payment',
-        label: 'Alterar configurações de pagamento',
-        description: 'Bloqueado por segurança',
-        defaultChecked: false,
-      },
-    ],
-  },
   {
     id: 'conn-browser',
     name: 'Navegador',
@@ -74,64 +38,40 @@ const BUILTIN_CONNECTIONS: ReadonlyArray<BuiltinConnectionItem> = [
     defaultUseIn: 'Todos os projetos',
     permissions: [
       {
-        id: 'browser-read',
-        label: 'Ver produtos, estoque e pedidos',
+        id: 'browser-navigate',
+        label: 'Navegar em páginas públicas quando solicitado',
         description: 'Somente leitura',
         defaultChecked: true,
       },
       {
-        id: 'browser-draft',
-        label: 'Criar rascunhos de campanhas e cupons',
-        description: 'Não publica sem sua aprovação',
+        id: 'browser-capture',
+        label: 'Capturar leitura de página com confirmação',
+        description: 'Pede confirmação antes de interagir com formulários',
         defaultChecked: true,
-      },
-      {
-        id: 'browser-publish',
-        label: 'Publicar alterações na loja',
-        description: 'Pede confirmação antes de cada publicação',
-        defaultChecked: false,
-      },
-      {
-        id: 'browser-payment',
-        label: 'Alterar configurações de pagamento',
-        description: 'Bloqueado por segurança',
-        defaultChecked: false,
       },
     ],
   },
   {
     id: 'conn-files',
     name: 'Arquivos locais',
-    subtitle: 'Apenas a pasta /Documentos/Projetos',
+    subtitle: 'Acesso restrito às pastas autorizadas em Segurança',
     icon: '📁',
     iconMod: 'is-files',
     statusLabel: 'Restrito',
     statusMod: 'is-restricted',
-    defaultUseIn: 'Projeto Auryly',
+    defaultUseIn: 'Apenas no projeto atual',
     permissions: [
       {
         id: 'files-read',
-        label: 'Ver produtos, estoque e pedidos',
-        description: 'Somente leitura',
+        label: 'Ler arquivos nas pastas autorizadas',
+        description: 'Somente leitura nas pastas permitidas',
         defaultChecked: true,
       },
       {
-        id: 'files-draft',
-        label: 'Criar rascunhos de campanhas e cupons',
-        description: 'Não publica sem sua aprovação',
+        id: 'files-write',
+        label: 'Pedir confirmação antes de editar arquivos',
+        description: 'Nunca altera arquivos fora das pastas autorizadas',
         defaultChecked: true,
-      },
-      {
-        id: 'files-publish',
-        label: 'Publicar alterações na loja',
-        description: 'Pede confirmação antes de cada publicação',
-        defaultChecked: false,
-      },
-      {
-        id: 'files-payment',
-        label: 'Alterar configurações de pagamento',
-        description: 'Bloqueado por segurança',
-        defaultChecked: false,
       },
     ],
   },
@@ -371,8 +311,8 @@ export function McpSection({ client }: { client?: ApiClient }) {
                 }))
               }
             >
-              <option value="Projeto Auryly">Projeto Auryly</option>
               <option value="Todos os projetos">Todos os projetos</option>
+              <option value="Apenas no projeto atual">Apenas no projeto atual</option>
             </select>
           </div>
 

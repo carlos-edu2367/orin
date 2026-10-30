@@ -5,9 +5,42 @@ import { describe, expect, it, vi } from 'vitest'
 import type { SkillSummary, SkillsClient } from '../../src/api/skills'
 import { SkillsPage } from '../../src/features/skills/SkillsPage'
 
-function createEmptySkillsClient(overrides: Partial<SkillsClient> = {}): SkillsClient {
+const SAMPLE_SKILLS: SkillSummary[] = [
+  {
+    id: 'skill-reports',
+    name: 'Criar relatórios',
+    description: 'Transforma dados e notas em relatórios claros com resumo executivo.',
+    version: '1.0.0',
+    tags: ['reports'],
+    source: 'system',
+    available: true,
+  },
+  {
+    id: 'skill-review',
+    name: 'Revisar textos',
+    description: 'Corrige clareza, tom e ortografia mantendo a sua voz.',
+    version: '1.0.0',
+    tags: ['writing'],
+    source: 'system',
+    available: true,
+  },
+  {
+    id: 'skill-custom',
+    name: 'Guia de Estilo',
+    description: 'Aplica diretrizes editoriais e padrões de código do projeto.',
+    version: '1.2.0',
+    tags: ['custom'],
+    source: 'user',
+    available: true,
+  },
+]
+
+function createSkillsClientWithItems(
+  items: SkillSummary[] = [],
+  overrides: Partial<SkillsClient> = {},
+): SkillsClient {
   return {
-    list: vi.fn(() => Promise.resolve({ items: [], next_cursor: null })),
+    list: vi.fn(() => Promise.resolve({ items, next_cursor: null })),
     get: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
@@ -19,7 +52,7 @@ function createEmptySkillsClient(overrides: Partial<SkillsClient> = {}): SkillsC
   }
 }
 
-function renderSkillsPage(client: SkillsClient = createEmptySkillsClient()) {
+function renderSkillsPage(client: SkillsClient = createSkillsClientWithItems()) {
   return render(
     <MemoryRouter initialEntries={['/skills']}>
       <Routes>
@@ -31,8 +64,8 @@ function renderSkillsPage(client: SkillsClient = createEmptySkillsClient()) {
 }
 
 describe('SkillsPage Phase 6 (ref-12.png)', () => {
-  it('renders header, subtitle, category tabs, searchbox, and toolbar action buttons', async () => {
-    renderSkillsPage()
+  it('renders header, subtitle, category tabs, searchbox, toolbar buttons, and honest empty state when API returns empty list', async () => {
+    renderSkillsPage(createSkillsClientWithItems([]))
 
     const heading = await screen.findByTestId('skills-heading')
     expect(heading).toHaveTextContent('Habilidades')
@@ -57,12 +90,17 @@ describe('SkillsPage Phase 6 (ref-12.png)', () => {
 
     const importBtn = screen.getByTestId('skills-import-button')
     expect(importBtn).toHaveTextContent('Importar arquivo')
+
+    expect(await screen.findByTestId('skills-empty-state')).toBeVisible()
+    expect(screen.getByTestId('skills-inspector-empty')).toBeVisible()
+    expect(screen.queryByText(/Auryly/i)).not.toBeInTheDocument()
   })
 
-  it('renders the 4 showcase cards from ref-12.png in a 2-column grid when API returns empty list', async () => {
-    const { container } = renderSkillsPage()
+  it('renders API skill cards in the grid and filters by category tab', async () => {
+    const user = userEvent.setup()
+    const { container } = renderSkillsPage(createSkillsClientWithItems(SAMPLE_SKILLS))
 
-    await screen.findByTestId('skills-heading')
+    await screen.findByRole('link', { name: 'Criar relatórios' })
     const grid = container.querySelector('.skills-cards-grid')
     expect(grid).not.toBeNull()
 
@@ -71,82 +109,73 @@ describe('SkillsPage Phase 6 (ref-12.png)', () => {
     expect(
       gridScope.getByText('Transforma dados e notas em relatórios claros com resumo executivo.'),
     ).toBeVisible()
-
     expect(gridScope.getByText('Revisar textos')).toBeVisible()
-    expect(
-      gridScope.getByText('Corrige clareza, tom e ortografia mantendo a sua voz.'),
-    ).toBeVisible()
+    expect(gridScope.getByText('Guia de Estilo')).toBeVisible()
 
-    expect(gridScope.getByText('Analisar planilhas')).toBeVisible()
-    expect(
-      gridScope.getByText('Encontra padrões, somas e pontos fora da curva em tabelas.'),
-    ).toBeVisible()
-
-    expect(gridScope.getByText('Padrão Auryly')).toBeVisible()
-    expect(
-      gridScope.getByText('Aplica as cores, fontes e tom de voz da marca Auryly.'),
-    ).toBeVisible()
-
-    expect(gridScope.getAllByText('Instalada')).toHaveLength(3)
+    expect(gridScope.getAllByText('Instalada')).toHaveLength(2)
     expect(gridScope.getByText('Criada por você')).toBeVisible()
 
     const firstCard = grid?.querySelector('.skill-card-v6.is-selected')
     expect(firstCard).not.toBeNull()
     expect(firstCard).toHaveTextContent('Criar relatórios')
+
+    // Switch to "Criadas por você" tab
+    await user.click(screen.getByTestId('skills-tab-custom'))
+    expect(gridScope.getByText('Guia de Estilo')).toBeVisible()
+    expect(gridScope.queryByText('Criar relatórios')).not.toBeInTheDocument()
   })
 
-  it('renders the right-hand inspector with settings, quick example, and closed instructions accordion by default', async () => {
+  it('renders the right-hand inspector with real skill details, neutral availability options, and closed instructions accordion by default', async () => {
     const user = userEvent.setup()
-    renderSkillsPage()
+    renderSkillsPage(createSkillsClientWithItems(SAMPLE_SKILLS))
 
+    await screen.findByRole('link', { name: 'Criar relatórios' })
     const inspector = await screen.findByTestId('skills-inspector-panel')
     const inspectorScope = within(inspector)
 
-    expect(inspectorScope.getByRole('heading', { name: 'Criar relatórios' })).toBeVisible()
+    expect(inspectorScope.getByRole('heading', { name: /Criar relatórios/ })).toBeVisible()
     expect(inspectorScope.getByText('Instalada')).toBeVisible()
     expect(
-      inspectorScope.getByText('Transforma dados e notas em relatórios claros com resumo executivo.'),
+      inspectorScope.getByText(/Transforma dados e notas em relatórios claros com resumo executivo\./),
     ).toBeVisible()
 
     const availabilitySelect = inspectorScope.getByLabelText('Disponível em') as HTMLSelectElement
     expect(availabilitySelect).toBeVisible()
     expect(
       Array.from(availabilitySelect.options).map((opt) => opt.textContent),
-    ).toEqual(['Todos os projetos', 'Apenas Auryly'])
+    ).toEqual(['Todos os projetos', 'Apenas no projeto atual'])
 
     const confirmToggle = inspectorScope.getByRole('checkbox', {
       name: /Pedir confirmação|Antes de publicar/i,
     })
     expect(confirmToggle).toBeChecked()
 
-    await user.selectOptions(availabilitySelect, 'Apenas Auryly')
-    expect(availabilitySelect.value).toBe('Apenas Auryly')
+    await user.selectOptions(availabilitySelect, 'Apenas no projeto atual')
+    expect(availabilitySelect.value).toBe('Apenas no projeto atual')
 
     await user.click(confirmToggle)
     expect(confirmToggle).not.toBeChecked()
 
     const quickExample = inspectorScope.getByTestId('skill-quick-example')
-    expect(quickExample).toHaveTextContent('Crie o relatório semanal da Auryly')
+    expect(quickExample).toHaveTextContent('Use a habilidade Criar relatórios na tarefa atual')
     expect(within(quickExample).getByRole('button', { name: 'Testar no chat' })).toBeVisible()
 
     const accordion = inspectorScope.getByTestId('skill-instructions-accordion')
     const trigger = within(accordion).getByRole('button', { name: /Instruções da habilidade/i })
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
-    expect(
-      within(accordion).queryByText(/Estruture com resumo executivo/i),
-    ).not.toBeInTheDocument()
 
     await user.click(trigger)
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
     expect(
-      within(accordion).getByText(/Estruture com resumo executivo/i),
+      within(accordion).getByText(/Transforma dados e notas em relatórios claros/i),
     ).toBeVisible()
   })
 
   it('updates the inspector and collapses instructions accordion when selecting another card', async () => {
     const user = userEvent.setup()
-    const { container } = renderSkillsPage()
+    const { container } = renderSkillsPage(createSkillsClientWithItems(SAMPLE_SKILLS))
 
+    await screen.findByRole('link', { name: 'Criar relatórios' })
     const inspector = await screen.findByTestId('skills-inspector-panel')
     const accordion = within(inspector).getByTestId('skill-instructions-accordion')
     const trigger = within(accordion).getByRole('button', { name: /Instruções da habilidade/i })
@@ -155,33 +184,14 @@ describe('SkillsPage Phase 6 (ref-12.png)', () => {
     expect(trigger).toHaveAttribute('aria-expanded', 'true')
 
     const grid = container.querySelector('.skills-cards-grid') as HTMLElement
-    await user.click(within(grid).getByText('Padrão Auryly'))
+    const cards = grid.querySelectorAll('.skill-card-v6')
+    await user.click(cards[2] as HTMLElement)
 
-    expect(within(inspector).getByRole('heading', { name: 'Padrão Auryly' })).toBeVisible()
+    expect(within(inspector).getByRole('heading', { name: /Guia de Estilo/ })).toBeVisible()
     expect(within(inspector).getByText('Criada por você')).toBeVisible()
     expect(
-      within(inspector).getByText('Aplica as cores, fontes e tom de voz da marca Auryly.'),
+      within(inspector).getByText(/Aplica diretrizes editoriais e padrões de código do projeto\./),
     ).toBeVisible()
     expect(trigger).toHaveAttribute('aria-expanded', 'false')
-  })
-
-  it('isolates API items from showcase cards when API returns skills', async () => {
-    const apiSkill: SkillSummary = {
-      id: 'api-skill-1',
-      name: 'Custom API Skill',
-      description: 'Executes an API-backed workflow.',
-      version: '2.1.0',
-      tags: ['automation'],
-      source: 'custom',
-      available: true,
-    }
-    const client = createEmptySkillsClient({
-      list: vi.fn(() => Promise.resolve({ items: [apiSkill], next_cursor: null })),
-    })
-    const { container } = renderSkillsPage(client)
-
-    expect(await screen.findByRole('link', { name: 'Custom API Skill' })).toBeVisible()
-    const grid = container.querySelector('.skills-cards-grid') as HTMLElement
-    expect(within(grid).queryByText('Criar relatórios')).not.toBeInTheDocument()
   })
 })

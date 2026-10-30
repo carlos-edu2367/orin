@@ -19,7 +19,7 @@ describe('SchedulesPage — Phase 6 (ref-09)', () => {
     expect(formatHumanCron('99 25 * * 1-5')).toBe('Cron · 99 25 * * 1-5')
   })
 
-  it('renders header, tabs, table columns, and the 3 reference showcase rows when API returns empty list', async () => {
+  it('renders header, tabs with 0 active count, table columns, and honest empty state when API returns empty list', async () => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async () => json({ items: [] })))
 
     render(
@@ -32,33 +32,90 @@ describe('SchedulesPage — Phase 6 (ref-09)', () => {
     expect(heading).toHaveTextContent('Ações agendadas')
     expect(screen.getByText('Tarefas que o Orin executa sozinho nos horários combinados.')).toBeInTheDocument()
 
-    expect(screen.getByTestId('schedules-tab-active')).toHaveTextContent(/Ativas/i)
-    expect(screen.getByTestId('schedules-tab-paused')).toHaveTextContent(/Pausadas/i)
-    expect(screen.getByTestId('schedules-tab-completed')).toHaveTextContent(/Concluídas/i)
+    expect(screen.getByTestId('schedules-tab-active')).toHaveTextContent('Ativas 0')
+    expect(screen.getByTestId('schedules-tab-paused')).toHaveTextContent('Pausadas 0')
+    expect(screen.getByTestId('schedules-tab-completed')).toHaveTextContent('Concluídas 0')
 
     expect(screen.getByRole('columnheader', { name: 'AÇÃO' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'QUANDO' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'PROJETO' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'STATUS' })).toBeInTheDocument()
 
-    expect(await screen.findByText('Resumo diário das vendas')).toBeInTheDocument()
-    expect(screen.getByText('Enviado no chat e por voz')).toBeInTheDocument()
-    expect(screen.getByText('Seg a sex · 09:00')).toBeInTheDocument()
+    const tbody = screen.getByTestId('schedules-table-body')
+    expect(tbody).toBeInTheDocument()
+    const emptyCell = await screen.findByTestId('schedules-empty-state')
+    expect(emptyCell).toHaveTextContent('Nenhuma ação agendada neste filtro. Use o painel ao lado para criar uma rotina.')
 
-    expect(screen.getByText('Relatório semanal da Auryly')).toBeInTheDocument()
-    expect(screen.getByText('Gera PDF e salva no projeto')).toBeInTheDocument()
-    expect(screen.getByText('Sexta · 18:00')).toBeInTheDocument()
-
-    expect(screen.getByText('Checar site no ar')).toBeInTheDocument()
-    expect(screen.getByText('Avisa apenas se encontrar erro')).toBeInTheDocument()
-    expect(screen.getByText('A cada 30 min')).toBeInTheDocument()
-    expect(screen.getByText('Orin Core')).toBeInTheDocument()
-    expect(screen.getByText('Monitorando')).toBeInTheDocument()
-
-    expect(screen.queryByRole('button', { name: 'Cancelar' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Resumo diário das vendas')).not.toBeInTheDocument()
+    expect(screen.queryByText('Relatório semanal da Auryly')).not.toBeInTheDocument()
+    expect(screen.queryByText('Checar site no ar')).not.toBeInTheDocument()
   })
 
-  it('renders the Nova ação drawer with Repeat mode selected by default, test simulation feedback, and cron submission', async () => {
+  it('renders real scheduled items from the API and updates tab counters accurately', async () => {
+    vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const path = new URL(typeof input === 'string' ? input : String(input), 'http://test.local').pathname
+      if (path === '/v1/projects') {
+        return json({
+          items: [
+            {
+              project_id: 'proj-core',
+              name: 'Orin Core',
+              description: null,
+              workspace_id: 'ws-1',
+              created_at: null,
+              updated_at: null,
+              archived_at: null,
+            },
+          ],
+        })
+      }
+      if (path === '/v1/schedules') {
+        return json({
+          items: [
+            {
+              schedule_id: 'sched-1',
+              state: 'ACTIVE',
+              next_fire_at: '2026-10-31T09:00:00Z',
+              recurrence: 'cron',
+              project_id: 'proj-core',
+              message: 'Verificar status do build matinal',
+              provider: 'openrouter',
+              model_id: 'model-1',
+              conversation_id: null,
+              cron: '0 9 * * 1-5',
+            },
+            {
+              schedule_id: 'sched-2',
+              state: 'PAUSED',
+              next_fire_at: null,
+              recurrence: 'cron',
+              project_id: null,
+              message: 'Revisão semanal de dependências',
+              provider: 'openrouter',
+              model_id: 'model-1',
+              conversation_id: null,
+              cron: '0 18 * * 5',
+            },
+          ],
+        })
+      }
+      return json({ items: [] })
+    }))
+
+    render(
+      <MemoryRouter initialEntries={['/schedules']}>
+        <SchedulesPage embedded />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('Verificar status do build matinal')).toBeInTheDocument()
+    expect(screen.getByText('Seg a sex · 09:00')).toBeInTheDocument()
+    expect(screen.getAllByText('Orin Core').length).toBeGreaterThan(0)
+    expect(screen.getByTestId('schedules-tab-active')).toHaveTextContent('Ativas 1')
+    expect(screen.getByTestId('schedules-tab-paused')).toHaveTextContent('Pausadas 1')
+  })
+
+  it('renders the Nova ação drawer with Repeat mode selected by default, neutral test simulation feedback, and cron submission', async () => {
     const requests: Array<{ method: string; path: string; body?: Record<string, unknown> }> = []
     vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : String(input)
@@ -100,6 +157,12 @@ describe('SchedulesPage — Phase 6 (ref-09)', () => {
     const submitBtn = screen.getByTestId('schedules-submit-button')
     expect(submitBtn).toHaveTextContent('Criar ação')
     expect(submitBtn).toHaveAttribute('aria-label', 'Criar tarefa')
+
+    // Clicking Testar agora when message is empty uses neutral fallback text
+    await user.click(screen.getByTestId('schedule-test-now'))
+    const emptyFeedback = await screen.findByTestId('schedule-test-feedback')
+    expect(emptyFeedback).toHaveTextContent('Execução de teste da rotina')
+    expect(emptyFeedback).not.toHaveTextContent('Resumo diário das vendas')
 
     await user.type(screen.getByLabelText('Instrução'), 'Gerar resumo matinal')
     await user.click(screen.getByTestId('schedule-test-now'))

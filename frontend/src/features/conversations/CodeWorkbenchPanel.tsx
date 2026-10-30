@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import type { StructuredPatchHunk } from './activityTypes'
 import { StructuredDiffView } from './WorkspaceFileCard'
 
@@ -31,13 +31,20 @@ export type CodeWorkbenchPanelProps = {
   onSelectFile?: (path: string | null) => void
 }
 
-const DEFAULT_PREVIEW_URL = 'http://localhost:3000/trilhas/ferramentas-do-hype'
 const URL_ERROR_MESSAGE = 'URL inválida. Use http:// ou https://.'
 
 export function sanitizePreviewUrl(raw: string): string | null {
   if (typeof raw !== 'string') return null
   const trimmed = raw.trim()
-  if (!trimmed || /[\u0000-\u001F\u007F]/.test(trimmed)) return null
+  if (
+    !trimmed ||
+    Array.from(trimmed).some((ch) => {
+      const code = ch.charCodeAt(0)
+      return code <= 0x1f || code === 0x7f
+    })
+  ) {
+    return null
+  }
   try {
     const parsed = new URL(trimmed)
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -50,6 +57,21 @@ export function sanitizePreviewUrl(raw: string): string | null {
   } catch {
     return null
   }
+}
+
+function detectPreviewUrlFromTerminal(
+  terminalEntries: readonly CodeWorkbenchTerminalEntry[],
+): string | null {
+  for (let i = terminalEntries.length - 1; i >= 0; i -= 1) {
+    const entry = terminalEntries[i]
+    const text = `${entry.output ?? ''} ${entry.command ?? ''}`
+    const match = text.match(/https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/[^\s"'<>]*)?/i)
+    if (match?.[0]) {
+      const sanitized = sanitizePreviewUrl(match[0])
+      if (sanitized) return sanitized
+    }
+  }
+  return null
 }
 
 function statusLabelForFile(status?: CodeWorkbenchFileItem['status']): string {
@@ -76,27 +98,6 @@ function statusLabelForTerminal(status?: CodeWorkbenchTerminalEntry['status']): 
   }
 }
 
-const AURYLY_LESSONS = [
-  {
-    number: 1,
-    title: 'Panorama das ferramentas',
-    description: 'Conheça o ecossistema e escolha as ferramentas certas para o seu projeto.',
-    duration: '12 min',
-  },
-  {
-    number: 2,
-    title: 'Do prompt ao protótipo',
-    description: 'Aprenda a criar, iterar e validar ideias de forma prática.',
-    duration: '18 min',
-  },
-  {
-    number: 3,
-    title: 'Projeto prático: seu primeiro app',
-    description: 'Mão na massa com um projeto completo, do zero ao ar.',
-    duration: '25 min',
-  },
-] as const
-
 export function CodeWorkbenchPanel({
   files,
   terminalEntries = [],
@@ -108,30 +109,30 @@ export function CodeWorkbenchPanel({
   selectedFilePath,
   onSelectFile,
 }: CodeWorkbenchPanelProps) {
-  const resolvedInitialUrl = useMemo(
-    () => (initialPreviewUrl ? sanitizePreviewUrl(initialPreviewUrl) : null) ?? DEFAULT_PREVIEW_URL,
-    [initialPreviewUrl],
-  )
+  const resolvedInitialUrl = useMemo(() => {
+    const fromProp = initialPreviewUrl ? sanitizePreviewUrl(initialPreviewUrl) : null
+    if (fromProp) return fromProp
+    if (!initialPreviewUrl) {
+      const fromTerminal = detectPreviewUrlFromTerminal(terminalEntries)
+      if (fromTerminal) return fromTerminal
+    }
+    return ''
+  }, [initialPreviewUrl, terminalEntries])
 
   const [internalTab, setInternalTab] = useState<CodeWorkbenchTab>(activeTab ?? 'preview')
-  const [urlInput, setUrlInput] = useState<string>(resolvedInitialUrl)
-  const [committedUrl, setCommittedUrl] = useState<string>(resolvedInitialUrl)
+  const [userUrlDraft, setUserUrlDraft] = useState<string | null>(null)
+  const [userCommittedUrl, setUserCommittedUrl] = useState<string | null>(null)
   const [urlError, setUrlError] = useState<string | null>(null)
   const [viewport, setViewport] = useState<'desktop' | 'mobile'>('desktop')
   const [reloadCount, setReloadCount] = useState<number>(0)
   const [fileQuery, setFileQuery] = useState<string>('')
-  const [internalSelectedFile, setInternalSelectedFile] = useState<string | null>(
-    selectedFilePath ?? files[0]?.path ?? null,
-  )
+  const [userSelectedFile, setUserSelectedFile] = useState<{
+    baseProp: string | null | undefined
+    path: string
+  } | null>(null)
 
-  useEffect(() => {
-    const sanitized = initialPreviewUrl ? sanitizePreviewUrl(initialPreviewUrl) : null
-    if (sanitized) {
-      setUrlInput(sanitized)
-      setCommittedUrl(sanitized)
-      setUrlError(null)
-    }
-  }, [initialPreviewUrl])
+  const urlInput = userUrlDraft ?? resolvedInitialUrl
+  const committedUrl = userCommittedUrl ?? resolvedInitialUrl
 
   const currentTab: CodeWorkbenchTab = activeTab ?? internalTab
 
@@ -141,15 +142,20 @@ export function CodeWorkbenchPanel({
   }
 
   const handleUrlInputChange = (rawValue: string) => {
-    setUrlInput(rawValue)
+    setUserUrlDraft(rawValue)
     const trimmed = rawValue.trim()
+    if (!trimmed) {
+      setUserCommittedUrl('')
+      setUrlError(null)
+      return
+    }
     if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed) && !/^https?:/i.test(trimmed)) {
       setUrlError(URL_ERROR_MESSAGE)
       return
     }
     const sanitized = sanitizePreviewUrl(rawValue)
     if (sanitized) {
-      setCommittedUrl(sanitized)
+      setUserCommittedUrl(sanitized)
       setUrlError(null)
     }
   }
@@ -161,7 +167,7 @@ export function CodeWorkbenchPanel({
       return null
     }
     setUrlError(null)
-    setCommittedUrl(sanitized)
+    setUserCommittedUrl(sanitized)
     return sanitized
   }
 
@@ -171,6 +177,10 @@ export function CodeWorkbenchPanel({
   }
 
   const handleReload = () => {
+    if (!urlInput.trim()) {
+      setReloadCount((count) => count + 1)
+      return
+    }
     const sanitized = applyUrlInput()
     if (sanitized) {
       setReloadCount((count) => count + 1)
@@ -183,17 +193,16 @@ export function CodeWorkbenchPanel({
     window.open(sanitized, '_blank', 'noopener,noreferrer')
   }
 
-  useEffect(() => {
-    if (selectedFilePath) {
-      setInternalSelectedFile(selectedFilePath)
-    }
-  }, [selectedFilePath])
-
   const filteredFiles = useMemo(() => {
     const normalizedQuery = fileQuery.trim().toLowerCase()
     if (!normalizedQuery) return files
     return files.filter((item) => item.path.toLowerCase().includes(normalizedQuery))
   }, [fileQuery, files])
+
+  const internalSelectedFile =
+    userSelectedFile && userSelectedFile.baseProp === selectedFilePath
+      ? userSelectedFile.path
+      : (selectedFilePath ?? files[0]?.path ?? null)
 
   const resolvedSelectedPath =
     internalSelectedFile && files.some((item) => item.path === internalSelectedFile)
@@ -208,7 +217,7 @@ export function CodeWorkbenchPanel({
   )
 
   const handleSelectFile = (path: string) => {
-    setInternalSelectedFile(path)
+    setUserSelectedFile({ baseProp: selectedFilePath, path })
     onSelectFile?.(path)
   }
 
@@ -372,75 +381,23 @@ export function CodeWorkbenchPanel({
                   : 'code-workbench__stage is-desktop'
               }
             >
-              <div className="auryly-preview">
-                <header className="auryly-preview__nav">
-                  <div className="auryly-preview__brand">
-                    <span className="auryly-preview__logo" aria-hidden="true">
-                      ✦
-                    </span>
-                    <strong className="auryly-preview__brand-name">Auryly</strong>
-                  </div>
-                  <nav className="auryly-preview__links" aria-label="Navegação da prévia">
-                    <span>Trilhas</span>
-                    <span>Comunidade</span>
-                    <span>Preços</span>
-                    <span className="auryly-preview__avatar" aria-hidden="true">
-                      👤
-                    </span>
-                  </nav>
-                </header>
-
-                <div className="auryly-preview__hero">
-                  <div className="auryly-preview__hero-copy">
-                    <span className="auryly-preview__pill">Trilha de aprendizado</span>
-                    <div className="auryly-preview__title">
-                      Transforme ideias em projetos com IA
-                    </div>
-                    <p className="auryly-preview__lead">
-                      Aprenda a usar as principais ferramentas do ecossistema Hype para tirar suas
-                      ideias do papel, com prática, exemplos reais e projetos guiados.
-                    </p>
-                    <div className="auryly-preview__actions">
-                      <span className="auryly-preview__cta-primary">Explorar a trilha →</span>
-                      <span className="auryly-preview__cta-secondary">▶ Assistir ao trailer</span>
-                    </div>
-                  </div>
-
-                  <div className="auryly-preview__hero-art" aria-hidden="true">
-                    <div className="auryly-preview__art-card">
-                      <span className="auryly-preview__art-tile">&gt;_</span>
-                      <span className="auryly-preview__art-tile">❃</span>
-                      <span className="auryly-preview__art-tile">▲</span>
-                      <span className="auryly-preview__art-tile">N</span>
-                    </div>
-                  </div>
+              {sanitizePreviewUrl(committedUrl) ? (
+                <iframe
+                  key={`${committedUrl}-${reloadCount}`}
+                  src={sanitizePreviewUrl(committedUrl)!}
+                  title="Prévia da aplicação"
+                  className="code-workbench__preview-iframe"
+                  data-testid="workbench-preview-iframe"
+                  sandbox="allow-scripts allow-forms allow-same-origin"
+                />
+              ) : (
+                <div
+                  className="code-workbench__preview-empty"
+                  data-testid="workbench-preview-empty"
+                >
+                  Nenhuma prévia ativa no momento. Informe uma URL http(s) acima ou inicie um servidor local no terminal.
                 </div>
-
-                <div className="auryly-preview__curriculum">
-                  <div className="auryly-preview__curriculum-header">
-                    <strong className="auryly-preview__curriculum-title">
-                      O que você vai aprender
-                    </strong>
-                    <span className="auryly-preview__curriculum-count">3 aulas</span>
-                  </div>
-
-                  <ol className="auryly-preview__lessons">
-                    {AURYLY_LESSONS.map((lesson) => (
-                      <li key={lesson.number} className="auryly-preview__lesson">
-                        <span className="auryly-preview__lesson-number">{lesson.number}</span>
-                        <div className="auryly-preview__lesson-body">
-                          <strong className="auryly-preview__lesson-title">{lesson.title}</strong>
-                          <p className="auryly-preview__lesson-desc">{lesson.description}</p>
-                        </div>
-                        <span className="auryly-preview__lesson-duration">{lesson.duration}</span>
-                        <span className="auryly-preview__lesson-play" aria-hidden="true">
-                          ▶
-                        </span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              </div>
+              )}
             </div>
           </div>
         )}

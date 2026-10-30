@@ -3,6 +3,9 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ThemeProvider, initThemeDom, useTheme } from '../ThemeContext'
 import themeCss from '../../styles/theme.css?raw'
+import liveCss from '../../styles/live.css?raw'
+import agentosCss from '../../styles/agentos.css?raw'
+import indexCss from '../../styles/index.css?raw'
 
 function ThemeHarness() {
   const { mode, resolvedTheme, accent, ambient, setMode, setAccent, setAmbient, cycleMode } = useTheme()
@@ -35,9 +38,12 @@ describe('ThemeContext & initThemeDom', () => {
     document.documentElement.removeAttribute('data-theme-preference')
     document.documentElement.removeAttribute('data-accent')
     document.documentElement.removeAttribute('data-ambient')
+    document.documentElement.removeAttribute('data-desktop')
+    delete (window as { orinDesktop?: unknown }).orinDesktop
   })
 
   afterEach(() => {
+    delete (window as { orinDesktop?: unknown }).orinDesktop
     vi.restoreAllMocks()
   })
 
@@ -47,6 +53,7 @@ describe('ThemeContext & initThemeDom', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark')
     expect(document.documentElement.getAttribute('data-accent')).toBe('violet')
     expect(document.documentElement.getAttribute('data-ambient')).toBe('on')
+    expect(document.documentElement.getAttribute('data-desktop')).toBe('false')
 
     render(
       <ThemeProvider>
@@ -87,6 +94,24 @@ describe('ThemeContext & initThemeDom', () => {
     expect(window.localStorage.getItem('orin.theme.ambient')).toBe('off')
   })
 
+  it('sets data-desktop synchronously via initThemeDom when window.orinDesktop is present and preserves pre-set data-desktop', () => {
+    ;(window as { orinDesktop?: { isDesktop?: boolean } }).orinDesktop = { isDesktop: true }
+    initThemeDom()
+    expect(document.documentElement.getAttribute('data-desktop')).toBe('true')
+
+    delete (window as { orinDesktop?: unknown }).orinDesktop
+    document.documentElement.setAttribute('data-desktop', 'true')
+    initThemeDom()
+    expect(document.documentElement.getAttribute('data-desktop')).toBe('true')
+
+    render(
+      <ThemeProvider>
+        <ThemeHarness />
+      </ThemeProvider>,
+    )
+    expect(document.documentElement.getAttribute('data-desktop')).toBe('true')
+  })
+
   it('defines canonical reference tokens (#101014, #141419, #1A1A21, #1E1E26, #B4A4EF, --orin-accent-ink) and custom theme blocks in theme.css', () => {
     expect(themeCss).toMatch(/--orin-page-bg:\s*#101014/i)
     expect(themeCss).toMatch(/--orin-surface-1:\s*#141419/i)
@@ -97,6 +122,20 @@ describe('ThemeContext & initThemeDom', () => {
     expect(themeCss).toContain('[data-theme="midnight"]')
     expect(themeCss).toContain('[data-theme="forest"]')
     expect(themeCss).toContain('[data-accent="rose"]')
+    expect(themeCss).toContain('--orin-titlebar-height')
+    expect(themeCss).toContain('--orin-titlebar-right-inset')
+    expect(themeCss).toContain('html[data-desktop="true"]')
+  })
+
+  it('defines Electron window controls clearance across live.css, agentos.css, and index.css topbars', () => {
+    expect(liveCss).toContain('html[data-desktop="true"] .live-stage__top')
+    expect(liveCss).toContain('html[data-desktop="true"] .friend-drawer__header')
+    expect(liveCss).toContain('html[data-desktop="true"] .friend-view__header')
+    expect(agentosCss).toContain('html[data-desktop="true"] .chat__head')
+    expect(agentosCss).toContain('html[data-desktop="true"] .settings-shell__bar')
+    expect(agentosCss).toContain('html[data-desktop="true"] .rewind-time-machine__topbar')
+    expect(indexCss).toContain('html[data-desktop="true"] .update-banner')
+    expect(indexCss).toContain('html[data-desktop="true"] .topbar')
   })
 
   it('cycles through dark -> light -> carbon -> dark and falls back safely on invalid storage values', async () => {

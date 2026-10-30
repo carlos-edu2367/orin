@@ -12,7 +12,6 @@ import {
 } from '../../api/projects'
 import { inspectNewWorkspaceFolder } from '../../api/workspace'
 import { OrinMascot } from '../../components/OrinMascot'
-import { estimateProjectFilesCount } from './ProjectsGalleryPage'
 import { WorkspaceNavigation } from './WorkspaceNavigation'
 
 export type ProjectPageProps = {
@@ -63,7 +62,7 @@ export function writeProjectInstructions(projectId: string, items: string[]): vo
   }
 }
 
-function formatChatRelativeTime(chat: ProjectChat, index: number): string {
+function formatChatRelativeTime(chat: ProjectChat): string {
   if (chat.updated_at) {
     const parsed = Date.parse(chat.updated_at)
     if (Number.isFinite(parsed)) {
@@ -77,20 +76,11 @@ function formatChatRelativeTime(chat: ProjectChat, index: number): string {
       return `há ${days} ${days === 1 ? 'dia' : 'dias'}`
     }
   }
-  if (index === 0) return 'há 2 horas'
-  if (index === 1) return 'há 1 dia'
-  return 'há 3 dias'
+  return 'Recente'
 }
 
-function summarizeProjectChat(chat: ProjectChat, projectName: string): string {
-  const lower = chat.title.toLowerCase()
-  if (chat.mode === 'code' || /trilha|página|endpoint|api|refator|código|app/i.test(lower)) {
-    return `Vamos estruturar e evoluir "${chat.title}" dentro do espaço ${projectName}.`
-  }
-  if (/pesquis|oportunidade|mercado|análise|estudo/i.test(lower)) {
-    return `Análise de contexto e oportunidades estratégicas para ${projectName}.`
-  }
-  return `Planejamento, decisões e próximos passos registrados em ${projectName}.`
+function summarizeProjectChat(chat: ProjectChat): string {
+  return chat.mode === 'code' ? 'Sessão do Orin Code' : 'Conversa do projeto'
 }
 
 export function ProjectPage({ client }: ProjectPageProps) {
@@ -240,7 +230,9 @@ export function ProjectPage({ client }: ProjectPageProps) {
     project.workspace?.kind === 'local'
       ? project.workspace.path || project.workspace.folderName || 'Workspace gerenciado'
       : 'Workspace gerenciado'
-  const filesCount = estimateProjectFilesCount(project)
+  const workspaceStatusLabel = project.workspace?.path
+    ? 'Pasta local vinculada'
+    : 'Sem pasta vinculada'
 
   return (
     <div className="project-dashboard-layout workspace-shell">
@@ -299,7 +291,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
               </span>
               <div className="project-dashboard__hero-text">
                 <h1>{project.name}</h1>
-                <p>{project.description || 'Produto, conteúdo e automações.'}</p>
+                <p>{project.description || 'Sem descrição definida.'}</p>
               </div>
             </div>
 
@@ -486,7 +478,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
 
                     {filteredChats.length > 0 ? (
                       <div className="project-page__chat-list project-dashboard__chat-list" data-testid="project-chat-list">
-                        {filteredChats.map((chat, idx) => {
+                        {filteredChats.map((chat) => {
                           const isRunning = ACTIVE_CHAT_STATES.has(chat.state)
                           const isSearch = /pesquis|oportunidade|busca|análise/i.test(chat.title)
                           return (
@@ -529,7 +521,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
                                   <span className="project-dashboard__chat-title">{chat.title}</span>
                                 </span>
                                 <span className="project-dashboard__chat-summary">
-                                  {summarizeProjectChat(chat, project.name)}
+                                  {summarizeProjectChat(chat)}
                                 </span>
                               </span>
 
@@ -540,7 +532,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
                                   </span>
                                 )}
                                 <span className="project-dashboard__chat-time">
-                                  {formatChatRelativeTime(chat, idx)}
+                                  {formatChatRelativeTime(chat)}
                                 </span>
                                 <small className="visually-hidden">{chat.state}</small>
                                 <span className="project-dashboard__chat-chevron" aria-hidden="true">›</span>
@@ -719,7 +711,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
                       {workspaceDisplayLabel}
                     </strong>
                     <small className="project-dashboard__context-card-secondary">
-                      {filesCount} arquivos
+                      {workspaceStatusLabel} · {project.chats.length} {project.chats.length === 1 ? 'conversa' : 'conversas'}
                     </small>
                   </span>
                   <span className="project-dashboard__context-card-chevron" aria-hidden="true">›</span>

@@ -236,7 +236,7 @@ describe('OnboardingWizard (ref-02.png)', () => {
     expect(window.localStorage.getItem('orin.provider.apiKey')).toBeNull()
 
     // 3. Sanitização de nome de usuário adversária
-    expect(sanitizeOnboardingDisplayName('   ')).toBe('Carlos')
+    expect(sanitizeOnboardingDisplayName('   ')).toBe('')
     expect(sanitizeOnboardingDisplayName('A'.repeat(120)).length).toBe(60)
   })
 

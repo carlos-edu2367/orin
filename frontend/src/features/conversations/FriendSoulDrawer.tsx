@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import {
   clampFriendTraits,
   FRIEND_ORB_THEMES,
@@ -539,7 +539,7 @@ export function FriendSoulDrawer({
                           max={meta.max}
                           step={0.01}
                           value={draft.traits[meta.key]}
-                          style={{ '--slider-pct': `${sliderPct}%` } as React.CSSProperties}
+                          style={{ '--slider-pct': `${sliderPct}%` } as CSSProperties}
                           onChange={(event) =>
                             edit({ traits: clampFriendTraits({ ...draft.traits, [meta.key]: Number(event.target.value) }) })
                           }

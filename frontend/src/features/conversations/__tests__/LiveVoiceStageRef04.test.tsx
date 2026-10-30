@@ -110,6 +110,12 @@ describe('LiveVoiceStage — Fase 4 (ref-04.png: Palco Friend / Ao vivo)', () =>
     expect(captions.getAttribute('data-captions-enabled')).toBe('false')
     expect(captions.textContent).toContain('Oi, Carlos!')
     expect(captions.textContent).toContain('Pode falar naturalmente e me interromper.')
+
+    // Quando não há falas nem tarefas delegadas, exibe estado vazio limpo e oculta o card de tarefa
+    expect(screen.getByTestId('live-voice-transcript-empty').textContent).toBe(
+      'As falas desta conversa aparecem aqui.',
+    )
+    expect(screen.queryByTestId('live-voice-task-card')).toBeNull()
   })
 
   it('renderiza coluna direita "Nesta conversa" com transcrição sanitizada e card de tarefa com botão Abrir no Code', () => {

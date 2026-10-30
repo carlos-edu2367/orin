@@ -26,15 +26,7 @@ export function getProjectFolderColor(projectId: string, index: number): FolderP
   return FOLDER_PALETTE[hash % FOLDER_PALETTE.length]
 }
 
-export function estimateProjectFilesCount(project: ProjectSidebarItem): number {
-  const chatsCount = project.chats.length
-  if (project.workspace?.kind === 'local') {
-    return Math.max(5, chatsCount * 4 + 4)
-  }
-  return Math.max(3, chatsCount * 2 + 3)
-}
-
-export function formatProjectUpdatedLabel(project: ProjectSidebarItem, index: number): string {
+export function formatProjectUpdatedLabel(project: ProjectSidebarItem): string {
   let latestMs = 0
   for (const chat of project.chats) {
     if (chat.updated_at) {
@@ -54,9 +46,7 @@ export function formatProjectUpdatedLabel(project: ProjectSidebarItem, index: nu
     const days = Math.floor(hours / 24)
     return `Atualizado há ${days} ${days === 1 ? 'dia' : 'dias'}`
   }
-  if (index === 0) return 'Atualizado há 20 min'
-  if (index === 1) return 'Atualizado há 2 dias'
-  return 'Atualizado há 5 dias'
+  return 'Sem atividade recente'
 }
 
 export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
@@ -98,7 +88,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
     if (!query) return projects
     return projects.filter((project) => {
       const nameMatch = project.name.toLowerCase().includes(query)
-      const descMatch = (project.description ?? 'Produto e conteúdo').toLowerCase().includes(query)
+      const descMatch = (project.description ?? 'Sem descrição').toLowerCase().includes(query)
       return nameMatch || descMatch
     })
   }, [projects, searchQuery])
@@ -229,7 +219,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
                     type="text"
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
-                    placeholder="Ex.: Auryly"
+                    placeholder="Ex.: Meu projeto"
                     maxLength={120}
                     required
                   />
@@ -240,7 +230,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
                     type="text"
                     value={newDescription}
                     onChange={(e) => setNewDescription(e.target.value)}
-                    placeholder="Ex.: Produto e conteúdo"
+                    placeholder="Ex.: Sem descrição"
                     maxLength={2000}
                   />
                 </label>
@@ -287,8 +277,10 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
                 ACTIVE_CHAT_STATES.has(chat.state),
               ).length
               const chatsCount = project.chats.length
-              const filesCount = estimateProjectFilesCount(project)
-              const updatedLabel = formatProjectUpdatedLabel(project, index)
+              const workspaceStatusLabel = project.workspace?.path
+                ? 'Pasta local vinculada'
+                : 'Sem pasta vinculada'
+              const updatedLabel = formatProjectUpdatedLabel(project)
 
               return (
                 <article
@@ -336,7 +328,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
                   <div className="projects-gallery__card-body">
                     <h3 className="projects-gallery__card-title">{project.name}</h3>
                     <p className="projects-gallery__card-desc">
-                      {project.description || 'Produto e conteúdo'}
+                      {project.description || 'Sem descrição'}
                     </p>
 
                     <div className="projects-gallery__card-counts" data-testid="project-card-counts">
@@ -349,7 +341,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
                           <path d="M10.5 4.5 6.2 8.8a1.5 1.5 0 0 0 2.1 2.1l4.6-4.6a3 3 0 0 0-4.2-4.2L4 6.8a4.5 4.5 0 0 0 6.4 6.4l3.6-3.6" strokeLinecap="round" strokeLinejoin="round" />
                         </svg>
                         <span>
-                          {chatsCount} {chatsCount === 1 ? 'conversa' : 'conversas'} · {filesCount} arquivos
+                          {chatsCount} {chatsCount === 1 ? 'conversa' : 'conversas'} · {workspaceStatusLabel}
                         </span>
                       </span>
                     </div>

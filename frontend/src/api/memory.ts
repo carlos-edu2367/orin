@@ -14,7 +14,7 @@ export type ManagedMemory = {
 
 export type MemorySemanticScope = 'work' | 'friend' | 'project'
 
-export type MemoryScopeLabel = 'Trabalho' | 'Friend' | 'Projeto · Auryly'
+export type MemoryScopeLabel = 'Trabalho' | 'Friend' | 'Por projeto'
 
 export const CUSTOM_MEMORY_STORAGE_KEY = 'orin.memory.custom.v1'
 
@@ -57,13 +57,13 @@ export function resolveSemanticScope(
 }
 
 export function scopeLabelFromSemantic(scope: MemorySemanticScope): MemoryScopeLabel {
-  if (scope === 'project') return 'Projeto · Auryly'
+  if (scope === 'project') return 'Por projeto'
   if (scope === 'friend') return 'Friend'
   return 'Trabalho'
 }
 
-export function semanticFromScopeLabel(label: MemoryScopeLabel): MemorySemanticScope {
-  if (label === 'Projeto · Auryly') return 'project'
+export function semanticFromScopeLabel(label: MemoryScopeLabel | string): MemorySemanticScope {
+  if (label === 'Por projeto' || label.startsWith('Projeto')) return 'project'
   if (label === 'Friend') return 'friend'
   return 'work'
 }

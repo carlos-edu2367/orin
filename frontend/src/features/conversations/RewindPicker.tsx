@@ -7,73 +7,6 @@ import { StructuredDiffView } from './WorkspaceFileCard'
 export type RewindMode = 'code' | 'conversation' | 'both'
 export type RewindableMessage = { messageId: string; content: string; createdAt?: string | null }
 
-function synthesizeHunksForFile(path: string): StructuredPatchHunk[] {
-  if (path.endsWith('App.tsx')) {
-    return [
-      {
-        oldStart: 12,
-        oldLines: 4,
-        newStart: 12,
-        newLines: 4,
-        lines: [
-          '   return (',
-          '     <div className="app">',
-          '-      <OldHome />',
-          '+      <Home />',
-          '     </div>',
-        ],
-      },
-    ]
-  }
-  if (path.endsWith('Header.tsx')) {
-    return [
-      {
-        oldStart: 8,
-        oldLines: 4,
-        newStart: 8,
-        newLines: 4,
-        lines: [
-          '     <header className="header">',
-          '       <Logo />',
-          '-      <NavigationOld />',
-          '+      <Navigation />',
-          '     </header>',
-        ],
-      },
-    ]
-  }
-  if (path.endsWith('.css')) {
-    return [
-      {
-        oldStart: 1,
-        oldLines: 4,
-        newStart: 1,
-        newLines: 4,
-        lines: [
-          ' :root {',
-          '-  --primary: #8b5cf6;',
-          '+  --primary: #b4a4ef;',
-          '   --background: #17171c;',
-          ' }',
-        ],
-      },
-    ]
-  }
-  return [
-    {
-      oldStart: 1,
-      oldLines: 2,
-      newStart: 1,
-      newLines: 2,
-      lines: [
-        ` // ${path}`,
-        '-const previousState = true',
-        '+const restoredState = true',
-      ],
-    },
-  ]
-}
-
 /**
  * The per-message rewind picker / Time Machine (`ref-16.png`, W7 `/rewind` or Esc Esc):
  * choose one of the checkpoints in the timeline, inspect the file diffs at that point,
@@ -150,7 +83,7 @@ export function RewindPicker({
   })
   useEffect(() => { listRef.current?.focus() }, [])
 
-  const selectedTimeLabel = selected === 0 ? 'Agora' : (current?.createdAt || 'Hoje, 14:20')
+  const selectedTimeLabel = selected === 0 ? 'Agora' : (current?.createdAt || 'Ponto anterior')
 
   return (
     <div
@@ -203,7 +136,7 @@ export function RewindPicker({
               >
                 {newestFirst.map((item, index) => {
                   const isSelected = index === selected
-                  const timeLabel = index === 0 ? 'Agora' : (item.createdAt || 'Hoje, 14:20')
+                  const timeLabel = index === 0 ? 'Agora' : (item.createdAt || 'Ponto anterior')
                   const filesForCheckpoint = filesByCheckpoint.get(item.messageId) ?? []
                   return (
                     <li
@@ -266,9 +199,10 @@ export function RewindPicker({
                 <div className="rewind-time-machine__file-list">
                   {changed.map((path) => {
                     const isCollapsed = Boolean(collapsedFiles[path])
-                    const hunks = filePatches && filePatches[path] && filePatches[path].length > 0
-                      ? filePatches[path]
-                      : synthesizeHunksForFile(path)
+                    const explicitPatch =
+                      filePatches && filePatches[path] && filePatches[path].length > 0
+                        ? filePatches[path]
+                        : null
                     return (
                       <article key={path} className="rewind-time-machine__file-card" data-testid="history-file-card">
                         <header className="rewind-time-machine__file-card-header">
@@ -288,7 +222,16 @@ export function RewindPicker({
                         </header>
                         {!isCollapsed && (
                           <div className="rewind-time-machine__file-card-body">
-                            <StructuredDiffView hunks={hunks} />
+                            {explicitPatch ? (
+                              <StructuredDiffView hunks={explicitPatch} />
+                            ) : (
+                              <p
+                                className="rewind-file-card__no-diff"
+                                data-testid="rewind-file-no-diff"
+                              >
+                                Diff detalhado não disponível para este arquivo.
+                              </p>
+                            )}
                           </div>
                         )}
                       </article>

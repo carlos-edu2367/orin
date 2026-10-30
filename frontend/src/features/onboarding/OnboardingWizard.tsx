@@ -38,9 +38,15 @@ const STEPS: ReadonlyArray<{
 ]
 
 export function sanitizeOnboardingDisplayName(rawName?: string | null): string {
-  if (typeof rawName !== 'string') return 'Carlos'
-  const cleaned = rawName.replace(/[\u0000-\u001F\u007F]/g, '').trim()
-  if (!cleaned) return 'Carlos'
+  if (typeof rawName !== 'string') return ''
+  const cleaned = Array.from(rawName)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0)
+      return code > 0x1f && code !== 0x7f
+    })
+    .join('')
+    .trim()
+  if (!cleaned) return ''
   return cleaned.slice(0, 60)
 }
 
@@ -93,7 +99,7 @@ export function OnboardingWizard({
 
   const [currentStep, setCurrentStep] = useState<OnboardingStepId>(resolvedInitialStep)
   const [displayName, setDisplayName] = useState<string>(() =>
-    readStoredString(ONBOARDING_DISPLAY_NAME_KEY, 'Carlos'),
+    readStoredString(ONBOARDING_DISPLAY_NAME_KEY, ''),
   )
   const [connectionMethod, setConnectionMethod] = useState<ConnectionMethod>('provider')
   const [selectedProvider, setSelectedProvider] = useState<ProviderName>('openrouter')
@@ -115,7 +121,7 @@ export function OnboardingWizard({
       setDisplayName(safeName)
       writeStoredString(ONBOARDING_DISPLAY_NAME_KEY, safeName)
     } else if (step === 3) {
-      const safeFriend = sanitizeOnboardingDisplayName(friendName)
+      const safeFriend = sanitizeOnboardingDisplayName(friendName) || 'Orin'
       setFriendName(safeFriend)
       writeStoredString(ONBOARDING_FRIEND_NAME_KEY, safeFriend)
       writeStoredString(ONBOARDING_FRIEND_TONE_KEY, friendTone)
@@ -147,7 +153,7 @@ export function OnboardingWizard({
   function handleFinishOnboarding() {
     const safeName = sanitizeOnboardingDisplayName(displayName)
     writeStoredString(ONBOARDING_DISPLAY_NAME_KEY, safeName)
-    writeStoredString(ONBOARDING_FRIEND_NAME_KEY, sanitizeOnboardingDisplayName(friendName))
+    writeStoredString(ONBOARDING_FRIEND_NAME_KEY, sanitizeOnboardingDisplayName(friendName) || 'Orin')
     writeStoredString(ONBOARDING_FRIEND_TONE_KEY, friendTone)
     writeStoredString(ONBOARDING_COMPLETED_KEY, 'true')
     navigate('/')
@@ -674,10 +680,12 @@ export function OnboardingWizard({
               <div className="onboarding-card onboarding-card--active">
                 <div className="onboarding-card__titles">
                   <span className="onboarding-card__title">
-                    Olá, {sanitizeOnboardingDisplayName(displayName)}!
+                    {sanitizeOnboardingDisplayName(displayName)
+                      ? `Olá, ${sanitizeOnboardingDisplayName(displayName)}!`
+                      : 'Olá!'}
                   </span>
                   <span className="onboarding-card__desc">
-                    Companheiro: {sanitizeOnboardingDisplayName(friendName)} ({friendTone})
+                    Companheiro: {sanitizeOnboardingDisplayName(friendName) || 'Orin'} ({friendTone})
                   </span>
                 </div>
               </div>

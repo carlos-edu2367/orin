@@ -71,11 +71,15 @@ export interface TeamActivityViewProps {
   onOpenOverflowMenu?: () => void
 }
 
-const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F]+/g
-
 export function sanitizeText(value: unknown, fallback = ''): string {
   if (typeof value !== 'string') return fallback
-  const cleaned = value.replace(CONTROL_CHARS_RE, '').replace(/\s+/g, ' ').trim()
+  const withoutControls = Array.from(value)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0)
+      return code > 0x1f && code !== 0x7f
+    })
+    .join('')
+  const cleaned = withoutControls.replace(/\s+/g, ' ').trim()
   return cleaned || fallback
 }
 
@@ -130,110 +134,8 @@ function statusLabelFor(status: TeamAgentStatus): string {
   }
 }
 
-const DEFAULT_CANONICAL_AGENTS: TeamAgentCardData[] = [
-  {
-    id: 'pesquisador',
-    roleName: 'Pesquisador',
-    currentTask: 'Comparando referências',
-    status: 'running',
-    durationLabel: '18 min',
-    icon: 'search',
-    activities: [
-      {
-        id: 'pesq-act-1',
-        label: 'Analisou 12 referências sobre ferramentas de mercado',
-        detail: '14:32',
-      },
-      {
-        id: 'pesq-act-2',
-        label: 'Buscando benchmarks e casos de mercado',
-        detail: 'Em execução',
-      },
-    ],
-  },
-  {
-    id: 'analista',
-    roleName: 'Analista',
-    currentTask: 'Organizando oportunidades',
-    status: 'running',
-    durationLabel: '12 min',
-    icon: 'chart',
-    activities: [
-      {
-        id: 'ana-act-1',
-        label: 'Organizou oportunidades por categoria',
-        detail: '14:28',
-      },
-      {
-        id: 'ana-act-2',
-        label: 'Estruturando matriz de impacto vs. esforço',
-        detail: 'Em execução',
-      },
-    ],
-  },
-  {
-    id: 'revisor',
-    roleName: 'Revisor',
-    currentTask: 'Aguardando análise',
-    status: 'queued',
-    durationLabel: '3 min',
-    icon: 'document',
-    activities: [
-      {
-        id: 'rev-act-1',
-        label: 'Aguardando consolidação do Analista para revisão final',
-        detail: 'Na fila',
-      },
-    ],
-  },
-]
-
-const DEFAULT_PENDING_DECISION: TeamPendingDecision = {
-  id: 'decision-paid-tools',
-  question: 'Incluir ferramentas pagas na comparação?',
-  context: 'Encontramos boas opções pagas que podem ampliar o escopo da análise.',
-  options: [
-    {
-      id: 'opt-include-paid',
-      label: 'Incluir opções pagas',
-      value: 'Incluir opções pagas',
-      primary: true,
-    },
-    {
-      id: 'opt-free-only',
-      label: 'Somente gratuitas',
-      value: 'Somente gratuitas',
-      primary: false,
-    },
-  ],
-}
-
-const DEFAULT_FINAL_DELIVERABLE: TeamFinalDeliverable = {
-  fileName: 'Relatório de oportunidades.md',
-  status: 'preparing',
-  statusLabel: 'Em preparação',
-}
-
-const DEFAULT_RECENT_ACTIVITIES: TeamRecentActivityEntry[] = [
-  {
-    id: 'rec-1',
-    time: '14:32',
-    text: 'Pesquisador analisou 12 referências sobre ferramentas de mercado.',
-  },
-  {
-    id: 'rec-2',
-    time: '14:28',
-    text: 'Analista organizou oportunidades por categoria.',
-  },
-  {
-    id: 'rec-3',
-    time: '14:25',
-    text: 'Equipe iniciada por Carlos.',
-  },
-]
-
 function deriveAgentsFromEvents(events?: ConversationActivityEvent[]): TeamAgentCardData[] {
-  if (!events || events.length === 0) return DEFAULT_CANONICAL_AGENTS
+  if (!events || events.length === 0) return []
 
   const relevantEvents = events.filter((ev) => {
     if (!ev || typeof ev !== 'object') return false
@@ -247,7 +149,7 @@ function deriveAgentsFromEvents(events?: ConversationActivityEvent[]): TeamAgent
     )
   })
 
-  if (relevantEvents.length === 0) return DEFAULT_CANONICAL_AGENTS
+  if (relevantEvents.length === 0) return []
 
   const grouped = new Map<string, ConversationActivityEvent[]>()
   for (const ev of relevantEvents) {
@@ -337,7 +239,7 @@ function deriveAgentsFromEvents(events?: ConversationActivityEvent[]): TeamAgent
     })
   }
 
-  return cards.length > 0 ? cards : DEFAULT_CANONICAL_AGENTS
+  return cards
 }
 
 function deriveRecentActivities(
@@ -353,7 +255,7 @@ function deriveRecentActivities(
   }
 
   if (!events || events.length === 0) {
-    return DEFAULT_RECENT_ACTIVITIES
+    return []
   }
 
   const entries: TeamRecentActivityEntry[] = []
@@ -374,7 +276,7 @@ function deriveRecentActivities(
     })
   }
 
-  return entries.length > 0 ? entries.slice(0, 6) : DEFAULT_RECENT_ACTIVITIES
+  return entries.slice(0, 6)
 }
 
 function AgentRoleSvg({ icon }: { icon: TeamAgentRoleIcon }) {
@@ -430,18 +332,18 @@ export function TeamActivityView({
   const stepperData = useMemo(() => {
     const validTodos = Array.isArray(todos) ? todos.filter((t) => t && typeof t === 'object') : []
     const total =
-      typeof totalStepsCount === 'number' && totalStepsCount > 0
+      typeof totalStepsCount === 'number' && totalStepsCount >= 0
         ? totalStepsCount
         : validTodos.length > 0
           ? validTodos.length
-          : 5
+          : 0
 
     const completed =
       typeof completedStepsCount === 'number' && completedStepsCount >= 0
         ? Math.min(total, completedStepsCount)
         : validTodos.length > 0
           ? validTodos.filter((t) => t.status === 'completed').length
-          : Math.min(total, 3)
+          : 0
 
     const defaultStepNames = ['Entender', 'Dividir', 'Executar', 'Revisar', 'Entregar']
     const isAllCompleted = total > 0 && completed >= total
@@ -485,7 +387,7 @@ export function TeamActivityView({
     if (pendingDecision !== undefined) {
       return {
         ...pendingDecision,
-        question: sanitizeText(pendingDecision.question, DEFAULT_PENDING_DECISION.question),
+        question: sanitizeText(pendingDecision.question, 'Decisão pendente'),
         context: sanitizeText(pendingDecision.context, ''),
       }
     }
@@ -494,8 +396,8 @@ export function TeamActivityView({
       const q = questionEvent.questions[0]
       return {
         id: sanitizeText(q.id, 'decision-event'),
-        question: sanitizeText(q.question, DEFAULT_PENDING_DECISION.question),
-        context: sanitizeText(q.header || questionEvent.summary, DEFAULT_PENDING_DECISION.context),
+        question: sanitizeText(q.question, 'Decisão pendente'),
+        context: sanitizeText(q.header || questionEvent.summary, ''),
         options:
           Array.isArray(q.options) && q.options.length > 0
             ? q.options.map((opt, idx) => ({
@@ -504,16 +406,17 @@ export function TeamActivityView({
                 value: sanitizeText(opt.label || opt.id, `opt-${idx}`),
                 primary: idx === 0,
               }))
-            : DEFAULT_PENDING_DECISION.options,
+            : [],
       }
     }
-    return DEFAULT_PENDING_DECISION
+    return null
   }, [pendingDecision, events])
 
-  const resolvedDeliverable = useMemo<TeamFinalDeliverable>(() => {
+  const resolvedDeliverable = useMemo<TeamFinalDeliverable | null>(() => {
+    if (finalDeliverable === null) return null
     if (finalDeliverable) {
       return {
-        fileName: sanitizeText(finalDeliverable.fileName, DEFAULT_FINAL_DELIVERABLE.fileName),
+        fileName: sanitizeText(finalDeliverable.fileName, 'Entregável'),
         path: finalDeliverable.path ? sanitizeText(finalDeliverable.path) : undefined,
         status: finalDeliverable.status,
         statusLabel:
@@ -525,9 +428,9 @@ export function TeamActivityView({
     if (artifactEvent) {
       const rawPath = sanitizeText(
         artifactEvent.filePath || artifactEvent.path || artifactEvent.title,
-        DEFAULT_FINAL_DELIVERABLE.fileName,
+        'Entregável',
       )
-      const fileName = rawPath.split(/[\\/]/).pop() || DEFAULT_FINAL_DELIVERABLE.fileName
+      const fileName = rawPath.split(/[\\/]/).pop() || 'Entregável'
       return {
         fileName,
         path: rawPath,
@@ -535,7 +438,7 @@ export function TeamActivityView({
         statusLabel: 'Concluído',
       }
     }
-    return DEFAULT_FINAL_DELIVERABLE
+    return null
   }, [finalDeliverable, events])
 
   const resolvedRecentActivities = useMemo(
@@ -651,78 +554,84 @@ export function TeamActivityView({
       <div className="team-activity__grid">
         {/* Left Column: Specialist Cards */}
         <div className="team-agents-list" data-testid="team-agents-list">
-          {resolvedAgents.map((agent) => {
-            const isExpanded = Boolean(expandedAgentIds[agent.id])
-            return (
-              <article
-                key={agent.id}
-                className="team-agent-card"
-                data-testid={`team-agent-card-${agent.id}`}
-              >
-                <div className="team-agent-card__main">
-                  <div className="team-agent-card__left">
-                    <div className="team-agent-card__icon">
-                      <AgentRoleSvg icon={agent.icon} />
+          {resolvedAgents.length === 0 ? (
+            <p className="team-empty-state" data-testid="team-agents-empty">
+              Nenhum subagente em execução neste momento.
+            </p>
+          ) : (
+            resolvedAgents.map((agent) => {
+              const isExpanded = Boolean(expandedAgentIds[agent.id])
+              return (
+                <article
+                  key={agent.id}
+                  className="team-agent-card"
+                  data-testid={`team-agent-card-${agent.id}`}
+                >
+                  <div className="team-agent-card__main">
+                    <div className="team-agent-card__left">
+                      <div className="team-agent-card__icon">
+                        <AgentRoleSvg icon={agent.icon} />
+                      </div>
+                      <div className="team-agent-card__info">
+                        <h3 className="team-agent-card__role">{agent.roleName}</h3>
+                        <p className="team-agent-card__task">{agent.currentTask}</p>
+                        <span
+                          className={`team-agent-card__status team-agent-card__status--${agent.status}`}
+                        >
+                          <span className="team-agent-card__status-dot" aria-hidden="true" />
+                          <span>{statusLabelFor(agent.status)}</span>
+                        </span>
+                      </div>
                     </div>
-                    <div className="team-agent-card__info">
-                      <h3 className="team-agent-card__role">{agent.roleName}</h3>
-                      <p className="team-agent-card__task">{agent.currentTask}</p>
-                      <span
-                        className={`team-agent-card__status team-agent-card__status--${agent.status}`}
-                      >
-                        <span className="team-agent-card__status-dot" aria-hidden="true" />
-                        <span>{statusLabelFor(agent.status)}</span>
+
+                    <div className="team-agent-card__right">
+                      <span className="team-agent-card__duration" title="Duração da atividade">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                          <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
+                          <path
+                            d="M12 7v5l3 2"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                          />
+                        </svg>
+                        <span>{agent.durationLabel}</span>
                       </span>
+
+                      <button
+                        type="button"
+                        className="team-agent-card__toggle"
+                        data-testid={`team-agent-toggle-${agent.id}`}
+                        aria-expanded={isExpanded ? 'true' : 'false'}
+                        onClick={() => toggleAgentExpanded(agent.id)}
+                      >
+                        <span>Ver atividade</span>
+                        <span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
+                      </button>
                     </div>
                   </div>
 
-                  <div className="team-agent-card__right">
-                    <span className="team-agent-card__duration" title="Duração da atividade">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
-                        <path
-                          d="M12 7v5l3 2"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                      <span>{agent.durationLabel}</span>
-                    </span>
-
-                    <button
-                      type="button"
-                      className="team-agent-card__toggle"
-                      data-testid={`team-agent-toggle-${agent.id}`}
-                      aria-expanded={isExpanded ? 'true' : 'false'}
-                      onClick={() => toggleAgentExpanded(agent.id)}
+                  {isExpanded ? (
+                    <ul
+                      className="team-agent-card__events"
+                      data-testid={`team-agent-events-${agent.id}`}
                     >
-                      <span>Ver atividade</span>
-                      <span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {isExpanded ? (
-                  <ul
-                    className="team-agent-card__events"
-                    data-testid={`team-agent-events-${agent.id}`}
-                  >
-                    {agent.activities.map((act) => (
-                      <li key={act.id} className="team-agent-card__event-item">
-                        <span className="team-agent-card__event-label">{act.label}</span>
-                        {act.detail || act.timestamp ? (
-                          <span className="team-agent-card__event-detail">
-                            {act.timestamp || act.detail}
-                          </span>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </article>
-            )
-          })}
+                      {agent.activities.map((act) => (
+                        <li key={act.id} className="team-agent-card__event-item">
+                          <span className="team-agent-card__event-label">{act.label}</span>
+                          {act.detail || act.timestamp ? (
+                            <span className="team-agent-card__event-detail">
+                              {act.timestamp || act.detail}
+                            </span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </article>
+              )
+            })
+          )}
         </div>
 
         {/* Right Column: Supervision & Final Deliverable */}
@@ -778,54 +687,60 @@ export function TeamActivityView({
               <span>Entregável final</span>
             </div>
 
-            <div className="team-deliverable-card__box">
-              <div className="team-deliverable-card__file">
-                <span className="team-deliverable-card__file-icon" aria-hidden="true">
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                    <path
-                      d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"
-                      stroke="currentColor"
-                      strokeWidth="1.7"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M14 3v5h5M9 13h6M9 17h4"
-                      stroke="currentColor"
-                      strokeWidth="1.7"
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </span>
-                <div className="team-deliverable-card__file-info">
-                  <span className="team-deliverable-card__filename">
-                    {resolvedDeliverable.fileName}
+            {resolvedDeliverable ? (
+              <div className="team-deliverable-card__box">
+                <div className="team-deliverable-card__file">
+                  <span className="team-deliverable-card__file-icon" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                      <path
+                        d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M14 3v5h5M9 13h6M9 17h4"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                      />
+                    </svg>
                   </span>
-                  <span
-                    className="team-deliverable-card__status"
-                    data-testid="team-deliverable-status"
-                  >
-                    <span aria-hidden="true">
-                      {resolvedDeliverable.status === 'ready' ? '●' : '◌'}
+                  <div className="team-deliverable-card__file-info">
+                    <span className="team-deliverable-card__filename">
+                      {resolvedDeliverable.fileName}
                     </span>
-                    <span>
-                      {resolvedDeliverable.statusLabel ||
-                        (resolvedDeliverable.status === 'ready' ? 'Concluído' : 'Em preparação')}
+                    <span
+                      className="team-deliverable-card__status"
+                      data-testid="team-deliverable-status"
+                    >
+                      <span aria-hidden="true">
+                        {resolvedDeliverable.status === 'ready' ? '●' : '◌'}
+                      </span>
+                      <span>
+                        {resolvedDeliverable.statusLabel ||
+                          (resolvedDeliverable.status === 'ready' ? 'Concluído' : 'Em preparação')}
+                      </span>
                     </span>
-                  </span>
+                  </div>
                 </div>
-              </div>
 
-              {resolvedDeliverable.status === 'ready' ? (
-                <button
-                  type="button"
-                  className="team-deliverable-card__open-btn"
-                  data-testid="team-deliverable-open-button"
-                  onClick={() => onOpenDeliverable?.(resolvedDeliverable)}
-                >
-                  Abrir ↗
-                </button>
-              ) : null}
-            </div>
+                {resolvedDeliverable.status === 'ready' ? (
+                  <button
+                    type="button"
+                    className="team-deliverable-card__open-btn"
+                    data-testid="team-deliverable-open-button"
+                    onClick={() => onOpenDeliverable?.(resolvedDeliverable)}
+                  >
+                    Abrir ↗
+                  </button>
+                ) : null}
+              </div>
+            ) : (
+              <p className="team-empty-state" data-testid="team-deliverable-empty">
+                Nenhum entregável gerado ainda
+              </p>
+            )}
           </section>
         </aside>
       </div>
@@ -845,15 +760,21 @@ export function TeamActivityView({
           </button>
         </div>
 
-        <ol className="team-recent-activity__list">
-          {resolvedRecentActivities.map((item) => (
-            <li key={item.id} className="team-recent-activity__item">
-              <span className="team-recent-activity__dot" aria-hidden="true" />
-              <time className="team-recent-activity__time">{item.time}</time>
-              <span className="team-recent-activity__text">{item.text}</span>
-            </li>
-          ))}
-        </ol>
+        {resolvedRecentActivities.length === 0 ? (
+          <p className="team-empty-state" data-testid="team-recent-activity-empty">
+            Nenhuma atividade registrada ainda.
+          </p>
+        ) : (
+          <ol className="team-recent-activity__list">
+            {resolvedRecentActivities.map((item) => (
+              <li key={item.id} className="team-recent-activity__item">
+                <span className="team-recent-activity__dot" aria-hidden="true" />
+                <time className="team-recent-activity__time">{item.time}</time>
+                <span className="team-recent-activity__text">{item.text}</span>
+              </li>
+            ))}
+          </ol>
+        )}
       </footer>
     </section>
   )

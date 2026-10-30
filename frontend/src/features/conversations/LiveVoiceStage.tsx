@@ -111,8 +111,9 @@ export function sanitizeTranscriptText(raw: string): string {
 }
 
 function formatTranscriptTimestamp(ts?: string): string {
-  if (!ts) return '14:26'
+  if (!ts) return ''
   const trimmed = ts.trim()
+  if (!trimmed) return ''
   if (/^\d{1,2}:\d{2}$/.test(trimmed) || trimmed === 'Agora') return trimmed
   const parsed = new Date(trimmed)
   if (!Number.isNaN(parsed.getTime())) {
@@ -130,13 +131,6 @@ const WAVEFORM_BASE_HEIGHTS: readonly number[] = Array.from({ length: WAVEFORM_B
   const harmonic = 0.58 + 0.42 * Math.cos(dist * 1.45)
   return Math.max(4, Math.round(4 + 34 * envelope * harmonic))
 })
-
-const DEMO_TODOS: ReadonlyArray<TodoItem> = [
-  { id: 'demo-todo-1', content: 'Estrutura da página', status: 'completed' },
-  { id: 'demo-todo-2', content: 'Seções principais', status: 'completed' },
-  { id: 'demo-todo-3', content: 'Revisão de conteúdo', status: 'completed' },
-  { id: 'demo-todo-4', content: 'Publicação', status: 'pending' },
-]
 
 type AudioOutputOption = {
   deviceId: string
@@ -326,8 +320,6 @@ export function LiveVoiceStage({
     if (!isOpen) return
     const mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
     if (!mediaDevices || typeof mediaDevices.enumerateDevices !== 'function') {
-      setSpeakerOptions([DEFAULT_SPEAKER_OPTION])
-      setSelectedSpeakerId(DEFAULT_SPEAKER_OPTION.deviceId)
       return
     }
 
@@ -419,23 +411,7 @@ export function LiveVoiceStage({
       }))
       .filter((item) => item.content.length > 0)
 
-    const base: LiveVoiceTranscriptItem[] =
-      provided.length > 0
-        ? provided.slice(-6)
-        : [
-            {
-              id: 'demo-user-1',
-              role: 'user',
-              content: 'Como está a página da Auryly?',
-              timestamp: '14:26',
-            },
-            {
-              id: 'demo-assistant-1',
-              role: 'assistant',
-              content: 'A prévia já está pronta. Quer dar uma olhada?',
-              timestamp: '14:26',
-            },
-          ]
+    const base: LiveVoiceTranscriptItem[] = provided.slice(-6)
 
     const liveUser = sanitizeTranscriptText(voice.userText)
     if (liveUser && base[base.length - 1]?.content !== liveUser) {
@@ -460,19 +436,15 @@ export function LiveVoiceStage({
     return base.slice(-6)
   }, [transcriptItems, voice.userText, voice.assistantText])
 
-  const effectiveTodos = useMemo<ReadonlyArray<TodoItem>>(() => {
-    if (todos && todos.length > 0) return todos
-    if (todos && todos.length === 0 && delegatedCodeSession?.total_todo_count === 0) return []
-    return DEMO_TODOS
-  }, [todos, delegatedCodeSession?.total_todo_count])
+  const effectiveTodos = useMemo<ReadonlyArray<TodoItem>>(() => todos ?? [], [todos])
 
   const taskTitle = useMemo(() => {
     const goal = delegatedCodeSession?.goal?.trim()
     if (goal) return goal
     const activeTitle = delegatedCodeSession?.active_task_title?.trim()
     if (activeTitle) return activeTitle
-    return 'Página da Auryly'
-  }, [delegatedCodeSession?.goal, delegatedCodeSession?.active_task_title])
+    return 'Tarefa em andamento'
+  }, [delegatedCodeSession])
 
   const { completedCount, totalCount, progressPercent } = useMemo(() => {
     const rawTotal =
@@ -491,11 +463,7 @@ export function LiveVoiceStage({
       totalCount: rawTotal,
       progressPercent: percent,
     }
-  }, [
-    delegatedCodeSession?.completed_todo_count,
-    delegatedCodeSession?.total_todo_count,
-    effectiveTodos,
-  ])
+  }, [delegatedCodeSession, effectiveTodos])
 
   useEffect(() => {
     if (!isOpen) return
@@ -532,7 +500,7 @@ export function LiveVoiceStage({
     '--live-accent': palette.core[1],
   } as CSSProperties
   const cleanNick = sanitizeNickname(userNickname)
-  const userInitial = (cleanNick[0] || 'C').toUpperCase()
+  const userInitial = (cleanNick[0] || 'V').toUpperCase()
   const greeting = cleanNick ? `Oi, ${cleanNick}!` : 'Oi!'
   const speakingNow = phase === 'speaking'
   const isMicMuted = muted || phase === 'muted'
@@ -770,93 +738,101 @@ export function LiveVoiceStage({
           data-testid="live-voice-side-panel"
           aria-label="Nesta conversa"
         >
-          <section className="live-side-section" data-testid="live-voice-transcript-list">
+          <section className="live-side-section live-transcript-card" data-testid="live-voice-transcript-list">
             <h3 className="live-side-section__title">Nesta conversa</h3>
-            <ul className="live-transcript-list">
-              {displayTranscriptItems.map((item) => {
-                const isUser = item.role === 'user'
-                return (
-                  <li
-                    key={item.id}
-                    className={`live-transcript-item is-${item.role}`}
-                  >
-                    <div className="live-transcript-item__avatar" aria-hidden="true">
-                      {isUser ? (
-                        <span className="live-transcript-item__initial">{userInitial}</span>
-                      ) : (
-                        <OrinMascot size={24} variant="mini" ariaHidden />
-                      )}
-                    </div>
-                    <div className="live-transcript-item__body">
-                      <div className="live-transcript-item__meta">
-                        <strong>{isUser ? 'Você' : companionName}</strong>
-                        {item.timestamp && <span>{item.timestamp}</span>}
-                      </div>
-                      <p className="live-transcript-item__text">{item.content}</p>
-                    </div>
-                  </li>
-                )
-              })}
-            </ul>
-          </section>
-
-          <section className="live-task-card" data-testid="live-voice-task-card">
-            <div className="live-task-card__header">
-              <span className="live-task-card__icon" aria-hidden="true">
-                <Icon name="doc" />
-              </span>
-              <div className="live-task-card__titles">
-                <strong className="live-task-card__title">{taskTitle}</strong>
-                <span className="live-task-card__subtitle">
-                  {completedCount} de {totalCount} etapas concluídas
-                </span>
-              </div>
-              <span className="live-task-card__chevron" aria-hidden="true">
-                <Icon name="chevron-right" />
-              </span>
-            </div>
-
-            <div
-              className="live-task-card__progress"
-              data-testid="live-voice-task-progress-bar"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={progressPercent}
-              aria-label="Progresso das etapas da tarefa"
-            >
-              <span style={{ width: `${progressPercent}%` }} />
-            </div>
-
-            {effectiveTodos.length > 0 && (
-              <ul className="live-task-card__checklist">
-                {effectiveTodos.map((todo, idx) => {
-                  const isDone = todo.status === 'completed'
+            {displayTranscriptItems.length === 0 ? (
+              <p className="live-transcript-empty" data-testid="live-voice-transcript-empty">
+                As falas desta conversa aparecem aqui.
+              </p>
+            ) : (
+              <ul className="live-transcript-list">
+                {displayTranscriptItems.map((item) => {
+                  const isUser = item.role === 'user'
                   return (
                     <li
-                      key={todo.id ?? `${idx}-${todo.content}`}
-                      className={`live-task-card__step${isDone ? ' is-completed' : ''}`}
+                      key={item.id}
+                      className={`live-transcript-item is-${item.role}`}
                     >
-                      <span className="live-task-card__check" aria-hidden="true">
-                        {isDone ? '✓' : '○'}
-                      </span>
-                      <span className="live-task-card__step-text">{todo.content}</span>
+                      <div className="live-transcript-item__avatar" aria-hidden="true">
+                        {isUser ? (
+                          <span className="live-transcript-item__initial">{userInitial}</span>
+                        ) : (
+                          <OrinMascot size={24} variant="mini" ariaHidden />
+                        )}
+                      </div>
+                      <div className="live-transcript-item__body">
+                        <div className="live-transcript-item__meta">
+                          <strong>{isUser ? 'Você' : companionName}</strong>
+                          {item.timestamp && <span>{item.timestamp}</span>}
+                        </div>
+                        <p className="live-transcript-item__text">{item.content}</p>
+                      </div>
                     </li>
                   )
                 })}
               </ul>
             )}
-
-            <button
-              type="button"
-              className="live-task-card__action"
-              data-testid="live-voice-open-in-code"
-              onClick={() => onOpenCodeSession?.(delegatedCodeSession?.code_conversation_id)}
-            >
-              <Icon name="external" />
-              <span>Abrir no Code</span>
-            </button>
           </section>
+
+          {(Boolean(delegatedCodeSession) || effectiveTodos.length > 0) && (
+            <section className="live-task-card" data-testid="live-voice-task-card">
+              <div className="live-task-card__header">
+                <span className="live-task-card__icon" aria-hidden="true">
+                  <Icon name="doc" />
+                </span>
+                <div className="live-task-card__titles">
+                  <strong className="live-task-card__title">{taskTitle}</strong>
+                  <span className="live-task-card__subtitle">
+                    {completedCount} de {totalCount} etapas concluídas
+                  </span>
+                </div>
+                <span className="live-task-card__chevron" aria-hidden="true">
+                  <Icon name="chevron-right" />
+                </span>
+              </div>
+
+              <div
+                className="live-task-card__progress"
+                data-testid="live-voice-task-progress-bar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progressPercent}
+                aria-label="Progresso das etapas da tarefa"
+              >
+                <span style={{ width: `${progressPercent}%` }} />
+              </div>
+
+              {effectiveTodos.length > 0 && (
+                <ul className="live-task-card__checklist">
+                  {effectiveTodos.map((todo, idx) => {
+                    const isDone = todo.status === 'completed'
+                    return (
+                      <li
+                        key={todo.id ?? `${idx}-${todo.content}`}
+                        className={`live-task-card__step${isDone ? ' is-completed' : ''}`}
+                      >
+                        <span className="live-task-card__check" aria-hidden="true">
+                          {isDone ? '✓' : '○'}
+                        </span>
+                        <span className="live-task-card__step-text">{todo.content}</span>
+                      </li>
+                    )
+                  })}
+                </ul>
+              )}
+
+              <button
+                type="button"
+                className="live-task-card__action"
+                data-testid="live-voice-open-in-code"
+                onClick={() => onOpenCodeSession?.(delegatedCodeSession?.code_conversation_id)}
+              >
+                <Icon name="external" />
+                <span>Abrir no Code</span>
+              </button>
+            </section>
+          )}
         </aside>
       </div>
 

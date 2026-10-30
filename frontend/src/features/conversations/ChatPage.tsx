@@ -1087,13 +1087,16 @@ export function ChatPage() {
 
   const liveWorkStep = useMemo(() => {
     if (!running) return null
-    const latestActive = [...activity.events]
+    const turnScopedEvents = activeTurn?.turn_id
+      ? activity.events.filter((ev) => ev.turnId === activeTurn.turn_id || !ev.turnId)
+      : activity.events
+    const latestActive = [...turnScopedEvents]
       .reverse()
       .find((ev) => ev.kind === 'tool' || ev.kind === 'agent' || ev.kind === 'lifecycle')
-    const title = liveWorkingStatus ?? latestActive?.summary ?? 'Comparando referências'
-    const subtitle = latestActive?.detail ?? latestActive?.tool ?? 'Buscando benchmarks e casos de mercado…'
+    const title = liveWorkingStatus ?? latestActive?.summary ?? 'Pensando…'
+    const subtitle = latestActive?.detail ?? latestActive?.tool ?? null
     return { title, subtitle }
-  }, [activity.events, liveWorkingStatus, running])
+  }, [activeTurn, activity.events, liveWorkingStatus, running])
 
   const userInitial = useMemo(() => {
     try {
@@ -1103,7 +1106,7 @@ export function ChatPage() {
     } catch {
       // Ignore storage access issues
     }
-    return 'C'
+    return 'V'
   }, [])
 
   // The queue lives on the server: read it when the chat opens (a reload keeps it visible) and whenever the turn
@@ -2647,11 +2650,13 @@ export function ChatPage() {
                   <span className="live-work-progress-card__dot" aria-hidden="true" />
                   <div className="live-work-progress-card__copy">
                     <span className="live-work-progress-card__title">
-                      {liveWorkStep?.title ?? 'Comparando referências'}
+                      {liveWorkStep?.title ?? 'Pensando…'}
                     </span>
-                    <span className="live-work-progress-card__subtitle">
-                      {liveWorkStep?.subtitle ?? 'Buscando benchmarks e casos de mercado…'}
-                    </span>
+                    {Boolean(liveWorkStep?.subtitle) && (
+                      <span className="live-work-progress-card__subtitle">
+                        {liveWorkStep?.subtitle}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="live-work-progress-card__actions">

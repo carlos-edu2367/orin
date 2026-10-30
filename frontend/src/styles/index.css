@@ -26,7 +26,8 @@ html, * { scrollbar-color: rgb(var(--orin-text-rgb) / .24) transparent; scrollba
 *::-webkit-scrollbar-corner { background: transparent; }
 
 .app-shell { min-height: 100vh; padding: 28px 54px 42px; background: radial-gradient(circle at 80% 10%, rgb(var(--orin-accent-rgb) / .16), transparent 32%), var(--orin-surface); }
-.topbar { max-width: 1320px; margin: 0 auto; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; border-bottom: 1px solid rgb(var(--orin-text-rgb) / .1); padding-bottom: 22px; }
+.topbar { max-width: 1320px; margin: 0 auto; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; border-bottom: 1px solid rgb(var(--orin-text-rgb) / .1); padding-bottom: 22px; padding-right: var(--orin-titlebar-right-inset, 0px); }
+html[data-desktop="true"] .topbar { padding-right: max(140px, var(--orin-titlebar-right-inset, 0px)); }
 .brand { display: inline-flex; align-items: center; gap: 11px; width: fit-content; font-weight: 650; letter-spacing: -.03em; }
 .brand__mark { display: grid; place-items: center; width: 25px; height: 25px; overflow: hidden; border: 1px solid var(--orin-accent); border-radius: 7px; box-shadow: 0 0 18px rgb(var(--orin-accent-rgb) / .24); }
 .brand__mark img { display: block; width: 100%; height: 100%; object-fit: cover; }
@@ -50,6 +51,7 @@ h1 { margin: 0; color: var(--orin-text); font-size: clamp(42px, 6vw, 76px); font
 .button__icon { width: 14px; height: 14px; }
 
 .update-banner { position: fixed; top: 18px; right: 22px; z-index: 20; display: flex; align-items: center; gap: 22px; width: min(620px, calc(100vw - 44px)); padding: 14px 16px; border: 1px solid rgb(var(--orin-accent-rgb) / .45); border-radius: 13px; background: linear-gradient(115deg, rgb(var(--orin-accent-rgb) / .16), rgb(var(--orin-surface-rgb) / .92) 52%); box-shadow: 0 16px 42px rgb(0 0 0 / .28); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+html[data-desktop="true"] .update-banner { top: 52px; }
 .update-banner__copy { display: grid; min-width: 0; gap: 4px; }
 .update-banner__eyebrow { color: var(--orin-accent); font-size: 10px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
 .update-banner__copy strong { color: var(--orin-text); font-size: 12px; font-weight: 650; }

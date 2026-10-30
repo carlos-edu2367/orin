@@ -33,7 +33,9 @@
 /* Settings shell & shared settings primitives */
 :root { --mono-readable: var(--orin-mono-readable); }
 .settings-shell { display: flex; flex-direction: column; min-height: 100vh; height: 100vh; height: 100dvh; max-height: 100dvh; overflow: hidden; background: var(--ink); color: var(--text); }
-.settings-shell__bar { flex-shrink: 0; display: flex; align-items: center; gap: 18px; height: 58px; padding: 0 28px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.settings-shell__bar { flex-shrink: 0; display: flex; align-items: center; gap: 18px; height: 58px; padding: 0 28px; padding-right: max(28px, calc(28px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))); border-bottom: 1px solid var(--line); font-size: 13px; -webkit-app-region: drag; }
+.settings-shell__bar a, .settings-shell__bar button, .settings-shell__bar [role="button"] { -webkit-app-region: no-drag; }
+html[data-desktop="true"] .settings-shell__bar { padding-right: max(156px, calc(20px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))); }
 .settings-shell__bar > span { flex: 1; color: var(--muted); }
 .settings-shell__bar > a:last-child { color: var(--muted); text-decoration: none; }
 .settings-shell__bar > a:last-child:hover { color: var(--text); }
@@ -135,7 +137,8 @@
   @keyframes settings-drawer-in { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
 }
 @media (max-width: 900px) {
-  .settings-shell__bar { padding: 0 16px; }
+  .settings-shell__bar { padding: 0 max(16px, calc(16px + var(--orin-titlebar-right-inset, 0px))) 0 16px; }
+  html[data-desktop="true"] .settings-shell__bar { padding-right: max(156px, calc(20px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))); }
   .settings-shell__body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
   .settings-nav { height: auto; max-height: none; overflow-y: hidden; grid-auto-flow: column; grid-auto-columns: max-content; gap: 14px; overflow-x: auto; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
   .settings-nav__group { grid-auto-flow: column; align-items: center; }
@@ -201,7 +204,7 @@
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: nowrap;
   min-height: var(--of-header-h, 48px); height: auto;
   padding: 8px 20px;
-  padding-right: calc(20px + env(titlebar-area-width, 0px));
+  padding-right: max(20px, calc(20px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
   border-bottom: 1px solid var(--orin-border-subtle, var(--line));
 }
 .home__bar {
@@ -212,7 +215,7 @@
   -webkit-backdrop-filter: blur(12px);
   -webkit-app-region: drag;
 }
-.home__bar a, .home__bar button, .chat__bar a, .chat__bar button, .chat__head a, .chat__head button, .chat__bar .context-indicator, .chat__head .context-indicator, .home__bar .context-indicator, .chat__bar .context-meter, .chat__head .context-meter { -webkit-app-region: no-drag; }
+.home__bar a, .home__bar button, .chat__bar a, .chat__bar button, .chat__head a, .chat__head button, .canvas-header a, .canvas-header button, .canvas-header [role="button"], .chat__bar .context-indicator, .chat__head .context-indicator, .home__bar .context-indicator, .canvas-header .context-indicator, .chat__bar .context-meter, .chat__head .context-meter, .canvas-header .context-meter { -webkit-app-region: no-drag; }
 .chat__head,
 .chat__bar {
   grid-column: 2; grid-row: 1; z-index: 5;
@@ -763,7 +766,7 @@
     max-height: 48px;
     min-height: 48px;
     flex-wrap: nowrap;
-    padding: 0 12px 0 52px;
+    padding: 0 max(12px, calc(12px + var(--orin-titlebar-right-inset, 0px))) 0 52px;
     gap: 8px;
   }
   .chat__bar .canvas-header__center {
@@ -3297,7 +3300,23 @@ body.has-workspace-file-preview { overflow: hidden; }
   flex-shrink: 0;
 }
 
+.canvas-header {
+  -webkit-app-region: drag;
+}
+
+.canvas-header a,
+.canvas-header button,
+.canvas-header input,
+.canvas-header select,
+.canvas-header [role="button"],
+.canvas-header .model-picker,
+.canvas-header .context-indicator,
+.canvas-header .context-meter {
+  -webkit-app-region: no-drag;
+}
+
 html[data-desktop="true"] .canvas-header,
+html[data-desktop="true"] .chat__head,
 html[data-desktop="true"] .home__bar,
 html[data-desktop="true"] .chat__bar {
   padding-right: max(148px, calc(18px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
@@ -3570,7 +3589,7 @@ html[data-desktop="true"] .chat__bar {
   .home__bar,
   .chat__bar {
     grid-column: 1;
-    padding: 0 12px 0 52px;
+    padding: 0 max(12px, calc(12px + var(--orin-titlebar-right-inset, 0px))) 0 52px;
     flex-wrap: nowrap;
     height: 48px;
     min-height: 48px;
@@ -6550,7 +6569,19 @@ progress.orin-progress::-moz-progress-bar,
   overflow-y: auto;
 }
 
+html[data-desktop="true"] .rewind-time-machine__topbar {
+  padding-right: max(140px, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))) !important;
+}
+
+.rewind-time-machine__topbar button,
+.rewind-time-machine__topbar a,
+.rewind-time-machine__topbar [role="button"] {
+  -webkit-app-region: no-drag;
+}
+
 .rewind-time-machine__topbar {
+  -webkit-app-region: drag;
+  padding-right: max(0px, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
   display: flex;
   align-items: center;
   justify-content: space-between;

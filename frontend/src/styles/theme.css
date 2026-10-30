@@ -701,3 +701,18 @@ samp,
   font-family: var(--orin-font-mono);
   font-variant-numeric: tabular-nums;
 }
+
+:root {
+  --orin-titlebar-height: 0px;
+  --orin-titlebar-right-inset: max(
+    0px,
+    calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+  );
+}
+html[data-desktop="true"] {
+  --orin-titlebar-height: 40px;
+  --orin-titlebar-right-inset: max(
+    140px,
+    calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+  );
+}

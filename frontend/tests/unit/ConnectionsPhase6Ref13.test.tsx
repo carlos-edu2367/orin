@@ -38,7 +38,7 @@ describe('Connections (McpSection) — Phase 6 (ref-13.png)', () => {
     vi.unstubAllGlobals()
   })
 
-  it('renders header, subtitle, + Adicionar conexão CTA, mode tabs, and unified connections list', async () => {
+  it('renders header, subtitle, + Adicionar conexão CTA, mode tabs, honest built-in capabilities, and MCP server cards', async () => {
     const client = createServersClient([
       {
         server_id: 'srv-gh',
@@ -83,10 +83,8 @@ describe('Connections (McpSection) — Phase 6 (ref-13.png)', () => {
     expect(tablist.contains(addBtn)).toBe(false)
 
     const list = screen.getByTestId('connections-list')
-    const aurylyCard = within(list).getByTestId('connection-card-conn-auryly')
-    expect(within(aurylyCard).getByText('Auryly')).toBeInTheDocument()
-    expect(within(aurylyCard).getByText('Acesso a produtos, pedidos e campanhas')).toBeInTheDocument()
-    expect(within(aurylyCard).getByText('Conectado')).toBeInTheDocument()
+    expect(within(list).queryByTestId('connection-card-conn-auryly')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Auryly/i)).not.toBeInTheDocument()
 
     const browserCard = within(list).getByTestId('connection-card-conn-browser')
     expect(within(browserCard).getByText('Navegador')).toBeInTheDocument()
@@ -97,7 +95,6 @@ describe('Connections (McpSection) — Phase 6 (ref-13.png)', () => {
 
     const filesCard = within(list).getByTestId('connection-card-conn-files')
     expect(within(filesCard).getByText('Arquivos locais')).toBeInTheDocument()
-    expect(within(filesCard).getByText('Apenas a pasta /Documentos/Projetos')).toBeInTheDocument()
     expect(within(filesCard).getByText('Restrito')).toBeInTheDocument()
 
     // Also renders MCP server cards returned by listMcpServers
@@ -105,7 +102,7 @@ describe('Connections (McpSection) — Phase 6 (ref-13.png)', () => {
     expect(within(ghCard).getByText(/2 tools/)).toBeInTheDocument()
   })
 
-  it('renders the right-hand inspector with Auryly selected by default, granular permission checkboxes, and disconnect button', async () => {
+  it('renders the right-hand inspector with Navegador selected by default, honest capability permissions, and disconnect button', async () => {
     const user = userEvent.setup()
     const client = createServersClient([])
 
@@ -118,66 +115,54 @@ describe('Connections (McpSection) — Phase 6 (ref-13.png)', () => {
     const inspector = await screen.findByTestId('connections-inspector-panel')
     const inspectorScope = within(inspector)
 
-    expect(inspectorScope.getByRole('heading', { name: 'Auryly' })).toBeInTheDocument()
-    expect(inspectorScope.getByText('Conectado')).toBeInTheDocument()
+    expect(inspectorScope.getByRole('heading', { name: 'Navegador' })).toBeInTheDocument()
+    expect(inspectorScope.getByText('Ativo')).toBeInTheDocument()
 
     const useInSelect = inspectorScope.getByLabelText('Usar em') as HTMLSelectElement
     expect(Array.from(useInSelect.options).map((o) => o.textContent)).toEqual([
-      'Projeto Auryly',
       'Todos os projetos',
+      'Apenas no projeto atual',
     ])
-    expect(useInSelect.value).toBe('Projeto Auryly')
-
-    await user.selectOptions(useInSelect, 'Todos os projetos')
     expect(useInSelect.value).toBe('Todos os projetos')
+
+    await user.selectOptions(useInSelect, 'Apenas no projeto atual')
+    expect(useInSelect.value).toBe('Apenas no projeto atual')
 
     expect(inspectorScope.getByText('O que o Orin pode fazer')).toBeInTheDocument()
 
-    const readPerm = inspectorScope.getByRole('checkbox', {
-      name: /Ver produtos, estoque e pedidos/i,
+    const navigatePerm = inspectorScope.getByRole('checkbox', {
+      name: /Navegar em páginas públicas quando solicitado/i,
     })
-    const draftPerm = inspectorScope.getByRole('checkbox', {
-      name: /Criar rascunhos de campanhas e cupons/i,
-    })
-    const publishPerm = inspectorScope.getByRole('checkbox', {
-      name: /Publicar alterações na loja/i,
-    })
-    const paymentPerm = inspectorScope.getByRole('checkbox', {
-      name: /Alterar configurações de pagamento/i,
+    const capturePerm = inspectorScope.getByRole('checkbox', {
+      name: /Capturar leitura de página com confirmação/i,
     })
 
-    expect(readPerm).toBeChecked()
-    expect(draftPerm).toBeChecked()
-    expect(publishPerm).not.toBeChecked()
-    expect(paymentPerm).not.toBeChecked()
-
-    expect(inspectorScope.getByText('Somente leitura')).toBeInTheDocument()
-    expect(inspectorScope.getByText('Não publica sem sua aprovação')).toBeInTheDocument()
-    expect(
-      inspectorScope.getByText('Pede confirmação antes de cada publicação'),
-    ).toBeInTheDocument()
-    expect(inspectorScope.getByText('Bloqueado por segurança')).toBeInTheDocument()
+    expect(navigatePerm).toBeChecked()
+    expect(capturePerm).toBeChecked()
 
     // Toggling a checkbox updates checked state immediately
-    await user.click(publishPerm)
-    expect(publishPerm).toBeChecked()
-
-    await user.click(readPerm)
-    expect(readPerm).not.toBeChecked()
+    await user.click(capturePerm)
+    expect(capturePerm).not.toBeChecked()
 
     expect(
       inspectorScope.getByText('Toda ação importante pede sua confirmação no chat.'),
     ).toBeInTheDocument()
 
     const disconnectBtn = inspectorScope.getByTestId('connections-disconnect-button')
-    expect(disconnectBtn).toHaveTextContent('Desconectar Auryly')
+    expect(disconnectBtn).toHaveTextContent('Desconectar Navegador')
 
-    // Selecting another built-in connection updates the inspector
+    // Selecting Arquivos locais updates the inspector with file permissions
     const list = screen.getByTestId('connections-list')
-    await user.click(within(list).getByText('Navegador'))
-    expect(inspectorScope.getByRole('heading', { name: 'Navegador' })).toBeInTheDocument()
+    await user.click(within(list).getByText('Arquivos locais'))
+    expect(inspectorScope.getByRole('heading', { name: 'Arquivos locais' })).toBeInTheDocument()
+    expect(
+      inspectorScope.getByRole('checkbox', { name: /Ler arquivos nas pastas autorizadas/i }),
+    ).toBeChecked()
+    expect(
+      inspectorScope.getByRole('checkbox', { name: /Pedir confirmação antes de editar arquivos/i }),
+    ).toBeChecked()
     expect(inspectorScope.getByTestId('connections-disconnect-button')).toHaveTextContent(
-      'Desconectar Navegador',
+      'Desconectar Arquivos locais',
     )
   })
 

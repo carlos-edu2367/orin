@@ -18,7 +18,7 @@ function stubFetch(answer?: (call: Call) => Answer | undefined): Call[] {
     calls.push(call)
     const result = answer?.(call) ?? {
       body: {
-        project_root: 'C:/Projetos/auryly',
+        project_root: 'C:/Projetos/meu-app',
         trusted: true,
         values: {},
         provenance: {},
@@ -26,8 +26,8 @@ function stubFetch(answer?: (call: Call) => Answer | undefined): Call[] {
         files: {},
         writable: {
           user: 'C:/u/.orin/settings.json',
-          project: 'C:/Projetos/auryly/.orin/settings.json',
-          local: 'C:/Projetos/auryly/.orin/settings.local.json',
+          project: 'C:/Projetos/meu-app/.orin/settings.json',
+          local: 'C:/Projetos/meu-app/.orin/settings.local.json',
         },
         errors: [],
         untrusted_ignored: [],
@@ -123,7 +123,7 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
     })
   })
 
-  it('manages authorized folders (scope select, add with path sanitization, reject invalid/duplicate, and remove)', async () => {
+  it('shows honest empty folders state by default, manages authorized folders (add, scope select, duplicate/invalid rejection, remove)', async () => {
     const calls = stubFetch(({ url, method }) => {
       if (url.includes('/v1/settings/trusted-folders/revoke') && method === 'POST') {
         return { body: { folders: [] } }
@@ -134,13 +134,10 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
     render(<PermissionsSection />, { wrapper: at('/settings/permissions') })
 
     const card = screen.getByTestId('security-authorized-folders-card')
-    expect(within(card).getByText('C:/Projetos/auryly')).toBeInTheDocument()
-
-    // Change scope of default folder
-    const scopeSelect = screen.getByRole('combobox', { name: 'Escopo da pasta C:/Projetos/auryly' })
-    expect(scopeSelect).toHaveValue('folder_only')
-    fireEvent.change(scopeSelect, { target: { value: 'include_subfolders' } })
-    expect(scopeSelect).toHaveValue('include_subfolders')
+    expect(within(card).getByTestId('security-empty-folders')).toHaveTextContent(
+      'Nenhuma pasta autorizada ainda. Adicione uma pasta para permitir edições locais.',
+    )
+    expect(within(card).queryByText(/auryly/i)).toBeNull()
 
     // Open inline add folder form
     fireEvent.click(screen.getByTestId('security-add-folder-btn'))
@@ -163,27 +160,36 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
     expect(errorMsg).toHaveTextContent(/Informe um caminho de pasta válido/i)
     expect(errorMsg).not.toHaveAttribute('role', 'alert')
 
-    // Red-team: reject duplicate path (case-insensitive and backslash-normalized)
-    fireEvent.change(input, { target: { value: 'c:\\projetos\\auryly' } })
-    fireEvent.click(confirmBtn)
-    expect(screen.getByTestId('security-folder-error')).toBeInTheDocument()
-
     // Valid path with backslashes and control chars is sanitized and added
     fireEvent.change(input, { target: { value: '  D:\\Workspace\\orin-app\u0007  ' } })
     fireEvent.click(confirmBtn)
     expect(screen.queryByTestId('security-folder-error')).toBeNull()
     expect(within(card).getByText('D:/Workspace/orin-app')).toBeInTheDocument()
+    expect(within(card).queryByTestId('security-empty-folders')).toBeNull()
 
-    // Remove the original folder
-    fireEvent.click(screen.getByRole('button', { name: 'Remover pasta autorizada C:/Projetos/auryly' }))
-    expect(within(card).queryByText('C:/Projetos/auryly')).toBeNull()
+    // Change scope of added folder
+    const scopeSelect = screen.getByRole('combobox', { name: 'Escopo da pasta D:/Workspace/orin-app' })
+    expect(scopeSelect).toHaveValue('folder_only')
+    fireEvent.change(scopeSelect, { target: { value: 'include_subfolders' } })
+    expect(scopeSelect).toHaveValue('include_subfolders')
+
+    // Red-team: reject duplicate path (case-insensitive and backslash-normalized)
+    fireEvent.click(screen.getByTestId('security-add-folder-btn'))
+    fireEvent.change(screen.getByTestId('security-new-folder-input'), { target: { value: 'd:\\workspace\\orin-app' } })
+    fireEvent.click(screen.getByTestId('security-confirm-folder-btn'))
+    expect(screen.getByTestId('security-folder-error')).toBeInTheDocument()
+
+    // Remove the folder
+    fireEvent.click(screen.getByRole('button', { name: 'Remover pasta autorizada D:/Workspace/orin-app' }))
+    expect(within(card).queryByText('D:/Workspace/orin-app')).toBeNull()
+    expect(within(card).getByTestId('security-empty-folders')).toBeInTheDocument()
     await waitFor(() => {
       const revokeCall = calls.find((c) => c.url.includes('/v1/settings/trusted-folders/revoke') && c.method === 'POST')
-      expect(revokeCall?.body).toEqual({ path: 'C:/Projetos/auryly' })
+      expect(revokeCall?.body).toEqual({ path: 'D:/Workspace/orin-app' })
     })
   })
 
-  it('renders external services card and interactive approval preview card without button name collisions', async () => {
+  it('renders external services card and neutral interactive approval simulation card without button name collisions', async () => {
     stubFetch()
     render(<PermissionsSection />, { wrapper: at('/settings/permissions') })
 
@@ -194,12 +200,15 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
       within(externalCard).getByText('Enviar mensagens, criar eventos ou alterar dados fora do computador sempre pede confirmação.'),
     ).toBeInTheDocument()
 
-    // Right column: Aprovar alteração? preview card
+    // Right column: Simulação do pedido de permissão card
     const previewCard = screen.getByTestId('security-approval-preview-card')
-    expect(within(previewCard).getByText('Aprovar alteração?')).toBeInTheDocument()
-    expect(within(previewCard).getByText('src/app.ts')).toBeInTheDocument()
-    expect(within(previewCard).getByText('src/components/Header.tsx')).toBeInTheDocument()
+    expect(within(previewCard).getByText('Simulação do pedido de permissão')).toBeInTheDocument()
+    expect(
+      within(previewCard).getByText('Como o Orin pede confirmação antes de alterar arquivos no projeto atual.'),
+    ).toBeInTheDocument()
+    expect(within(previewCard).getByText('src/index.ts')).toBeInTheDocument()
     expect(within(previewCard).getByText('package.json')).toBeInTheDocument()
+    expect(within(previewCard).queryByText(/auryly/i)).toBeNull()
 
     // "+ Adicionar" badge must be a span, not a button
     const addBadge = within(previewCard).getByText('+ Adicionar')
@@ -208,7 +217,8 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
     // Toggle diff preview
     expect(screen.queryByTestId('security-preview-diff-box')).toBeNull()
     fireEvent.click(screen.getByTestId('security-preview-diff-toggle'))
-    expect(screen.getByTestId('security-preview-diff-box')).toHaveTextContent("+ import { Header } from './components/Header'")
+    expect(screen.getByTestId('security-preview-diff-box')).toHaveTextContent('+ export function startApp()')
+    expect(screen.getByTestId('security-preview-diff-box')).not.toHaveTextContent('auryly')
 
     // Approve / Reject preview actions
     fireEvent.click(screen.getByTestId('security-preview-approve-btn'))
@@ -235,7 +245,7 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
       if (url.includes('/v1/settings/trusted-folders')) {
         return {
           body: {
-            folders: ['C:\\Projetos\\servidor-extra', 'C:/Projetos/auryly'],
+            folders: ['C:\\Projetos\\servidor-extra', 'C:/Projetos/meu-app'],
           },
         }
       }
@@ -245,8 +255,8 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
     render(<PermissionsSection />, { wrapper: at('/settings/permissions') })
 
     const card = screen.getByTestId('security-authorized-folders-card')
-    expect(within(card).getByText('C:/Projetos/auryly')).toBeInTheDocument()
     expect(await within(card).findByText('C:/Projetos/servidor-extra')).toBeInTheDocument()
+    expect(within(card).getByText('C:/Projetos/meu-app')).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getByTestId('security-perm-accept')).toHaveAttribute('aria-checked', 'true')
     })

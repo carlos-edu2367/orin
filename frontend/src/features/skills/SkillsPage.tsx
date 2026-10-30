@@ -29,7 +29,7 @@ type DetailState =
 
 type SkillCategoryTab = 'ready' | 'custom' | 'team'
 
-type AvailabilityOption = 'Todos os projetos' | 'Apenas Auryly'
+type AvailabilityOption = 'Todos os projetos' | 'Apenas no projeto atual'
 
 type InspectorSkillItem = {
   id: string
@@ -39,7 +39,6 @@ type InspectorSkillItem = {
   source: string
   available: boolean
   isCustom: boolean
-  isShowcase: boolean
   icon: string
   defaultAvailability: AvailabilityOption
   quickExample: string
@@ -47,75 +46,9 @@ type InspectorSkillItem = {
   category: SkillCategoryTab
 }
 
-const SHOWCASE_SKILLS: ReadonlyArray<InspectorSkillItem> = [
-  {
-    id: 'showcase-relatorios',
-    name: 'Criar relatórios',
-    description: 'Transforma dados e notas em relatórios claros com resumo executivo.',
-    version: '1.0.0',
-    source: 'system',
-    available: true,
-    isCustom: false,
-    isShowcase: true,
-    icon: '📄',
-    defaultAvailability: 'Todos os projetos',
-    quickExample: 'Crie o relatório semanal da Auryly',
-    instructions:
-      '# Criar relatórios\n\n1. Analise os dados e notas enviados.\n2. Estruture com resumo executivo, destaques e próximos passos.',
-    category: 'ready',
-  },
-  {
-    id: 'showcase-revisar',
-    name: 'Revisar textos',
-    description: 'Corrige clareza, tom e ortografia mantendo a sua voz.',
-    version: '1.0.0',
-    source: 'system',
-    available: true,
-    isCustom: false,
-    isShowcase: true,
-    icon: 'Aa',
-    defaultAvailability: 'Todos os projetos',
-    quickExample: 'Revise este comunicado mantendo um tom direto e natural',
-    instructions:
-      '# Revisar textos\n\n1. Corrija gramática, fluidez e ortografia.\n2. Preserve a voz e intenção original do autor.',
-    category: 'ready',
-  },
-  {
-    id: 'showcase-planilhas',
-    name: 'Analisar planilhas',
-    description: 'Encontra padrões, somas e pontos fora da curva em tabelas.',
-    version: '1.0.0',
-    source: 'system',
-    available: true,
-    isCustom: false,
-    isShowcase: true,
-    icon: '📊',
-    defaultAvailability: 'Todos os projetos',
-    quickExample: 'Analise a planilha de vendas do mês e aponte anomalias',
-    instructions:
-      '# Analisar planilhas\n\n1. Valide colunas numéricas e somas.\n2. Destaque tendências e pontos fora da curva.',
-    category: 'ready',
-  },
-  {
-    id: 'showcase-auryly',
-    name: 'Padrão Auryly',
-    description: 'Aplica as cores, fontes e tom de voz da marca Auryly.',
-    version: '1.0.0',
-    source: 'user',
-    available: true,
-    isCustom: true,
-    isShowcase: true,
-    icon: '✦',
-    defaultAvailability: 'Apenas Auryly',
-    quickExample: 'Aplique o Padrão Auryly nesta proposta comercial',
-    instructions:
-      '# Padrão Auryly\n\n1. Aplique a paleta, tipografia e diretrizes verbais da marca Auryly.\n2. Mantenha consistência em todos os títulos e blocos.',
-    category: 'custom',
-  },
-]
-
 function toInspectorItem(skill: SkillSummary): InspectorSkillItem {
   const isCustom = skill.source === 'custom' || skill.source === 'user'
+  const isTeam = skill.source === 'team' || skill.tags.includes('team')
   return {
     id: skill.id,
     name: skill.name,
@@ -124,12 +57,11 @@ function toInspectorItem(skill: SkillSummary): InspectorSkillItem {
     source: skill.source,
     available: skill.available,
     isCustom,
-    isShowcase: false,
     icon: isCustom ? '✦' : '📄',
     defaultAvailability: 'Todos os projetos',
     quickExample: `Use a habilidade ${skill.name} na tarefa atual`,
     instructions: `# ${skill.name}\n\n${skill.description}`,
-    category: isCustom ? 'custom' : 'ready',
+    category: isTeam ? 'team' : isCustom ? 'custom' : 'ready',
   }
 }
 
@@ -153,8 +85,8 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
   const [reload, setReload] = useState(0)
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreError, setMoreError] = useState(false)
-  const [selectedSkillId, setSelectedSkillId] = useState<string>(SHOWCASE_SKILLS[0].id)
-  const [instructionsOpen, setInstructionsOpen] = useState(false)
+  const [selectedSkillId, setSelectedSkillId] = useState<string>('')
+  const [instructionsOpenSkillId, setInstructionsOpenSkillId] = useState<string | null>(null)
   const [availabilityBySkill, setAvailabilityBySkill] = useState<Record<string, AvailabilityOption>>({})
   const [confirmBySkill, setConfirmBySkill] = useState<Record<string, boolean>>({})
 
@@ -174,39 +106,30 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
   const sources =
     list.status === 'loaded' ? [...new Set(list.value.items.map((item) => item.source))].sort() : []
 
-  const isShowcaseMode =
-    list.status === 'loaded' && list.value.items.length === 0 && !query.trim()
-
   const displayedItems: ReadonlyArray<InspectorSkillItem> = useMemo(() => {
-    if (isShowcaseMode) {
-      if (activeTab === 'custom') {
-        return SHOWCASE_SKILLS.filter((item) => item.isCustom)
-      }
-      if (activeTab === 'team') {
-        return SHOWCASE_SKILLS.filter((item) => item.id === 'showcase-auryly' || item.id === 'showcase-relatorios')
-      }
-      return SHOWCASE_SKILLS
+    if (list.status !== 'loaded') return []
+    const mapped = list.value.items.map(toInspectorItem)
+    if (activeTab === 'custom') {
+      return mapped.filter((item) => item.isCustom)
     }
-    if (list.status === 'loaded') {
-      return list.value.items.map(toInspectorItem)
+    if (activeTab === 'team') {
+      return mapped.filter((item) => item.category === 'team')
     }
-    return []
-  }, [activeTab, isShowcaseMode, list])
+    return mapped
+  }, [activeTab, list])
 
-  const selectedSkill: InspectorSkillItem = useMemo(() => {
+  const selectedSkill: InspectorSkillItem | null = useMemo(() => {
     const found = displayedItems.find((item) => item.id === selectedSkillId)
     if (found) return found
     if (displayedItems.length > 0) return displayedItems[0]
-    return SHOWCASE_SKILLS[0]
+    return null
   }, [displayedItems, selectedSkillId])
 
-  useEffect(() => {
-    setInstructionsOpen(false)
-  }, [selectedSkill.id])
+  const instructionsOpen = Boolean(selectedSkill && instructionsOpenSkillId === selectedSkill.id)
 
   function handleSelectSkill(id: string) {
     setSelectedSkillId(id)
-    setInstructionsOpen(false)
+    setInstructionsOpenSkillId(null)
   }
 
   function clearPaginationForBaseRefresh() {
@@ -237,9 +160,10 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
     }
   }
 
-  const currentAvailability: AvailabilityOption =
-    availabilityBySkill[selectedSkill.id] ?? selectedSkill.defaultAvailability
-  const currentConfirm: boolean = confirmBySkill[selectedSkill.id] ?? true
+  const currentAvailability: AvailabilityOption = selectedSkill
+    ? (availabilityBySkill[selectedSkill.id] ?? selectedSkill.defaultAvailability)
+    : 'Todos os projetos'
+  const currentConfirm: boolean = selectedSkill ? (confirmBySkill[selectedSkill.id] ?? true) : true
 
   const content = (
     <section className="skills-library skills-ref12" aria-labelledby="skills-title">
@@ -376,8 +300,7 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
               <SkillCardsGrid
                 state={list}
                 items={displayedItems}
-                isShowcaseMode={isShowcaseMode}
-                selectedSkillId={selectedSkill.id}
+                selectedSkillId={selectedSkill?.id ?? ''}
                 availabilityBySkill={availabilityBySkill}
                 onSelectSkill={handleSelectSkill}
                 onRetry={() => {
@@ -396,96 +319,104 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
               data-testid="skills-inspector-panel"
               aria-label="Detalhes da habilidade"
             >
-              <div className="skills-inspector__header">
-                <span className="skill-card-v6__icon" aria-hidden="true">
-                  {selectedSkill.icon}
-                </span>
-                <div>
-                  <h3 className="skills-inspector__title">
-                    {selectedSkill.isShowcase
-                      ? selectedSkill.name
-                      : `${selectedSkill.name} · v${selectedSkill.version}`}
-                  </h3>
-                  <span
-                    className={`skill-pill ${selectedSkill.isCustom ? 'is-custom' : 'is-installed'}`}
-                  >
-                    {selectedSkill.isCustom ? 'Criada por você' : 'Instalada'}
-                  </span>
-                </div>
-              </div>
-
-              <p className="skills-inspector__desc">
-                {selectedSkill.isShowcase
-                  ? selectedSkill.description
-                  : `${selectedSkill.description} (${selectedSkill.source})`}
-              </p>
-
-              <div className="skills-inspector__settings">
-                <div className="skills-inspector__setting-row">
-                  <label htmlFor="skill-availability-select">Disponível em</label>
-                  <select
-                    id="skill-availability-select"
-                    aria-label="Disponível em"
-                    data-testid="skill-availability-select"
-                    value={currentAvailability}
-                    onChange={(event) =>
-                      setAvailabilityBySkill((prev) => ({
-                        ...prev,
-                        [selectedSkill.id]: event.target.value as AvailabilityOption,
-                      }))
-                    }
-                  >
-                    <option value="Todos os projetos">Todos os projetos</option>
-                    <option value="Apenas Auryly">Apenas Auryly</option>
-                  </select>
-                </div>
-
-                <div className="skills-inspector__setting-row">
-                  <label htmlFor="skill-confirm-toggle">
-                    <span>Pedir confirmação · Antes de publicar</span>
-                  </label>
-                  <input
-                    id="skill-confirm-toggle"
-                    type="checkbox"
-                    aria-label="Pedir confirmação antes de publicar"
-                    checked={currentConfirm}
-                    onChange={(event) =>
-                      setConfirmBySkill((prev) => ({
-                        ...prev,
-                        [selectedSkill.id]: event.target.checked,
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-
-              <div className="skill-example-card" data-testid="skill-quick-example">
-                <span className="skill-example-card__label">Exemplo rápido</span>
-                <p className="skill-example-card__prompt">“{selectedSkill.quickExample}”</p>
-                <button type="button" className="skill-example-card__btn">
-                  Testar no chat
-                </button>
-              </div>
-
-              <div
-                className="skill-instructions-accordion"
-                data-testid="skill-instructions-accordion"
-              >
-                <button
-                  type="button"
-                  className="skill-instructions-accordion__trigger"
-                  aria-expanded={instructionsOpen}
-                  onClick={() => setInstructionsOpen((prev) => !prev)}
-                >
-                  <span>Instruções da habilidade</span>
-                  <span aria-hidden="true">{instructionsOpen ? '▴' : '▾'}</span>
-                </button>
-                {instructionsOpen && (
-                  <div className="skill-instructions-accordion__body">
-                    <pre className="skills-instructions">{selectedSkill.instructions}</pre>
+              {selectedSkill ? (
+                <>
+                  <div className="skills-inspector__header">
+                    <span className="skill-card-v6__icon" aria-hidden="true">
+                      {selectedSkill.icon}
+                    </span>
+                    <div>
+                      <h3 className="skills-inspector__title">
+                        {`${selectedSkill.name} · v${selectedSkill.version}`}
+                      </h3>
+                      <span
+                        className={`skill-pill ${selectedSkill.isCustom ? 'is-custom' : 'is-installed'}`}
+                      >
+                        {selectedSkill.isCustom ? 'Criada por você' : 'Instalada'}
+                      </span>
+                    </div>
                   </div>
-                )}
-              </div>
+
+                  <p className="skills-inspector__desc">
+                    {`${selectedSkill.description} (${selectedSkill.source})`}
+                  </p>
+
+                  <div className="skills-inspector__settings">
+                    <div className="skills-inspector__setting-row">
+                      <label htmlFor="skill-availability-select">Disponível em</label>
+                      <select
+                        id="skill-availability-select"
+                        aria-label="Disponível em"
+                        data-testid="skill-availability-select"
+                        value={currentAvailability}
+                        onChange={(event) =>
+                          setAvailabilityBySkill((prev) => ({
+                            ...prev,
+                            [selectedSkill.id]: event.target.value as AvailabilityOption,
+                          }))
+                        }
+                      >
+                        <option value="Todos os projetos">Todos os projetos</option>
+                        <option value="Apenas no projeto atual">Apenas no projeto atual</option>
+                      </select>
+                    </div>
+
+                    <div className="skills-inspector__setting-row">
+                      <label htmlFor="skill-confirm-toggle">
+                        <span>Pedir confirmação · Antes de publicar</span>
+                      </label>
+                      <input
+                        id="skill-confirm-toggle"
+                        type="checkbox"
+                        aria-label="Pedir confirmação antes de publicar"
+                        checked={currentConfirm}
+                        onChange={(event) =>
+                          setConfirmBySkill((prev) => ({
+                            ...prev,
+                            [selectedSkill.id]: event.target.checked,
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="skill-example-card" data-testid="skill-quick-example">
+                    <span className="skill-example-card__label">Exemplo rápido</span>
+                    <p className="skill-example-card__prompt">“{selectedSkill.quickExample}”</p>
+                    <button type="button" className="skill-example-card__btn">
+                      Testar no chat
+                    </button>
+                  </div>
+
+                  <div
+                    className="skill-instructions-accordion"
+                    data-testid="skill-instructions-accordion"
+                  >
+                    <button
+                      type="button"
+                      className="skill-instructions-accordion__trigger"
+                      aria-expanded={instructionsOpen}
+                      onClick={() =>
+                        setInstructionsOpenSkillId((prev) =>
+                          prev === selectedSkill.id ? null : selectedSkill.id,
+                        )
+                      }
+                    >
+                      <span>Instruções da habilidade</span>
+                      <span aria-hidden="true">{instructionsOpen ? '▴' : '▾'}</span>
+                    </button>
+                    {instructionsOpen && (
+                      <div className="skill-instructions-accordion__body">
+                        <pre className="skills-instructions">{selectedSkill.instructions}</pre>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="skills-inspector__empty" data-testid="skills-inspector-empty">
+                  <p>Selecione uma habilidade para ver detalhes e instruções ou crie uma nova habilidade.</p>
+                </div>
+              )}
             </aside>
           </div>
 
@@ -515,7 +446,6 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
 function SkillCardsGrid({
   state,
   items,
-  isShowcaseMode,
   selectedSkillId,
   availabilityBySkill,
   onSelectSkill,
@@ -527,7 +457,6 @@ function SkillCardsGrid({
 }: {
   state: ListState
   items: ReadonlyArray<InspectorSkillItem>
-  isShowcaseMode: boolean
   selectedSkillId: string
   availabilityBySkill: Record<string, AvailabilityOption>
   onSelectSkill: (id: string) => void
@@ -554,8 +483,12 @@ function SkillCardsGrid({
       </div>
     )
   }
-  if (!isShowcaseMode && state.value.items.length === 0) {
-    return <p className="skills-state">Nenhuma skill corresponde à busca atual.</p>
+  if (items.length === 0) {
+    return (
+      <p className="skills-state" data-testid="skills-empty-state">
+        Nenhuma skill corresponde à busca atual.
+      </p>
+    )
   }
 
   return (
@@ -580,43 +513,37 @@ function SkillCardsGrid({
               </div>
 
               <div className="skill-card-v6__title">
-                {skill.isShowcase ? (
-                  <strong>{skill.name}</strong>
-                ) : (
-                  <Link
-                    className="skill-card-v6__title-link"
-                    to={`${embedded ? '/settings/skills' : '/skills'}/${encodeURIComponent(skill.id)}`}
-                    onClick={(event) => event.stopPropagation()}
-                  >
-                    {skill.name}
-                  </Link>
-                )}
+                <Link
+                  className="skill-card-v6__title-link"
+                  to={`${embedded ? '/settings/skills' : '/skills'}/${encodeURIComponent(skill.id)}`}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {skill.name}
+                </Link>
               </div>
 
               <p className="skill-card-v6__desc">{skill.description}</p>
 
               <div className="skill-card-v6__footer">
                 <span>
-                  {availability === 'Apenas Auryly'
-                    ? 'Somente no projeto Auryly'
+                  {availability === 'Apenas no projeto atual'
+                    ? 'Somente no projeto atual'
                     : 'Disponível em todos os projetos'}
                 </span>
-                {!skill.isShowcase && (
-                  <span className="skill-row__meta">
-                    <code>v{skill.version}</code>
-                    <span>{skill.source}</span>
-                    <span
-                      aria-label={skill.available ? 'Disponível' : 'Indisponível'}
-                      className={
-                        skill.available
-                          ? 'skill-row__availability is-available'
-                          : 'skill-row__availability'
-                      }
-                    >
-                      {skill.available ? 'Disponível' : 'Indisponível'}
-                    </span>
+                <span className="skill-row__meta">
+                  <code>v{skill.version}</code>
+                  <span>{skill.source}</span>
+                  <span
+                    aria-label={skill.available ? 'Disponível' : 'Indisponível'}
+                    className={
+                      skill.available
+                        ? 'skill-row__availability is-available'
+                        : 'skill-row__availability'
+                    }
+                  >
+                    {skill.available ? 'Disponível' : 'Indisponível'}
                   </span>
-                )}
+                </span>
               </div>
             </article>
           )

@@ -54,14 +54,16 @@ export function formatHomeGreeting(hour?: number, rawName?: string | null): stri
   }
 
   const sourceName =
-    rawName === undefined ? readStored(USER_NAME_STORAGE_KEY, 'Carlos') : (rawName ?? '')
+    rawName === undefined ? readStored(USER_NAME_STORAGE_KEY, '') : (rawName ?? '')
   const cleaned = String(sourceName)
     .replace(/[\r\n\t]+/g, ' ')
     .trim()
     .slice(0, 60)
     .trim()
-  const safeName = cleaned.length > 0 ? cleaned : 'Carlos'
-  return `${salutation}, ${safeName}.`
+  if (cleaned.length === 0) {
+    return `${salutation}.`
+  }
+  return `${salutation}, ${cleaned}.`
 }
 
 /**
@@ -585,7 +587,7 @@ export function Home({ client, bootstrap }: HomeProps) {
               </div>
             </div>
             <div className="home__continue-list">
-              {chats.slice(0, 3).map((chat, index) => (
+              {chats.slice(0, 3).map((chat) => (
                 <button
                   key={chat.conversation_id}
                   type="button"
@@ -608,7 +610,7 @@ export function Home({ client, bootstrap }: HomeProps) {
                   <span className="home__continue-card-body">
                     <span className="home__continue-card-title">{chat.title}</span>
                     <span className="home__continue-card-time">
-                      {formatContinueSubtitle(chat, index)}
+                      {formatContinueSubtitle(chat)}
                     </span>
                   </span>
                   <span className="home__continue-card-arrow" aria-hidden="true">›</span>
@@ -626,7 +628,7 @@ function isSearchConversation(title: string): boolean {
   return /pesquis|busca|oportunidade|estudo|análise/i.test(title)
 }
 
-function formatContinueSubtitle(chat: WorkspaceNavigationConversationSummary, index: number): string {
+function formatContinueSubtitle(chat: WorkspaceNavigationConversationSummary): string {
   if (ACTIVE_CONVERSATION_STATES.has(chat.state)) {
     return 'Em andamento agora'
   }
@@ -643,9 +645,7 @@ function formatContinueSubtitle(chat: WorkspaceNavigationConversationSummary, in
       return `Última conversa há ${days} ${days === 1 ? 'dia' : 'dias'}`
     }
   }
-  if (index === 0) return 'Última conversa há 2 horas'
-  if (index === 1) return 'Última conversa há 1 dia'
-  return 'Última conversa recente'
+  return 'Conversa recente'
 }
 
 function readStored(key: string, fallback: string): string {

@@ -79,14 +79,14 @@ app.whenReady().then(async () => {
     minWidth: 900,
     minHeight: 620,
     show: false,
-    backgroundColor: '#070611',
+    backgroundColor: '#101014',
     title: 'Orin',
     icon: iconPath,
     autoHideMenuBar: true,
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#0b0a14',
-      symbolColor: '#f5f1ff',
+      color: '#00000000',
+      symbolColor: '#f4f3f8',
       height: 40,
     },
     webPreferences: {

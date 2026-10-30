@@ -62,6 +62,13 @@ export function applyThemeAttributes(
     root.setAttribute('data-accent', accent)
     root.setAttribute('data-ambient', ambient)
     root.setAttribute('data-reduce-motion', reduceMotion ? 'true' : 'false')
+    const hasDesktopBridge =
+      typeof window !== 'undefined' && Boolean((window as { orinDesktop?: { isDesktop?: boolean } }).orinDesktop)
+    if (hasDesktopBridge) {
+      root.setAttribute('data-desktop', 'true')
+    } else if (!root.hasAttribute('data-desktop')) {
+      root.setAttribute('data-desktop', 'false')
+    }
   }
   if (typeof document !== 'undefined' && document.body) {
     document.body.classList.toggle('reduce-motion', Boolean(reduceMotion))
@@ -112,7 +119,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       root.setAttribute('data-accent', accent)
       root.setAttribute('data-ambient', ambient)
       root.setAttribute('data-reduce-motion', reduceMotion ? 'true' : 'false')
-      root.setAttribute('data-desktop', typeof window !== 'undefined' && Boolean(window.orinDesktop) ? 'true' : 'false')
+      const hasDesktopBridge =
+        typeof window !== 'undefined' && Boolean((window as { orinDesktop?: { isDesktop?: boolean } }).orinDesktop)
+      if (hasDesktopBridge) {
+        root.setAttribute('data-desktop', 'true')
+      } else if (!root.hasAttribute('data-desktop')) {
+        root.setAttribute('data-desktop', 'false')
+      }
     }
     if (typeof document !== 'undefined' && document.body) {
       document.body.classList.toggle('reduce-motion', reduceMotion)

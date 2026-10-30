@@ -48,9 +48,25 @@
   justify-content: space-between;
   gap: 14px;
   padding: 14px 28px;
+  padding-right: max(28px, calc(28px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
+  -webkit-app-region: drag;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(16, 16, 20, 0.72);
   backdrop-filter: blur(12px);
+}
+
+.live-stage__top button,
+.live-stage__top a,
+.live-stage__top input,
+.live-stage__top select,
+.live-stage__top [role="button"],
+.live-stage__top-actions,
+.live-stage__persona {
+  -webkit-app-region: no-drag;
+}
+
+html[data-desktop="true"] .live-stage__top {
+  padding-right: max(156px, calc(20px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
 }
 
 .live-stage__identity,
@@ -731,7 +747,8 @@
 @media (max-width: 640px) {
   .live-stage__engines { display: none; }
   .live-round-button.is-wide span { display: none; }
-  .live-stage__top { padding: 14px 16px; }
+  .live-stage__top { padding: 14px 16px; padding-right: max(16px, calc(16px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))); }
+  html[data-desktop="true"] .live-stage__top { padding-right: max(156px, calc(20px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))); }
 }
 
 /* ── Orb ── */
@@ -1200,6 +1217,8 @@
   justify-content: space-between;
   gap: 18px;
   padding: 20px 32px 14px;
+  padding-right: max(32px, calc(32px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
+  -webkit-app-region: drag;
   max-width: 1140px;
   width: 100%;
   margin: 0 auto;
@@ -1702,6 +1721,24 @@
 .friend-drawer__header,
 .friend-view__header {
   padding: 14px 32px 10px;
+  padding-right: max(32px, calc(32px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
+  -webkit-app-region: drag;
+}
+
+.friend-drawer__header button,
+.friend-drawer__header a,
+.friend-drawer__header [role="button"],
+.friend-drawer__header .friend-drawer__header-actions,
+.friend-view__header button,
+.friend-view__header a,
+.friend-view__header [role="button"],
+.friend-view__header .friend-drawer__header-actions {
+  -webkit-app-region: no-drag;
+}
+
+html[data-desktop="true"] .friend-drawer__header,
+html[data-desktop="true"] .friend-view__header {
+  padding-right: max(156px, calc(24px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
 }
 
 .friend-tabs {

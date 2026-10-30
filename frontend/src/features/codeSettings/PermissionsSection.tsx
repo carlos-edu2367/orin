@@ -46,7 +46,7 @@ type AuthorizedFolder = { path: string; scope: FolderScope }
 
 const PERMISSION_STORAGE_KEY = 'orin.security.permissionMode'
 const FOLDERS_STORAGE_KEY = 'orin.security.authorizedFolders'
-const DEFAULT_AUTHORIZED_FOLDERS: AuthorizedFolder[] = [{ path: 'C:/Projetos/auryly', scope: 'folder_only' }]
+const DEFAULT_AUTHORIZED_FOLDERS: AuthorizedFolder[] = []
 
 const PERMISSION_OPTIONS: ReadonlyArray<{
   mode: Ref15PermissionMode
@@ -83,7 +83,13 @@ function toRef15PermissionMode(value: string | null | undefined): Ref15Permissio
 }
 
 function sanitizeFolderPath(raw: string): string | null {
-  const withoutControls = raw.replace(/[\u0000-\u001F\u007F]/g, '').trim()
+  const withoutControls = Array.from(raw)
+    .filter((ch) => {
+      const code = ch.charCodeAt(0)
+      return code > 0x1f && code !== 0x7f
+    })
+    .join('')
+    .trim()
   if (!withoutControls || withoutControls.length > 260) return null
   if (/[<>"|?*]/.test(withoutControls)) return null
   const normalized = withoutControls.replace(/\\/g, '/').replace(/\/+/g, '/')
@@ -120,7 +126,7 @@ function readStoredFolders(): AuthorizedFolder[] {
         }
       }
     }
-    return valid.length > 0 ? valid : DEFAULT_AUTHORIZED_FOLDERS
+    return valid
   } catch {
     return DEFAULT_AUTHORIZED_FOLDERS
   }
@@ -361,35 +367,41 @@ export function PermissionsSection() {
               <p className="security-ref15__card-hint">
                 O Orin só pode editar arquivos nas pastas que você autorizar.
               </p>
-              <ul className="security-ref15__folders">
-                {authorizedFolders.map((folder) => (
-                  <li key={folder.path} className="security-ref15__folder-row">
-                    <span className="security-ref15__folder-icon" aria-hidden="true">
-                      📁
-                    </span>
-                    <div className="security-ref15__folder-info">
-                      <code className="security-ref15__folder-path">{folder.path}</code>
-                      <select
-                        className="security-ref15__folder-scope"
-                        aria-label={`Escopo da pasta ${folder.path}`}
-                        value={folder.scope}
-                        onChange={(event) => handleScopeChange(folder.path, event.target.value as FolderScope)}
+              {authorizedFolders.length === 0 ? (
+                <p className="security-ref15__empty-folders" data-testid="security-empty-folders">
+                  Nenhuma pasta autorizada ainda. Adicione uma pasta para permitir edições locais.
+                </p>
+              ) : (
+                <ul className="security-ref15__folders">
+                  {authorizedFolders.map((folder) => (
+                    <li key={folder.path} className="security-ref15__folder-row">
+                      <span className="security-ref15__folder-icon" aria-hidden="true">
+                        📁
+                      </span>
+                      <div className="security-ref15__folder-info">
+                        <code className="security-ref15__folder-path">{folder.path}</code>
+                        <select
+                          className="security-ref15__folder-scope"
+                          aria-label={`Escopo da pasta ${folder.path}`}
+                          value={folder.scope}
+                          onChange={(event) => handleScopeChange(folder.path, event.target.value as FolderScope)}
+                        >
+                          <option value="folder_only">Somente esta pasta</option>
+                          <option value="include_subfolders">Incluir subpastas</option>
+                        </select>
+                      </div>
+                      <button
+                        type="button"
+                        className="security-ref15__folder-remove"
+                        aria-label={`Remover pasta autorizada ${folder.path}`}
+                        onClick={() => handleRemoveFolder(folder.path)}
                       >
-                        <option value="folder_only">Somente esta pasta</option>
-                        <option value="include_subfolders">Incluir subpastas</option>
-                      </select>
-                    </div>
-                    <button
-                      type="button"
-                      className="security-ref15__folder-remove"
-                      aria-label={`Remover pasta autorizada ${folder.path}`}
-                      onClick={() => handleRemoveFolder(folder.path)}
-                    >
-                      🗑
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                        🗑
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
 
               <button
                 type="button"
@@ -461,28 +473,24 @@ export function PermissionsSection() {
             <section
               className="settings-card security-ref15__preview-card"
               data-testid="security-approval-preview-card"
-              aria-label="Aprovar alteração?"
+              aria-label="Simulação do pedido de permissão"
             >
               <div className="security-ref15__preview-head">
                 <span className="security-ref15__preview-mascot" aria-hidden="true">
                   🟣
                 </span>
                 <div>
-                  <h3>Aprovar alteração?</h3>
+                  <h3>Simulação do pedido de permissão</h3>
                   <p className="security-ref15__preview-lede">
-                    O Orin quer atualizar 3 arquivos em <strong>auryly</strong>.
+                    Como o Orin pede confirmação antes de alterar arquivos no projeto atual.
                   </p>
                 </div>
               </div>
 
               <ul className="security-ref15__preview-files">
                 <li className="security-ref15__preview-file">
-                  <code>src/app.ts</code>
+                  <code>src/index.ts</code>
                   <span className="security-ref15__diff-badge is-add">+ Adicionar</span>
-                </li>
-                <li className="security-ref15__preview-file">
-                  <code>src/components/Header.tsx</code>
-                  <span className="security-ref15__diff-badge is-edit">✎ Editar</span>
                 </li>
                 <li className="security-ref15__preview-file">
                   <code>package.json</code>
@@ -501,7 +509,7 @@ export function PermissionsSection() {
 
               {showDiffPreview && (
                 <pre className="security-ref15__preview-diff" data-testid="security-preview-diff-box">
-                  {"+ import { Header } from './components/Header'\n+ export function mountHeader() {\n+   return <Header project=\"auryly\" />\n+ }"}
+                  {"+ export function startApp() {\n+   return { status: 'ready' }\n+ }"}
                 </pre>
               )}
 

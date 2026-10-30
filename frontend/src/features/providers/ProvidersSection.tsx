@@ -192,7 +192,6 @@ export function ProvidersSection({ client: providedClient }: { client?: ApiClien
 
   useEffect(() => {
     if (!isCatalogProvider(primaryProvider)) {
-      setDynamicModels([])
       return
     }
     const controller = new AbortController()
@@ -214,7 +213,8 @@ export function ProvidersSection({ client: providedClient }: { client?: ApiClien
     const curated = CURATED_MODELS_BY_PROVIDER[primaryProvider] ?? []
     const seen = new Set<string>(curated.map((item) => item.id))
     const merged: CuratedModelOption[] = [...curated]
-    for (const model of dynamicModels) {
+    const activeDynamicModels = isCatalogProvider(primaryProvider) ? dynamicModels : []
+    for (const model of activeDynamicModels) {
       if (!seen.has(model.model_id)) {
         seen.add(model.model_id)
         merged.push({
@@ -230,31 +230,11 @@ export function ProvidersSection({ client: providedClient }: { client?: ApiClien
   }, [dynamicModels, primaryModel, primaryProvider])
 
   const connectedProviders = useMemo(() => {
-    const items: Array<{ id: ProviderName; name: string; statusLabel: string }> = [
-      {
-        id: 'openai',
-        name: 'OpenAI',
-        statusLabel:
-          states.openai?.status === 'configured' && states.openai.detail
-            ? `Conectado · ${states.openai.detail}`
-            : 'Conectado',
-      },
-      {
-        id: 'ollama',
-        name: 'Ollama (no computador)',
-        statusLabel:
-          states.ollama?.status === 'configured' && states.ollama.detail
-            ? `Conectado · ${states.ollama.detail}`
-            : 'Conectado · Local',
-      },
-    ]
-    const seen = new Set<ProviderName>(['openai', 'ollama'])
+    const items: Array<{ id: ProviderName; name: string; statusLabel: string }> = []
     for (const provider of PROVIDER_NAMES) {
-      if (seen.has(provider)) continue
       if (provider === 'omniroute' && !omniroute) continue
       const st = states[provider]
       if (st?.status === 'configured') {
-        seen.add(provider)
         items.push({
           id: provider,
           name: PROVIDER_DISPLAY_LABELS[provider],
@@ -375,25 +355,34 @@ export function ProvidersSection({ client: providedClient }: { client?: ApiClien
 
             <section className="providers-ref14__card" data-testid="providers-connected-card">
               <h3>Provedores conectados</h3>
-              <ul className="providers-ref14__connected-list">
-                {connectedProviders.map((item) => (
-                  <li key={item.id} className="providers-ref14__connected-row">
-                    <span className="providers-ref14__connected-name">{item.name}</span>
-                    <span className="providers-ref14__connected-status">
-                      <span className="providers-ref14__status-dot" aria-hidden="true" />
-                      {item.statusLabel}
-                    </span>
-                    <button
-                      type="button"
-                      className="providers-ref14__manage-btn"
-                      data-testid={`providers-manage-${item.id}`}
-                      onClick={() => navigate(`/settings/providers/${item.id}`)}
-                    >
-                      Gerenciar <span aria-hidden="true">›</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              {connectedProviders.length === 0 ? (
+                <p
+                  className="providers-ref14__empty-connected"
+                  data-testid="providers-connected-empty"
+                >
+                  Nenhum provedor conectado ainda. Conecte um provedor abaixo para começar.
+                </p>
+              ) : (
+                <ul className="providers-ref14__connected-list">
+                  {connectedProviders.map((item) => (
+                    <li key={item.id} className="providers-ref14__connected-row">
+                      <span className="providers-ref14__connected-name">{item.name}</span>
+                      <span className="providers-ref14__connected-status">
+                        <span className="providers-ref14__status-dot" aria-hidden="true" />
+                        {item.statusLabel}
+                      </span>
+                      <button
+                        type="button"
+                        className="providers-ref14__manage-btn"
+                        data-testid={`providers-manage-${item.id}`}
+                        onClick={() => navigate(`/settings/providers/${item.id}`)}
+                      >
+                        Gerenciar <span aria-hidden="true">›</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <button
                 type="button"
                 className="providers-ref14__connect-btn"

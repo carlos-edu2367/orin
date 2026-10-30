@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import process from 'node:process'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { RewindPicker } from '../RewindPicker'
@@ -135,10 +136,12 @@ describe('RewindPicker — Time Machine 3-Column Layout (ref-16.png)', () => {
     expect(within(fileCards[0]).getByText(/-\s+<OldHome \/>/)).toBeInTheDocument()
     expect(within(fileCards[0]).getByText(/\+\s+<Home \/>/)).toBeInTheDocument()
 
-    // Synthesized diff also renders for files without explicit filePatches entry
+    // Files without explicit filePatches entry render clean fallback message
     expect(within(fileCards[1]).getByText('src/components/Header.tsx')).toBeInTheDocument()
     expect(within(fileCards[1]).getByText('Modificado')).toBeInTheDocument()
-    expect(within(fileCards[1]).getByText(/<NavigationOld \/>/)).toBeInTheDocument()
+    expect(within(fileCards[1]).getByTestId('rewind-file-no-diff')).toHaveTextContent(
+      'Diff detalhado não disponível para este arquivo.',
+    )
 
     // Accordion toggle collapses and re-expands the file diff
     const toggleBtn = within(fileCards[0]).getByRole('button')
@@ -194,7 +197,10 @@ describe('RewindPicker — Time Machine 3-Column Layout (ref-16.png)', () => {
   })
 
   it('does not use forbidden dark-only utility classes (text-white*, bg-black*, border-white*)', () => {
-    const source = readFileSync(resolve(__dirname, '../RewindPicker.tsx'), 'utf-8')
+    const source = readFileSync(
+      resolve(process.cwd(), 'src/features/conversations/RewindPicker.tsx'),
+      'utf-8',
+    )
     expect(source).not.toMatch(/\b(text-white|bg-black|border-white)\b/)
   })
 })

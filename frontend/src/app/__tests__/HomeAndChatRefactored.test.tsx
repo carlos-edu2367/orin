@@ -164,9 +164,9 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
     expect(formatHomeGreeting(4, 'Carlos')).toBe('Boa noite, Carlos.');
 
     // Red-Team: empty, whitespace, control chars, > 60 chars, invalid hours
-    expect(formatHomeGreeting(14, '')).toBe('Boa tarde, Carlos.');
-    expect(formatHomeGreeting(14, '   \n\t  ')).toBe('Boa tarde, Carlos.');
-    expect(formatHomeGreeting(14, null)).toBe('Boa tarde, Carlos.');
+    expect(formatHomeGreeting(14, '')).toBe('Boa tarde.');
+    expect(formatHomeGreeting(14, '   \n\t  ')).toBe('Boa tarde.');
+    expect(formatHomeGreeting(14, null)).toBe('Boa tarde.');
     expect(formatHomeGreeting(9, 'A'.repeat(100))).toBe(`Bom dia, ${'A'.repeat(60)}.`);
     expect(formatHomeGreeting(-5, 'Carlos')).toBe('Boa noite, Carlos.');
     expect(formatHomeGreeting(25, 'Carlos')).toBe('Boa noite, Carlos.');

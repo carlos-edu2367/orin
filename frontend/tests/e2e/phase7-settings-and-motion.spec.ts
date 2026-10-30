@@ -74,7 +74,7 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     await assertZeroCriticalOrSeriousViolations(page, '/settings/providers (light)')
   })
 
-  test('2. Segurança e controle (ref-15.png) renders default permissions, authorized folders, approval preview card, and passes Axe in dark & light mode', async ({ page }) => {
+  test('2. Segurança e controle (ref-15.png) renders default permissions, honest empty folders state, neutral approval simulation card, and passes Axe in dark & light mode', async ({ page }) => {
     await page.goto('/settings/permissions')
     await applyTheme(page, 'dark')
 
@@ -86,6 +86,7 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     await expect(page.getByTestId('security-authorized-folders-card')).toBeVisible()
     await expect(page.getByTestId('security-external-actions-card')).toBeVisible()
     await expect(page.getByTestId('security-approval-preview-card')).toBeVisible()
+    await expect(page.getByTestId('security-approval-preview-card')).toContainText('Simulação do pedido de permissão')
 
     await page.screenshot({ path: `${ARTIFACT_DIR}/fase7-ref15-security.png`, fullPage: false })
     await assertZeroCriticalOrSeriousViolations(page, '/settings/permissions (dark)')
@@ -121,6 +122,16 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     // Trigger celebration by clicking the hero mascot
     await heroMascot.click()
     await expect(heroMascot).toHaveAttribute('data-celebrating', 'true')
+
+    // Verify Electron desktop window-controls right clearance
+    const desktopRightPad = await page.evaluate(() => {
+      document.documentElement.setAttribute('data-desktop', 'true')
+      const bar = document.querySelector('.home__bar')
+      const pad = bar ? Number.parseFloat(window.getComputedStyle(bar).paddingRight) : 0
+      document.documentElement.setAttribute('data-desktop', 'false')
+      return pad
+    })
+    expect(desktopRightPad).toBeGreaterThanOrEqual(148)
 
     await page.screenshot({ path: `${ARTIFACT_DIR}/fase7-home-interactive.png`, fullPage: false })
     await assertZeroCriticalOrSeriousViolations(page, '/ (dark)')

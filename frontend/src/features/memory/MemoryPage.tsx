@@ -24,7 +24,7 @@ type MemoryCardItem = {
   semanticScope: MemorySemanticScope
   apiScope: 'user' | 'project'
   metaLabel: string
-  source: 'showcase' | 'api' | 'local'
+  source: 'api' | 'local'
 }
 
 type UndoSnapshot = {
@@ -33,39 +33,6 @@ type UndoSnapshot = {
   draftText: string
   draftScope: MemoryScopeLabel
 }
-
-const DEFAULT_SHOWCASE_ITEMS: ReadonlyArray<MemoryCardItem> = [
-  {
-    id: 'showcase-mem-1',
-    title: 'Prefere respostas curtas em português',
-    fullText: 'Prefere respostas curtas e diretas em português, sem introduções longas.',
-    scopeLabel: 'Trabalho',
-    semanticScope: 'work',
-    apiScope: 'user',
-    metaLabel: 'Criada em 12 abr',
-    source: 'showcase',
-  },
-  {
-    id: 'showcase-mem-2',
-    title: 'Auryly usa tons de rosa na comunicação',
-    fullText: 'Auryly usa tons de rosa na comunicação',
-    scopeLabel: 'Projeto · Auryly',
-    semanticScope: 'project',
-    apiScope: 'project',
-    metaLabel: 'Criada pelo Orin',
-    source: 'showcase',
-  },
-  {
-    id: 'showcase-mem-3',
-    title: 'Prefere exemplos em Python',
-    fullText: 'Prefere exemplos em Python',
-    scopeLabel: 'Trabalho',
-    semanticScope: 'work',
-    apiScope: 'user',
-    metaLabel: 'Criada em 03 abr',
-    source: 'showcase',
-  },
-]
 
 function mapApiMemoryToCard(item: ManagedMemory): MemoryCardItem {
   const semanticScope = resolveSemanticScope(item)
@@ -106,14 +73,13 @@ export function MemoryPage({
   const [explicitTabFilter, setExplicitTabFilter] = useState(false)
   const [query, setQuery] = useState('')
   const [error, setError] = useState(false)
-  const [cards, setCards] = useState<MemoryCardItem[]>(() => [...DEFAULT_SHOWCASE_ITEMS])
-  const [selectedId, setSelectedId] = useState<string>(DEFAULT_SHOWCASE_ITEMS[0].id)
+  const [cards, setCards] = useState<MemoryCardItem[]>([])
+  const [selectedId, setSelectedId] = useState<string>('')
   const [isCreating, setIsCreating] = useState(false)
-  const [draftText, setDraftText] = useState<string>(DEFAULT_SHOWCASE_ITEMS[0].fullText)
-  const [draftScope, setDraftScope] = useState<MemoryScopeLabel>(DEFAULT_SHOWCASE_ITEMS[0].scopeLabel)
+  const [draftText, setDraftText] = useState<string>('')
+  const [draftScope, setDraftScope] = useState<MemoryScopeLabel>('Trabalho')
   const [toastUndoSnapshot, setToastUndoSnapshot] = useState<UndoSnapshot | null>(null)
 
-  const hasLoadedNonEmptyApiRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   useLayoutEffect(() => {
@@ -144,26 +110,18 @@ export function MemoryPage({
           source: 'local' as const,
         }))
 
-        if (result.items.length > 0 || hasLoadedNonEmptyApiRef.current) {
-          if (result.items.length > 0) {
-            hasLoadedNonEmptyApiRef.current = true
+        const mappedApi = result.items.map(mapApiMemoryToCard)
+        const combined = [...mappedApi, ...customStored]
+        setCards(combined)
+        setSelectedId((prevId) => {
+          const existing = combined.find((c) => c.id === prevId) ?? combined[0]
+          if (existing) {
+            setDraftText(existing.fullText)
+            setDraftScope(existing.scopeLabel)
+            return existing.id
           }
-          const mappedApi = result.items.map(mapApiMemoryToCard)
-          const combined = [...mappedApi, ...customStored]
-          setCards(combined)
-          setSelectedId((prevId) => {
-            const existing = combined.find((c) => c.id === prevId) ?? combined[0]
-            if (existing) {
-              setDraftText(existing.fullText)
-              setDraftScope(existing.scopeLabel)
-              return existing.id
-            }
-            return ''
-          })
-        } else if (customStored.length > 0) {
-          const combined = [...customStored, ...DEFAULT_SHOWCASE_ITEMS]
-          setCards(combined)
-        }
+          return ''
+        })
       })
       .catch(() => {
         setError(true)
@@ -252,14 +210,12 @@ export function MemoryPage({
       setDraftText(newCard.fullText)
       setIsCreating(false)
 
-      if (hasLoadedNonEmptyApiRef.current) {
-        void createManagedMemory(client, {
-          fact: trimmed,
-          scope: nextApiScope,
-          project_id: nextSemantic === 'project' ? (projectId ?? 'auryly') : null,
-          tags: [nextSemantic],
-        })
-      }
+      void createManagedMemory(client, {
+        fact: trimmed,
+        scope: nextApiScope,
+        project_id: nextSemantic === 'project' ? (projectId ?? null) : null,
+        tags: [nextSemantic],
+      })
       return
     }
 
@@ -416,49 +372,55 @@ export function MemoryPage({
 
       <div className="memory-ref11__master-detail">
         <div className="memory-cards-list" data-testid="memory-cards-list">
-          {visibleCards.map((item) => {
-            const isSelected = !isCreating && selectedCard?.id === item.id
-            const tagMod = getTagModifierClass(item.semanticScope)
-            return (
-              <article
-                key={item.id}
-                className={`memory-card-v6${isSelected ? ' is-selected' : ''}`}
-                onClick={() => handleSelectCard(item)}
-              >
-                <div className="memory-card-v6__content">
-                  <h3 className="memory-card-v6__title">{item.title}</h3>
-                  <div className="memory-card-v6__meta">
-                    <span className={`memory-card-v6__tag ${tagMod}`}>{item.scopeLabel}</span>
-                    <span>{item.metaLabel}</span>
+          {visibleCards.length === 0 ? (
+            <p className="memory-empty-state" data-testid="memory-empty-state">
+              Nenhuma memória salva neste filtro.
+            </p>
+          ) : (
+            visibleCards.map((item) => {
+              const isSelected = !isCreating && selectedCard?.id === item.id
+              const tagMod = getTagModifierClass(item.semanticScope)
+              return (
+                <article
+                  key={item.id}
+                  className={`memory-card-v6${isSelected ? ' is-selected' : ''}`}
+                  onClick={() => handleSelectCard(item)}
+                >
+                  <div className="memory-card-v6__content">
+                    <h3 className="memory-card-v6__title">{item.title}</h3>
+                    <div className="memory-card-v6__meta">
+                      <span className={`memory-card-v6__tag ${tagMod}`}>{item.scopeLabel}</span>
+                      <span>{item.metaLabel}</span>
+                    </div>
                   </div>
-                </div>
-                <div className="memory-card-v6__actions">
-                  <button
-                    type="button"
-                    className="memory-card-v6__edit-btn"
-                    aria-label={`Editar ${item.title}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      handleSelectCard(item)
-                    }}
-                  >
-                    ✎ Editar
-                  </button>
-                  <button
-                    type="button"
-                    className="memory-card-v6__more-btn"
-                    aria-label={`Opções de ${item.title}`}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      handleSelectCard(item)
-                    }}
-                  >
-                    •••
-                  </button>
-                </div>
-              </article>
-            )
-          })}
+                  <div className="memory-card-v6__actions">
+                    <button
+                      type="button"
+                      className="memory-card-v6__edit-btn"
+                      aria-label={`Editar ${item.title}`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        handleSelectCard(item)
+                      }}
+                    >
+                      ✎ Editar
+                    </button>
+                    <button
+                      type="button"
+                      className="memory-card-v6__more-btn"
+                      aria-label={`Opções de ${item.title}`}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        handleSelectCard(item)
+                      }}
+                    >
+                      •••
+                    </button>
+                  </div>
+                </article>
+              )
+            })
+          )}
         </div>
 
         <aside
@@ -495,7 +457,7 @@ export function MemoryPage({
             >
               <option value="Trabalho">Trabalho</option>
               <option value="Friend">Friend</option>
-              <option value="Projeto · Auryly">Projeto · Auryly</option>
+              <option value="Por projeto">Por projeto</option>
             </select>
           </div>
 

@@ -132,7 +132,7 @@ describe('Phase 5 Task 1: ProjectsGalleryPage (ref-05) & ProjectPage Context Das
 
     expect(within(aurylyCard).getByRole('heading', { name: 'Auryly' })).toBeInTheDocument()
     expect(within(aurylyCard).getByTestId('project-card-active-badge')).toHaveTextContent(/1 tarefa em andamento/i)
-    expect(within(aurylyCard).getByTestId('project-card-counts')).toHaveTextContent(/2 conversas\s*·\s*\d+ arquivos/i)
+    expect(within(aurylyCard).getByTestId('project-card-counts')).toHaveTextContent(/2 conversas\s*·\s*Pasta local vinculada/i)
     expect(within(aurylyCard).getByTestId('project-card-open-link')).toHaveAttribute('href', '/projects/proj_auryly')
 
     // Financeiro has no running task badge
