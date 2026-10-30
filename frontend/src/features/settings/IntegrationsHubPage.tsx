@@ -33,7 +33,7 @@ function isValidProviderName(value: unknown): value is ProviderName {
 }
 
 function resolveTabFromPath(pathname: string): IntegrationsTab | null {
-  if (pathname.includes('/mcp')) return 'mcp'
+  if (pathname.includes('/mcp') || pathname.includes('/connections')) return 'mcp'
   if (pathname.includes('/providers') || pathname.includes('/vision')) return 'providers'
   return null
 }
@@ -51,12 +51,14 @@ function resolveProviderFromPath(pathname: string, paramProvider?: string): Prov
 
 export function IntegrationsHubPage({
   activeTab,
+  initialTab,
   selectedProvider,
   client,
   embedded = false,
   basePath,
 }: {
   activeTab?: IntegrationsTab
+  initialTab?: IntegrationsTab
   selectedProvider?: ProviderName | null
   client?: ApiClient
   embedded?: boolean
@@ -80,13 +82,15 @@ export function IntegrationsHubPage({
     [capabilities.omniroute],
   )
 
+  const effectivePropTab = activeTab ?? initialTab
+
   const buildSyncKey = useCallback(
-    (pathname: string) => `${activeTab ?? ''}|${ pathname }|${selectedProvider ?? ''}|${params.provider ?? ''}`,
-    [activeTab, params.provider, selectedProvider],
+    (pathname: string) => `${effectivePropTab ?? ''}|${pathname}|${selectedProvider ?? ''}|${params.provider ?? ''}`,
+    [effectivePropTab, params.provider, selectedProvider],
   )
   const syncKey = buildSyncKey(location.pathname)
-  const derivedTab: IntegrationsTab = isValidIntegrationsTab(activeTab)
-    ? activeTab
+  const derivedTab: IntegrationsTab = isValidIntegrationsTab(effectivePropTab)
+    ? effectivePropTab
     : (resolveTabFromPath(location.pathname) ?? 'providers')
   const derivedProvider: ProviderName | null = sanitizeProvider(
     selectedProvider !== undefined ? selectedProvider : resolveProviderFromPath(location.pathname, params.provider),
@@ -148,7 +152,10 @@ export function IntegrationsHubPage({
   }
 
   return (
-    <div className={`hub-page${embedded ? ' hub-page--embedded' : ''}`} data-testid="integrations-hub-page">
+    <div
+      className={`hub-page${embedded ? ' hub-page--embedded' : ''}${tab === 'mcp' ? ' hub-page--mcp-active' : ''}`}
+      data-testid="integrations-hub-page"
+    >
       <header className="hub-page__header">
         <div className="hub-page__title-group">
           <p className="eyebrow">WORKSPACE / INTEGRAÇÕES</p>

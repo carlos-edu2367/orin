@@ -233,11 +233,13 @@ export function WorkspaceNavigation({
   const isHomeActive = location.pathname === '/'
   const isLibraryActive =
     location.pathname.startsWith('/library') ||
+    location.pathname.startsWith('/memory') ||
     location.pathname.startsWith('/settings/skills') ||
     location.pathname.startsWith('/settings/plugins') ||
     location.pathname.startsWith('/settings/memory')
   const isIntegrationsActive =
     location.pathname.startsWith('/integrations') ||
+    location.pathname.startsWith('/connections') ||
     location.pathname.startsWith('/settings/providers') ||
     location.pathname.startsWith('/settings/mcp') ||
     location.pathname.startsWith('/settings/vision')

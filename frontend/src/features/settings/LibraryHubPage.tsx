@@ -106,7 +106,7 @@ export function LibraryHubPage({
       >
         {tab === 'skills' && <SkillsSection client={skillsClient} />}
         {tab === 'plugins' && <PluginsSection client={apiClient} />}
-        {tab === 'memory' && <MemoryPage embedded />}
+        {tab === 'memory' && <MemoryPage embedded client={apiClient} />}
       </div>
     </div>
   )
