@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -5,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
 import { LOCAL_CAPABILITIES } from '../../src/api/session'
 import { SessionContext } from '../../src/app/useSession'
+import { ProviderDetail } from '../../src/features/providers/ProviderDetail'
 import { ProvidersSection } from '../../src/features/providers/ProvidersSection'
 
 function LocationProbe() {
@@ -231,6 +234,166 @@ describe('ProvidersSection Phase 7 (ref-14.png: Modelos e provedores)', () => {
     expect(window.localStorage.getItem('orin.providers.fallback')).toBe('anthropic:claude-sonnet-4-5')
     expect(window.localStorage.getItem('orin.providers.fallbackAuto')).toBe('false')
     expect(window.localStorage.getItem('orin.providers.showCostEstimate')).toBe('false')
+  })
+
+  it('constrains .slide-over-drawer, .settings-drawer, .ollama-flow, and .ollama-flow__modes against horizontal overflow in CSS and renders AnthropicSetup inside ProviderDetail cleanly', async () => {
+    const user = userEvent.setup()
+    const agentosCss = readFileSync(resolve(__dirname, '../../src/styles/agentos.css'), 'utf8')
+    const indexCss = readFileSync(resolve(__dirname, '../../src/styles/index.css'), 'utf8')
+
+    // 1. Verify .slide-over-drawer width, overflow-x, box-sizing, and desktop top padding
+    expect(agentosCss).toMatch(/\.slide-over-drawer\s*\{[^}]*width:\s*min\(560px,\s*100vw\)/s)
+    expect(agentosCss).toMatch(/\.slide-over-drawer\s*\{[^}]*overflow-x:\s*hidden/s)
+    expect(agentosCss).toMatch(/\.slide-over-drawer\s*\{[^}]*box-sizing:\s*border-box/s)
+    expect(agentosCss).toMatch(
+      /html\[data-desktop="true"\]\s+\.slide-over-drawer\s*\{[^}]*padding-top:\s*max\(24px,\s*calc\(14px\s*\+\s*var\(--orin-titlebar-height,\s*0px\)\)\)/s,
+    )
+
+    // 2. Verify .settings-drawer and .settings-drawer__body grid constraints
+    expect(agentosCss).toMatch(
+      /\.settings-drawer\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*min-width:\s*0[^}]*max-width:\s*100%[^}]*box-sizing:\s*border-box/s,
+    )
+    expect(agentosCss).toMatch(
+      /\.settings-drawer__body\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*min-width:\s*0[^}]*max-width:\s*100%[^}]*box-sizing:\s*border-box/s,
+    )
+
+    // 3. Verify .ollama-flow, .ollama-flow__connection, and .provider-key-list grid constraints in index.css
+    expect(indexCss).toMatch(
+      /\.ollama-flow\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*min-width:\s*0[^}]*max-width:\s*100%[^}]*box-sizing:\s*border-box/s,
+    )
+    expect(indexCss).toMatch(
+      /\.ollama-flow__connection\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*min-width:\s*0[^}]*max-width:\s*100%[^}]*box-sizing:\s*border-box/s,
+    )
+    expect(indexCss).toMatch(
+      /\.provider-key-list\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*min-width:\s*0[^}]*max-width:\s*100%[^}]*box-sizing:\s*border-box/s,
+    )
+
+    // 4. Verify wrapping on headings/overview and .ollama-flow__modes + .ollama-flow .chip
+    expect(indexCss).toMatch(/\.ollama-flow__overview\s*\{[^}]*flex-wrap:\s*wrap[^}]*min-width:\s*0/s)
+    expect(indexCss).toMatch(/\.ollama-flow__section-heading\s*\{[^}]*flex-wrap:\s*wrap[^}]*min-width:\s*0/s)
+    expect(indexCss).toMatch(/\.provider-panel__section-heading\s*\{[^}]*flex-wrap:\s*wrap[^}]*min-width:\s*0/s)
+    expect(indexCss).not.toMatch(/\.ollama-flow__modes\s*\{[^}]*width:\s*max-content/s)
+    expect(indexCss).toMatch(
+      /\.ollama-flow__modes\s*\{[^}]*display:\s*flex[^}]*flex-wrap:\s*wrap[^}]*width:\s*100%[^}]*max-width:\s*100%[^}]*box-sizing:\s*border-box/s,
+    )
+    expect(indexCss).toMatch(
+      /\.ollama-flow\s+\.chip\s*\{[^}]*flex:\s*1\s+1\s+auto[^}]*min-width:\s*0[^}]*max-width:\s*100%[^}]*white-space:\s*normal[^}]*text-align:\s*center/s,
+    )
+
+    // 5. Verify .settings-drawer single-column rules in index.css
+    expect(indexCss).toContain('.settings-drawer .ollama-flow__overview')
+    expect(indexCss).toContain('.settings-drawer .ollama-flow__fields')
+    expect(indexCss).toContain('.settings-drawer .ollama-flow__mode-field')
+    expect(indexCss).toContain('.settings-drawer .ollama-flow__footer')
+    expect(indexCss).toContain('.settings-drawer .ollama-flow__actions')
+    expect(indexCss).toContain('.settings-drawer .provider-key-list__fields')
+    expect(indexCss).toContain('.settings-drawer .provider-key-list__cooldown')
+    expect(indexCss).toContain('.settings-drawer .provider-key-list__cooldown-controls')
+
+    // 6. Verify AnthropicSetup inside ProviderDetail renders all controls cleanly
+    const onClose = vi.fn()
+    const client = createMockClient({ anthropic: [] }, ['anthropic'])
+    const { container } = render(
+      <ProviderDetail
+        provider="anthropic"
+        client={client}
+        bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }}
+        onClose={onClose}
+      />,
+    )
+
+    const drawer = screen.getByRole('region', { name: 'Anthropic' })
+    expect(drawer).toHaveClass('settings-drawer')
+    expect(container.querySelector('.settings-drawer__body')).not.toBeNull()
+    expect(container.querySelector('form.ollama-flow')).not.toBeNull()
+    expect(container.querySelector('.ollama-flow__overview')).not.toBeNull()
+    expect(container.querySelector('.ollama-flow__connection')).not.toBeNull()
+    expect(container.querySelector('.provider-key-list')).not.toBeNull()
+
+    const modeGroup = within(drawer).getByRole('radiogroup', { name: 'Modo da Anthropic' })
+    expect(modeGroup).toHaveClass('ollama-flow__modes')
+    const localChip = within(modeGroup).getByRole('radio', { name: 'Assinatura Claude Code (CLI Local)' })
+    const cloudChip = within(modeGroup).getByRole('radio', { name: 'Cloud (Chave de API)' })
+    expect(localChip).toBeInTheDocument()
+    expect(cloudChip).toBeInTheDocument()
+
+    expect(within(drawer).getByLabelText('URL do servidor')).toBeInTheDocument()
+    expect(within(drawer).getByLabelText('Chave de API')).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Testar conexão' })).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Salvar' })).toBeInTheDocument()
+    expect(within(drawer).getByRole('button', { name: 'Revogar acesso' })).toBeInTheDocument()
+
+    await user.click(localChip)
+    expect(localChip).toHaveAttribute('aria-checked', 'true')
+    expect(within(drawer).getByText('Assinatura CLI Local')).toBeInTheDocument()
+
+    await user.click(cloudChip)
+    expect(cloudChip).toHaveAttribute('aria-checked', 'true')
+    expect(within(drawer).getByText('Anthropic Cloud')).toBeInTheDocument()
+  })
+
+  it('handles adversarial edge cases across provider setup flows (missing_csrf, empty vs filled cloud API key, Escape key, and all provider variants)', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const client = createMockClient({ anthropic: [] }, ['anthropic'])
+
+    // 1. Missing CSRF disables actions safely without crashing
+    const { unmount } = render(
+      <ProviderDetail
+        provider="anthropic"
+        client={client}
+        bootstrap={{ status: 'missing_csrf' }}
+        onClose={onClose}
+      />,
+    )
+    const disabledDrawer = screen.getByRole('region', { name: 'Anthropic' })
+    expect(within(disabledDrawer).getByRole('button', { name: 'Testar conexão' })).toBeDisabled()
+    expect(within(disabledDrawer).getByRole('button', { name: 'Salvar' })).toBeDisabled()
+    expect(within(disabledDrawer).getByRole('button', { name: 'Revogar acesso' })).toBeDisabled()
+    unmount()
+
+    // 2. Ready session: local mode allows saving without API key; cloud mode requires API key
+    const { unmount: unmountReady } = render(
+      <ProviderDetail
+        provider="anthropic"
+        client={client}
+        bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }}
+        onClose={onClose}
+      />,
+    )
+    const readyDrawer = screen.getByRole('region', { name: 'Anthropic' })
+    const saveBtn = within(readyDrawer).getByRole('button', { name: 'Salvar' })
+    const localChip = within(readyDrawer).getByRole('radio', { name: 'Assinatura Claude Code (CLI Local)' })
+    const cloudChip = within(readyDrawer).getByRole('radio', { name: 'Cloud (Chave de API)' })
+
+    await user.click(localChip)
+    expect(saveBtn).not.toBeDisabled()
+
+    await user.click(cloudChip)
+    expect(saveBtn).toBeDisabled()
+
+    await user.type(within(readyDrawer).getByLabelText('Chave de API'), 'sk-ant-test-key-123')
+    expect(saveBtn).not.toBeDisabled()
+
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledTimes(1)
+    unmountReady()
+
+    // 3. Other providers using .ollama-flow / .provider-panel__form mount cleanly inside .settings-drawer
+    for (const provider of ['opencode', 'nvidia', 'ollama', 'openai'] as const) {
+      const { container, unmount: unmountProvider } = render(
+        <ProviderDetail
+          provider={provider}
+          client={client}
+          bootstrap={{ status: 'ready', csrfToken: 'csrf-test' }}
+          onClose={onClose}
+        />,
+      )
+      expect(container.querySelector('.settings-drawer')).not.toBeNull()
+      expect(container.querySelector('.settings-drawer__body')).not.toBeNull()
+      expect(container.querySelector('.provider-key-list')).not.toBeNull()
+      unmountProvider()
+    }
   })
 
   it('survives localStorage errors when reading or saving and keeps catalog components mounted', async () => {

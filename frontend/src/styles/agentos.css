@@ -122,11 +122,11 @@ html[data-desktop="true"] .settings-shell__bar { padding-right: max(156px, calc(
 .provider-card__name { font-size: 14px; font-weight: 560; letter-spacing: -.01em; }
 .provider-card__status { color: var(--mono-readable); font: 10px var(--mono); letter-spacing: .04em; }
 .provider-card.is-unavailable .provider-card__status { color: var(--warn); }
-.settings-drawer { position: sticky; top: 24px; display: grid; align-content: start; gap: 18px; margin-top: 22px; padding: 22px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: linear-gradient(150deg, var(--raised-strong), rgb(var(--orin-surface-rgb) / .9)); box-shadow: 0 24px 60px rgb(var(--orin-ink-rgb) / .55); }
+.settings-drawer { position: sticky; top: 24px; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; max-width: 100%; box-sizing: border-box; align-content: start; gap: 18px; margin-top: 22px; padding: 22px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: linear-gradient(150deg, var(--raised-strong), rgb(var(--orin-surface-rgb) / .9)); box-shadow: 0 24px 60px rgb(var(--orin-ink-rgb) / .55); }
 .settings-drawer:focus-visible { outline: 2px solid var(--signal); outline-offset: 3px; }
 .settings-drawer__head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-drawer__head h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
-.settings-drawer__body { display: grid; gap: 16px; }
+.settings-drawer__body { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; max-width: 100%; box-sizing: border-box; gap: 16px; }
 .provider-detail__identity { display: flex; align-items: center; gap: 12px; }
 .provider-detail__identity p { margin: 0; }
 .provider-detail__state { color: var(--mono-readable); font: 11px var(--mono); }
@@ -3185,7 +3185,9 @@ body.has-workspace-file-preview { overflow: hidden; }
   right: 0;
   bottom: 0;
   z-index: 86;
-  width: min(460px, 100vw);
+  width: min(560px, 100vw);
+  overflow-x: hidden;
+  box-sizing: border-box;
   height: 100dvh;
   overflow-y: auto;
   padding: 24px;
@@ -3193,6 +3195,10 @@ body.has-workspace-file-preview { overflow: hidden; }
   background: var(--orin-surface-2);
   color: var(--orin-text-primary);
   box-shadow: -20px 0 60px rgb(var(--orin-ink-rgb) / 0.42);
+}
+
+html[data-desktop="true"] .slide-over-drawer {
+  padding-top: max(24px, calc(14px + var(--orin-titlebar-height, 0px)));
 }
 
 .slide-over-drawer .settings-drawer {
