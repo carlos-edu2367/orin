@@ -6,7 +6,7 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -22,7 +22,11 @@ from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.agentic.workspace import WorkspaceError, _directory_name, resolve_workspace
 from agentos.installation import orin_paths
-from agentos.persistence.postgres.agentic_activity import ActivityCursorError
+from agentos.persistence.postgres.agentic_activity import (
+    ActivityCursorError,
+    _coerce_stored_payload,
+    _coerce_stored_value,
+)
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
 from agentos.agentic.compaction import compaction_message
@@ -36,6 +40,10 @@ _LOGGER = logging.getLogger("agentos.conversations.chat")
 
 def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
 def _title(message: str) -> str: return " ".join(message.split())[:80] or "Nova conversa"
+
+
+def _truncate_activity_payload(payload: Mapping[str, object]) -> dict[str, object]:
+    return _coerce_stored_payload(payload)
 
 
 def _execution_duration_limit(code_active: bool) -> int:
@@ -505,11 +513,23 @@ class PostgresChatStore:
                         summary=summary[:512] or "Atividade", payload=payload or {}, created_at=datetime.now(UTC),
                     )
                 except ValueError:
-                    # The event's own content (payload/summary) failed validation —
-                    # retrying with the same content fails identically every time.
-                    # This is a different failure than the sequence race below, and
-                    # must not burn the retry budget meant for that race.
-                    return
+                    try:
+                        coerced_payload = _truncate_activity_payload(payload) if isinstance(payload, Mapping) else {}
+                        event = AgentActivityEvent(
+                            event_id=f"activity:{turn['turn_id']}:{sequence}",
+                            conversation_id=str(turn["conversation_id"]), turn_id=str(turn["turn_id"]),
+                            execution_id=str(turn["execution_id"]), user_id=str(turn["user_id"]),
+                            agent_id=effective_agent_id, parent_agent_id=parent_agent_id,
+                            event_type=event_type, sequence=sequence,
+                            summary=(summary or "").strip()[:512] or "Atividade",
+                            payload=coerced_payload,
+                            created_at=datetime.now(UTC),
+                        )
+                    except ValueError:
+                        # The event's own content (payload/summary) failed validation even after
+                        # truncation — retrying with the same content fails identically every time.
+                        _LOGGER.warning("Dropped activity event %s after payload truncation failed", event_type, exc_info=True)
+                        return
                 try:
                     self.activity_store.record_event(event)
                     return
@@ -1352,6 +1372,9 @@ class PostgresChatStore:
                         activity_cursor = self.activity_store._encode_cursor(
                             user_id, conversation_id, int(max_id)
                         )
+                        encode_fn = lambda pos: self.activity_store._encode_cursor(
+                            user_id, conversation_id, int(pos)
+                        )
                         activities, has_older_activities, oldest_activity_id = self._query_activity_window(
                             c,
                             user_id=user_id,
@@ -1359,6 +1382,7 @@ class PostgresChatStore:
                             turns=turns,
                             limit=150,
                             before_id=None,
+                            encode_cursor=encode_fn,
                         )
                         ctx_rows = c.execute(
                             select(conversation_activity_events.c.payload)
@@ -1433,6 +1457,11 @@ class PostgresChatStore:
                 .where(conversation_turns.c.conversation_id == conversation_id)
                 .order_by(conversation_turns.c.created_at)
             ).mappings().all()
+            encode_fn = (
+                (lambda pos: self.activity_store._encode_cursor(user_id, conversation_id, int(pos)))
+                if self.activity_store is not None and hasattr(self.activity_store, "_encode_cursor")
+                else None
+            )
             activities, has_older, oldest_id = self._query_activity_window(
                 c,
                 user_id=user_id,
@@ -1440,6 +1469,7 @@ class PostgresChatStore:
                 turns=turns,
                 limit=bounded_limit,
                 before_id=int(before_id),
+                encode_cursor=encode_fn,
             )
         return {
             "activities": activities,
@@ -1457,6 +1487,7 @@ class PostgresChatStore:
         turns: Sequence[Mapping[str, object]],
         limit: int = 150,
         before_id: int | None = None,
+        encode_cursor: Callable[[int], str] | None = None,
     ) -> tuple[list[dict[str, object]], bool, int | None]:
         settled_turns = [
             str(t["turn_id"])
@@ -1474,6 +1505,7 @@ class PostgresChatStore:
                     & conversation_activity_events.c.event_type.in_((
                         "tool.requested",
                         "tool.started",
+                        "tool.progressed",
                         "code_mode.validation_started",
                         "code_mode.validation_finished",
                         "code_mode.stage_changed",
@@ -1499,7 +1531,12 @@ class PostgresChatStore:
             cursor_before = int(desc_batch[-1]["id"])
             if len(desc_batch) < fetch_limit:
                 reached_start = True
-            compacted = cls._compact_snapshot_activities(collected_rows, turns, keep_db_id=True)
+            compacted = cls._compact_snapshot_activities(
+                collected_rows,
+                turns,
+                keep_db_id=True,
+                encode_cursor=encode_cursor,
+            )
             if len(compacted) > limit or reached_start:
                 break
         if not compacted:
@@ -1518,6 +1555,7 @@ class PostgresChatStore:
         turns: Sequence[Mapping[str, object]],
         *,
         keep_db_id: bool = False,
+        encode_cursor: Callable[[int], str] | None = None,
     ) -> list[dict[str, object]]:
         settled_turns = {
             str(t["turn_id"])
@@ -1545,9 +1583,7 @@ class PostgresChatStore:
             raw_payload = row["payload"]
             payload = _plain(raw_payload) if isinstance(raw_payload, Mapping) else {}
             if t_id in settled_turns:
-                if ev_type == "tool.requested":
-                    continue
-                if ev_type == "tool.progressed" and payload.get("phase") != "generating_arguments":
+                if ev_type in {"tool.requested", "tool.progressed"}:
                     continue
             if (
                 ev_type == AgentActivityEventType.CONTEXT_UPDATED.value
@@ -1573,6 +1609,7 @@ class PostgresChatStore:
                 else str(created_at)
             )
             agent_id = str(row["agent_id"])
+            item_cursor = encode_cursor(r_id) if callable(encode_cursor) else str(row["sequence"])
             if (
                 ev_type == AgentActivityEventType.ASSISTANT_DELTA.value
                 and compacted
@@ -1586,7 +1623,7 @@ class PostgresChatStore:
                     chunk_content = str(payload.get("content") or "")
                     prev_payload["content"] = prev_content + chunk_content
                     compacted[-1]["sequence"] = int(row["sequence"])
-                    compacted[-1]["cursor"] = str(row["sequence"])
+                    compacted[-1]["cursor"] = item_cursor
                     compacted[-1]["occurred_at"] = occurred_at
                     continue
 
@@ -1605,7 +1642,7 @@ class PostgresChatStore:
                     prev_payload["content"] = merged
                     prev_payload["delta"] = merged
                     compacted[-1]["sequence"] = int(row["sequence"])
-                    compacted[-1]["cursor"] = str(row["sequence"])
+                    compacted[-1]["cursor"] = item_cursor
                     compacted[-1]["occurred_at"] = occurred_at
                     continue
 
@@ -1620,7 +1657,7 @@ class PostgresChatStore:
                 "execution_id": str(row["execution_id"]),
                 "agent_id": agent_id,
                 "parent_agent_id": row["parent_agent_id"],
-                "cursor": str(row["sequence"]),
+                "cursor": item_cursor,
             }
             if keep_db_id:
                 entry["_db_id"] = r_id
@@ -1856,6 +1893,7 @@ class PostgresChatStore:
                     "phase": "generating_arguments",
                     "tool_name": tool_name,
                     "call_id": call_id,
+                    "invocation_id": call_id,
                     "bytes_received": bytes_received,
                     **({"iteration": int(_payload["iteration"])} if isinstance(_payload.get("iteration"), int) else {}),
                 },
@@ -2701,7 +2739,7 @@ class PostgresChatStore:
                 select(conversation_dispatches.c.turn_id).where(
                     conversation_dispatches.c.state == "active",
                     conversation_dispatches.c.acquired_at.is_not(None),
-                    conversation_dispatches.c.acquired_at < cutoff,
+                    func.coalesce(conversation_dispatches.c.lease_renewed_at, conversation_dispatches.c.acquired_at) < cutoff,
                 )
             ).scalars().all()
             for turn_id in rows:
@@ -2709,7 +2747,7 @@ class PostgresChatStore:
                     update(conversation_dispatches).where(
                         conversation_dispatches.c.turn_id == turn_id,
                         conversation_dispatches.c.state == "active",
-                    ).values(state="pending", last_error="worker_recovered", queued_at=requeued_at, acquired_at=None, updated_at=requeued_at)
+                    ).values(state="pending", last_error="worker_recovered", queued_at=requeued_at, acquired_at=None, lease_renewed_at=None, updated_at=requeued_at)
                 )
                 if changed.rowcount:
                     turn = c.execute(select(conversation_turns).where(conversation_turns.c.turn_id == turn_id)).mappings().one()

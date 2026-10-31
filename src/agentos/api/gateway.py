@@ -1782,6 +1782,14 @@ def create_app(services: ApiServices) -> FastAPI:
                 except CursorError:
                     yield f"event: resync\ndata: {json_dumps({'code': 'cursor_invalid'})}\n\n"
                     return
+                except Exception:
+                    import logging
+
+                    logging.getLogger("agentos.api.gateway").warning(
+                        "SSE events poll error for conversation %s", conversation_id, exc_info=True
+                    )
+                    await asyncio.sleep(_SSE_IDLE_POLL_SECONDS)
+                    continue
                 for event in events:
                     yield f"id: {event['event_id']}\nevent: {event['event_type']}\ndata: {json_dumps(event)}\n\n"
                 if events:

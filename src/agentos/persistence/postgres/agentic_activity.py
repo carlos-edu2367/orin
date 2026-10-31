@@ -12,7 +12,20 @@ from sqlalchemy import insert, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from agentos.agentic.events import AgentActivityEvent
+from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
+from agentos.agentic.models import (
+    MAX_ACTION_DEPTH,
+    MAX_ACTION_ITEMS,
+    MAX_ACTION_TEXT,
+    MAX_APPROVAL_DEPTH,
+    MAX_APPROVAL_ITEMS,
+    MAX_APPROVAL_TEXT,
+    MAX_CODE_PROPOSAL_TEXT,
+    MAX_USER_QUESTION_DEPTH,
+    MAX_USER_QUESTION_ITEMS,
+    MAX_USER_QUESTION_TEXT,
+    _LARGE_BUDGET_KEYS,
+)
 
 from .schema import conversation_activity_events
 
@@ -65,23 +78,157 @@ def _matches(row: Mapping[str, object], event: AgentActivityEvent) -> bool:
     ) and _plain(row["payload"]) == _plain(event.payload) and _aware(row["created_at"]) == event.created_at
 
 
+def _coerce_stored_value(
+    value: object,
+    *,
+    depth: int = 0,
+    count: list[int] | None = None,
+    text_limit: int = MAX_ACTION_TEXT,
+    item_limit: int = MAX_ACTION_ITEMS,
+    depth_limit: int = MAX_ACTION_DEPTH,
+) -> object:
+    if count is None:
+        count = [0]
+    if depth > depth_limit:
+        return None
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value[:text_limit] if len(value) > text_limit else value
+    if depth >= depth_limit:
+        return str(value)[:text_limit]
+    if isinstance(value, Mapping):
+        out: dict[str, object] = {}
+        valid_items = [
+            (k, v)
+            for k, v in value.items()
+            if isinstance(k, str) and k.strip()
+        ][:item_limit]
+        for idx, (k, v) in enumerate(valid_items):
+            remaining_siblings = (len(valid_items) - idx - 1) if depth == 0 else 0
+            effective_item_limit = max(count[0], item_limit - remaining_siblings)
+            if len(out) >= item_limit or count[0] >= effective_item_limit:
+                break
+            is_large_key = depth == 0 and k in _LARGE_BUDGET_KEYS and isinstance(v, (Mapping, tuple, list))
+            if (
+                not is_large_key
+                and isinstance(v, (Mapping, list, tuple))
+                and len(v) > 0
+                and count[0] + 2 > effective_item_limit
+            ):
+                if depth == 0:
+                    continue
+                break
+            count[0] += 1
+            if is_large_key:
+                is_questions = k == "questions"
+                is_code_proposal = k == "code_session_proposal"
+                out[k] = _coerce_stored_value(
+                    v,
+                    depth=depth + 1,
+                    count=[0],
+                    text_limit=(
+                        MAX_CODE_PROPOSAL_TEXT
+                        if is_code_proposal
+                        else (MAX_USER_QUESTION_TEXT if is_questions else MAX_APPROVAL_TEXT)
+                    ),
+                    item_limit=MAX_USER_QUESTION_ITEMS if is_questions else MAX_APPROVAL_ITEMS,
+                    depth_limit=MAX_USER_QUESTION_DEPTH if is_questions else MAX_APPROVAL_DEPTH,
+                )
+            else:
+                sub_limit = MAX_APPROVAL_TEXT if depth == 0 and k in {"output_tail", "plan_content"} else text_limit
+                out[k] = _coerce_stored_value(
+                    v,
+                    depth=depth + 1,
+                    count=count,
+                    text_limit=sub_limit,
+                    item_limit=effective_item_limit,
+                    depth_limit=depth_limit,
+                )
+        return out
+    if isinstance(value, (list, tuple)):
+        out_list: list[object] = []
+        for item in value:
+            if len(out_list) >= item_limit or count[0] >= item_limit:
+                break
+            if isinstance(item, (Mapping, list, tuple)) and len(item) > 0 and count[0] + 2 > item_limit:
+                break
+            count[0] += 1
+            out_list.append(
+                _coerce_stored_value(
+                    item,
+                    depth=depth + 1,
+                    count=count,
+                    text_limit=text_limit,
+                    item_limit=item_limit,
+                    depth_limit=depth_limit,
+                )
+            )
+        return out_list
+    return str(value)[:text_limit]
+
+
+def _coerce_stored_payload(payload: object) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        return {}
+    coerced = _coerce_stored_value(payload, depth=0, count=[0], text_limit=512, item_limit=64)
+    return dict(coerced) if isinstance(coerced, Mapping) else {}
+
+
 def _event_from_row(row: Mapping[str, object]) -> AgentActivityEvent:
-    return AgentActivityEvent(
-        event_id=str(row["event_id"]),
-        conversation_id=str(row["conversation_id"]),
-        turn_id=str(row["turn_id"]),
-        execution_id=str(row["execution_id"]),
-        user_id=str(row["user_id"]),
-        workspace_id=row["workspace_id"],
-        agent_id=str(row["agent_id"]),
-        parent_agent_id=row["parent_agent_id"],
-        event_type=str(row["event_type"]),
-        sequence=int(row["sequence"]),
-        summary=str(row["summary"]),
-        payload=row["payload"],
-        visibility=str(row["visibility"]),
-        created_at=_aware(row["created_at"]),
-    )
+    coerced_payload = _coerce_stored_payload(row["payload"])
+    raw_visibility = str(row["visibility"] or "public").strip().lower()
+    visibility = raw_visibility if raw_visibility in {"public", "owner", "internal"} else "public"
+    raw_summary = str(row["summary"] or "").strip()
+    summary = raw_summary[:512] if raw_summary else "Atividade"
+    try:
+        return AgentActivityEvent(
+            event_id=str(row["event_id"]),
+            conversation_id=str(row["conversation_id"]),
+            turn_id=str(row["turn_id"]),
+            execution_id=str(row["execution_id"]),
+            user_id=str(row["user_id"]),
+            workspace_id=row["workspace_id"],
+            agent_id=str(row["agent_id"]),
+            parent_agent_id=row["parent_agent_id"],
+            event_type=str(row["event_type"]),
+            sequence=int(row["sequence"]),
+            summary=summary,
+            payload=coerced_payload,
+            visibility=visibility,
+            created_at=_aware(row["created_at"]),
+        )
+    except ValueError:
+        raw_ev_type = str(row["event_type"] or "")
+        safe_ev_type = (
+            raw_ev_type
+            if raw_ev_type in AgentActivityEventType._value2member_map_
+            else AgentActivityEventType.TOOL_PROGRESSED.value
+        )
+        return AgentActivityEvent(
+            event_id=str(row["event_id"] or "").strip() or "evt_recovered",
+            conversation_id=str(row["conversation_id"] or "").strip() or "conv_recovered",
+            turn_id=str(row["turn_id"] or "").strip() or "turn_recovered",
+            execution_id=str(row["execution_id"] or "").strip() or "exec_recovered",
+            user_id=str(row["user_id"] or "").strip() or "user_recovered",
+            workspace_id=(
+                row["workspace_id"]
+                if isinstance(row["workspace_id"], str) and row["workspace_id"].strip()
+                else None
+            ),
+            agent_id=str(row["agent_id"] or "").strip() or "agent:recovered",
+            parent_agent_id=(
+                row["parent_agent_id"]
+                if isinstance(row["parent_agent_id"], str) and row["parent_agent_id"].strip()
+                else None
+            ),
+            event_type=safe_ev_type,
+            sequence=max(1, int(row["sequence"] or 1)),
+            summary=summary,
+            payload={},
+            visibility=visibility,
+            created_at=_aware(row["created_at"]),
+        )
 
 
 class PostgresAgenticActivityStore:

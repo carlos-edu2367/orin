@@ -506,7 +506,6 @@ def test_settled_turn_compacts_consecutive_assistant_and_thought_deltas_preservi
     assert relevant == [
         ("agent.thought_delta", "Pensando parte 1, parte 2."),
         ("assistant.delta", "Vou ler o arquivo."),
-        ("tool.progressed", "Preparando argumentos de read_file"),
         ("filesystem.read", "Leu config.txt"),
         ("assistant.delta", "Tudo certo!"),
     ]

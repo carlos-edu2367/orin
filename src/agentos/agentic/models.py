@@ -128,7 +128,10 @@ def _bounded(
         if redact:  # W0-R11: what the activity log keeps is what its SSE stream and the interface show
             from agentos.redaction import redact_text
 
-            return redact_text(value)
+            redacted = redact_text(value)
+            if len(redacted) > text_limit:
+                return redacted[:text_limit]
+            return redacted
         return value
     if isinstance(value, Mapping):
         if len(value) > item_limit:
