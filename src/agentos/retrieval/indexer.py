@@ -33,7 +33,7 @@ class ProjectIndexer:
 
     # -- scanning -------------------------------------------------------
 
-    def scan(self, only: list[str] | None = None) -> None:
+    def scan(self, only: list[str] | None = None, *, embed: bool = True) -> None:
         """Reconcile the index with the disk, optionally for a subset of paths."""
         index_filter = IndexFilter(GitignoreFilter.from_root(self.root))
         known = self._store.known_files()
@@ -54,7 +54,8 @@ class ProjectIndexer:
             known_paths = tuple(self._store.known_files())
             for path, (language, text) in pending_imports.items():
                 self._record_imports(path, language, text, known_paths)
-        self._embed_pending()
+        if embed:
+            self._embed_pending()
         self._store.mark_scanned(datetime.now(UTC))
 
     def _candidates(self, index_filter: IndexFilter, only: list[str] | None) -> list[str]:
@@ -146,9 +147,15 @@ class ProjectIndexer:
                 return
             try:
                 vectors = self._embedder.embed(texts)
-            except EmbeddingUnavailable:
+            except Exception:
+                return
+            if not vectors:
                 return
             self._store.store_vectors(dict(zip(chunks.keys(), vectors, strict=False)))
+            if len(vectors) < len(chunks):
+                return
 
 
-__all__ = ["EMBED_BATCH", "MAX_CHUNKS", "MAX_FILE_BYTES", "ProjectIndexer"]
+WorkspaceIndexer = ProjectIndexer
+
+__all__ = ["EMBED_BATCH", "MAX_CHUNKS", "MAX_FILE_BYTES", "ProjectIndexer", "WorkspaceIndexer"]

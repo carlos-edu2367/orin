@@ -28,6 +28,14 @@ MAX_READ_LINES = 800
 MAX_LIST_DEPTH = 5
 MAX_LIST_ENTRIES = 500
 GIT_STATUS_TIMEOUT_SECONDS = 10
+_IGNORED_CHANGE_PREFIXES = (
+    ".orin/",
+    ".git/",
+    "uploads/",
+    "node_modules/",
+    ".venv/",
+    "__pycache__/",
+)
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
 _PROJECT_WORKSPACE_ID = re.compile(r"^workspace:[A-Za-z0-9._-]+$")
@@ -409,6 +417,50 @@ class ConversationWorkspace:
                 snapshot[relative] = {"size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
         return snapshot
 
+    @staticmethod
+    def _normalize_change_path(rel_path: str) -> str:
+        clean = str(rel_path or "").strip().replace("\\", "/")
+        while clean.startswith("./") or clean.startswith("/"):
+            clean = clean[2:] if clean.startswith("./") else clean[1:]
+        return clean
+
+    @classmethod
+    def _is_ignored_change_path(cls, rel_path: str) -> bool:
+        clean = cls._normalize_change_path(rel_path)
+        if not clean:
+            return True
+        if clean in {".orin", ".git", "uploads", "node_modules", ".venv", "__pycache__"}:
+            return True
+        if clean.startswith(_IGNORED_CHANGE_PREFIXES):
+            return True
+        parts = clean.split("/")
+        if any(part in {".orin", ".git", "node_modules", ".venv", "__pycache__"} for part in parts[:-1]):
+            return True
+        return False
+
+    def _file_signature(self, path: Path) -> tuple[int, int] | None:
+        try:
+            resolved = path.resolve() if self.unrestricted else resolve_contained(path, self.root)
+            if resolved is None or not resolved.is_file():
+                return None
+            stat = resolved.stat()
+            return (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _baseline_signature(before: object, rel_path: str) -> tuple[bool, tuple[int, int] | None]:
+        if not isinstance(before, dict) or rel_path not in before:
+            return False, None
+        entry = before[rel_path]
+        if entry is None:
+            return True, None
+        if isinstance(entry, tuple) and len(entry) == 2:
+            return True, (int(entry[0]), int(entry[1]))
+        if isinstance(entry, dict) and "mtime_ns" in entry and "size_bytes" in entry:
+            return True, (int(entry["mtime_ns"]), int(entry["size_bytes"]))
+        return True, None
+
     def _git_status_paths(self) -> list[str] | None:
         """Relative paths ``git`` considers new or modified, or ``None`` when
         git cannot answer.
@@ -418,7 +470,7 @@ class ConversationWorkspace:
         tree twice per command (once before, once after) is not. Only used
         when the workspace root is itself a git repository's top level.
         """
-        if not (self.root / ".git").is_dir() or shutil.which("git") is None:
+        if not (self.root / ".git").exists() or shutil.which("git") is None:
             return None
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
@@ -438,45 +490,65 @@ class ConversationWorkspace:
             raw = line[3:].strip()
             if " -> " in raw:  # a rename is reported as "old -> new"
                 raw = raw.split(" -> ", 1)[1]
-            paths.append(raw.strip('"'))
+            cleaned = self._normalize_change_path(raw.strip('"'))
+            if cleaned:
+                paths.append(cleaned)
         return paths
 
-    def begin_change_tracking(self) -> dict[str, dict[str, int]] | None:
+    def _git_changed_files(self) -> list[str] | None:
+        return self._git_status_paths()
+
+    def begin_change_tracking(self) -> dict[str, object] | None:
         """A cheap baseline for ``end_change_tracking``.
 
-        ``None`` means a git index will be able to answer the question
-        afterwards with no tree walk at all; a full snapshot is the fallback
-        when there is no git index to consult.
+        ``None`` means a clean git index will be able to answer the question
+        afterwards with no tree walk at all; when the git working tree already
+        has dirty/untracked files, their ``(mtime_ns, size)`` signatures are
+        recorded so only files newly created or modified during the command are
+        emitted. A full snapshot is the fallback when there is no git index.
         """
-        if self._git_status_paths() is not None:
-            return None
+        git_paths = self._git_changed_files()
+        if git_paths is not None:
+            baseline: dict[str, object] = {
+                rel_path: self._file_signature(self.root / rel_path)
+                for rel_path in git_paths
+                if not self._is_ignored_change_path(rel_path)
+            }
+            return baseline or None
         return self.file_snapshot()
 
-    def end_change_tracking(self, before: dict[str, dict[str, int]] | None) -> list[dict[str, object]]:
+    def end_change_tracking(self, before: dict[str, object] | None) -> list[dict[str, object]]:
         """Pair with ``begin_change_tracking`` around one mutating command."""
+        git_paths = self._git_changed_files()
+        if git_paths is not None:
+            results: list[dict[str, object]] = []
+            for relative in git_paths:
+                if self._is_ignored_change_path(relative):
+                    continue
+                target = self.root / relative
+                signature = self._file_signature(target)
+                if signature is None:
+                    continue
+                in_baseline, prev_signature = self._baseline_signature(before, relative)
+                if in_baseline and prev_signature == signature:
+                    continue
+                results.append({"path": relative, "size_bytes": signature[1]})
+                if len(results) >= MAX_SNAPSHOT_FILES:
+                    break
+            return results
         if before is None:
-            git_paths = self._git_status_paths()
-            if git_paths is not None:
-                results: list[dict[str, object]] = []
-                for relative in git_paths:
-                    target = self.root / relative
-                    try:
-                        if not target.is_file():
-                            continue
-                        size = target.stat().st_size
-                    except OSError:
-                        continue
-                    results.append({"path": relative, "size_bytes": size})
-                    if len(results) >= MAX_SNAPSHOT_FILES:
-                        break
-                return results
             before = {}
         after = self.file_snapshot()
-        return [
-            {"path": path, "size_bytes": metadata["size_bytes"]}
-            for path, metadata in after.items()
-            if before.get(path) != metadata
-        ]
+        results: list[dict[str, object]] = []
+        for path, metadata in after.items():
+            if self._is_ignored_change_path(path):
+                continue
+            in_baseline, prev_signature = self._baseline_signature(before, path)
+            curr_signature = (int(metadata["mtime_ns"]), int(metadata["size_bytes"]))
+            if in_baseline and prev_signature == curr_signature:
+                continue
+            results.append({"path": path, "size_bytes": metadata["size_bytes"]})
+        return results
 
     def file_metadata(self, path: str) -> dict[str, object]:
         target = self.resolve(path)
@@ -505,8 +577,11 @@ def resolve_workspace(workspace_id: str, *, managed_root: Path | str, local_root
     return ConversationWorkspace(managed_root, workspace_id)
 
 
+LocalWorkspace = ConversationWorkspace
+
 __all__ = [
     "ConversationWorkspace",
+    "LocalWorkspace",
     "MAX_LIST_DEPTH",
     "MAX_LIST_ENTRIES",
     "MAX_READ_BYTES",

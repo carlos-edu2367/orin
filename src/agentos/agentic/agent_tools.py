@@ -1157,6 +1157,28 @@ class AgentToolset(
     def _is_verification_command(command_str: str) -> bool:
         return is_verification_command(command_str)
 
+    @staticmethod
+    def _normalize_tracked_path(raw_path: str) -> str:
+        clean = str(raw_path or "").strip().replace("\\", "/")
+        while clean.startswith(("./", "/")):
+            clean = clean[2:] if clean.startswith("./") else clean[1:]
+        return clean
+
+    def _record_changed_paths(self, artifacts: Any) -> bool:
+        ignored_prefixes = (
+            ".orin/", ".git/", "uploads/", "shots/", "screenshots/",
+            "test-results/", "playwright-report/", "coverage/", "browser-captures/",
+        )
+        changed_any = False
+        if isinstance(artifacts, (list, tuple, set)):
+            for item in artifacts:
+                raw = item.get("path") if isinstance(item, Mapping) else item if isinstance(item, str) else None
+                path = self._normalize_tracked_path(raw) if isinstance(raw, str) else ""
+                if path and not path.startswith(ignored_prefixes):
+                    self._changed_paths.add(path)
+                    changed_any = True
+        return changed_any
+
     def _observe_mutation_outcome(self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome) -> None:
         """Track workspace changes, and, in Code mode, the checks run against them.
 
@@ -1172,8 +1194,8 @@ class AgentToolset(
         self._tool_calls_count += 1
         payload = outcome.payload or {}
         if name in {"write_file", "edit_file", "notebook_edit"}:
-            path = str(payload.get("path") or arguments.get("path") or arguments.get("notebook_path") or "").replace("\\", "/")
-            if path and not path.startswith(".orin/"):
+            path = self._normalize_tracked_path(str(payload.get("path") or arguments.get("path") or arguments.get("notebook_path") or ""))
+            if path and not path.startswith((".orin/", "uploads/")):
                 self._changed_paths.add(path)
                 self._change_events += 1
                 self._code_mode_verified = False
@@ -1189,10 +1211,7 @@ class AgentToolset(
                     self._code_mode_verified = True
             # A scaffold can create files but is not a verification result.
             artifacts = payload.get("artifacts")
-            if isinstance(artifacts, list) and any(
-                isinstance(item, Mapping) and isinstance(item.get("path"), str) and not str(item["path"]).startswith(".orin/")
-                for item in artifacts
-            ):
+            if self._record_changed_paths(artifacts):
                 self._change_events += 1
                 self._code_mode_verified = False
             return
@@ -1201,23 +1220,7 @@ class AgentToolset(
         command_str = str(arguments.get("command") or payload.get("command") or "").strip()
         is_verif = self._is_verification_command(command_str)
         artifacts = payload.get("artifacts")
-        changed_any = False
-        ignored_prefixes = (
-            ".orin/",
-            "shots/",
-            "screenshots/",
-            "test-results/",
-            "playwright-report/",
-            "coverage/",
-            "browser-captures/",
-        )
-        if isinstance(artifacts, list):
-            for artifact in artifacts:
-                if isinstance(artifact, Mapping) and isinstance(artifact.get("path"), str):
-                    path = str(artifact["path"]).replace("\\", "/").lstrip("./")
-                    if not path.startswith(ignored_prefixes):
-                        self._changed_paths.add(path)
-                        changed_any = True
+        changed_any = self._record_changed_paths(artifacts)
         if is_verif and payload.get("exit_code") == 0:
             self._code_mode_verified = True
         elif changed_any:

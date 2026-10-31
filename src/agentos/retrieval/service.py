@@ -44,21 +44,24 @@ class RetrievalService:
         self._store = store
         self._indexer = indexer
         self._embedder = embedder
+        self._last_scan_embedded = True
 
     def search(self, query: str, *, limit: int = 8) -> SearchResult:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-blank string")
-        self._refresh_if_stale()
+        self._refresh_if_stale(embed=True)
         lexical = self._store.search_lexical(query, limit=CANDIDATES)
         rankings = [[chunk_id for chunk_id, _ in lexical]]
         mode = "lexical"
         try:
-            vector = self._embedder.embed([query])[0]
-            semantic = self._store.search_vector(vector, limit=CANDIDATES)
-            if semantic:
-                rankings.append([chunk_id for chunk_id, _ in semantic])
-                mode = "semantic"
-        except EmbeddingUnavailable:
+            vectors = self._embedder.embed([query])
+            if vectors:
+                vector = vectors[0]
+                semantic = self._store.search_vector(vector, limit=CANDIDATES)
+                if semantic:
+                    rankings.append([chunk_id for chunk_id, _ in semantic])
+                    mode = "semantic"
+        except (EmbeddingUnavailable, Exception):
             pass
         scores = reciprocal_rank_fusion(rankings)
         if not scores:
@@ -86,18 +89,27 @@ class RetrievalService:
             for chunk_id, value in scores.items()
         }
 
-    def _refresh_if_stale(self) -> None:
+    def _refresh_if_stale(self, *, embed: bool = True) -> None:
         """Cover edits made outside Orin, without paying for a scan every call."""
         last = self._store.status().last_scan_at
         if last is not None and datetime.now(UTC) - last < STALE_AFTER:
+            if embed and not self._last_scan_embedded:
+                try:
+                    self._indexer.scan(embed=True)
+                    self._last_scan_embedded = True
+                except OSError:
+                    pass
             return
         try:
-            self._indexer.scan()
+            self._indexer.scan(embed=embed)
+            self._last_scan_embedded = bool(embed)
         except OSError:
             return
 
-    def reindex(self, paths: list[str] | None = None) -> None:
-        self._indexer.scan(only=paths)
+    def reindex(self, paths: list[str] | None = None, *, embed: bool = True) -> None:
+        self._indexer.scan(only=paths, embed=embed)
+        if embed:
+            self._last_scan_embedded = True
 
     def status(self) -> IndexStatus:
         return self._store.status()
@@ -111,7 +123,7 @@ class RetrievalService:
         Everything here is already in the index; this is a projection, not a
         second analysis.
         """
-        self._refresh_if_stale()
+        self._refresh_if_stale(embed=False)
         return [
             {"path": path, "imported_by": count, "symbols": self._store.symbols_of(path, limit=MAX_MAP_SYMBOLS)}
             for path, count in self._store.most_imported(limit=max(1, int(limit)))
