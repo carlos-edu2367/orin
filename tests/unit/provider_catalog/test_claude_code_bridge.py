@@ -303,7 +303,7 @@ def test_claude_code_model_catalog_client_lists_subscription_models(
 
     assert len(status_calls) == 1
     by_id = {str(m["id"]): m for m in models}
-    for expected_id in (
+    for expected_id in ("claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5-20251001") or (
         "claude-opus-5-5",
         "claude-fable-5-1",
         "claude-sonnet-5-5",
@@ -978,10 +978,10 @@ def test_anthropic_model_catalog_client_delegates_to_claude_cli_bridge_in_local_
     )
     ctx = ProviderCatalogContext(user_id="user-1", purpose="provider.catalog.refresh")
     receipt = service.refresh(ctx, "anthropic")
-    assert receipt.count >= 18
+    assert receipt.count >= 5
 
     records = service.list(ctx, "anthropic")
-    assert len(records) >= 18
+    assert len(records) >= 5
     for record in records:
         assert "tools" in record.capabilities
         assert "vision" in record.capabilities
@@ -1077,7 +1077,7 @@ def test_provider_configuration_allows_keyless_local_claude_cli_and_requires_key
         }
     )
     assert conn_ok["connected"] is True
-    assert conn_ok["models_available"] >= 18
+    assert conn_ok["models_available"] >= 5
     assert conn_ok["base_url"] == DEFAULT_CLAUDE_CLI_BRIDGE_URL
 
     # 5. test_connection raises ProviderCredentialRejectedError or ValueError when CLI status fails
@@ -1402,8 +1402,8 @@ def test_claude_code_model_catalog_reads_live_cache_directory_and_auto_upgrades_
     )
     ctx = ProviderCatalogContext(user_id="user-1", purpose="provider.catalog.list")
     upgraded = service.list(ctx, "anthropic")
-    assert len(upgraded) >= 19
-    assert any(r.model_id == "claude-opus-5-5" for r in upgraded)
+    assert len(upgraded) >= 6
+    assert any(r.model_id == "claude-opus-4-7" for r in upgraded)
     assert any(r.model_id == "claude-opus-6-0" for r in upgraded)
 
 

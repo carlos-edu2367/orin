@@ -472,11 +472,34 @@ def _format_tool_call_xml(name: str, raw_args: Any) -> str:
     )
 
 
+def _normalize_bridge_image_block(block: Mapping[str, Any]) -> dict[str, Any] | None:
+    b_type = str(block.get("type") or "")
+    if b_type not in {"image", "input_image"}:
+        return None
+    if isinstance(block.get("source"), Mapping):
+        return {**dict(block), "type": "image", "source": dict(block["source"])}
+    data = block.get("data")
+    if isinstance(data, str) and data:
+        media_type = str(block.get("media_type") or "image/png")
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }
+    return dict(block)
+
+
 def _format_bridge_conversation_transcript(
     messages: Iterable[Mapping[str, Any]],
-) -> tuple[list[str], str]:
+    *,
+    return_images: bool = False,
+) -> tuple[list[str], str] | tuple[list[str], str, list[dict[str, Any]]]:
     system_parts: list[str] = []
     turns_text: list[str] = []
+    image_blocks: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, Mapping):
             continue
@@ -497,14 +520,26 @@ def _format_bridge_conversation_transcript(
                     anthropic_tool_uses.append(block)
                 elif b_type == "tool_result":
                     anthropic_tool_results.append(block)
+                    tr_content = block.get("content")
+                    if isinstance(tr_content, list):
+                        for sub in tr_content:
+                            if isinstance(sub, Mapping):
+                                norm_img = _normalize_bridge_image_block(sub)
+                                if norm_img is not None:
+                                    image_blocks.append(norm_img)
+                elif b_type in {"image", "input_image"}:
+                    norm_img = _normalize_bridge_image_block(block)
+                    if norm_img is not None:
+                        image_blocks.append(norm_img)
                 elif b_type in ("", "text") and isinstance(block.get("text"), str):
                     chunks.append(block["text"])
             text_content = "\n".join(chunks)
 
         if role == "system":
             if text_content.strip():
-                system_parts.append(text_content.strip())
-                if turns_text:
+                if not turns_text:
+                    system_parts.append(text_content.strip())
+                else:
                     turns_text.append(f"[System]\n{text_content.strip()}")
             continue
         if role == "user":
@@ -566,8 +601,12 @@ def _format_bridge_conversation_transcript(
                 turns_text.append(f"[Tool Result id={call_id}]\n{text_content}")
 
     if len(turns_text) == 1 and turns_text[0].startswith("[User]\n"):
-        return system_parts, turns_text[0][len("[User]\n") :]
-    return system_parts, "\n\n".join(turns_text) or "Continue."
+        prompt_text = turns_text[0][len("[User]\n") :]
+    else:
+        prompt_text = "\n\n".join(turns_text) or "Continue."
+    if return_images:
+        return system_parts, prompt_text, image_blocks
+    return system_parts, prompt_text
 
 
 def _resolve_tool_name(raw_name: str, allowed_names: set[str]) -> str | None:

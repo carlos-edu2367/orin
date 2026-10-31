@@ -256,7 +256,7 @@ class ProviderModelCatalogService:
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         normalized_provider = _provider(provider)
         items = self._repository.list(context, normalized_provider, favorites_only)
-        if normalized_provider == "anthropic" and (not items or (not favorites_only and len(items) < 12)):
+        if normalized_provider == "anthropic" and (not items or (not favorites_only and len(items) < 5)):
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True and is_claude_cli_bridge_url(str(credential.get("base_url") or "")):
                 try:

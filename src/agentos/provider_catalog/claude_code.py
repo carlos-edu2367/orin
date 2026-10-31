@@ -43,9 +43,12 @@ from agentos.providers.models import (
 
 
 DEFAULT_CLAUDE_CLI_BRIDGE_URL = "http://127.0.0.1:18447"
+CLAUDE_CODE_LOCAL_BASE_URL = DEFAULT_CLAUDE_CLI_BRIDGE_URL
 PUBLISHED_CLAUDE_MODEL_CATALOG_URL = "https://downloads.claude.ai/model-catalog/v1/catalog.json"
 ANTHROPIC_CLOUD_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_BASE_URL = ANTHROPIC_CLOUD_BASE_URL
+
+_CLAUDE_CLI_SEMAPHORE = threading.BoundedSemaphore(3)
 
 _CLOUD_HOSTS = frozenset({"api.anthropic.com", "anthropic.com"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -93,25 +96,35 @@ _PUBLIC_ARG_RENAMES: dict[str, dict[str, str]] = {
 }
 
 _SUBSCRIPTION_MODELS: tuple[tuple[str, str, int], ...] = (
-    ("claude-opus-5-5", "Claude Opus 5.5 (Assinatura CLI)", 1_000_000),
-    ("claude-fable-5-1", "Claude Fable 5.1 (Assinatura CLI)", 1_000_000),
-    ("claude-sonnet-5-5", "Claude Sonnet 5.5 (Assinatura CLI)", 1_000_000),
-    ("claude-haiku-5-5", "Claude Haiku 5.5 (Assinatura CLI)", 1_000_000),
-    ("claude-opus-5", "Claude Opus 5 (Assinatura CLI)", 1_000_000),
-    ("claude-sonnet-5", "Claude Sonnet 5 (Assinatura CLI)", 1_000_000),
-    ("claude-fable-5", "Claude Fable 5 (Assinatura CLI)", 1_000_000),
-    ("claude-opus-4-8", "Claude Opus 4.8 (Assinatura CLI)", 1_000_000),
-    ("claude-opus-4-7", "Claude Opus 4.7 (Assinatura CLI)", 1_000_000),
-    ("claude-opus-4-6", "Claude Opus 4.6 (Assinatura CLI)", 1_000_000),
-    ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Assinatura CLI)", 1_000_000),
-    ("claude-opus-4-5-20251101", "Claude Opus 4.5 (Assinatura CLI)", 200_000),
+    ("claude-opus-4-7", "Claude Opus 4.7 (Assinatura CLI)", 200_000),
+    ("claude-opus-4-6", "Claude Opus 4.6 (Assinatura CLI)", 200_000),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Assinatura CLI)", 200_000),
     ("claude-sonnet-4-5", "Claude Sonnet 4.5 (Assinatura CLI)", 200_000),
     ("claude-haiku-4-5-20251001", "Claude Haiku 4.5 (Assinatura CLI)", 200_000),
-    ("claude-opus-4-1-20250805", "Claude Opus 4.1 (Assinatura CLI)", 200_000),
-    ("claude-opus-4-0", "Claude Opus 4.0 (Assinatura CLI)", 200_000),
-    ("claude-sonnet-4-0", "Claude Sonnet 4.0 (Assinatura CLI)", 200_000),
-    ("claude-3-7-sonnet-20250219", "Claude 3.7 Sonnet (Assinatura CLI)", 200_000),
 )
+
+_LEGACY_CLAUDE_MODEL_MAP: dict[str, str] = {
+    "claude-opus-5-5": "claude-opus-4-7",
+    "claude-opus-5": "claude-opus-4-7",
+    "claude-opus-4-8": "claude-opus-4-7",
+    "claude-fable-5-1": "claude-sonnet-4-6",
+    "claude-fable-5": "claude-sonnet-4-6",
+    "claude-sonnet-5-5": "claude-sonnet-4-6",
+    "claude-sonnet-5": "claude-sonnet-4-6",
+    "claude-haiku-5-5": "claude-haiku-4-5-20251001",
+}
+
+
+def _normalize_claude_model_id(model: str | None) -> str | None:
+    if model is None:
+        return None
+    cleaned = str(model).strip()
+    if not cleaned:
+        return None
+    if "/" in cleaned:
+        _, cleaned = cleaned.split("/", 1)
+        cleaned = cleaned.strip()
+    return _LEGACY_CLAUDE_MODEL_MAP.get(cleaned.lower(), cleaned)
 
 
 class ProviderTransportError(ProviderKeyRejected):
@@ -255,9 +268,10 @@ def _resolve_claude_binary(
         return str(found_path)
 
     if appdata:
-        cmd_candidate = Path(appdata) / "npm" / "claude.cmd"
-        if cmd_candidate.is_file():
-            return str(cmd_candidate)
+        for shim_name in ("claude.cmd", "claude.ps1"):
+            cmd_candidate = Path(appdata) / "npm" / shim_name
+            if cmd_candidate.is_file():
+                return str(cmd_candidate)
     if home:
         posix_candidate = Path(home) / ".local" / "bin" / "claude"
         if posix_candidate.is_file():
@@ -312,10 +326,7 @@ def _build_claude_cli_command(
     ]
 
     if model is not None and str(model).strip():
-        cleaned_model = str(model).strip()
-        if "/" in cleaned_model:
-            _, cleaned_model = cleaned_model.split("/", 1)
-            cleaned_model = cleaned_model.strip()
+        cleaned_model = _normalize_claude_model_id(str(model)) or ""
         if cleaned_model.startswith("-") or not _SAFE_MODEL_RE.match(cleaned_model):
             raise ValueError(f"Invalid model identifier for Claude CLI: {model!r}")
         cmd.extend(["--model", cleaned_model])
@@ -423,10 +434,10 @@ def _format_catalog_model_entry(entry: Mapping[str, Any]) -> tuple[str, str, int
     max_input = runtime.get("max_input_tokens")
     if isinstance(max_input, int) and not isinstance(max_input, bool) and max_input > 0:
         context_window = max_input
-    elif any(legacy in model_id for legacy in ("4-5", "4-1", "4-0", "3-7", "3-5")):
-        context_window = 200_000
-    else:
+    elif "[1m]" in model_id.lower():
         context_window = 1_000_000
+    else:
+        context_window = 200_000
     return (model_id, display_name, context_window)
 
 
@@ -558,10 +569,10 @@ def _discover_cached_claude_cli_models(
             max_input = runtime.get("max_input_tokens")
             if isinstance(max_input, int) and not isinstance(max_input, bool) and max_input > 0:
                 context_window = max_input
-            elif any(legacy in model_id for legacy in ("4-5", "4-1", "4-0", "3-7", "3-5")):
-                context_window = 200_000
-            else:
+            elif "[1m]" in model_id.lower():
                 context_window = 1_000_000
+            else:
+                context_window = 200_000
 
             seen_ids.add(model_id)
             discovered.append((model_id, display_name, context_window))
@@ -777,12 +788,25 @@ def stream_claude_code_bridge(
     declarations, allowed_names = (
         ([], set()) if withheld else _extract_tool_declarations(tools)
     )
-    system_parts, prompt_text = _format_bridge_conversation_transcript(messages)
+    transcript_res = _format_bridge_conversation_transcript(
+        messages, return_images=True
+    )
+    if len(transcript_res) == 3:
+        system_parts, prompt_text, image_blocks = transcript_res  # type: ignore[misc]
+    else:
+        system_parts, prompt_text = transcript_res  # type: ignore[misc]
+        image_blocks = []
     system_prompt = _build_bridge_system_prompt(system_parts, declarations)
 
     prompt_file_path: Path | None = None
     proc: Any = None
+    semaphore_acquired = False
     try:
+        while not semaphore_acquired:
+            if cancel_check is not None and cancel_check():
+                return
+            semaphore_acquired = _CLAUDE_CLI_SEMAPHORE.acquire(timeout=0.05)
+
         with tempfile.NamedTemporaryFile(
             mode="w",
             encoding="utf-8",
@@ -798,31 +822,47 @@ def stream_claude_code_bridge(
             if effort and str(effort).strip().lower() in _VALID_EFFORT_LEVELS
             else None
         )
+        normalized_model = _normalize_claude_model_id(model) if model else None
         cmd = _build_claude_cli_command(
             binary=resolved_binary,
             system_prompt_file=prompt_file_path,
-            model=model or None,
+            model=normalized_model,
             effort=effective_effort,
         )
         isolated_env = build_isolated_claude_env()
         creationflags = (
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         )
+        safe_cwd = tempfile.gettempdir()
 
         if popen_factory is not None:
-            proc = popen_factory(
-                cmd,
-                env=isolated_env,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
+            try:
+                proc = popen_factory(
+                    cmd,
+                    cwd=safe_cwd,
+                    env=isolated_env,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except TypeError:
+                proc = popen_factory(
+                    cmd,
+                    env=isolated_env,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
         else:
             proc = subprocess.Popen(
                 cmd,
+                cwd=safe_cwd,
                 env=isolated_env,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -866,11 +906,19 @@ def stream_claude_code_bridge(
 
         # Immediately send the user turn via stream-json and close stdin so claude.exe
         # never waits 3,000ms on an open stdin pipe.
+        user_content: str | list[dict[str, Any]]
+        if image_blocks:
+            user_content = [
+                *image_blocks,
+                {"type": "text", "text": prompt_text or "Continue."},
+            ]
+        else:
+            user_content = prompt_text or "Continue."
         user_envelope = {
             "type": "user",
             "message": {
                 "role": "user",
-                "content": prompt_text or "Continue.",
+                "content": user_content,
             },
         }
         if getattr(proc, "stdin", None) is not None:
@@ -1206,6 +1254,7 @@ def stream_claude_code_bridge(
                             ):
                                 saw_unclosed_tool_call = True
                             if cleaned_text:
+                                saw_stream_text = True
                                 sequence += 1
                                 yield NormalizedStreamItem(
                                     StreamKind.TEXT,
@@ -1257,6 +1306,17 @@ def stream_claude_code_bridge(
                     formatted_reset = _format_reset_timestamp(resets_at)
                     if formatted_reset and formatted_reset not in err_msg:
                         err_msg = f"{err_msg} (resets at {formatted_reset})"
+                    retry_after_seconds: float | None = None
+                    if (
+                        isinstance(resets_at, (int, float))
+                        and not isinstance(resets_at, bool)
+                        and resets_at > 0
+                    ):
+                        now_ts = time.time()
+                        if float(resets_at) > 1_000_000_000:
+                            retry_after_seconds = max(1.0, float(resets_at) - now_ts)
+                        else:
+                            retry_after_seconds = max(1.0, float(resets_at))
                     raise ProviderTransportError(
                         err_msg,
                         status_code=429
@@ -1264,7 +1324,24 @@ def stream_claude_code_bridge(
                         or latest_rate_limit_info.get("status") == "rejected"
                         else 500,
                         exhausted=False,
+                        retry_after_seconds=retry_after_seconds,
                     )
+                if not saw_stream_text and isinstance(packet.get("result"), str) and packet["result"].strip():
+                    normalized_res_text = packet["result"].replace(
+                        "<tool_call>", "<orin_tool_call>"
+                    ).replace("</tool_call>", "</orin_tool_call>")
+                    cleaned_res_text, parsed_res_calls = _parse_orin_tool_calls(
+                        normalized_res_text, allowed_names
+                    )
+                    if cleaned_res_text:
+                        saw_stream_text = True
+                        sequence += 1
+                        yield NormalizedStreamItem(
+                            StreamKind.TEXT,
+                            sequence,
+                            text=cleaned_res_text,
+                        )
+                    emitted_tool_calls.extend(parsed_res_calls)
                 break
 
         for pending_idx in list(pending_native_tools.keys()):
@@ -1324,17 +1401,26 @@ def stream_claude_code_bridge(
             cost=zero_cost,
         )
     finally:
-        if proc is not None and proc.poll() is None:
-            _kill_process_tree(proc)
+        if proc is not None:
+            if proc.poll() is None:
+                _kill_process_tree(proc)
+            else:
+                try:
+                    proc.wait(timeout=0.5)
+                except Exception:
+                    pass
         if prompt_file_path is not None:
             try:
                 prompt_file_path.unlink(missing_ok=True)
             except Exception:
                 pass
+        if semaphore_acquired:
+            _CLAUDE_CLI_SEMAPHORE.release()
 
 
 __all__ = [
     "ANTHROPIC_CLOUD_BASE_URL",
+    "CLAUDE_CODE_LOCAL_BASE_URL",
     "ClaudeCodeModelCatalogClient",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_CLAUDE_CLI_BRIDGE_URL",
@@ -1345,6 +1431,7 @@ __all__ = [
     "_extract_bridge_tool_calls",
     "_format_bridge_conversation_transcript",
     "_kill_process_tree",
+    "_normalize_claude_model_id",
     "_resolve_claude_binary",
     "build_isolated_claude_env",
     "check_claude_cli_status",

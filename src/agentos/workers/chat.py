@@ -934,7 +934,12 @@ class ChatWorker:
         """The turn model's real context window, or None if it is unknown."""
         row = self._catalog_row_for(turn) or {}
         context_window = row.get("context_window")
-        return int(context_window) if context_window else None
+        window = int(context_window) if context_window else None
+        if str(turn.get("provider") or "") == "anthropic":
+            base_url = str(row.get("base_url") or "") or self._provider_base_url("anthropic", user_id=str(turn.get("user_id") or ""))
+            if is_claude_cli_bridge_url(base_url) and "[1m]" not in str(turn.get("model_id") or "").lower():
+                window = min(window, 200_000) if window else 200_000
+        return window
 
     def _model_sees_images(self, turn: dict[str, object]) -> bool:
         row = self._catalog_row_for(turn) or {}
@@ -1068,6 +1073,19 @@ class ChatWorker:
         capped = max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, context_window - CONTEXT_WINDOW_RESERVE_TOKENS))
         return min(context_window, capped + CONTEXT_WINDOW_RESERVE_TOKENS)
 
+    def _provider_base_url(self, provider: str, *, user_id: str | None = None) -> str:
+        try:
+            with self.store._engine.connect() as c:
+                stmt = select(provider_configurations.c.base_url).where(provider_configurations.c.provider == provider)
+                if user_id:
+                    stmt = stmt.where(provider_configurations.c.user_id == user_id)
+                row = c.execute(stmt).mappings().first()
+                if row and row.get("base_url"):
+                    return str(row["base_url"])
+        except Exception:
+            pass
+        return ""
+
     def _base_url_for(self, provider: str, credential) -> str:
         configured = str(credential.get("base_url") or "")
         if provider == "anthropic":
@@ -1130,6 +1148,8 @@ class ChatWorker:
                 num_ctx=num_ctx,
             )
 
+        if provider == "anthropic" and is_claude_cli_bridge_url(base_url):
+            return build("")
         if first_key is None:
             if provider not in PROVIDERS_WITH_BASE_URL or (
                 provider == "anthropic" and not is_claude_cli_bridge_url(base_url)
@@ -1176,6 +1196,8 @@ class ChatWorker:
                 key_pool=keys, user_id=user_id, provider=provider,
                 cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
             )
+        if provider == "anthropic" and is_claude_cli_bridge_url(base_url):
+            return build("")
         if first_key is None:
             return build("")
         return MultiKeyProviderStreamTransport(
@@ -1286,6 +1308,12 @@ class ChatWorker:
             or raw_model_id
         )
         target_provider = str(turn["provider"])
+        normalized_child = resolved_model_id.split("/", 1)[-1].strip().lower()
+        keep_cli_subscription = (
+            target_provider == "anthropic"
+            and is_claude_cli_bridge_url(self._provider_base_url("anthropic", user_id=str(turn.get("user_id") or "")))
+            and (normalized_child.startswith("claude-") or normalized_child in {"haiku", "sonnet", "opus", "fable"})
+        )
         try:
             with self.store._engine.connect() as connection:
                 allowed_providers = self._allowed_child_providers(connection, turn)
@@ -1298,7 +1326,7 @@ class ChatWorker:
                     )
                 ).all()
                 matching_providers = [str(r.provider) for r in rows if r.provider]
-                if matching_providers and target_provider not in matching_providers:
+                if not keep_cli_subscription and matching_providers and target_provider not in matching_providers:
                     target_provider = matching_providers[0]
         except Exception:
             pass

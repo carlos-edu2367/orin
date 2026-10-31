@@ -492,12 +492,14 @@ class AgenticTurnRuntime:
 
     def _retry_wait(self, turn: dict[str, object], attempt: int, error: object | None) -> str:
         """"retry" after waiting, "cancelled", or "exhausted" when the server asks for longer than allowed."""
-        base = self.limits.retry_base_delay_seconds
-        if base <= 0:
-            return "retry"
         retry_after = retry_after_of(error) if isinstance(error, BaseException) else None
         if retry_after is not None and retry_after > self.limits.max_retry_after_seconds:
             return "exhausted"
+        base = self.limits.retry_base_delay_seconds
+        if base <= 0:
+            if retry_after is not None and retry_after > 0:
+                return "retry" if self._wait(turn, retry_after) else "cancelled"
+            return "retry"
         delay = backoff_delay(attempt, base=base, maximum=self.limits.retry_max_delay_seconds, retry_after=retry_after)
         return "retry" if self._wait(turn, delay) else "cancelled"
 
@@ -834,6 +836,11 @@ class AgenticTurnRuntime:
                 request["effort"] = self.effort
             if final_iteration:
                 request["tool_choice"] = "none"
+            if str(turn.get("provider", "")).lower() == "anthropic":
+                from agentos.provider_catalog.claude_code import is_claude_cli_bridge_url
+
+                if is_claude_cli_bridge_url(getattr(self.provider, "base_url", None)):
+                    request["cancel_check"] = lambda: self.cancelled(turn)
             provider_effect_id = self._effect_started(
                 turn,
                 kind="provider",
@@ -1545,9 +1552,15 @@ class AgenticTurnRuntime:
         counts as supporting it, which covers gateways that pass Anthropic's
         caching through under their own name.
         """
+        provider_name = str(turn.get("provider", "")).lower()
+        if provider_name == "anthropic":
+            from agentos.provider_catalog.claude_code import is_claude_cli_bridge_url
+
+            if is_claude_cli_bridge_url(getattr(self.provider, "base_url", None)):
+                return False
         if self.counters.cached_input_tokens:
             return True
-        return str(turn.get("provider", "")).lower() in PREFIX_CACHING_PROVIDERS
+        return provider_name in PREFIX_CACHING_PROVIDERS
 
     @staticmethod
     def _is_context_length_error(error: object) -> bool:

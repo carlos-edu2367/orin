@@ -257,6 +257,9 @@ def _classify_stream_error_item(item: NormalizedStreamItem) -> ProviderKeyReject
     return None
 
 
+stream_claude_code_bridge: Any = None
+
+
 def _anthropic_tool_choice(value: object) -> dict[str, str]:
     if isinstance(value, Mapping):
         choice_type = str(value.get("type") or "").lower()
@@ -875,22 +878,23 @@ class HTTPProviderStreamTransport:
         apply_effort(self.provider, payload, effort, explicit_cap=requested)
         return endpoint, headers, payload
 
-    def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
+    def stream(self, request: Mapping[str, object], *, cancel_check: Any = None) -> Iterator[NormalizedStreamItem]:
         if self.provider == "anthropic":
             from agentos.provider_catalog.claude_code import (
                 is_claude_cli_bridge_url,
-                stream_claude_code_bridge,
+                stream_claude_code_bridge as _default_stream_claude_code_bridge,
             )
 
             if is_claude_cli_bridge_url(self.base_url):
-                yield from stream_claude_code_bridge(
-                    request,
+                yield from (stream_claude_code_bridge or _default_stream_claude_code_bridge)(
+                    request=request,
                     base_url=self.base_url,
                     model=self.model,
                     messages=list(request.get("messages") or []),  # type: ignore[arg-type]
                     tools=list(request.get("tools") or []),  # type: ignore[arg-type]
                     tool_choice=request.get("tool_choice"),
                     effort=str(request.get("effort")) if request.get("effort") is not None else None,
+                    cancel_check=cancel_check or (request.get("cancel_check") if callable(request.get("cancel_check")) else None),
                 )
                 return
         if self.provider == "opencode":

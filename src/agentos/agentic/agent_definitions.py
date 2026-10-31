@@ -28,6 +28,12 @@ MAX_AGENT_PROMPT_CHARS = 40_000
 _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TOOL = re.compile(r"[A-Za-z_][\w.:-]*")
 MODEL_ALIASES = ("sonnet", "opus", "haiku", "fable")
+DEFAULT_MODEL_ALIASES: Mapping[str, str] = {
+    "haiku": "claude-haiku-4-5-20251001",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-7",
+    "fable": "claude-sonnet-4-6",
+}
 # Least to most permissive. dontAsk refuses whatever would prompt, so it ranks with plan mode below the default.
 # Names of Orin's builtin agents. A repository may not replace them (a read-only Explore stays read-only); a
 # person's own (user) or managed definition may.
@@ -264,6 +270,8 @@ def resolve_agent_model(requested: str | None, aliases: Mapping[str, str] | None
     mapping = {str(key).lower(): str(item) for key, item in dict(aliases or {}).items() if isinstance(item, str) and item.strip()}
     if value.lower() in mapping:
         return mapping[value.lower()].strip()
+    if value.lower() in MODEL_ALIASES and not mapping:
+        return DEFAULT_MODEL_ALIASES.get(value.lower())
     if value.lower() in MODEL_ALIASES:
         return None
     return value
