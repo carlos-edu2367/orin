@@ -173,7 +173,7 @@ Você tem visibilidade e controle total sobre o que o Orin faz sozinho, o que el
 | Habilidades (`Skills`) | Conexões (`MCP, Navegador & Arquivos`) |
 | :---: | :---: |
 | ![Habilidades do Orin](docs/images/readme/orin-skills.png) | ![Conexões do Orin](docs/images/readme/orin-connections.png) |
-| *Ative habilidades prontas, explore o catálogo ou crie novas capacidades reutilizáveis em linguagem simples.* | *Gerencie integrações (GitHub, Google Drive, Slack, Postgres, Navegador Playwright) com aprovação explícita antes de publicar qualquer coisa.* |
+| *Ative habilidades prontas, explore o catálogo ou crie novas capacidades reutilizáveis em linguagem simples.* | *Gerencie integrações (GitHub, Google Drive, Slack, Postgres e **Playwright MCP** via `@playwright/mcp`) com aprovação explícita antes de publicar qualquer coisa.* |
 
 ---
 
@@ -324,7 +324,7 @@ src/agentos/
 ├── live/                # Pipeline Full-Duplex: Silero VAD, Wake Word "Orin", Whisper GPU, Chatterbox, Kokoro e Barge-in
 ├── cli_code/            # CLI `orin code` / `orin-code`, modo headless e protocolo `claude-agent-sdk`
 ├── agentic/             # Sessão, runtime, 23+ tools (`tools/`), subagentes, equipes e geração de mídia
-├── permissions/         # 6 modos de permissão, parser AST (`tree-sitter-bash`/`powershell`) e Workspace Trust
+├── permissions/         # 6 modos de permissão (default, acceptEdits, plan, auto, dontAsk, bypassPermissions), parser AST (`tree-sitter-bash`/`powershell`) e Workspace Trust
 ├── hooks/               # Motor de 33 eventos de ciclo de vida (`command`, `http`, `prompt`, `agent`)
 ├── settings/            # Settings hierárquicos em 5 camadas (`.orin` e `.claude`) com proveniência
 ├── memory_files/        # Carregador `ORIN.md` / `CLAUDE.md`, rules condicionais por glob e imports `@`

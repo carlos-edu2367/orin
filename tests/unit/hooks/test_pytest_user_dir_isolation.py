@@ -157,6 +157,11 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
     ):
         env.pop(key, None)
 
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{env['PYTHONPATH']}"
+        if env.get("PYTHONPATH")
+        else str(repo_root)
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -164,6 +169,7 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
             "pytest",
             "-c",
             str(repo_root / "pyproject.toml"),
+            f"--rootdir={tmp_path}",
             str(standalone),
         ],
         cwd=str(repo_root),

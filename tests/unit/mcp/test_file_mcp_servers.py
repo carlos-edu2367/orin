@@ -77,7 +77,7 @@ def test_a_slow_server_does_not_hold_the_turn() -> None:
     assert time.monotonic() - started < 3 and bundles == [] and "did not answer" in failures[0][1]
     gate.set()
     deadline = time.monotonic() + 5
-    while not file_servers._cache and time.monotonic() < deadline:
+    while not any(tools for _, tools, _ in file_servers._cache.values()) and time.monotonic() < deadline:
         time.sleep(0.02)
 
     def not_called(config, secrets):

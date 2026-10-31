@@ -18,6 +18,7 @@ from typing import Any
 
 Handler = Callable[[dict[str, Any]], dict[str, Any]]
 
+_HostPath = type(Path())
 _WINDOWS_DLL_DIR_HANDLES: list[Any] = []
 
 
@@ -37,16 +38,16 @@ def expose_windows_dll_directories() -> list[str]:
     if os.name != "nt":
         return []
     candidates: list[Path] = [
-        Path(sys.prefix),
-        Path(sys.prefix) / "Scripts",
-        Path(sys.prefix) / "Library" / "bin",
-        Path(sys.base_prefix),
-        Path(sys.base_prefix) / "DLLs",
+        _HostPath(sys.prefix),
+        _HostPath(sys.prefix) / "Scripts",
+        _HostPath(sys.prefix) / "Library" / "bin",
+        _HostPath(sys.base_prefix),
+        _HostPath(sys.base_prefix) / "DLLs",
     ]
     for entry in list(sys.path):
         if not entry:
             continue
-        site = Path(entry)
+        site = _HostPath(entry)
         nvidia = site / "nvidia"
         if _safe_is_dir(nvidia):
             candidates.extend(nvidia.glob("*/bin"))

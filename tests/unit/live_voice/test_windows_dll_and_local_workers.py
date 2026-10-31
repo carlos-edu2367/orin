@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+_HostPath = type(Path())
+
 import pytest
 
 from agentos.live_voice import local_runtime as runtime_module
@@ -171,8 +173,8 @@ def test_local_runtime_install_includes_msvc_runtime_on_windows(
         return subprocess.CompletedProcess(argv, 0, "ok", "")
 
     runtime = LocalEngineRuntime(root=tmp_path, runner=runner, gpu_probe=lambda: True)
-    runtime.ensure_uv = lambda: Path("C:/uv/uv.exe")  # type: ignore[method-assign]
-    runtime.python_path = lambda _e: Path(sys.executable)  # type: ignore[method-assign]
+    runtime.ensure_uv = lambda: _HostPath("C:/uv/uv.exe")  # type: ignore[method-assign]
+    runtime.python_path = lambda _e: _HostPath(sys.executable)  # type: ignore[method-assign]
 
     class FakeWorker:
         def request(self, _payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:

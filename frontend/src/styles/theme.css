@@ -655,6 +655,8 @@
 [data-theme="midnight"],
 [data-theme="forest"],
 [data-theme="light"] {
+  --orin-bg: var(--orin-page-bg);
+  --orin-bg-surface: var(--orin-surface-1);
   --orin-ink: var(--orin-page-bg);
   --orin-surface: var(--orin-surface-1);
   --orin-surface-raised: var(--orin-surface-2);

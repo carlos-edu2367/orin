@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_HostPath = type(Path())
+
 import httpx
 
 from agentos.settings.paths import orin_user_dir
@@ -345,7 +347,7 @@ class LocalEngineRuntime:
             if candidate.is_file():
                 return candidate
         found = shutil.which("uv")
-        return Path(found) if found else None
+        return _HostPath(found) if found else None
 
     def _ensure_windows_msvc_runtime(self, engine_id: str, venv: Path) -> None:
         """Ensure ``msvc-runtime`` DLLs exist in ``venv`` and base Python on Windows.
@@ -401,7 +403,7 @@ class LocalEngineRuntime:
                 for raw_line in pyvenv_cfg.read_text(encoding="utf-8", errors="ignore").splitlines():
                     if raw_line.strip().lower().startswith("home"):
                         _, _, val = raw_line.partition("=")
-                        home_dir = Path(val.strip())
+                        home_dir = _HostPath(val.strip())
                         if home_dir.is_dir() and home_dir not in targets:
                             targets.append(home_dir)
             except OSError:
@@ -469,7 +471,7 @@ class LocalEngineRuntime:
     def ensure_uv(self) -> Path:
         found = shutil.which("uv")
         if found:
-            return Path(found)
+            return _HostPath(found)
         asset, binary = _uv_asset()
         target = self.root / "tools" / binary
         if target.is_file():

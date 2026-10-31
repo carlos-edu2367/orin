@@ -2146,7 +2146,9 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.put("/v1/providers/{provider}")
     async def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
-        if (provider_name not in PROVIDERS_WITH_OPTIONAL_KEY or (provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)))) and payload.api_key is None:
+        if provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
+            raise ValueError("API key is required for this provider")
+        if provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)) and payload.api_key is None:
             raise ValueError("API key is required for this provider")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))

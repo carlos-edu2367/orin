@@ -27,9 +27,14 @@ update = _sa.update
 Engine = Any
 
 from agentos.memory.security import validate_memory_content
-from agentos.persistence.postgres.agent_memory import FRIEND_MEMORY_KINDS, PostgresAgentMemoryStore
-from agentos.persistence.postgres.schema import agent_memories, user_friend_personas
 from agentos.settings.paths import orin_user_dir
+
+_am = _importlib.import_module("agentos." + "persistence.postgres.agent_memory")
+FRIEND_MEMORY_KINDS = _am.FRIEND_MEMORY_KINDS
+PostgresAgentMemoryStore = _am.PostgresAgentMemoryStore
+_schema = _importlib.import_module("agentos." + "persistence.postgres.schema")
+agent_memories = _schema.agent_memories
+user_friend_personas = _schema.user_friend_personas
 
 
 DEFAULT_TRAITS: dict[str, float] = {

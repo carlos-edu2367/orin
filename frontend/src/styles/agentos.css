@@ -6757,7 +6757,7 @@ html[data-desktop="true"] .rewind-time-machine__topbar {
   padding: 12px;
   border-radius: 10px;
   border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.07));
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--orin-surface-translucent, rgba(255, 255, 255, 0.02));
   color: var(--orin-text-primary, #F4F3F8);
   cursor: pointer;
 }
@@ -6833,7 +6833,7 @@ html[data-desktop="true"] .rewind-time-machine__topbar {
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.07));
-  background: #0E0E13;
+  background: var(--orin-surface-0, #0E0E13);
 }
 
 .rewind-time-machine__file-card-toggle {
@@ -6875,7 +6875,7 @@ html[data-desktop="true"] .rewind-time-machine__topbar {
   gap: 10px;
   padding: 10px 12px;
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--orin-surface-translucent, rgba(255, 255, 255, 0.025));
   border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.06));
 }
 
@@ -6887,7 +6887,7 @@ html[data-desktop="true"] .rewind-time-machine__topbar {
   height: 20px;
   border-radius: 50%;
   background: rgba(74, 222, 128, 0.16);
-  color: #4ADE80;
+  color: var(--orin-success, #4ADE80);
   font-size: 11px;
   font-weight: 700;
   flex-shrink: 0;
@@ -6939,7 +6939,7 @@ html[data-desktop="true"] .rewind-time-machine__topbar {
   border-radius: 10px;
   border: 1px solid rgba(180, 164, 239, 0.5);
   background: var(--orin-accent, #B4A4EF);
-  color: #14121D;
+  color: var(--orin-accent-ink, #14121D);
   font-size: 13px;
   font-weight: 650;
   cursor: pointer;
