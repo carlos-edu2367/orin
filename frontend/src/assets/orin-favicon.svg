@@ -1,14 +1,57 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title>Orin</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" fill="none" role="img" aria-labelledby="title">
+  <title id="title">Orin</title>
   <defs>
-    <linearGradient id="violet" x1="12" y1="8" x2="54" y2="58" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#e9c8ff" />
-      <stop offset=".48" stop-color="#a66cff" />
-      <stop offset="1" stop-color="#6328d8" />
+    <linearGradient id="orinBgGrad" x1="20" y1="10" x2="140" y2="150" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#231D38" />
+      <stop offset="55%" stop-color="#1A152B" />
+      <stop offset="100%" stop-color="#13101F" />
     </linearGradient>
+    <radialGradient id="orinGlowGrad" cx="50%" cy="38%" r="55%">
+      <stop offset="0%" stop-color="#B4A4EF" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#B4A4EF" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="orinMascotGrad" cx="36%" cy="30%" r="68%" fx="36%" fy="30%">
+      <stop offset="0%" stop-color="#E6DFFF" />
+      <stop offset="55%" stop-color="#B4A4EF" />
+      <stop offset="100%" stop-color="#8E79DF" />
+    </radialGradient>
   </defs>
-  <rect width="64" height="64" rx="16" fill="#0b0a14" />
-  <path d="M18 43a22 22 0 1 1 28 0" fill="none" stroke="url(#violet)" stroke-linecap="round" stroke-width="7" />
-  <path d="M32 24 27.5 52h9L32 24Z" fill="url(#violet)" />
-  <path d="m49 10 1.8 4.2L55 16l-4.2 1.8L49 22l-1.8-4.2L43 16l4.2-1.8L49 10Z" fill="#d8b4fe" />
+
+  <rect x="6" y="6" width="148" height="148" rx="38" fill="url(#orinBgGrad)" stroke="#B4A4EF" stroke-opacity="0.22" stroke-width="2" />
+  <rect x="6" y="6" width="148" height="148" rx="38" fill="url(#orinGlowGrad)" />
+
+  <g transform="translate(14, 14) scale(0.825)">
+    <ellipse cx="80" cy="146" rx="42" ry="6" fill="#0B0914" fill-opacity="0.45" />
+    <path
+      d="M 55 46 C 48 29, 58 21, 68 35 C 74 14, 95 18, 87 37 C 115 38, 137 66, 139 96 C 142 125, 121 138, 81 139 C 42 140, 20 128, 21 102 C 22 77, 35 55, 55 46 Z"
+      fill="url(#orinMascotGrad)"
+      data-mascot-part="body"
+    />
+    <ellipse
+      cx="61"
+      cy="88"
+      rx="5"
+      ry="11"
+      fill="#282333"
+      transform="rotate(-5 61 88)"
+      data-mascot-part="eye"
+    />
+    <ellipse
+      cx="101"
+      cy="86"
+      rx="5"
+      ry="11"
+      fill="#282333"
+      transform="rotate(-5 101 86)"
+      data-mascot-part="eye"
+    />
+    <path
+      d="M 76 105 Q 81 112 87 104"
+      fill="none"
+      stroke="#282333"
+      stroke-width="3.2"
+      stroke-linecap="round"
+      data-mascot-part="smile"
+    />
+  </g>
 </svg>

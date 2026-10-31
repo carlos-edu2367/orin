@@ -22,6 +22,10 @@ let announcedBackground = false
 const CLOSE_BEHAVIORS = ['ask', 'background', 'quit']
 let preferences = { closeBehavior: 'ask' }
 
+if (process.platform === 'win32' && typeof app.setAppUserModelId === 'function') {
+  app.setAppUserModelId('dev.orin.desktop')
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 }
