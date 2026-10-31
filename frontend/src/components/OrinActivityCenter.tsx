@@ -270,8 +270,7 @@ function extractPendingApprovalsFromConversation(
         !nonPendingRequestIds.has(perm.requestId) &&
         perm.state !== 'allowed' &&
         perm.state !== 'denied' &&
-        perm.state !== 'completed' &&
-        perm.state !== 'resolved'
+        event.state !== 'completed'
       ) {
         seenKeys.add(key)
         items.push({
@@ -285,13 +284,13 @@ function extractPendingApprovalsFromConversation(
           toolName: perm.toolName,
           command: perm.command ?? null,
           reason: perm.reason ?? null,
-          suggestedRule: perm.suggestedRule ?? null,
+          suggestedRule: perm.ruleSuggestion ?? null,
           summary: event.summary || `Permissão para ${perm.toolName}`,
         })
       }
     }
 
-    if (event.planApproval && event.planApproval.status !== 'approved') {
+    if (event.planApproval && event.state !== 'completed') {
       const key = `plan:${convId}:${event.eventId}`
       if (!seenKeys.has(key) && !locallyResolved.has(key)) {
         seenKeys.add(key)
@@ -650,7 +649,7 @@ export function OrinActivityCenter({
   function navigateToConversation(conversationId: string, projectId: string | null) {
     const lastSeen = readLastSeenMap()
     const entry = latestCatalogRef.current.find((c) => c.conversationId === conversationId)
-    lastSeen[conversationId] = entry ? sessionVersionStamp(entry) : `seen:${Date.now()}`
+    lastSeen[conversationId] = entry ? sessionVersionStamp(entry) : `seen:${conversationId}`
     activeBackgroundIdsRef.current.delete(conversationId)
     writeLastSeenMap(lastSeen)
     setUnreadUpdates((prev) => prev.filter((item) => item.conversationId !== conversationId))

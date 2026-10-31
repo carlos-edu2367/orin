@@ -1,7 +1,11 @@
-import { expect, test, type Page } from '@playwright/test'
+import { env as processEnv } from 'node:process'
+import { expect, test, type Page, type TestInfo } from '@playwright/test'
 import { mockSettings } from '../support/w7Settings'
 
-const ARTIFACT_DIR = 'C:/Users/carlos/.gemini/antigravity/brain/28432abb-96b3-4636-8712-5cb8322c17d0'
+function screenshotPath(testInfo: TestInfo, filename: string): string {
+  const customDir = processEnv.ORIN_VISUAL_ARTIFACT_DIR
+  return customDir ? `${customDir}/${filename}` : testInfo.outputPath(filename)
+}
 
 async function installCsrfMeta(page: Page): Promise<void> {
   await page.route('**/*', async (route) => {
@@ -25,7 +29,7 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     await mockSettings(page)
   })
 
-  test('Case 1: Orin Code starts with CodeWorkbenchPanel collapsed and expands/collapses via Bancada button', async ({ page }) => {
+  test('Case 1: Orin Code starts with CodeWorkbenchPanel collapsed and expands/collapses via Bancada button', async ({ page }, testInfo) => {
     await page.route('**/v1/projects/sidebar', async (route) => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ items: [] }) })
     })
@@ -141,7 +145,7 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     await expect(toggleBtn).toBeVisible()
     await expect(toggleBtn).toHaveAttribute('aria-expanded', 'false')
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case1-code-collapsed.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case1-code-collapsed.png') })
 
     // Click to expand workbench
     await toggleBtn.click()
@@ -150,7 +154,7 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     await expect(workbench).toBeVisible()
     await expect(toggleBtn).toHaveAttribute('aria-expanded', 'true')
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case1-code-expanded.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case1-code-expanded.png') })
 
     // Click close button inside workbench
     await page.getByTestId('code-workbench-close').click()
@@ -158,7 +162,7 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     await expect(main).not.toHaveClass(/chat--code-split/)
   })
 
-  test('Case 3: Anthropic provider drawer has zero horizontal overflow and all controls fit inside drawer bounds', async ({ page }) => {
+  test('Case 3: Anthropic provider drawer has zero horizontal overflow and all controls fit inside drawer bounds', async ({ page }, testInfo) => {
     await page.route('**/v1/providers/anthropic', async (route) => {
       await route.fulfill({
         status: 200,
@@ -234,10 +238,10 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
       expect(box!.x + box!.width).toBeLessThanOrEqual(drawerBox!.x + drawerBox!.width + 1)
     }
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case3-anthropic-drawer.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case3-anthropic-drawer.png') })
   })
 
-  test('Case 4 & Case 6: Topbar mascot conditional green dot + inline approvals popover, and Light Mode mascot contrast on Home', async ({ page }) => {
+  test('Case 4 & Case 6: Topbar mascot conditional green dot + inline approvals popover, and Light Mode mascot contrast on Home', async ({ page }, testInfo) => {
     let permissionResolved = false
 
     await page.route('**/v1/projects/sidebar', async (route) => {
@@ -363,7 +367,7 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     await expect(popover).toContainText('Clonar repositório Educly')
     await expect(popover).toContainText('git clone https://github.com/ContraEstatisticas/educlyapp-1.00.0.01 .')
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case4-activity-center-popover.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case4-activity-center-popover.png') })
 
     // Approve inline via "Permitir"
     await page.getByTestId('activity-center-allow-once-req-git-clone-1').click()
@@ -378,7 +382,7 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     // Close popover and verify idle state has NO green dot
     await page.keyboard.press('Escape')
     await expect(trigger.getByTestId('orin-mascot-status-dot')).toHaveCount(0)
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case4-mascot-idle-no-dot.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case4-mascot-idle-no-dot.png') })
 
     // Switch to Light Mode on Home to verify Case 6 (Mascot contrast in Light Mode)
     await page.evaluate(() => {
@@ -404,11 +408,11 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
     expect(mascotTokens.strong.toUpperCase()).toBe('#8870DF')
     expect(mascotTokens.feature.toUpperCase()).toBe('#282333')
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case6-home-light-mascot.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case6-home-light-mascot.png') })
 
     // Also verify Mobile viewport (390x844) in Light Mode
     await page.setViewportSize({ width: 390, height: 844 })
     await page.waitForTimeout(200)
-    await page.screenshot({ path: `${ARTIFACT_DIR}/verify-case6-home-light-mobile.png` })
+    await page.screenshot({ path: screenshotPath(testInfo, 'verify-case6-home-light-mobile.png') })
   })
 })

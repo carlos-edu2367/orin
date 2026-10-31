@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import process from 'node:process'
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -238,8 +239,8 @@ describe('ProvidersSection Phase 7 (ref-14.png: Modelos e provedores)', () => {
 
   it('constrains .slide-over-drawer, .settings-drawer, .ollama-flow, and .ollama-flow__modes against horizontal overflow in CSS and renders AnthropicSetup inside ProviderDetail cleanly', async () => {
     const user = userEvent.setup()
-    const agentosCss = readFileSync(resolve(__dirname, '../../src/styles/agentos.css'), 'utf8')
-    const indexCss = readFileSync(resolve(__dirname, '../../src/styles/index.css'), 'utf8')
+    const agentosCss = readFileSync(resolve(process.cwd(), 'src/styles/agentos.css'), 'utf8')
+    const indexCss = readFileSync(resolve(process.cwd(), 'src/styles/index.css'), 'utf8')
 
     // 1. Verify .slide-over-drawer width, overflow-x, box-sizing, and desktop top padding
     expect(agentosCss).toMatch(/\.slide-over-drawer\s*\{[^}]*width:\s*min\(560px,\s*100vw\)/s)
