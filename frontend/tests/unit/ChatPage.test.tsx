@@ -722,16 +722,16 @@ describe('ChatPage', () => {
     expect(screen.getByTestId('todo-bar')).toBeInTheDocument()
 
     const pill = screen.getByTestId('code-permission-mode-pill')
-    expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
+    expect(pill).toHaveTextContent('Aceitar edições')
 
     // Global Shift+Tab outside composer textarea must not change permission mode
     fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
-    expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
+    expect(pill).toHaveTextContent('Aceitar edições')
 
     const textarea = screen.getByRole('textbox', { name: 'Mensagem' })
     textarea.focus()
     fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })
-    expect(pill).toHaveTextContent('⏸ Modo Plano')
+    expect(pill).toHaveTextContent('Modo Plano')
     await waitFor(() => {
       expect(permissionUpdates).toContainEqual({ permission_mode: 'plan_mode' })
     })

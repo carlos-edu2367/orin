@@ -1242,24 +1242,24 @@ test('Orin allows activating Sem restrições (full_autonomy) via pill, Shift+Ta
   // In Chat mode, the permission mode pill is visible next to the workspace trigger
   const pill = page.getByTestId('code-permission-mode-pill')
   await expect(pill).toBeVisible()
-  await expect(pill).toHaveText('🔒 Pedir permissão')
+  await expect(pill).toHaveText('Pedir permissão')
 
-  // Clicking the pill cycles directly from ask_permissions -> full_autonomy (⚡ Sem restrições)
+  // Clicking the pill cycles directly from ask_permissions -> full_autonomy (Sem restrições)
   await pill.click()
-  await expect(pill).toHaveText('⚡ Sem restrições')
+  await expect(pill).toHaveText('Sem restrições')
   await expect.poll(() => patchedModes).toContain('full_autonomy')
 
   // Pressing Shift+Tab inside the composer textarea cycles full_autonomy -> accept_edits -> plan_mode -> ask_permissions -> full_autonomy
   const textarea = page.getByRole('textbox', { name: 'Mensagem' })
   await textarea.focus()
   await page.keyboard.press('Shift+Tab')
-  await expect(pill).toHaveText('⏵⏵ Aceitar edições')
+  await expect(pill).toHaveText('Aceitar edições')
   await page.keyboard.press('Shift+Tab')
-  await expect(pill).toHaveText('⏸ Modo Plano')
+  await expect(pill).toHaveText('Modo Plano')
   await page.keyboard.press('Shift+Tab')
-  await expect(pill).toHaveText('🔒 Pedir permissão')
+  await expect(pill).toHaveText('Pedir permissão')
   await page.keyboard.press('Shift+Tab')
-  await expect(pill).toHaveText('⚡ Sem restrições')
+  await expect(pill).toHaveText('Sem restrições')
 
   // Opening the SessionContextPopover shows the Modo de permissão grid with updated detail text
   await page.getByTestId('session-context-trigger').click()

@@ -13,6 +13,8 @@ import { CommandPicker, slashItems } from './CommandPicker'
 import { applyFileMention, detectFileMention, FileMentionPicker } from './FileMentionPicker'
 import { TodoBar } from './TodoBar'
 import {
+  GitBranchIcon,
+  PermissionModeIcon,
   SAFE_PERMISSION_CYCLE,
   SessionContextPopover,
   formatPermissionModePill,
@@ -119,7 +121,7 @@ export function Composer({
   placeholder = 'Descreva o que você precisa…', settings, hint, error, autoFocus, notice, focusSignal = 0, canSend = true,
   attachments = [], onAttach = () => {}, onRemoveAttachment = () => {}, commands = [], skills = [],
   builtinCommands = [], catalogCommands = [], onSendNow, onOpenModelPicker, onRunCommand, onQueue, onOpenRewind, history = [],
-  mode, onModeChange,
+  mode,
   codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles,
@@ -139,15 +141,6 @@ export function Composer({
   const effectiveCodeMode: CodeModeChoice =
     modeSwitch?.mode ?? conversationMode ?? (internalAutoMode === 'code' ? 'code' : codeMode)
   const showCodeModeToggle = Boolean(!modeSwitch && onCodeModeChange && !hideCodeModeToggle && conversationMode === undefined)
-
-  function handleToggleAutoModePill() {
-    if (disabled) return
-    const nextMode: 'chat' | 'code' = internalAutoMode === 'code' ? 'chat' : 'code'
-    setInternalAutoMode(nextMode)
-    modeSwitch?.onModeChange(nextMode)
-    onModeChange?.(nextMode)
-    onCodeModeChange?.(nextMode === 'code' ? 'code' : 'auto')
-  }
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
@@ -542,17 +535,6 @@ export function Composer({
                 <path d="M10.7 4.3 5.4 9.6a2 2 0 1 0 2.8 2.8l5.1-5.1a3.4 3.4 0 1 0-4.8-4.8L3.3 7.7" />
               </svg>
             </button>
-            <button
-              type="button"
-              data-testid="composer-auto-mode-pill"
-              aria-pressed={internalAutoMode === 'code'}
-              disabled={disabled}
-              className={`composer__auto-mode-pill${internalAutoMode === 'code' ? ' is-code' : ''}`}
-              onClick={handleToggleAutoModePill}
-            >
-              <span>{internalAutoMode === 'code' ? 'Orin Code' : 'Automático'}</span>
-              <span aria-hidden="true" className="composer__auto-mode-chevron">⌄</span>
-            </button>
             {modeSwitch ? (
               <div
                 className="composer__mode-switch"
@@ -625,7 +607,8 @@ export function Composer({
                   title={formatPermissionModeTitle(activePermissionMode)}
                   onClick={() => stepPermissionMode()}
                 >
-                  {formatPermissionModePill(activePermissionMode)}
+                  <PermissionModeIcon mode={activePermissionMode} />
+                  <span>{formatPermissionModePill(activePermissionMode)}</span>
                 </button>
                 <select
                   className="visually-hidden"
@@ -653,7 +636,7 @@ export function Composer({
                   }
                   onClick={() => changeWorktreeIsolated(!activeWorktreeIsolated)}
                 >
-                  <span aria-hidden="true">⑂</span>
+                  <GitBranchIcon />
                   <span>{activeWorktreeIsolated && worktreeBranch ? worktreeBranch : 'Worktree'}</span>
                 </button>
               </>

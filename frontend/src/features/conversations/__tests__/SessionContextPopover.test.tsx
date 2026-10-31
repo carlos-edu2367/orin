@@ -7,7 +7,7 @@ import { Composer } from '../Composer'
 import { SessionContextPopover } from '../SessionContextPopover'
 
 describe('SessionContextPopover', () => {
-  it('renders a compact summary chip and opens unified popover with workspace, permission, worktree, and project controls', async () => {
+  it('renders a compact summary chip and opens unified popover with workspace, permission, worktree, and project controls without emojis', async () => {
     const user = userEvent.setup()
     const onPermissionChange = vi.fn()
     const onWorktreeChange = vi.fn()
@@ -43,9 +43,15 @@ describe('SessionContextPopover', () => {
       </MemoryRouter>,
     )
 
-    // Summary pill shows folder name and permission mode
-    expect(screen.getByTestId('session-context-trigger')).toHaveTextContent('orin')
-    expect(screen.getByTestId('code-permission-mode-pill')).toHaveTextContent('🔒 Pedir permissão')
+    // Summary pill shows folder name and permission mode without AI-slop emojis
+    const trigger = screen.getByTestId('session-context-trigger')
+    const permissionPill = screen.getByTestId('code-permission-mode-pill')
+    expect(trigger).toHaveTextContent('orin')
+    expect(trigger.textContent).not.toMatch(/[📁🔒⚡⏸⏵⑂]/u)
+    expect(trigger.querySelector('svg')).not.toBeNull()
+    expect(permissionPill).toHaveTextContent('Pedir permissão')
+    expect(permissionPill.textContent).not.toMatch(/[📁🔒⚡⏸⏵⑂]/u)
+    expect(permissionPill.querySelector('svg')).not.toBeNull()
 
     // Change permission mode via hidden select
     fireEvent.change(screen.getByTestId('code-permission-mode-select'), {
@@ -54,8 +60,10 @@ describe('SessionContextPopover', () => {
     expect(onPermissionChange).toHaveBeenCalledWith('plan_mode')
 
     // Open popover
-    await user.click(screen.getByTestId('session-context-trigger'))
-    expect(screen.getByRole('dialog', { name: /Contexto da sessão/i })).toBeInTheDocument()
+    await user.click(trigger)
+    const dialog = screen.getByRole('dialog', { name: /Contexto da sessão/i })
+    expect(dialog).toBeInTheDocument()
+    expect(dialog.textContent).not.toMatch(/[📁🔒⚡⏸⏵⑂]/u)
 
     // Change permission mode inside popover
     await user.click(screen.getByRole('button', { name: /Aceitar edições/i }))
@@ -111,7 +119,8 @@ describe('SessionContextPopover', () => {
 
     // Permission mode pill is visible and clickable even in chat mode
     const pill = screen.getByTestId('code-permission-mode-pill')
-    expect(pill).toHaveTextContent('🔒 Pedir permissão')
+    expect(pill).toHaveTextContent('Pedir permissão')
+    expect(pill.textContent).not.toMatch(/[📁🔒⚡⏸⏵⑂]/u)
     await user.click(pill)
     expect(onPermissionChange).toHaveBeenCalledWith('full_autonomy')
 
@@ -230,5 +239,109 @@ describe('SessionContextPopover', () => {
       expect(screen.queryByRole('listbox', { name: /Modelos disponíveis/i })).not.toBeInTheDocument()
     })
     expect(parentKeyDown).not.toHaveBeenCalled()
+  })
+
+  it('constrains popover maxHeight to available space above trigger inside .home__stage so top is never clipped, and flips downward when top space is tight', async () => {
+    const user = userEvent.setup()
+
+    const { container } = render(
+      <MemoryRouter>
+        <section className="home__stage">
+          <SessionContextPopover
+            mode="code"
+            permissionMode="plan_mode"
+            onPermissionModeChange={vi.fn()}
+            workspaceState={{
+              kind: 'managed',
+              path: null,
+              folderName: null,
+              scope: 'chat',
+              projectName: null,
+            }}
+          />
+        </section>
+      </MemoryRouter>,
+    )
+
+    const stage = container.querySelector('.home__stage') as HTMLElement
+    const popoverRoot = container.querySelector('.session-context-popover') as HTMLElement
+
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      top: 48,
+      bottom: 760,
+      left: 0,
+      right: 1280,
+      width: 1280,
+      height: 712,
+      x: 0,
+      y: 48,
+      toJSON: () => ({}),
+    })
+
+    // Case 1: Trigger is at y=420 (only ~350px above inside .home__stage)
+    vi.spyOn(popoverRoot, 'getBoundingClientRect').mockReturnValue({
+      top: 420,
+      bottom: 448,
+      left: 300,
+      right: 520,
+      width: 220,
+      height: 28,
+      x: 300,
+      y: 420,
+      toJSON: () => ({}),
+    })
+
+    await user.click(screen.getByTestId('session-context-trigger'))
+    const dialog = screen.getByTestId('session-context-dialog')
+    expect(dialog.getAttribute('data-placement')).toBe('top')
+    const maxHeightPx = Number.parseInt(dialog.style.maxHeight, 10)
+    expect(maxHeightPx).toBeGreaterThanOrEqual(200)
+    // Must fit strictly inside (420 - 48 - margin) so the top of the popover is never clipped by .home__stage
+    expect(maxHeightPx).toBeLessThanOrEqual(360)
+
+    // Case 2: Trigger is very close to the top of .home__stage (y=180), more room below -> flips downward
+    vi.spyOn(popoverRoot, 'getBoundingClientRect').mockReturnValue({
+      top: 180,
+      bottom: 208,
+      left: 300,
+      right: 520,
+      width: 220,
+      height: 28,
+      x: 300,
+      y: 180,
+      toJSON: () => ({}),
+    })
+    fireEvent(window, new Event('resize'))
+
+    expect(dialog.getAttribute('data-placement')).toBe('bottom')
+
+    // Case 3: Mobile viewport (width=390) with trigger at x=40 -> clamps left offset so panel never overflows left or right edge
+    const prevInnerWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 390 })
+    vi.spyOn(stage, 'getBoundingClientRect').mockReturnValue({
+      top: 48,
+      bottom: 844,
+      left: 0,
+      right: 390,
+      width: 390,
+      height: 796,
+      x: 0,
+      y: 48,
+      toJSON: () => ({}),
+    })
+    vi.spyOn(popoverRoot, 'getBoundingClientRect').mockReturnValue({
+      top: 480,
+      bottom: 540,
+      left: 40,
+      right: 268,
+      width: 228,
+      height: 60,
+      x: 40,
+      y: 480,
+      toJSON: () => ({}),
+    })
+    fireEvent(window, new Event('resize'))
+    expect(dialog.style.left).toBe('-24px')
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: prevInnerWidth })
   })
 })

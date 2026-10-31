@@ -377,7 +377,7 @@ export function CodeSessionProposalCard({
                 <option value="accept_edits">Aceitar edições automaticamente</option>
                 <option value="plan_mode">Modo Plano (aprovar plano antes)</option>
                 <option value="ask_permissions">Pedir permissão a cada ação</option>
-                <option value="full_autonomy">⚡ Sem restrições (autonomia total)</option>
+                <option value="full_autonomy">Sem restrições (autonomia total)</option>
               </select>
             </label>
           </div>

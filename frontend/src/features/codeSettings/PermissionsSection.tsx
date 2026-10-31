@@ -376,7 +376,7 @@ export function PermissionsSection() {
                   {authorizedFolders.map((folder) => (
                     <li key={folder.path} className="security-ref15__folder-row">
                       <span className="security-ref15__folder-icon" aria-hidden="true">
-                        📁
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M2.2 4.4A1.4 1.4 0 0 1 3.6 3h2.7l1.4 1.5h4.7a1.4 1.4 0 0 1 1.4 1.4v5.7A1.4 1.4 0 0 1 12.4 13H3.6a1.4 1.4 0 0 1-1.4-1.4V4.4Z" /></svg>
                       </span>
                       <div className="security-ref15__folder-info">
                         <code className="security-ref15__folder-path">{folder.path}</code>

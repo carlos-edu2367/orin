@@ -116,30 +116,31 @@ describe('Composer command picker', () => {
     )
 
     const pill = screen.getByTestId('code-permission-mode-pill')
-    expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
+    expect(pill).toHaveTextContent('Aceitar edições')
+    expect(pill.textContent).not.toMatch(/[📁🔒⚡⏸⏵⑂]/u)
     expect(pill).toHaveAttribute('title', 'Modo de permissão: Aceitar edições (Shift+Tab para alternar)')
 
     const textarea = screen.getByLabelText('Mensagem')
     textarea.focus()
 
     await user.keyboard('{Shift>}{Tab}{/Shift}')
-    expect(pill).toHaveTextContent('⏸ Modo Plano')
+    expect(pill).toHaveTextContent('Modo Plano')
     expect(onPermissionChange).toHaveBeenLastCalledWith('plan_mode')
 
     await user.keyboard('{Shift>}{Tab}{/Shift}')
-    expect(pill).toHaveTextContent('🔒 Pedir permissão')
+    expect(pill).toHaveTextContent('Pedir permissão')
     expect(onPermissionChange).toHaveBeenLastCalledWith('ask_permissions')
 
     await user.keyboard('{Shift>}{Tab}{/Shift}')
-    expect(pill).toHaveTextContent('⚡ Sem restrições')
+    expect(pill).toHaveTextContent('Sem restrições')
     expect(onPermissionChange).toHaveBeenLastCalledWith('full_autonomy')
 
     await user.keyboard('{Shift>}{Tab}{/Shift}')
-    expect(pill).toHaveTextContent('⏵⏵ Aceitar edições')
+    expect(pill).toHaveTextContent('Aceitar edições')
     expect(onPermissionChange).toHaveBeenLastCalledWith('accept_edits')
 
     await user.click(pill)
-    expect(pill).toHaveTextContent('⏸ Modo Plano')
+    expect(pill).toHaveTextContent('Modo Plano')
     expect(onPermissionChange).toHaveBeenLastCalledWith('plan_mode')
   })
 
@@ -168,4 +169,3 @@ describe('Composer command picker', () => {
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 })
-

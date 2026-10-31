@@ -10,9 +10,8 @@ import type { ConversationActivityEvent } from '../activityTypes'
 
 describe('Phase 3 Chat Widgets (Composer, QueuePanel, MemoryLearnedCard, WorkspaceFileCard)', () => {
   describe('Composer (ref-01 & ref-03)', () => {
-    it('renders the "Automático ⌄" mode pill that toggles between Automático and Orin Code while preserving legacy testids', async () => {
+    it('renders a single modeSwitch without a redundant composer-auto-mode-pill duplicate', async () => {
       const user = userEvent.setup()
-      const onModeChange = vi.fn()
       const onSwitchModeChange = vi.fn()
 
       render(
@@ -21,10 +20,9 @@ describe('Phase 3 Chat Widgets (Composer, QueuePanel, MemoryLearnedCard, Workspa
             value=""
             onChange={vi.fn()}
             onSubmit={vi.fn()}
-            onModeChange={onModeChange}
-            modeSwitch={{ mode: 'chat', onModeChange: onSwitchModeChange }}
+            modeSwitch={{ mode: 'code', onModeChange: onSwitchModeChange }}
             sessionContext={{
-              mode: 'chat',
+              mode: 'code',
               permissionMode: 'ask_permissions',
               onPermissionModeChange: vi.fn(),
               workspaceState: {
@@ -39,25 +37,21 @@ describe('Phase 3 Chat Widgets (Composer, QueuePanel, MemoryLearnedCard, Workspa
         </MemoryRouter>,
       )
 
-      const autoPill = screen.getByTestId('composer-auto-mode-pill')
-      expect(autoPill).toHaveTextContent(/Automático\s*⌄/)
+      // No redundant "Orin Code ⌄" / "Automático ⌄" pill next to the mode switch
+      expect(screen.queryByTestId('composer-auto-mode-pill')).not.toBeInTheDocument()
 
-      // Legacy testids are preserved
+      // Single clean segmented mode switch is rendered
       expect(screen.getByTestId('home-mode-toggle')).toBeInTheDocument()
       expect(screen.getByTestId('home-mode-chat')).toBeInTheDocument()
       expect(screen.getByTestId('home-mode-code')).toBeInTheDocument()
       expect(screen.getByTestId('code-permission-mode-pill')).toBeInTheDocument()
       expect(screen.getByTestId('session-context-trigger')).toBeInTheDocument()
 
-      await user.click(autoPill)
-      expect(autoPill).toHaveTextContent(/Orin Code\s*⌄/)
-      expect(onModeChange).toHaveBeenCalledWith('code')
-      expect(onSwitchModeChange).toHaveBeenCalledWith('code')
+      await user.click(screen.getByTestId('home-mode-chat'))
+      expect(onSwitchModeChange).toHaveBeenCalledWith('chat')
 
-      await user.click(autoPill)
-      expect(autoPill).toHaveTextContent(/Automático\s*⌄/)
-      expect(onModeChange).toHaveBeenLastCalledWith('chat')
-      expect(onSwitchModeChange).toHaveBeenLastCalledWith('chat')
+      await user.click(screen.getByTestId('home-mode-code'))
+      expect(onSwitchModeChange).toHaveBeenLastCalledWith('code')
     })
 
     it('renders circular voice dictation button and paper-plane send icon while preserving live voice toggle', async () => {
