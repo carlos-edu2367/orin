@@ -22,6 +22,7 @@ from agentos.agentic.provider_stream import (
     StreamKind,
 )
 from agentos.agentic.retry import parse_retry_after
+from agentos.agentic.tools.public_names import internal_name, public_name
 from agentos.providers.models import (
     FinishReason,
     ProviderError,
@@ -414,6 +415,44 @@ def _build_bridge_system_prompt(
     return f"{base_system}{bridge_instructions}" if base_system else bridge_instructions.lstrip()
 
 
+def _extract_tool_result_text(raw_content: Any) -> str:
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        chunks: list[str] = []
+        for item in raw_content:
+            if isinstance(item, str):
+                chunks.append(item)
+            elif isinstance(item, Mapping):
+                if isinstance(item.get("text"), str):
+                    chunks.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    chunks.append(item["content"])
+        return "\n".join(chunks)
+    if raw_content is None:
+        return ""
+    return str(raw_content)
+
+
+def _format_tool_call_xml(name: str, raw_args: Any) -> str:
+    tc_args = raw_args
+    if isinstance(tc_args, str):
+        try:
+            tc_args = json.loads(tc_args)
+        except json.JSONDecodeError:
+            tc_args = {}
+    if not isinstance(tc_args, Mapping):
+        tc_args = {}
+    return (
+        "<orin_tool_call>"
+        + json.dumps(
+            {"name": name, "arguments": dict(tc_args)},
+            ensure_ascii=False,
+        )
+        + "</orin_tool_call>"
+    )
+
+
 def _format_bridge_conversation_transcript(
     messages: Iterable[Mapping[str, Any]],
 ) -> tuple[list[str], str]:
@@ -425,12 +464,21 @@ def _format_bridge_conversation_transcript(
         role = str(msg.get("role") or "")
         content = msg.get("content")
         text_content = ""
+        anthropic_tool_uses: list[Mapping[str, Any]] = []
+        anthropic_tool_results: list[Mapping[str, Any]] = []
         if isinstance(content, str):
             text_content = content
         elif isinstance(content, list):
             chunks: list[str] = []
             for block in content:
-                if isinstance(block, Mapping) and isinstance(block.get("text"), str):
+                if not isinstance(block, Mapping):
+                    continue
+                b_type = str(block.get("type") or "")
+                if b_type == "tool_use":
+                    anthropic_tool_uses.append(block)
+                elif b_type == "tool_result":
+                    anthropic_tool_results.append(block)
+                elif b_type in ("", "text") and isinstance(block.get("text"), str):
                     chunks.append(block["text"])
             text_content = "\n".join(chunks)
 
@@ -441,12 +489,30 @@ def _format_bridge_conversation_transcript(
                     turns_text.append(f"[System]\n{text_content.strip()}")
             continue
         if role == "user":
-            turns_text.append(f"[User]\n{text_content}")
+            if anthropic_tool_results:
+                for tr in anthropic_tool_results:
+                    call_id = str(
+                        tr.get("tool_use_id")
+                        or tr.get("tool_call_id")
+                        or tr.get("id")
+                        or ""
+                    )
+                    tr_text = _extract_tool_result_text(tr.get("content"))
+                    turns_text.append(f"[Tool Result id={call_id}]\n{tr_text}")
+                if text_content.strip():
+                    turns_text.append(f"[User]\n{text_content}")
+            else:
+                turns_text.append(f"[User]\n{text_content}")
             continue
         if role == "assistant":
             parts: list[str] = []
             if text_content.strip():
                 parts.append(text_content.strip())
+            for tu in anthropic_tool_uses:
+                tc_name = str(tu.get("name") or "").strip()
+                tc_args = tu.get("input") if "input" in tu else tu.get("arguments")
+                if tc_name:
+                    parts.append(_format_tool_call_xml(tc_name, tc_args))
             tool_calls = msg.get("tool_calls")
             if isinstance(tool_calls, list):
                 for tc in tool_calls:
@@ -457,32 +523,60 @@ def _format_bridge_conversation_transcript(
                         if isinstance(tc.get("function"), Mapping)
                         else {}
                     )
-                    tc_name = str(fn.get("name") or "")
+                    tc_name = str(fn.get("name") or "").strip()
                     tc_args = fn.get("arguments")
-                    if isinstance(tc_args, str):
-                        try:
-                            tc_args = json.loads(tc_args)
-                        except json.JSONDecodeError:
-                            tc_args = {}
                     if tc_name:
-                        parts.append(
-                            "<orin_tool_call>"
-                            + json.dumps(
-                                {"name": tc_name, "arguments": tc_args or {}},
-                                ensure_ascii=False,
-                            )
-                            + "</orin_tool_call>"
-                        )
+                        parts.append(_format_tool_call_xml(tc_name, tc_args))
             if parts:
                 turns_text.append("[Assistant]\n" + "\n".join(parts))
             continue
         if role == "tool":
-            call_id = str(msg.get("tool_call_id") or "")
-            turns_text.append(f"[Tool Result id={call_id}]\n{text_content}")
+            if anthropic_tool_results:
+                for tr in anthropic_tool_results:
+                    call_id = str(
+                        tr.get("tool_use_id")
+                        or tr.get("tool_call_id")
+                        or tr.get("id")
+                        or msg.get("tool_call_id")
+                        or ""
+                    )
+                    tr_text = _extract_tool_result_text(tr.get("content"))
+                    turns_text.append(f"[Tool Result id={call_id}]\n{tr_text}")
+            else:
+                call_id = str(msg.get("tool_call_id") or "")
+                turns_text.append(f"[Tool Result id={call_id}]\n{text_content}")
 
     if len(turns_text) == 1 and turns_text[0].startswith("[User]\n"):
         return system_parts, turns_text[0][len("[User]\n") :]
     return system_parts, "\n\n".join(turns_text) or "Continue."
+
+
+def _resolve_allowed_tool_name(raw_name: str, allowed_names: set[str]) -> str:
+    candidate = raw_name.strip()
+    if not candidate or not allowed_names:
+        return ""
+    if candidate in allowed_names:
+        return candidate
+    if candidate.startswith("mcp__"):
+        parts = candidate.split("__", 2)
+        if len(parts) == 3 and parts[2]:
+            candidate = parts[2]
+            if candidate in allowed_names:
+                return candidate
+    lower_map = {item.lower(): item for item in allowed_names}
+    if candidate.lower() in lower_map:
+        return lower_map[candidate.lower()]
+    internal = internal_name(candidate)
+    if internal in allowed_names:
+        return internal
+    if internal.lower() in lower_map:
+        return lower_map[internal.lower()]
+    public = public_name(internal)
+    if public in allowed_names:
+        return public
+    if public.lower() in lower_map:
+        return lower_map[public.lower()]
+    return ""
 
 
 def _parse_orin_tool_calls(
@@ -507,10 +601,13 @@ def _parse_orin_tool_calls(
             continue
         if not isinstance(parsed, Mapping):
             continue
-        name = str(parsed.get("name") or "").strip()
-        if not name or name not in allowed_names:
+        raw_name = str(parsed.get("name") or "").strip()
+        name = _resolve_allowed_tool_name(raw_name, allowed_names)
+        if not name:
             continue
         arguments = parsed.get("arguments")
+        if arguments is None or (arguments == {} and "input" in parsed):
+            arguments = parsed.get("input")
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)

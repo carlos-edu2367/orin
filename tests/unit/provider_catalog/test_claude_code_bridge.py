@@ -1456,3 +1456,258 @@ def test_fetch_published_claude_cli_models_parses_official_remote_catalog(
     discovered = _fetch_published_claude_cli_models()
     assert ("claude-opus-7-0", "Claude Opus 7.0 (Assinatura CLI)", 2_000_000) in discovered
     assert ("claude-sonnet-7-0", "Claude Sonnet 7.0 (Assinatura CLI)", 1_000_000) in discovered
+
+
+
+def test_format_bridge_conversation_transcript_preserves_anthropic_tool_use_and_tool_result_blocks() -> None:
+    from agentos.provider_catalog.opencode import _format_bridge_conversation_transcript
+
+    messages = [
+        {"role": "system", "content": "System instruction"},
+        {"role": "user", "content": "Run pytest and inspect README.md"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Thinking about running pytest..."},
+                {"type": "text", "text": "Vou rodar os testes e ler o README."},
+                {
+                    "type": "tool_use",
+                    "id": "call_bash_1",
+                    "name": "Bash",
+                    "input": {"command": "pytest -q"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_read_2",
+                    "name": "Read",
+                    "input": {"file_path": "README.md"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_bash_1",
+                    "content": "12 passed in 0.42s",
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_read_2",
+                    "content": [
+                        {"type": "text", "text": "# Orin Project"},
+                        {"type": "text", "text": "All systems operational."},
+                    ],
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_extra_3",
+                    "content": "extra output",
+                },
+                {"type": "text", "text": "Agora gere o relatório final."},
+            ],
+        },
+    ]
+
+    system_parts, prompt_text = _format_bridge_conversation_transcript(messages)
+
+    assert system_parts == ["System instruction"]
+    assert "[User]\nRun pytest and inspect README.md" in prompt_text
+    assert "Vou rodar os testes e ler o README." in prompt_text
+    assert (
+        '<orin_tool_call>{"name": "Bash", "arguments": {"command": "pytest -q"}}</orin_tool_call>'
+        in prompt_text
+    )
+    assert (
+        '<orin_tool_call>{"name": "Read", "arguments": {"file_path": "README.md"}}</orin_tool_call>'
+        in prompt_text
+    )
+    assert "[Tool Result id=call_bash_1]\n12 passed in 0.42s" in prompt_text
+    assert (
+        "[Tool Result id=call_read_2]\n# Orin Project\nAll systems operational."
+        in prompt_text
+    )
+    assert "[Tool Result id=call_extra_3]\nextra output" in prompt_text
+    assert "[User]\nAgora gere o relatório final." in prompt_text
+    # Ensure no empty "[User]\n\n" phantom turn was emitted for pure tool_result user messages
+    assert "[User]\n\n" not in prompt_text
+    assert not prompt_text.endswith("[User]\n")
+
+
+def test_stream_claude_code_bridge_multi_iteration_sends_anthropic_tool_history_via_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "agentos.provider_catalog.claude_code._resolve_claude_binary",
+        lambda env=None: r"C:\fake\claude.exe",
+    )
+
+    captured_stdin: list[str] = []
+
+    class _CapturingPopen(_FakePopen):
+        def __init__(self, cmd: list[str], **kwargs: Any) -> None:
+            super().__init__(cmd, **kwargs)
+
+            class _KeepBufferStringIO(io.StringIO):
+                def close(self_io) -> None:
+                    captured_stdin.append(self_io.getvalue())
+
+            self.stdin = _KeepBufferStringIO()
+
+    ndjson_stream = [
+        json.dumps({"type": "system", "subtype": "init", "apiKeySource": "none"}),
+        json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "Os testes passaram com sucesso.",
+                    },
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "usage": {"input_tokens": 30, "output_tokens": 10},
+            }
+        ),
+    ]
+
+    messages = [
+        {"role": "user", "content": "Execute pytest"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Executando pytest agora."},
+                {
+                    "type": "tool_use",
+                    "id": "call_iter1",
+                    "name": "Bash",
+                    "input": {"command": "pytest"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_iter1",
+                    "content": "5 passed in 0.12s",
+                }
+            ],
+        },
+    ]
+
+    items = list(
+        stream_claude_code_bridge(
+            base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+            model="claude-sonnet-4-6",
+            messages=messages,
+            popen_factory=lambda cmd, **kw: _CapturingPopen(cmd, ndjson_lines=ndjson_stream),
+        )
+    )
+
+    assert len(captured_stdin) == 1
+    envelope = json.loads(captured_stdin[0].strip())
+    sent_prompt = envelope["message"]["content"]
+    assert "[User]\nExecute pytest" in sent_prompt
+    assert (
+        '<orin_tool_call>{"name": "Bash", "arguments": {"command": "pytest"}}</orin_tool_call>'
+        in sent_prompt
+    )
+    assert "[Tool Result id=call_iter1]\n5 passed in 0.12s" in sent_prompt
+    assert not sent_prompt.endswith("[User]\n")
+    assert "[User]\n\n" not in sent_prompt
+    assert [i.text for i in items if i.kind is StreamKind.TEXT] == [
+        "Os testes passaram com sucesso."
+    ]
+
+
+def test_parse_orin_tool_calls_supports_input_key_and_case_or_alias_resolution() -> None:
+    from agentos.provider_catalog.opencode import _parse_orin_tool_calls
+
+    raw_text = (
+        "Vou rodar os comandos.\n"
+        '<orin_tool_call>{"id": "c1", "name": "bash", "input": {"command": "ls -la"}}</orin_tool_call>\n'
+        '<orin_tool_call>{"id": "c2", "name": "run_command", "arguments": {"command": "pwd"}}</orin_tool_call>\n'
+        '<orin_tool_call>{"id": "c3", "name": "Read", "input": {"path": "README.md"}}</orin_tool_call>\n'
+        '<orin_tool_call>{"id": "c4", "name": "unregistered_tool", "input": {"x": 1}}</orin_tool_call>'
+    )
+
+    # Case 1: allowed_names contains public names ("Bash") and internal names ("read_file")
+    cleaned, calls = _parse_orin_tool_calls(raw_text, {"Bash", "read_file"})
+    assert cleaned == "Vou rodar os comandos."
+    assert len(calls) == 3
+    assert calls[0] == ("c1", "Bash", json.dumps({"command": "ls -la"}, ensure_ascii=False))
+    assert calls[1] == ("c2", "Bash", json.dumps({"command": "pwd"}, ensure_ascii=False))
+    assert calls[2] == ("c3", "read_file", json.dumps({"path": "README.md"}, ensure_ascii=False))
+
+
+def test_bridge_transcript_and_tool_parser_adversarial_edge_cases() -> None:
+    from agentos.provider_catalog.opencode import (
+        _format_bridge_conversation_transcript,
+        _parse_orin_tool_calls,
+    )
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_str_input",
+                    "name": "Edit",
+                    "input": '{"file_path": "main.py", "old_string": "a", "new_string": "b"}',
+                },
+                {
+                    "type": "tool_use",
+                    "id": "call_bad_input",
+                    "name": "Bash",
+                    "input": "not-valid-json",
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_str_input", "content": ""},
+                {"type": "tool_result", "tool_use_id": "call_bad_input", "content": None},
+            ],
+        },
+    ]
+
+    _, prompt = _format_bridge_conversation_transcript(messages)
+    assert (
+        '<orin_tool_call>{"name": "Edit", "arguments": {"file_path": "main.py", "old_string": "a", "new_string": "b"}}</orin_tool_call>'
+        in prompt
+    )
+    assert '<orin_tool_call>{"name": "Bash", "arguments": {}}</orin_tool_call>' in prompt
+    assert "[Tool Result id=call_str_input]\n" in prompt
+    assert "[Tool Result id=call_bad_input]\n" in prompt
+    assert "[User]" not in prompt
+
+    fenced_and_aliased = (
+        '<orin_tool_call>```json\n{"id": "f1", "name": "mcp__orin__Bash", "input": "{\\"command\\": \\"echo ok\\"}"}\n```</orin_tool_call>'
+        '<orin_tool_call>{"id": "f2", "name": "READ", "arguments": {"path": "x.py"}}</orin_tool_call>'
+        "<orin_tool_call>[1, 2, 3]</orin_tool_call>"
+        '<orin_tool_call>{"id": "f3", "name": "Write", "input": {"path": "evil.py"}}</orin_tool_call>'
+    )
+    cleaned, calls = _parse_orin_tool_calls(fenced_and_aliased, {"run_command", "Read"})
+    assert cleaned == ""
+    assert calls == [
+        ("f1", "run_command", json.dumps({"command": "echo ok"}, ensure_ascii=False)),
+        ("f2", "Read", json.dumps({"path": "x.py"}, ensure_ascii=False)),
+    ]

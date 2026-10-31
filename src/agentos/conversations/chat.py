@@ -2223,20 +2223,88 @@ class PostgresChatStore:
         history: list[dict[str, object]] = []
         for row in rows:
             message_id = str(row["message_id"])
-            for message in replay.get(message_id, ()):
-                history.append(message)
+            replayed_messages = replay.get(message_id, ())
+            turn_step_texts: list[str] | None = None
+            for message in replayed_messages:
+                msg_copy = dict(message)
+                raw_texts = msg_copy.pop("_turn_step_texts", None)
+                if isinstance(raw_texts, list) and turn_step_texts is None:
+                    turn_step_texts = [str(t) for t in raw_texts if str(t)]
+                history.append(msg_copy)
             for message in queued.get(message_id, ()):
-                history.append(message)
+                history.append(dict(message))
             content = expansions.get(message_id, str(row["content"]))
+            if replayed_messages and str(row["role"]) == "assistant" and message_id not in expansions:
+                content = self._strip_replayed_assistant_text(
+                    content,
+                    replayed_messages,
+                    step_texts=turn_step_texts,
+                )
             records = grouped.get(message_id, [])
             if records:
                 content = f"{content}{_attachment_marker(records)}"
+            if (
+                replayed_messages
+                and str(row["role"]) == "assistant"
+                and message_id not in expansions
+                and not records
+                and not content.strip()
+            ):
+                if history:
+                    history[-1]["_sequence"] = int(row["sequence"])
+                continue
             # ``_sequence`` lets the runtime know which messages a compaction folded;
             # keys starting with ``_`` never reach the provider.
             history.append({"role": str(row["role"]), "content": content, "_sequence": int(row["sequence"])})
         if compacted:
             history.insert(0, compaction_message(str(boundary["summary"])))
         return history
+
+    @staticmethod
+    def _strip_replayed_assistant_text(
+        content: str,
+        replayed_messages: Sequence[Mapping[str, object]],
+        *,
+        step_texts: Sequence[str] | None = None,
+    ) -> str:
+        remaining = content
+        stripped_any = False
+        if step_texts is not None:
+            texts_to_strip = list(step_texts)
+        else:
+            texts_to_strip = []
+            for message in replayed_messages:
+                if str(message.get("role") or "") != "assistant":
+                    continue
+                msg_content = message.get("content")
+                if isinstance(msg_content, str):
+                    step_text = msg_content
+                elif isinstance(msg_content, list):
+                    step_text = "".join(
+                        str(block.get("text") or "")
+                        for block in msg_content
+                        if isinstance(block, Mapping) and block.get("type") == "text"
+                    )
+                else:
+                    step_text = ""
+                if step_text:
+                    texts_to_strip.append(step_text)
+
+        for step_text in texts_to_strip:
+            if not step_text:
+                continue
+            if remaining.startswith(step_text):
+                remaining = remaining[len(step_text) :]
+                stripped_any = True
+            elif remaining.lstrip().startswith(step_text):
+                remaining = remaining.lstrip()[len(step_text) :]
+                stripped_any = True
+            elif step_text.strip() and remaining.lstrip().startswith(step_text.strip()):
+                remaining = remaining.lstrip()[len(step_text.strip()) :]
+                stripped_any = True
+        if stripped_any:
+            remaining = remaining.lstrip("\r\n")
+        return remaining
 
     def _queued_inputs_for(
         self,
@@ -2321,6 +2389,15 @@ class PostgresChatStore:
             remaining -= sum(turn_transcript.estimated_tokens(step.get("payload")) for step in kept)
             messages = turn_transcript.project(kept, provider)
             if messages:
+                step_texts = [
+                    str(step["payload"].get("text") or "")
+                    for step in steps
+                    if step.get("kind") == turn_transcript.STEP_ASSISTANT_TOOL_CALL
+                    and isinstance(step.get("payload"), Mapping)
+                    and str(step["payload"].get("text") or "")
+                ]
+                if step_texts:
+                    messages[0] = {**messages[0], "_turn_step_texts": step_texts}
                 replay[message_id] = messages
         return replay
 
