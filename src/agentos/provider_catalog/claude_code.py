@@ -29,8 +29,11 @@ from agentos.provider_catalog.opencode import (
     _ORIN_TOOL_CALL_RE,
     _build_bridge_system_prompt,
     _extract_tool_declarations,
+    _find_orin_tool_call_close,
     _format_bridge_conversation_transcript,
+    _normalize_bridge_tool_arguments,
     _parse_orin_tool_calls,
+    _resolve_tool_name,
 )
 from agentos.providers.models import (
     FinishReason,
@@ -670,28 +673,20 @@ def _resolve_native_tool_call(
         mapped_name = _INTERNAL_BY_PUBLIC.get(
             candidate, _INTERNAL_BY_LOWER_PUBLIC.get(candidate.lower(), candidate)
         )
-    elif candidate in allowed_names:
-        mapped_name = candidate
     else:
-        internal = _INTERNAL_BY_PUBLIC.get(
-            candidate, _INTERNAL_BY_LOWER_PUBLIC.get(candidate.lower(), "")
-        )
-        if internal and internal in allowed_names:
-            mapped_name = internal
-        else:
-            public = PUBLIC_NAMES.get(candidate, "")
-            if public and public in allowed_names:
-                mapped_name = public
+        mapped_name = _resolve_tool_name(candidate, allowed_names) or ""
 
     if not mapped_name:
         return None
 
     args_dict = dict(raw_input) if isinstance(raw_input, Mapping) else {}
+    args_dict = _normalize_bridge_tool_arguments(mapped_name, args_dict)
     canonical_internal = _INTERNAL_BY_PUBLIC.get(mapped_name, mapped_name)
     renames = _PUBLIC_ARG_RENAMES.get(canonical_internal, {})
-    for src_key, dst_key in renames.items():
-        if src_key in args_dict and dst_key not in args_dict:
-            args_dict[dst_key] = args_dict.pop(src_key)
+    if mapped_name == canonical_internal:
+        for src_key, dst_key in renames.items():
+            if src_key in args_dict and dst_key not in args_dict:
+                args_dict[dst_key] = args_dict.pop(src_key)
 
     return mapped_name, json.dumps(args_dict, ensure_ascii=False)
 
@@ -745,6 +740,8 @@ def stream_claude_code_bridge(
     effort: str | None = None,
     timeout_seconds: float = 180.0,
     timeout: float | None = None,
+    idle_timeout_seconds: float | None = None,
+    max_wall_clock_seconds: float | None = None,
     cancel_check: Callable[[], bool] | None = None,
     binary: str | None = None,
     popen_factory: Callable[..., Any] | None = None,
@@ -758,9 +755,17 @@ def stream_claude_code_bridge(
             tool_choice = request.get("tool_choice")
         if effort is None and request.get("effort") is not None:
             effort = str(request.get("effort"))
+        if idle_timeout_seconds is None and request.get("idle_timeout_seconds") is not None:
+            idle_timeout_seconds = float(request["idle_timeout_seconds"])  # type: ignore[arg-type]
+        if max_wall_clock_seconds is None and request.get("max_wall_clock_seconds") is not None:
+            max_wall_clock_seconds = float(request["max_wall_clock_seconds"])  # type: ignore[arg-type]
 
     normalize_anthropic_base_url(base_url or DEFAULT_CLAUDE_CLI_BRIDGE_URL)
-    effective_timeout = float(timeout if timeout is not None else timeout_seconds)
+    effective_timeout = float(
+        idle_timeout_seconds
+        if idle_timeout_seconds is not None
+        else (timeout if timeout is not None else timeout_seconds)
+    )
 
     resolved_binary = binary or _resolve_claude_binary()
     if not resolved_binary:
@@ -828,26 +833,6 @@ def stream_claude_code_bridge(
                 creationflags=creationflags,
             )
 
-        # Immediately send the user turn via stream-json and close stdin so claude.exe
-        # never waits 3,000ms on an open stdin pipe.
-        user_envelope = {
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": prompt_text or "Continue.",
-            },
-        }
-        if getattr(proc, "stdin", None) is not None:
-            try:
-                proc.stdin.write(json.dumps(user_envelope, ensure_ascii=False) + "\n")
-                proc.stdin.flush()
-            except Exception:
-                pass
-            try:
-                proc.stdin.close()
-            except Exception:
-                pass
-
         line_queue: queue.Queue[str | None] = queue.Queue()
         stderr_chunks: list[str] = []
 
@@ -872,15 +857,39 @@ def stream_claude_code_bridge(
             except Exception:
                 pass
 
+        # Start stdout/stderr reader threads BEFORE writing a potentially large prompt
+        # to stdin so OS pipe buffers cannot deadlock on Windows.
         stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
         stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
         stdout_thread.start()
         stderr_thread.start()
 
+        # Immediately send the user turn via stream-json and close stdin so claude.exe
+        # never waits 3,000ms on an open stdin pipe.
+        user_envelope = {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": prompt_text or "Continue.",
+            },
+        }
+        if getattr(proc, "stdin", None) is not None:
+            try:
+                proc.stdin.write(json.dumps(user_envelope, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
+            except Exception:
+                pass
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
         sequence = 0
         saw_stream_thinking = False
         saw_stream_text = False
         saw_result_packet = False
+        saw_unclosed_tool_call = False
+        stop_reason: str | None = None
         active_close_tag: str | None = None
         text_tag_buffer = ""
         emitted_tool_calls: list[tuple[str, str, str]] = []
@@ -888,7 +897,13 @@ def stream_claude_code_bridge(
         pending_native_tools: dict[int, dict[str, Any]] = {}
         latest_usage_raw: dict[str, Any] = {}
         latest_rate_limit_info: dict[str, Any] = {}
-        deadline = time.monotonic() + effective_timeout
+        started_at = time.monotonic()
+        hard_deadline = started_at + (
+            float(max_wall_clock_seconds)
+            if max_wall_clock_seconds is not None
+            else max(effective_timeout * 10.0, 1800.0)
+        )
+        deadline = min(hard_deadline, started_at + effective_timeout)
         tool_tag_pairs = (
             ("<orin_tool_call>", "</orin_tool_call>"),
             ("<tool_call>", "</tool_call>"),
@@ -932,8 +947,10 @@ def stream_claude_code_bridge(
                         )
                     break
                 else:
-                    if active_close_tag in buf:
-                        inner_xml, after = buf.split(active_close_tag, 1)
+                    close_pos = _find_orin_tool_call_close(buf, 0, active_close_tag)
+                    if close_pos != -1:
+                        inner_xml = buf[:close_pos]
+                        after = buf[close_pos + len(active_close_tag) :]
                         full_tag = f"<orin_tool_call>{inner_xml}</orin_tool_call>"
                         _, parsed_calls = _parse_orin_tool_calls(full_tag, allowed_names)
                         emitted_tool_calls.extend(parsed_calls)
@@ -944,8 +961,11 @@ def stream_claude_code_bridge(
                     break
 
         def _flush_streaming_text_buffer() -> Iterator[NormalizedStreamItem]:
-            nonlocal sequence, active_close_tag, text_tag_buffer
+            nonlocal sequence, active_close_tag, text_tag_buffer, saw_unclosed_tool_call
             if not text_tag_buffer:
+                if active_close_tag is not None:
+                    active_close_tag = None
+                    saw_unclosed_tool_call = True
                 return
             leftover = text_tag_buffer
             text_tag_buffer = ""
@@ -954,7 +974,10 @@ def stream_claude_code_bridge(
                 _, parsed_calls = _parse_orin_tool_calls(
                     f"<orin_tool_call>{leftover}</orin_tool_call>", allowed_names
                 )
-                emitted_tool_calls.extend(parsed_calls)
+                if parsed_calls:
+                    emitted_tool_calls.extend(parsed_calls)
+                else:
+                    saw_unclosed_tool_call = True
             elif leftover.strip():
                 sequence += 1
                 yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=leftover)
@@ -1005,6 +1028,7 @@ def stream_claude_code_bridge(
             if raw_line is None:
                 break
 
+            deadline = min(hard_deadline, time.monotonic() + effective_timeout)
             line = raw_line.strip()
             if not line:
                 continue
@@ -1066,6 +1090,11 @@ def stream_claude_code_bridge(
                 elif ev_type == "message_delta":
                     if isinstance(event.get("usage"), Mapping):
                         latest_usage_raw.update(event["usage"])
+                    delta_obj = event.get("delta")
+                    if isinstance(delta_obj, Mapping) and delta_obj.get("stop_reason"):
+                        stop_reason = str(delta_obj["stop_reason"])
+                    elif event.get("stop_reason"):
+                        stop_reason = str(event["stop_reason"])
                 elif ev_type == "content_block_start":
                     idx = int(event.get("index", 0))
                     block = event.get("content_block")
@@ -1138,6 +1167,8 @@ def stream_claude_code_bridge(
                     continue
                 if isinstance(msg.get("usage"), Mapping):
                     latest_usage_raw.update(msg["usage"])
+                if msg.get("stop_reason"):
+                    stop_reason = str(msg["stop_reason"])
                 content_list = msg.get("content")
                 if not isinstance(content_list, list):
                     continue
@@ -1163,6 +1194,17 @@ def stream_claude_code_bridge(
                             cleaned_text, parsed_calls = _parse_orin_tool_calls(
                                 normalized_raw_text, allowed_names
                             )
+                            if (
+                                "<orin_tool_call>" in normalized_raw_text
+                                and not parsed_calls
+                                and _find_orin_tool_call_close(
+                                    normalized_raw_text,
+                                    normalized_raw_text.find("<orin_tool_call>"),
+                                    "</orin_tool_call>",
+                                )
+                                == -1
+                            ):
+                                saw_unclosed_tool_call = True
                             if cleaned_text:
                                 sequence += 1
                                 yield NormalizedStreamItem(
@@ -1194,6 +1236,8 @@ def stream_claude_code_bridge(
                 saw_result_packet = True
                 if isinstance(packet.get("usage"), Mapping):
                     latest_usage_raw.update(packet["usage"])
+                if packet.get("stop_reason"):
+                    stop_reason = str(packet["stop_reason"])
                 is_error = packet.get("is_error") is True or str(
                     packet.get("subtype") or ""
                 ).startswith("error")
@@ -1266,9 +1310,12 @@ def stream_claude_code_bridge(
         )
 
         sequence += 1
-        finish_reason = (
-            FinishReason.TOOL_CALLS if emitted_tool_calls else FinishReason.STOP
-        )
+        if emitted_tool_calls:
+            finish_reason = FinishReason.TOOL_CALLS
+        elif stop_reason == "max_tokens" or saw_unclosed_tool_call:
+            finish_reason = FinishReason.LENGTH
+        else:
+            finish_reason = FinishReason.STOP
         yield NormalizedStreamItem(
             StreamKind.FINISH,
             sequence,

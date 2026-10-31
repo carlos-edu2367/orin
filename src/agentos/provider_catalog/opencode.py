@@ -64,6 +64,25 @@ _ORIN_TOOL_CALL_RE = re.compile(
     re.DOTALL,
 )
 
+_TOOL_FAMILY_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("read_file", "Read", "read", "view_file", "ViewFile"),
+    ("write_file", "Write", "write"),
+    ("edit_file", "Edit", "edit"),
+    ("run_command", "Bash", "bash", "shell", "powershell", "PowerShell"),
+    ("search_files", "Grep", "grep", "search_code", "SearchCode"),
+    ("glob_files", "list_files", "Glob", "ListFiles", "glob"),
+    ("fetch_url", "web_fetch", "WebFetch", "webfetch"),
+    ("web_search", "WebSearch", "websearch"),
+    ("todo_write", "TodoWrite", "todowrite"),
+    ("run_subagent", "spawn_agent", "Agent", "agent", "task"),
+)
+
+_TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {}
+for _group in _TOOL_FAMILY_GROUPS:
+    for _member in _group:
+        _TOOL_NAME_ALIASES[_member] = _group
+        _TOOL_NAME_ALIASES[_member.lower()] = _group
+
 
 def normalize_opencode_base_url(value: str) -> str:
     """Validate and normalize an OpenCode Local Bridge or Cloud Zen URL."""
@@ -403,13 +422,13 @@ def _build_bridge_system_prompt(
     bridge_instructions = (
         "\n\n<orin-tool-bridge>\n"
         "IMPORTANT TOOL EXECUTION PROTOCOL:\n"
-        "You are running inside Orin's agentic harness via the OpenCode Bridge.\n"
-        "1. NEVER invoke any native OpenCode tool (`read`, `bash`, `edit`, `write`, `glob`, `grep`, etc.) directly.\n"
+        "You are running inside Orin's agentic harness via the Orin Tool Bridge.\n"
+        "1. NEVER invoke any native CLI or host tool (`read`, `bash`, `edit`, `write`, `glob`, `grep`, etc.) directly.\n"
         "2. To call a tool, you MUST emit an `<orin_tool_call>` XML block in your text response containing a JSON object with `\"name\"` and `\"arguments\"`:\n"
         "<orin_tool_call>{\"name\": \"tool_name\", \"arguments\": {\"key\": \"value\"}}</orin_tool_call>\n"
         "3. Only call tools from the following authorized Orin tool declarations:\n"
         f"{tools_json}\n"
-        "4. After emitting `<orin_tool_call>...</orin_tool_call>`, stop your response and wait for the `[Tool Result]` in the next turn.\n"
+        "4. You may emit multiple `<orin_tool_call>` blocks in a single response when the tool calls are independent. After emitting your `<orin_tool_call>...</orin_tool_call>` block(s), stop your response and wait for the `[Tool Result]` in the next turn.\n"
         "</orin-tool-bridge>"
     )
     return f"{base_system}{bridge_instructions}" if base_system else bridge_instructions.lstrip()
@@ -551,10 +570,10 @@ def _format_bridge_conversation_transcript(
     return system_parts, "\n\n".join(turns_text) or "Continue."
 
 
-def _resolve_allowed_tool_name(raw_name: str, allowed_names: set[str]) -> str:
+def _resolve_tool_name(raw_name: str, allowed_names: set[str]) -> str | None:
     candidate = raw_name.strip()
     if not candidate or not allowed_names:
-        return ""
+        return None
     if candidate in allowed_names:
         return candidate
     if candidate.startswith("mcp__"):
@@ -576,7 +595,164 @@ def _resolve_allowed_tool_name(raw_name: str, allowed_names: set[str]) -> str:
         return public
     if public.lower() in lower_map:
         return lower_map[public.lower()]
-    return ""
+    alias_group = _TOOL_NAME_ALIASES.get(candidate) or _TOOL_NAME_ALIASES.get(
+        candidate.lower()
+    )
+    if alias_group:
+        for alias in alias_group:
+            if alias in allowed_names:
+                return alias
+            if alias.lower() in lower_map:
+                return lower_map[alias.lower()]
+    return None
+
+
+def _resolve_allowed_tool_name(raw_name: str, allowed_names: set[str]) -> str:
+    return _resolve_tool_name(raw_name, allowed_names) or ""
+
+
+def _normalize_bridge_tool_arguments(
+    resolved_name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(arguments)
+    if resolved_name in {"Read", "Write", "Edit", "ViewFile"}:
+        if "path" in normalized and "file_path" not in normalized:
+            normalized["file_path"] = normalized.pop("path")
+        elif "filePath" in normalized and "file_path" not in normalized:
+            normalized["file_path"] = normalized.pop("filePath")
+        if resolved_name == "Edit":
+            if "old_text" in normalized and "old_string" not in normalized:
+                normalized["old_string"] = normalized.pop("old_text")
+            if "new_text" in normalized and "new_string" not in normalized:
+                normalized["new_string"] = normalized.pop("new_text")
+    elif resolved_name in {"read_file", "write_file", "edit_file", "view_file"}:
+        if "file_path" in normalized and "path" not in normalized:
+            normalized["path"] = normalized.pop("file_path")
+        elif "filePath" in normalized and "path" not in normalized:
+            normalized["path"] = normalized.pop("filePath")
+        if resolved_name == "edit_file":
+            if "old_string" in normalized and "old_text" not in normalized:
+                normalized["old_text"] = normalized.pop("old_string")
+            if "new_string" in normalized and "new_text" not in normalized:
+                normalized["new_text"] = normalized.pop("new_string")
+    return normalized
+
+
+def _find_orin_tool_call_close(
+    buffer: str,
+    open_idx: int = 0,
+    close_tag: str = "</orin_tool_call>",
+) -> int:
+    """Locate the closing tag outside JSON string literals."""
+    if not buffer or not close_tag or open_idx < 0 or open_idx >= len(buffer):
+        return -1
+
+    scan_start = open_idx
+    for open_tag in ("<orin_tool_call>", "<tool_call>"):
+        if buffer.startswith(open_tag, open_idx):
+            scan_start = open_idx + len(open_tag)
+            break
+
+    in_string = False
+    escape = False
+    depth = 0
+    first_unquoted_close = -1
+    limit = len(buffer)
+
+    for idx in range(scan_start, limit):
+        ch = buffer[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            if depth > 0:
+                depth -= 1
+            continue
+
+        if buffer.startswith(close_tag, idx):
+            if depth == 0:
+                return idx
+            if first_unquoted_close == -1:
+                first_unquoted_close = idx
+
+    if not in_string and first_unquoted_close != -1:
+        return first_unquoted_close
+    return -1
+
+
+class _ParsedToolCall(tuple):  # type: ignore[type-arg]
+    """3-tuple `(call_id, name, args_json)` that also supports dict-key access (`["name"]`, `["arguments"]`)."""
+
+    _args_dict: dict[str, Any]
+    _raw_args_json: str
+
+    def __new__(
+        cls,
+        call_id: str,
+        name: str,
+        args_json: str,
+        args_dict: dict[str, Any] | None = None,
+        raw_args_json: str | None = None,
+    ) -> _ParsedToolCall:
+        instance = super().__new__(cls, (call_id, name, args_json))
+        instance._args_dict = (
+            dict(args_dict) if args_dict is not None else json.loads(args_json)
+        )
+        instance._raw_args_json = (
+            raw_args_json if raw_args_json is not None else args_json
+        )
+        return instance
+
+    def __getitem__(self, key: int | slice | str) -> Any:
+        if isinstance(key, str):
+            if key == "id":
+                return super().__getitem__(0)
+            if key == "name":
+                return super().__getitem__(1)
+            if key in {"arguments", "input"}:
+                return self._args_dict
+            if key == "arguments_json":
+                return super().__getitem__(2)
+            raise KeyError(key)
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, tuple):
+            if super().__eq__(other):
+                return True
+            if (
+                len(other) == 3
+                and other[0] == super().__getitem__(0)
+                and other[1] == super().__getitem__(1)
+                and other[2] == self._raw_args_json
+            ):
+                return True
+            return False
+        if isinstance(other, Mapping):
+            return (
+                other.get("name") == super().__getitem__(1)
+                and other.get("arguments") == self._args_dict
+            )
+        return False
 
 
 def _parse_orin_tool_calls(
@@ -585,11 +761,30 @@ def _parse_orin_tool_calls(
 ) -> tuple[str, list[tuple[str, str, str]]]:
     """Extract validated `<orin_tool_call>` blocks and strip all `<orin_tool_call>` tags from visible text."""
     calls: list[tuple[str, str, str]] = []
-    if not _ORIN_TOOL_CALL_RE.search(text):
+    open_tag = "<orin_tool_call>"
+    close_tag = "</orin_tool_call>"
+    if open_tag not in text:
         return text, calls
 
-    for match in _ORIN_TOOL_CALL_RE.finditer(text):
-        raw_json = match.group(1).strip()
+    cleaned_parts: list[str] = []
+    cursor = 0
+    text_len = len(text)
+
+    while cursor < text_len:
+        open_idx = text.find(open_tag, cursor)
+        if open_idx == -1:
+            cleaned_parts.append(text[cursor:])
+            break
+
+        cleaned_parts.append(text[cursor:open_idx])
+        close_idx = _find_orin_tool_call_close(text, open_idx, close_tag)
+        if close_idx == -1:
+            # Unclosed tool call tag at EOF: do not leak raw partial XML/JSON into visible text
+            break
+
+        raw_json = text[open_idx + len(open_tag) : close_idx].strip()
+        cursor = close_idx + len(close_tag)
+
         if raw_json.startswith("```"):
             raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json, flags=re.IGNORECASE)
             raw_json = re.sub(r"\s*```$", "", raw_json).strip()
@@ -602,7 +797,7 @@ def _parse_orin_tool_calls(
         if not isinstance(parsed, Mapping):
             continue
         raw_name = str(parsed.get("name") or "").strip()
-        name = _resolve_allowed_tool_name(raw_name, allowed_names)
+        name = _resolve_tool_name(raw_name, allowed_names)
         if not name:
             continue
         arguments = parsed.get("arguments")
@@ -615,10 +810,22 @@ def _parse_orin_tool_calls(
                 arguments = {}
         if not isinstance(arguments, Mapping):
             arguments = {}
+        raw_args_dict = dict(arguments)
+        raw_args_json = json.dumps(raw_args_dict, ensure_ascii=False)
+        norm_args_dict = _normalize_bridge_tool_arguments(name, raw_args_dict)
+        norm_args_json = json.dumps(norm_args_dict, ensure_ascii=False)
         call_id = str(parsed.get("id") or f"call_{uuid4().hex[:12]}")
-        calls.append((call_id, name, json.dumps(dict(arguments), ensure_ascii=False)))
+        calls.append(
+            _ParsedToolCall(
+                call_id,
+                name,
+                norm_args_json,
+                args_dict=norm_args_dict,
+                raw_args_json=raw_args_json,
+            )
+        )
 
-    cleaned = _ORIN_TOOL_CALL_RE.sub("", text).strip()
+    cleaned = "".join(cleaned_parts).strip()
     return cleaned, calls
 
 
@@ -854,6 +1061,10 @@ __all__ = [
     "OPENCODE_CLOUD_BASE_URL",
     "OpenCodeBridgeProcessManager",
     "OpenCodeModelCatalogClient",
+    "_find_orin_tool_call_close",
+    "_normalize_bridge_tool_arguments",
+    "_parse_orin_tool_calls",
+    "_resolve_tool_name",
     "is_opencode_cloud",
     "normalize_opencode_base_url",
     "stream_opencode_bridge",

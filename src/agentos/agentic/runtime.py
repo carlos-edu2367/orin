@@ -242,6 +242,7 @@ class AgenticTurnRuntime:
     offered_tools: frozenset[str] | None = None
     withheld_tools: frozenset[str] = frozenset()
     completion_gate: bool = True
+    provider_timeout_seconds: float | None = None
 
     def __init__(
         self,
@@ -282,8 +283,11 @@ class AgenticTurnRuntime:
         budget_meter: BudgetMeter | None = None,
         on_completed: Callable[[], None] | None = None,
         config_block_reason: str | None = None,
+        provider_timeout_seconds: float | None = None,
     ) -> None:
         self.store, self.provider = store, provider
+        if provider_timeout_seconds is not None:
+            self.provider_timeout_seconds = float(provider_timeout_seconds)
         # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
         self.compact_request = compact_request
         # W7 `!command`: the person's own shell command, run as one tool call; the model is not called.
@@ -982,6 +986,14 @@ class AgenticTurnRuntime:
                     provider_yielded = True
                     if event.kind in {StreamKind.TEXT, StreamKind.THINKING, StreamKind.TOOL_CALL, StreamKind.FINISH}:
                         last_progress_at = now_clock
+                        stall_window = (
+                            timedelta(seconds=float(self.provider_timeout_seconds))
+                            if self.provider_timeout_seconds is not None and self.provider_timeout_seconds > 0
+                            else self.limits.deadline
+                        )
+                        refreshed_deadline = now_clock + stall_window
+                        if refreshed_deadline > deadline:
+                            deadline = refreshed_deadline
                     if event.kind is StreamKind.THINKING:
                         saw_thinking_kind = True
                         if getattr(event, "signature", None):
@@ -1106,7 +1118,14 @@ class AgenticTurnRuntime:
                     reactive_compacted = True
                     if self._force_compact(messages, turn, tool_schemas):
                         continue
-                is_keepalive_stall = isinstance(exc, ProviderError) and exc.category is ProviderErrorCategory.TIMEOUT and not text_parts and not calls
+                is_keepalive_stall = (
+                    not text_parts
+                    and not calls
+                    and (
+                        (isinstance(exc, ProviderError) and exc.category is ProviderErrorCategory.TIMEOUT)
+                        or type(exc).__name__ == "ProviderTransportError"
+                    )
+                )
                 effective_yielded = provider_yielded and not is_keepalive_stall
                 # Once a stream yielded anything the request may have reached
                 # the provider and charged or produced a result.  A restart
