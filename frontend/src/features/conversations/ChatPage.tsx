@@ -604,6 +604,7 @@ export function ChatPage() {
   // sits in the most-used screen in the product.
   const [teamViewOpen, setTeamViewOpen] = useState(false)
   const [teamPaused, setTeamPaused] = useState(false)
+  const [workbenchOpen, setWorkbenchOpen] = useState(false)
   const [workbenchTab, setWorkbenchTab] = useState<CodeWorkbenchTab>('preview')
   const [selectedWorkbenchFile, setSelectedWorkbenchFile] = useState<string | null>(null)
   const [changedFilesExpanded, setChangedFilesExpanded] = useState(false)
@@ -621,6 +622,7 @@ export function ChatPage() {
     setOversizedInput(null)
     setTeamViewOpen(false)
     setTeamPaused(false)
+    setWorkbenchOpen(false)
     setWorkbenchTab('preview')
     setSelectedWorkbenchFile(null)
     setChangedFilesExpanded(false)
@@ -1093,7 +1095,7 @@ export function ChatPage() {
     const latestActive = [...turnScopedEvents]
       .reverse()
       .find((ev) => ev.kind === 'tool' || ev.kind === 'agent' || ev.kind === 'lifecycle')
-    const title = liveWorkingStatus ?? latestActive?.summary ?? 'Pensando…'
+    const title = liveWorkingStatus ?? latestActive?.summary ?? 'Em andamento…'
     const subtitle = latestActive?.detail ?? latestActive?.tool ?? null
     return { title, subtitle }
   }, [activeTurn, activity.events, liveWorkingStatus, running])
@@ -1983,7 +1985,7 @@ export function ChatPage() {
   }, [activity.events])
 
   return (
-    <main className={conversationMode === 'code' ? 'chat chat--code-split' : 'chat'}>
+    <main className={conversationMode === 'code' && workbenchOpen ? 'chat chat--code-split' : 'chat'}>
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
       {tasksOpen && <TasksPanel client={client} conversationId={conversationId} onClose={() => setTasksOpen(false)} />}
@@ -2053,15 +2055,31 @@ export function ChatPage() {
 
         <div className="chat__bar-actions canvas-header__right">
           {conversationMode === 'code' && (
-            <button
-              type="button"
-              className="chat__history-btn"
-              data-testid="code-open-history-button"
-              onClick={() => { void openRewind() }}
-            >
-              <span aria-hidden="true">🕒</span>
-              <span>Histórico</span>
-            </button>
+            <>
+              <button
+                type="button"
+                className="chat__history-btn"
+                data-testid="code-open-history-button"
+                onClick={() => { void openRewind() }}
+              >
+                <span aria-hidden="true">🕒</span>
+                <span>Histórico</span>
+              </button>
+              <button
+                type="button"
+                className={workbenchOpen ? 'chat__history-btn chat__workbench-toggle-btn is-active' : 'chat__history-btn chat__workbench-toggle-btn'}
+                data-testid="code-workbench-toggle"
+                aria-pressed={workbenchOpen}
+                aria-expanded={workbenchOpen}
+                onClick={() => setWorkbenchOpen((prev) => !prev)}
+              >
+                <span aria-hidden="true">◫</span>
+                <span>Bancada</span>
+                {codeWorkbenchFiles.length > 0 && (
+                  <span className="chat__workbench-toggle-badge">{codeWorkbenchFiles.length}</span>
+                )}
+              </button>
+            </>
           )}
           {conversationMode !== 'code' && (
             <button
@@ -2564,6 +2582,7 @@ export function ChatPage() {
                       className="code-changed-files-card__btn"
                       data-testid="code-view-changes-button"
                       onClick={() => {
+                        setWorkbenchOpen(true)
                         setWorkbenchTab('files')
                         setChangedFilesExpanded((prev) => !prev)
                       }}
@@ -2588,6 +2607,7 @@ export function ChatPage() {
                           type="button"
                           className="code-changed-files-card__file-btn"
                           onClick={() => {
+                            setWorkbenchOpen(true)
                             setSelectedWorkbenchFile(file.path)
                             setWorkbenchTab('files')
                           }}
@@ -2650,7 +2670,7 @@ export function ChatPage() {
                   <span className="live-work-progress-card__dot" aria-hidden="true" />
                   <div className="live-work-progress-card__copy">
                     <span className="live-work-progress-card__title">
-                      {liveWorkStep?.title ?? 'Pensando…'}
+                      {liveWorkStep?.title ?? 'Em andamento…'}
                     </span>
                     {Boolean(liveWorkStep?.subtitle) && (
                       <span className="live-work-progress-card__subtitle">
@@ -2887,7 +2907,7 @@ export function ChatPage() {
         />
         <StatusLineBar client={client} conversationId={conversationId} refreshKey={`${running ? 'running' : 'idle'}:${conversation?.turns.length ?? 0}`} />
       </footer>}
-      {!loadFailure && conversationMode === 'code' && (
+      {!loadFailure && conversationMode === 'code' && workbenchOpen && (
         <CodeWorkbenchPanel
           files={codeWorkbenchFiles}
           terminalEntries={codeWorkbenchTerminalEntries}
@@ -2897,6 +2917,7 @@ export function ChatPage() {
           running={running}
           selectedFilePath={selectedWorkbenchFile}
           onSelectFile={setSelectedWorkbenchFile}
+          onClose={() => setWorkbenchOpen(false)}
         />
       )}
       {oversizedInput && (

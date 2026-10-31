@@ -274,6 +274,20 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
     expect(screen.getByTestId('workbench-files-view')).toBeInTheDocument()
   })
 
+  it('renders close button (code-workbench-close) only when onClose is provided and invokes onClose on click', () => {
+    const onClose = vi.fn()
+    const { rerender } = render(<CodeWorkbenchPanel files={SAMPLE_FILES} />)
+    expect(screen.queryByTestId('code-workbench-close')).toBeNull()
+
+    rerender(<CodeWorkbenchPanel files={SAMPLE_FILES} onClose={onClose} />)
+    const closeBtn = screen.getByTestId('code-workbench-close')
+    expect(closeBtn).toHaveClass('code-workbench__close-btn')
+    expect(closeBtn).toHaveAttribute('aria-label', 'Recolher bancada')
+
+    fireEvent.click(closeBtn)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it('contains no prohibited dark-only utility classes in CodeWorkbenchPanel.tsx', () => {
     const source = readFileSync(
       resolve(process.cwd(), 'src/features/conversations/CodeWorkbenchPanel.tsx'),

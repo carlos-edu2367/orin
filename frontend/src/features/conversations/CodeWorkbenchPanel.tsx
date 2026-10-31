@@ -29,6 +29,7 @@ export type CodeWorkbenchPanelProps = {
   elapsedLabel?: string | null
   selectedFilePath?: string | null
   onSelectFile?: (path: string | null) => void
+  onClose?: () => void
 }
 
 const URL_ERROR_MESSAGE = 'URL inválida. Use http:// ou https://.'
@@ -108,6 +109,7 @@ export function CodeWorkbenchPanel({
   elapsedLabel = null,
   selectedFilePath,
   onSelectFile,
+  onClose,
 }: CodeWorkbenchPanelProps) {
   const resolvedInitialUrl = useMemo(() => {
     const fromProp = initialPreviewUrl ? sanitizePreviewUrl(initialPreviewUrl) : null
@@ -268,6 +270,17 @@ export function CodeWorkbenchPanel({
         >
           Terminal
         </button>
+        {onClose && (
+          <button
+            type="button"
+            data-testid="code-workbench-close"
+            aria-label="Recolher bancada"
+            className="code-workbench__close-btn"
+            onClick={onClose}
+          >
+            ×
+          </button>
+        )}
       </div>
 
       <div className="code-workbench__body">
