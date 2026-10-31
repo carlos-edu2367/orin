@@ -303,7 +303,7 @@ class MultiProviderSTTAdapter:
 
         # Se a janela for puro silêncio digital, retorna vazio sem chamar rede/modelo
         rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float32) / 32768.0)))) if samples.size else 0.0
-        if rms < 1e-4 and not prompt_hint:
+        if rms < 1e-3:
             return STTTranscriptionResult(
                 text="",
                 language=language,
@@ -338,7 +338,7 @@ class MultiProviderSTTAdapter:
 
         # Without a transport the adapter can only echo a transcript the client
         # already produced (browser speech recognition). It never invents one.
-        transcript = (prompt_hint or "").strip()
+        transcript = ""
         return STTTranscriptionResult(
             text=transcript,
             language=language,

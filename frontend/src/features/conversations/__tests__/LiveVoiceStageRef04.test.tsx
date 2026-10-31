@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   LiveVoiceStage,
@@ -6,6 +6,12 @@ import {
   type LiveVoiceTranscriptItem,
 } from '../LiveVoiceStage'
 import type { DelegatedCodeSessionInfo, TodoItem } from '../activityTypes'
+import { MemoryRouter } from 'react-router-dom'
+import type { ApiClient } from '../../../api/client'
+import * as LiveVoiceApi from '../../../api/liveVoice'
+import { GlobalWakeWordListener } from '../live/GlobalWakeWordListener'
+import { LIVE_FRAME_SAMPLES, MicCapture } from '../live/liveAudio'
+import { setLiveVoiceStageOpen } from '../live/wakeWord'
 
 afterEach(() => {
   cleanup()
@@ -293,5 +299,132 @@ describe('LiveVoiceStage — Fase 4 (ref-04.png: Palco Friend / Ao vivo)', () =>
 
     const fallbackPicker = screen.getByTestId('live-voice-speaker-picker')
     expect(fallbackPicker.textContent).toContain('Alto-falantes (Padrão)')
+  })
+
+  it('GlobalWakeWordListener em standby desativa headphoneMode (AGC), ignora cliques curtos de 2 frames cercados de silêncio e só chama wake-check com >= 6 frames vocais (RMS >= 0.020 e pico >= 0.025)', async () => {
+    window.localStorage.removeItem('orin.live-voice.prefs.v1')
+    setLiveVoiceStageOpen(false)
+
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [], getAudioTracks: () => [] }),
+        enumerateDevices: vi.fn().mockResolvedValue([]),
+      },
+      configurable: true,
+      writable: true,
+    })
+
+    let capturedOnFrame: ((frame: Int16Array, rms: number) => void) | undefined
+    let capturedHeadphoneMode: boolean | undefined
+    vi.spyOn(MicCapture, 'open').mockImplementation(async (opts) => {
+      capturedOnFrame = opts?.onFrame
+      capturedHeadphoneMode = opts?.headphoneMode
+      return {
+        level: 0,
+        deviceLabel: 'Mic Standby',
+        close: vi.fn(),
+      } as unknown as MicCapture
+    })
+
+    vi.spyOn(LiveVoiceApi, 'getLiveVoiceCapabilities').mockResolvedValue({
+      ...LiveVoiceApi.UNAVAILABLE_CAPABILITIES,
+      stt: {
+        ...LiveVoiceApi.UNAVAILABLE_CAPABILITIES.stt,
+        local_sidecar: {
+          available: true,
+          reason: '',
+          modelId: 'faster-whisper-large-v3-turbo',
+          models: [],
+          voices: [],
+        },
+      },
+      recommendedStt: 'local_sidecar',
+    })
+
+    const checkWakeWordSpy = vi.spyOn(LiveVoiceApi, 'checkWakeWord').mockResolvedValue({
+      matched: false,
+      wake_variant: '',
+      command_remainder: '',
+      confidence: 0,
+      transcript: '',
+    })
+
+    const fakeClient = {
+      request: vi.fn().mockResolvedValue(null),
+      createMutationIntent: () => ({ idempotencyKey: 'k-wake-standby' }),
+    } as unknown as ApiClient
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <GlobalWakeWordListener client={fakeClient} />
+        </MemoryRouter>,
+      )
+
+      await waitFor(() => expect(capturedOnFrame).toBeDefined())
+      expect(capturedHeadphoneMode).toBe(false)
+
+      const silenceFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(5) // RMS ~ 0.00015
+      const clickFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(2000) // RMS ~ 0.061 (>= 0.025)
+      const lowNoiseFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(500) // RMS ~ 0.015 (< 0.020, mas > threshold 0.0145)
+
+      // 1. Pre-roll de silêncio (10 frames) + clique curto de 2 frames (64ms) + 20 frames de silêncio
+      act(() => {
+        for (let i = 0; i < 10; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.00015)
+        }
+        for (let i = 0; i < 2; i += 1) {
+          capturedOnFrame?.(clickFrame, 0.061)
+        }
+        for (let i = 0; i < 20; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.00015)
+        }
+      })
+      expect(checkWakeWordSpy).not.toHaveBeenCalled()
+
+      // 2. Mesmo se o EnergyVad abrir utterance com 2 frames de clique + 4 frames de ruído baixo (25+ frames totais com pre-roll/post-roll),
+      // inspectSpeechFrames rejeita pois há apenas 2 frames com frameRms >= 0.020 (< 6).
+      act(() => {
+        for (let i = 0; i < 10; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.00015)
+        }
+        for (let i = 0; i < 2; i += 1) {
+          capturedOnFrame?.(clickFrame, 0.061)
+        }
+        for (let i = 0; i < 4; i += 1) {
+          capturedOnFrame?.(lowNoiseFrame, 0.016)
+        }
+        for (let i = 0; i < 20; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.00015)
+        }
+      })
+      expect(checkWakeWordSpy).not.toHaveBeenCalled()
+
+      // 2b. Adversarial: 8 frames com RMS ~0.021 (>= 0.020) mas peakRms < 0.025 (int16 = 700 -> 0.02136) NÃO dispara wake-check
+      const borderlineVoicedFrame = new Int16Array(LIVE_FRAME_SAMPLES).fill(700)
+      act(() => {
+        for (let i = 0; i < 8; i += 1) {
+          capturedOnFrame?.(borderlineVoicedFrame, 0.0213)
+        }
+        for (let i = 0; i < 20; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.00015)
+        }
+      })
+      expect(checkWakeWordSpy).not.toHaveBeenCalled()
+
+      // 3. Fala real com >= 6 frames vocais (8 frames com RMS ~0.061 >= 0.025) seguida de silêncio dispara checkWakeWord
+      act(() => {
+        for (let i = 0; i < 8; i += 1) {
+          capturedOnFrame?.(clickFrame, 0.061)
+        }
+        for (let i = 0; i < 18; i += 1) {
+          capturedOnFrame?.(silenceFrame, 0.00015)
+        }
+      })
+
+      await waitFor(() => expect(checkWakeWordSpy).toHaveBeenCalledTimes(1))
+    } finally {
+      setLiveVoiceStageOpen(false)
+    }
   })
 })

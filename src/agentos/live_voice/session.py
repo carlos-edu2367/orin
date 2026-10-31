@@ -60,6 +60,34 @@ MAX_WAKE_PCM_BYTES = 16000 * 2 * 6  # Máximo de 6s de áudio 16kHz PCM16 para w
 MAX_PCM_INPUT_BUFFER_BYTES = 16000 * 2 * 60
 
 
+def _has_sufficient_wake_speech_energy(pcm_bytes: bytes, sample_rate: int = 16000) -> bool:
+    """Require at least 6 voiced 32ms frames (RMS >= 0.020) and peak frame RMS >= 0.025
+    before invoking Whisper on standby wake-word audio.
+    """
+    import numpy as np
+
+    aligned = pcm_bytes if len(pcm_bytes) % 2 == 0 else pcm_bytes[:-1]
+    if len(aligned) < 2:
+        return False
+    sr = max(8000, min(48000, int(sample_rate or 16000)))
+    frame_samples = max(1, int(round(sr * 0.032)))
+    samples = np.frombuffer(aligned, dtype=np.int16).astype(np.float32) / 32768.0
+    if samples.size < frame_samples:
+        return False
+    voiced_frames = 0
+    peak_rms = 0.0
+    for offset in range(0, samples.size, frame_samples):
+        frame = samples[offset : offset + frame_samples]
+        if frame.size < frame_samples // 2:
+            continue
+        rms = float(np.sqrt(np.mean(np.square(frame))))
+        if rms >= 0.020:
+            voiced_frames += 1
+        if rms > peak_rms:
+            peak_rms = rms
+    return voiced_frames >= 6 and peak_rms >= 0.025
+
+
 def split_realtime_tts_clauses(
     text: str,
     *,
@@ -1004,6 +1032,8 @@ def register_live_voice_routes(
             raise ApplicationValidationError("Invalid pcm_base64 payload") from exc
         if len(pcm_bytes) > MAX_WAKE_PCM_BYTES:
             raise ApplicationValidationError("Wake check audio exceeds maximum allowed duration")
+        if not _has_sufficient_wake_speech_energy(pcm_bytes, payload.sample_rate):
+            return JSONResponse(match_wake_word("", custom_names=custom_words).to_dict())
 
         def _run_wake_stt() -> dict[str, object]:
             caps = _voice_capabilities(governor, services, user_id, engines_runtime, catalog)
@@ -1025,7 +1055,7 @@ def register_live_voice_routes(
                     language=payload.language or "pt-BR",
                 ),
             )
-            prompt_hint = build_wake_prompt_hint(custom_words)
+            prompt_hint: str | None = None
             try:
                 transcript = _transcribe(
                     temp_session,

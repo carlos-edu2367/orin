@@ -357,7 +357,7 @@ def test_multi_provider_stt_adapter_supports_all_providers_with_safe_fallback(
     )
     assert result.provider == stt_provider
     assert result.language == "pt"
-    assert isinstance(result.text, str) and len(result.text) > 0
+    assert isinstance(result.text, str) and result.text == ""
 
     # Red-Team: bytes ímpares / truncados ou vazios não devem levantar exceção
     empty_res = adapter.transcribe(b"", sample_rate=sr, provider=stt_provider)

@@ -28,7 +28,20 @@ import {
 const WAKE_COOLDOWN_MS = 2800
 const MIN_WAKE_FRAMES = Math.ceil(160 / LIVE_FRAME_MS)
 const MAX_WAKE_FRAMES = Math.ceil(5800 / LIVE_FRAME_MS)
-const MIN_STANDBY_SENSITIVITY = 0.78
+const MAX_STANDBY_SENSITIVITY = 0.65
+const MIN_VOICED_WAKE_FRAMES = 6
+const MIN_VOICED_FRAME_RMS = 0.02
+const MIN_WAKE_PEAK_RMS = 0.025
+
+function frameRms(frame: Int16Array): number {
+  if (frame.length === 0) return 0
+  let sumSq = 0
+  for (let i = 0; i < frame.length; i += 1) {
+    const norm = frame[i] / 32768
+    sumSq += norm * norm
+  }
+  return Math.sqrt(sumSq / frame.length)
+}
 
 export type OpenFriendLiveDetail = {
   conversationId: string
@@ -61,7 +74,8 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
   useEffect(() => onLiveVoiceStageOpenChange(setStageOpen), [])
 
   useEffect(() => {
-    vadRef.current?.setSensitivity(Math.max(prefs.sensitivity, MIN_STANDBY_SENSITIVITY))
+    const effectiveSensitivity = Math.min(prefs.sensitivity, MAX_STANDBY_SENSITIVITY)
+    vadRef.current?.setSensitivity(effectiveSensitivity)
   }, [prefs.sensitivity])
 
   useEffect(() => {
@@ -157,10 +171,14 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
 
     const browserSupported = browserRecognitionSupported()
 
+    const effectiveSensitivity = Math.min(
+      runtimeRef.current.prefs.sensitivity,
+      MAX_STANDBY_SENSITIVITY,
+    )
     const vad = new EnergyVad({
-      sensitivity: Math.max(runtimeRef.current.prefs.sensitivity, MIN_STANDBY_SENSITIVITY),
+      sensitivity: effectiveSensitivity,
       endSilenceMs: 420,
-      startSpeechMs: 64,
+      startSpeechMs: 160,
       preRollMs: 280,
       maxUtteranceMs: 5000,
     })
@@ -176,6 +194,19 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
     const inspectSpeechFrames = async (frames: Int16Array[]) => {
       if (cancelled || checkingRef.current || isLiveVoiceStageOpen()) return
       if (frames.length < MIN_WAKE_FRAMES || frames.length > MAX_WAKE_FRAMES) return
+
+      let voicedFrames = 0
+      let peakRms = 0
+      for (const frame of frames) {
+        const rms = frameRms(frame)
+        if (rms >= MIN_VOICED_FRAME_RMS) {
+          voicedFrames += 1
+        }
+        if (rms > peakRms) {
+          peakRms = rms
+        }
+      }
+      if (voicedFrames < MIN_VOICED_WAKE_FRAMES || peakRms < MIN_WAKE_PEAK_RMS) return
 
       checkingRef.current = true
       try {
@@ -222,7 +253,7 @@ export function GlobalWakeWordListener({ client }: { client: ApiClient }) {
 
     MicCapture.open({
       deviceId: prefs.micDeviceId,
-      headphoneMode: true,
+      headphoneMode: false,
       onFrame: (frame, rms) => {
         if (cancelled || isLiveVoiceStageOpen()) return
         const events = vad.process(frame, rms)

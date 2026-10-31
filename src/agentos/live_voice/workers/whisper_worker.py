@@ -70,17 +70,22 @@ def transcribe(request: dict[str, Any]) -> dict[str, Any]:
         target = np.linspace(0.0, duration, int(duration * 16000), endpoint=False)
         audio = np.interp(target, np.linspace(0.0, duration, audio.size, endpoint=False), audio).astype(np.float32)
     prompt_hint = str(request.get("prompt_hint") or "").strip() or None
-    if prompt_hint and prompt_hint.startswith("Orin. Oi Orin"):
-        prompt_hint = "Assistente Orin. Oi Orin."
     segments, _info = model.transcribe(
         audio,
         language=str(request.get("language") or "pt").split("-")[0],
         beam_size=1,
-        vad_filter=not bool(prompt_hint),
+        vad_filter=True,
         condition_on_previous_text=False,
         initial_prompt=prompt_hint,
     )
-    return {"text": " ".join(segment.text.strip() for segment in segments).strip(), "device": device}
+    valid_segments = [
+        segment.text.strip()
+        for segment in segments
+        if (getattr(segment, "no_speech_prob", None) or 0.0) <= 0.6
+        and (getattr(segment, "avg_logprob", None) or 0.0) >= -1.0
+        and getattr(segment, "text", "").strip()
+    ]
+    return {"text": " ".join(valid_segments).strip(), "device": device}
 
 
 if __name__ == "__main__":

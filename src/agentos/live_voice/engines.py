@@ -267,11 +267,18 @@ class LocalWhisperEngine:
                 pcm16_to_float32(pcm_bytes, sample_rate),
                 language=(language or "pt").split("-")[0],
                 beam_size=1,
-                vad_filter=not bool(prompt_hint),
+                vad_filter=True,
                 condition_on_previous_text=False,
                 initial_prompt=prompt_hint or None,
             )
-            return " ".join(segment.text.strip() for segment in segments).strip()
+            valid_segments = [
+                segment.text.strip()
+                for segment in segments
+                if (getattr(segment, "no_speech_prob", None) or 0.0) <= 0.6
+                and (getattr(segment, "avg_logprob", None) or 0.0) >= -1.0
+                and getattr(segment, "text", "").strip()
+            ]
+            return " ".join(valid_segments).strip()
         except Exception as exc:
             _LOGGER.warning("local whisper transcription failed", exc_info=True)
             raise VoiceEngineError(

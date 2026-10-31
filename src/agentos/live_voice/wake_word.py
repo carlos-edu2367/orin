@@ -207,45 +207,38 @@ def build_wake_prompt_hint(custom_names: Sequence[str] | None = None) -> str:
 def phonetic_skeleton_ptbr(word: str) -> str:
     """Convert a single word into an accent-invariant PT-BR/EN phonetic skeleton.
 
-    Canonical target for 'Orin' across regional accents is `'ORN'` (or `'OR'` when the
-    nasal coda is absorbed into an open vowel).
+    Canonical target for 'Orin' across regional accents is `'ORN'`.
+    Requires initial vowel after optional silent 'h' to be 'o', 'u', or 'au'/'ou'/'ao'
+    (never bare 'a' or 'e'), a front/high vowel ('i', 'e', 'y') between 'r/l' and 'n/m',
+    and no trailing vowel after 'n/m' unless it is a valid diminutive ('-inho'/'-zinho').
     """
     w = re.sub(r"[^a-z]", "", _strip_accents(word))
     if not w:
         return ""
-    # Drop silent initial 'h' ("horin", "horim", "horyn")
-    if w.startswith("h") and len(w) > 1:
-        w = w[1:]
-    # Diminutive suffix "-inho" / "-zinho" ("orinho", "orinzinho")
+    w = re.sub(r"^h+", "", w)
+    if not w:
+        return ""
     if w.endswith("zinho") and len(w) > 6:
         w = w[:-5]
-    elif w.endswith("inho") and len(w) > 5:
-        w = w[:-3] + "n"
+    elif (w.endswith("inho") or w.endswith("inha")) and len(w) > 5:
+        w = w[:-4] + "in"
 
-    # Unify initial labial/rounded vowel onsets ("ourin", "aurin", "aoryn", "urin", "orin") -> "o"
-    w = re.sub(r"^(?:ou|au|ao|oo|uo|u)(?=[rldn])", "o", w)
-    # Collapse duplicate letters ("orrin", "orinn", "oreen")
-    w = re.sub(r"(.)\1+", r"\1", w)
-    # Unify intervocalic liquid/palatal/rhotic substitutions ("olhin" -> "orin", "olin" -> "orin")
-    w = re.sub(r"^o(?:lh|l)(?=[iey])", "or", w)
-    # Strip trailing sibilant noise often added by STT ("orinz", "orins", "orimz")
     w = re.sub(r"(?<=[nm])[sz]+$", "", w)
-    # Unify nasal coda ("-im", "-in", "-em", "-en", "-yn", "-ing", "-inh", "-ion") -> "in"
-    w = re.sub(r"(?:ing|inh|ion|im|in|em|en|yn|an)$", "in", w)
+    w = re.sub(r"(.)\1+", r"\1", w)
 
-    skeleton: list[str] = []
-    for idx, ch in enumerate(w):
-        if idx == 0 and ch in {"o", "a", "e", "u"}:
-            skeleton.append("O")
-        elif ch in {"r", "l"}:
-            if not skeleton or skeleton[-1] != "R":
-                skeleton.append("R")
-        elif ch in {"n", "m"}:
-            if not skeleton or skeleton[-1] != "N":
-                skeleton.append("N")
-        elif ch not in {"a", "e", "i", "o", "u", "y"}:
-            skeleton.append(ch.upper())
-    return "".join(skeleton)
+    for prefix in ("our", "aur", "aor", "or", "ur", "olh", "ol"):
+        if w.startswith(prefix):
+            w = "or" + w[len(prefix) :]
+            break
+
+    for suffix in ("ing", "inh", "ion", "yn", "im", "in", "em", "en"):
+        if w.endswith(suffix) and len(w) > len(suffix) + 1:
+            w = w[: -len(suffix)] + "in"
+            break
+
+    if w in {"orin", "ori"}:
+        return "ORN"
+    return w.upper()
 
 
 @dataclass(frozen=True, slots=True)
