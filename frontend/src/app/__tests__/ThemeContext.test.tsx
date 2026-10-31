@@ -252,4 +252,63 @@ describe('ThemeContext & initThemeDom', () => {
     expect(screen.getByTestId('accent')).toHaveTextContent('violet')
     expect(screen.getByTestId('ambient')).toHaveTextContent('on')
   })
+
+  it('scopes [data-theme="light"] .orin-mascot with luminous pastel tokens and overrides for all 6 light-mode accents', () => {
+    expect(themeCss).toContain('[data-theme="light"] .orin-mascot')
+    expect(themeCss).toContain('[data-theme="light"][data-accent="violet"] .orin-mascot')
+    expect(themeCss).toContain(':root[data-theme="system"] .orin-mascot')
+    expect(themeCss).toMatch(/--orin-accent-soft:\s*#E4DCFF/i)
+    expect(themeCss).toMatch(/--orin-accent-strong:\s*#8870DF/i)
+    expect(themeCss).toMatch(/--orin-mascot-shadow:\s*rgba\(28,\s*22,\s*48,\s*0\.12\)/i)
+    expect(themeCss).toMatch(/--orin-mascot-feature:\s*#282333/i)
+
+    for (const accent of ['violet', 'sapphire', 'emerald', 'amber', 'rose', 'mono'] as const) {
+      expect(themeCss).toContain(`[data-theme="light"][data-accent="${accent}"] .orin-mascot`)
+    }
+    for (const accent of ['sapphire', 'emerald', 'amber', 'rose', 'mono'] as const) {
+      expect(themeCss).toContain(`:root[data-theme="system"][data-accent="${accent}"] .orin-mascot`)
+    }
+
+    expect(themeCss).toMatch(/--orin-accent-soft:\s*#DCE8FF;\s*--orin-accent:\s*#82A8F8;\s*--orin-accent-strong:\s*#547EEB;/i)
+    expect(themeCss).toMatch(/--orin-accent-soft:\s*#D1FAE5;\s*--orin-accent:\s*#5CE0B2;\s*--orin-accent-strong:\s*#22B886;/i)
+    expect(themeCss).toMatch(/--orin-accent-soft:\s*#FEF3C7;\s*--orin-accent:\s*#FCD34D;\s*--orin-accent-strong:\s*#F59E0B;/i)
+    expect(themeCss).toMatch(/--orin-accent-soft:\s*#FCE0E8;\s*--orin-accent:\s*#F4A2B8;\s*--orin-accent-strong:\s*#E47293;/i)
+    expect(themeCss).toMatch(/--orin-accent-soft:\s*#F4F4F6;\s*--orin-accent:\s*#D4D4D8;\s*--orin-accent-strong:\s*#A1A1AA;/i)
+
+    const hexLuminance = (hex: string): number => {
+      const clean = hex.replace('#', '')
+      const [r, g, b] = [0, 2, 4].map((offset) => {
+        const channel = Number.parseInt(clean.slice(offset, offset + 2), 16) / 255
+        return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+      })
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    const contrastRatio = (hexA: string, hexB: string): number => {
+      const lumA = hexLuminance(hexA)
+      const lumB = hexLuminance(hexB)
+      const brightest = Math.max(lumA, lumB)
+      const darkest = Math.min(lumA, lumB)
+      return (brightest + 0.05) / (darkest + 0.05)
+    }
+
+    const lightMascotPalettes = [
+      { accent: 'violet', soft: '#E4DCFF', mid: '#B4A4EF', strong: '#8870DF' },
+      { accent: 'sapphire', soft: '#DCE8FF', mid: '#82A8F8', strong: '#547EEB' },
+      { accent: 'emerald', soft: '#D1FAE5', mid: '#5CE0B2', strong: '#22B886' },
+      { accent: 'amber', soft: '#FEF3C7', mid: '#FCD34D', strong: '#F59E0B' },
+      { accent: 'rose', soft: '#FCE0E8', mid: '#F4A2B8', strong: '#E47293' },
+      { accent: 'mono', soft: '#F4F4F6', mid: '#D4D4D8', strong: '#A1A1AA' },
+    ] as const
+
+    for (const p of lightMascotPalettes) {
+      expect(hexLuminance(p.soft)).toBeGreaterThan(hexLuminance(p.mid))
+      expect(hexLuminance(p.mid)).toBeGreaterThan(hexLuminance(p.strong))
+      expect(contrastRatio(p.mid, '#282333')).toBeGreaterThan(4.5)
+    }
+
+    const strippedCss = themeCss.replace(/\/\*[\s\S]*?\*\//g, '')
+    const openBraces = (strippedCss.match(/\{/g) ?? []).length
+    const closeBraces = (strippedCss.match(/\}/g) ?? []).length
+    expect(openBraces).toBe(closeBraces)
+  })
 })

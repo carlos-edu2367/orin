@@ -603,11 +603,39 @@
   :root[data-theme="system"][data-accent="amber"] { --orin-accent: #d97706; --orin-accent-rgb: 217 119 6; }
   :root[data-theme="system"][data-accent="rose"] { --orin-accent: #be185d; --orin-accent-rgb: 190 24 93; }
   :root[data-theme="system"][data-accent="mono"] { --orin-accent: #18181b; --orin-accent-rgb: 24 24 27; }
+
+  :root[data-theme="system"] .orin-mascot,
+  :root[data-theme="system"][data-accent="violet"] .orin-mascot {
+    --orin-accent-soft: #E4DCFF;
+    --orin-accent: #B4A4EF;
+    --orin-accent-strong: #8870DF;
+    --orin-mascot-shadow: rgba(28, 22, 48, 0.12);
+    --orin-mascot-feature: #282333;
+  }
+  :root[data-theme="system"][data-accent="sapphire"] .orin-mascot { --orin-accent-soft: #DCE8FF; --orin-accent: #82A8F8; --orin-accent-strong: #547EEB; }
+  :root[data-theme="system"][data-accent="emerald"] .orin-mascot { --orin-accent-soft: #D1FAE5; --orin-accent: #5CE0B2; --orin-accent-strong: #22B886; }
+  :root[data-theme="system"][data-accent="amber"] .orin-mascot { --orin-accent-soft: #FEF3C7; --orin-accent: #FCD34D; --orin-accent-strong: #F59E0B; }
+  :root[data-theme="system"][data-accent="rose"] .orin-mascot { --orin-accent-soft: #FCE0E8; --orin-accent: #F4A2B8; --orin-accent-strong: #E47293; }
+  :root[data-theme="system"][data-accent="mono"] .orin-mascot { --orin-accent-soft: #F4F4F6; --orin-accent: #D4D4D8; --orin-accent-strong: #A1A1AA; }
 }
 
 /* ==========================================================================
    Controle de Atmosfera (data-ambient="off")
    ========================================================================== */
+[data-theme="light"] .orin-mascot,
+[data-theme="light"][data-accent="violet"] .orin-mascot {
+  --orin-accent-soft: #E4DCFF;
+  --orin-accent: #B4A4EF;
+  --orin-accent-strong: #8870DF;
+  --orin-mascot-shadow: rgba(28, 22, 48, 0.12);
+  --orin-mascot-feature: #282333;
+}
+[data-theme="light"][data-accent="sapphire"] .orin-mascot { --orin-accent-soft: #DCE8FF; --orin-accent: #82A8F8; --orin-accent-strong: #547EEB; }
+[data-theme="light"][data-accent="emerald"] .orin-mascot { --orin-accent-soft: #D1FAE5; --orin-accent: #5CE0B2; --orin-accent-strong: #22B886; }
+[data-theme="light"][data-accent="amber"] .orin-mascot { --orin-accent-soft: #FEF3C7; --orin-accent: #FCD34D; --orin-accent-strong: #F59E0B; }
+[data-theme="light"][data-accent="rose"] .orin-mascot { --orin-accent-soft: #FCE0E8; --orin-accent: #F4A2B8; --orin-accent-strong: #E47293; }
+[data-theme="light"][data-accent="mono"] .orin-mascot { --orin-accent-soft: #F4F4F6; --orin-accent: #D4D4D8; --orin-accent-strong: #A1A1AA; }
+
 [data-ambient="off"] .home__glow,
 [data-ambient="off"] .ambient-field,
 [data-ambient="off"] .home__orb-ambient {

@@ -119,7 +119,7 @@ export function OrinMascot({
             cy="148"
             rx="44"
             ry="6"
-            fill="rgba(0, 0, 0, 0.34)"
+            fill="var(--orin-mascot-shadow, rgba(0, 0, 0, 0.34))"
             data-mascot-part="shadow"
           />
         )}
@@ -170,7 +170,7 @@ export function OrinMascot({
           cy="88"
           rx="5"
           ry="11"
-          fill="#282333"
+          fill="var(--orin-mascot-feature, #282333)"
           transform="rotate(-5 61 88)"
           data-mascot-part="eye"
         />
@@ -179,14 +179,14 @@ export function OrinMascot({
           cy="86"
           rx="5"
           ry="11"
-          fill="#282333"
+          fill="var(--orin-mascot-feature, #282333)"
           transform="rotate(-5 101 86)"
           data-mascot-part="eye"
         />
 
         <path
           d="M 76 105 Q 81 112 87 104"
-          stroke="#282333"
+          stroke="var(--orin-mascot-feature, #282333)"
           strokeWidth="3"
           strokeLinecap="round"
           data-mascot-part="smile"

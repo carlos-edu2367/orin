@@ -19,14 +19,21 @@ describe('OrinMascot & Brand components', () => {
 
     const eyes = container.querySelectorAll('[data-mascot-part="eye"]')
     expect(eyes).toHaveLength(2)
-    expect(container.querySelector('[data-mascot-part="smile"]')).not.toBeNull()
+    eyes.forEach((eye) => {
+      expect(eye.getAttribute('fill')).toBe('var(--orin-mascot-feature, #282333)')
+    })
+    const smile = container.querySelector('[data-mascot-part="smile"]')
+    expect(smile).not.toBeNull()
+    expect(smile?.getAttribute('stroke')).toBe('var(--orin-mascot-feature, #282333)')
   })
 
   it('renders soft3d variant with radial gradient shading and base shadow', () => {
     const { container } = render(<OrinMascot size={88} variant="soft3d" ariaLabel="Orin 3D" />)
     expect(screen.getByRole('img', { name: 'Orin 3D' })).toHaveAttribute('data-variant', 'soft3d')
     expect(container.querySelector('radialGradient')).not.toBeNull()
-    expect(container.querySelector('[data-mascot-part="shadow"]')).not.toBeNull()
+    const shadow = container.querySelector('[data-mascot-part="shadow"]')
+    expect(shadow).not.toBeNull()
+    expect(shadow?.getAttribute('fill')).toBe('var(--orin-mascot-shadow, rgba(0, 0, 0, 0.34))')
   })
 
   it('renders waving variant with waving arm and sparkles for onboarding', () => {
@@ -72,5 +79,25 @@ describe('OrinMascot & Brand components', () => {
     expect(stops[0]?.getAttribute('stop-color')).toContain('#4ADE80')
     expect(stops[1]?.getAttribute('stop-color')).toBe('#4ADE80')
     expect(stops[2]?.getAttribute('stop-color')).toContain('#4ADE80')
+  })
+
+  it('preserves default CSS variable stops and feature/shadow tokens in waving variant and falls back to flat on unknown variant', () => {
+    const { container, rerender } = render(<OrinMascot variant="waving" ariaHidden />)
+    const stops = container.querySelectorAll('radialGradient stop')
+    expect(stops).toHaveLength(3)
+    expect(stops[0]?.getAttribute('stop-color')).toBe('var(--orin-accent-soft, #DDD5FA)')
+    expect(stops[1]?.getAttribute('stop-color')).toBe('var(--orin-accent, #B4A4EF)')
+    expect(stops[2]?.getAttribute('stop-color')).toBe('var(--orin-accent-strong, #8F7AE0)')
+    expect(container.querySelector('[data-mascot-part="shadow"]')?.getAttribute('fill')).toBe(
+      'var(--orin-mascot-shadow, rgba(0, 0, 0, 0.34))',
+    )
+
+    rerender(<OrinMascot variant={'unknown-variant' as 'flat'} statusDot={'unknown-dot' as 'none'} />)
+    expect(screen.getByTestId('orin-mascot')).toHaveAttribute('data-variant', 'flat')
+    expect(screen.getByTestId('orin-mascot')).toHaveAttribute('data-status-dot', 'none')
+    expect(container.querySelector('[data-mascot-part="shadow"]')).toBeNull()
+    expect(container.querySelector('[data-mascot-part="smile"]')?.getAttribute('stroke')).toBe(
+      'var(--orin-mascot-feature, #282333)',
+    )
   })
 })
