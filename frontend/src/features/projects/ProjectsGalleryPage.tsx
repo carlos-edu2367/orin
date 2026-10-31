@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { type ApiClient, createBrowserApiClient } from '../../api/client'
 import { ensureFriendConversation } from '../../api/conversations'
 import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../../api/projects'
-import { OrinMascot } from '../../components/OrinMascot'
+import { OrinActivityCenter } from '../../components/OrinActivityCenter'
 import { WorkspaceNavigation } from './WorkspaceNavigation'
 
 export type ProjectsGalleryPageProps = {
@@ -157,7 +157,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
               </svg>
               <span>Conversar por voz</span>
             </button>
-            <OrinMascot size={30} variant="flat" statusDot="online" ariaHidden />
+            <OrinActivityCenter client={apiClient} />
           </div>
         </header>
 

@@ -11,7 +11,7 @@ import {
   type ProjectSidebarItem,
 } from '../../api/projects'
 import { inspectNewWorkspaceFolder } from '../../api/workspace'
-import { OrinMascot } from '../../components/OrinMascot'
+import { OrinActivityCenter } from '../../components/OrinActivityCenter'
 import { WorkspaceNavigation } from './WorkspaceNavigation'
 
 export type ProjectPageProps = {
@@ -277,7 +277,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
               </svg>
               <span>Conversar por voz</span>
             </button>
-            <OrinMascot size={30} variant="flat" statusDot="online" ariaHidden />
+            <OrinActivityCenter client={apiClient} />
           </div>
         </header>
 

@@ -73,7 +73,8 @@ describe('WorkspaceShell & Sidebar Hubs', () => {
     // Topbar right includes "Conversar por voz" button and OrinMascot (size 30) with online status dot
     const voiceBtn = screen.getByTestId('topbar-voice-button')
     expect(voiceBtn).toHaveTextContent(/Conversar por voz/i)
-    expect(header.querySelector('[data-testid="orin-mascot-status-dot"]')).not.toBeNull()
+    expect(header.querySelector('[data-testid="orin-activity-center-trigger"]')).not.toBeNull()
+    expect(header.querySelector('[data-testid="orin-mascot-status-dot"]')).toBeNull()
     expect(header.querySelector('[data-testid="orin-mascot"]')).toHaveStyle({ width: '30px', height: '30px' })
 
     // Local ProfileMenu defaults to "Você" when orin.user.displayName is unset, and closes on Escape / outside click

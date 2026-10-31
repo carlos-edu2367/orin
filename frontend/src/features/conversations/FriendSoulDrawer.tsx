@@ -371,7 +371,7 @@ export function FriendSoulDrawer({
               <span aria-hidden="true">🎙️</span>
               <span>Conversar por voz</span>
             </button>
-            <OrinMascot size={32} variant="flat" statusDot="online" ariaHidden />
+            <OrinMascot size={32} variant="flat" statusDot="none" ariaHidden />
             <button
               type="button"
               className="voice-button is-quiet"

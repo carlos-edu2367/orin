@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type JSX, type ReactNode } from 'react'
 import { createBrowserApiClient, type ApiClient } from '../api/client'
 import { CommandPalette } from '../components/CommandPalette'
-import { OrinMascot } from '../components/OrinMascot'
+import { OrinActivityCenter } from '../components/OrinActivityCenter'
 import {
   WorkspaceNavigation,
   type WorkspaceNavigationConversationSummary,
@@ -170,13 +170,7 @@ export function WorkspaceShell({
               </svg>
               <span>Conversar por voz</span>
             </button>
-            <OrinMascot
-              size={30}
-              variant="flat"
-              statusDot="online"
-              ariaLabel="Orin ativo"
-              className="canvas-header__mascot"
-            />
+            <OrinActivityCenter client={apiClient} className="canvas-header__mascot" />
           </div>
         </header>
         <div className="canvas-stage">{children}</div>

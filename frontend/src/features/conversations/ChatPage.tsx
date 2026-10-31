@@ -26,6 +26,7 @@ import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, t
 import { CommandPalette } from '../../components/CommandPalette'
 import { ModelPicker } from '../../components/ModelPicker'
 import { OrinMascot } from '../../components/OrinMascot'
+import { OrinActivityCenter } from '../../components/OrinActivityCenter'
 import {
   enqueueMessage, forkConversation, getFileHistory, listCommandCatalog, listQueue, removeQueued, renameConversation, rewindCode,
   rewindMessage, runShell, TOO_LARGE_TO_BACK_UP, type CatalogCommand, type FileHistoryItem, type QueuedInput,
@@ -2265,7 +2266,7 @@ export function ChatPage() {
             </svg>
             <span>Conversar por voz</span>
           </button>
-          <OrinMascot size={30} variant="flat" statusDot="online" ariaLabel="Orin ativo" />
+          <OrinActivityCenter client={client} activeConversationId={conversationId} />
         </div>
       </header>
 

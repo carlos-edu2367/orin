@@ -86,7 +86,8 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
     const topbarMascot = header.querySelector('[data-testid="orin-mascot"]');
     expect(topbarMascot).not.toBeNull();
     expect(topbarMascot).toHaveAttribute('data-variant', 'flat');
-    expect(topbarMascot).toHaveAttribute('data-status-dot', 'online');
+    expect(topbarMascot).toHaveAttribute('data-status-dot', 'none');
+    expect(header.querySelector('[data-testid="orin-activity-center-trigger"]')).not.toBeNull();
 
     const heroMascotWrap = screen.getByTestId('home-hero-mascot');
     const heroMascot = within(heroMascotWrap).getByTestId('orin-mascot');

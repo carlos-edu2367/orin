@@ -174,7 +174,8 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
 
     const headerMascot = within(header).getByTestId('orin-mascot')
     expect(headerMascot).toBeInTheDocument()
-    expect(within(header).getByTestId('orin-mascot-status-dot')).toBeInTheDocument()
+    expect(within(header).getByTestId('orin-activity-center-trigger')).toBeInTheDocument()
+    expect(within(header).queryByTestId('orin-mascot-status-dot')).not.toBeInTheDocument()
 
     const teamToggleBtn = within(header).getByTestId('chat-team-view-toggle')
     expect(teamToggleBtn).toHaveTextContent('Equipe em atividade')

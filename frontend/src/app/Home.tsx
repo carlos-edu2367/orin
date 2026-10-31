@@ -17,6 +17,7 @@ import { AmbientField } from '../components/three/AmbientField'
 import { CommandPalette } from '../components/CommandPalette'
 import { ModelPicker } from '../components/ModelPicker'
 import { OrinMascot } from '../components/OrinMascot'
+import { OrinActivityCenter } from '../components/OrinActivityCenter'
 import { Composer } from '../features/conversations/Composer'
 import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
 import { inspectNewWorkspaceFolder, type WorkspaceState } from '../api/workspace'
@@ -340,13 +341,7 @@ export function Home({ client, bootstrap }: HomeProps) {
             <span>Conversar por voz</span>
           </button>
           <CommandPalette conversations={chats} />
-          <OrinMascot
-            size={30}
-            variant="flat"
-            statusDot="online"
-            ariaLabel="Orin ativo"
-            celebrating={celebrating}
-          />
+          <OrinActivityCenter client={apiClient} celebrating={celebrating} />
         </div>
       </header>
 

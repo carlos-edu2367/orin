@@ -9629,3 +9629,288 @@ body.reduce-motion .security-ref15__card {
   background: var(--orin-bg, #0E0E12);
   color: var(--orin-text-primary, #F4F3F8);
 }
+
+
+/* ---------------------------------------------------------------- Caso 4: OrinActivityCenter */
+.orin-activity-center {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.orin-activity-center__trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.orin-activity-center__trigger:hover,
+.orin-activity-center__trigger[aria-expanded="true"] {
+  background: var(--orin-surface-2, #1A1A21);
+  border-color: var(--orin-border, rgba(255, 255, 255, 0.09));
+}
+
+.orin-activity-center__trigger:focus-visible {
+  outline: 2px solid var(--orin-accent, #B4A4EF);
+  outline-offset: 2px;
+}
+
+.orin-activity-center__badge {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--orin-success, #4ADE80);
+  color: var(--orin-surface-1, #141419);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.orin-activity-center__popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 60;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(520px, calc(100vh - 80px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.12));
+  border-radius: 14px;
+  background: var(--orin-surface-1, #141419);
+  color: var(--orin-text-primary, #F4F3F8);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+}
+
+.orin-activity-center__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--orin-border, rgba(255, 255, 255, 0.08));
+}
+
+.orin-activity-center__header-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.orin-activity-center__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.orin-activity-center__subtitle {
+  font-size: 11px;
+  color: var(--orin-text-secondary, #9E9BAE);
+}
+
+.orin-activity-center__mark-read-btn {
+  padding: 4px 8px;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  background: var(--orin-surface-2, #1A1A21);
+  color: var(--orin-text-secondary, #9E9BAE);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.orin-activity-center__mark-read-btn:hover {
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.orin-activity-center__error {
+  margin: 8px 14px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--orin-danger, #F87171);
+  font-size: 12px;
+}
+
+.orin-activity-center__empty {
+  padding: 24px 16px;
+  text-align: center;
+}
+
+.orin-activity-center__empty-text {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--orin-text-secondary, #9E9BAE);
+}
+
+.orin-activity-center__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+
+.orin-activity-center__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.orin-activity-center__section-title {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--orin-text-secondary, #9E9BAE);
+}
+
+.orin-activity-center__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.orin-activity-center__card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.08));
+  border-radius: 10px;
+  background: var(--orin-surface-2, #1A1A21);
+}
+
+.orin-activity-center__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.orin-activity-center__session-link {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--orin-accent, #B4A4EF);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orin-activity-center__session-link:hover {
+  text-decoration: underline;
+}
+
+.orin-activity-center__kind-pill {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--orin-surface-1, #141419);
+  color: var(--orin-text-secondary, #9E9BAE);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.orin-activity-center__card-summary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.orin-activity-center__card-reason {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--orin-text-secondary, #9E9BAE);
+}
+
+.orin-activity-center__code {
+  display: block;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--orin-surface-1, #141419);
+  color: var(--orin-text-primary, #F4F3F8);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.orin-activity-center__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.orin-activity-center__btn {
+  padding: 5px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.1));
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.orin-activity-center__btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.orin-activity-center__btn--primary {
+  background: var(--orin-accent, #B4A4EF);
+  border-color: var(--orin-accent, #B4A4EF);
+  color: var(--orin-surface-1, #141419);
+}
+
+.orin-activity-center__btn--secondary {
+  background: var(--orin-surface-1, #141419);
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.orin-activity-center__btn--danger {
+  background: transparent;
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--orin-danger, #F87171);
+}
+
+.orin-activity-center__update-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.orin-activity-center__update-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.orin-activity-center__update-meta {
+  font-size: 11px;
+  color: var(--orin-text-secondary, #9E9BAE);
+}
