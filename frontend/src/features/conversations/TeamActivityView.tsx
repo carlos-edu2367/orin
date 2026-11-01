@@ -134,18 +134,25 @@ function statusLabelFor(status: TeamAgentStatus): string {
   }
 }
 
-function deriveAgentsFromEvents(events?: ConversationActivityEvent[]): TeamAgentCardData[] {
+function deriveAgentsFromEvents(
+  events?: ConversationActivityEvent[],
+  running = true,
+): TeamAgentCardData[] {
   if (!events || events.length === 0) return []
 
   const relevantEvents = events.filter((ev) => {
     if (!ev || typeof ev !== 'object') return false
     const cleanId = sanitizeText(ev.agentId)
+    if (cleanId === 'main' || cleanId === 'assistant' || cleanId.endsWith(':main')) {
+      return false
+    }
     return (
-      ev.kind === 'tool' ||
       ev.kind === 'agent' ||
+      ev.kind === 'subagent' ||
       Boolean(ev.parentAgentId) ||
       Boolean(sanitizeText(ev.agentName)) ||
-      (Boolean(cleanId) && cleanId !== 'main' && cleanId !== 'assistant')
+      (ev.kind === 'tool' && Boolean(cleanId)) ||
+      Boolean(cleanId)
     )
   })
 
@@ -209,6 +216,9 @@ function deriveAgentsFromEvents(events?: ConversationActivityEvent[]): TeamAgent
       } else {
         status = 'running'
       }
+    }
+    if (!running && (status === 'running' || status === 'queued')) {
+      status = 'completed'
     }
 
     let durationLabel = '1 min'
@@ -318,6 +328,7 @@ export function TeamActivityView({
   finalDeliverable,
   recentActivities,
   paused = false,
+  running = true,
   completedStepsCount,
   totalStepsCount,
   onPauseTeam,
@@ -346,7 +357,7 @@ export function TeamActivityView({
           : 0
 
     const defaultStepNames = ['Entender', 'Dividir', 'Executar', 'Revisar', 'Entregar']
-    const isAllCompleted = total > 0 && completed >= total
+    const isAllCompleted = !running || (total > 0 && completed >= total)
     const steps = Array.from({ length: total }, (_, idx) => {
       const stepNumber = idx + 1
       const stepCompleted =
@@ -367,7 +378,7 @@ export function TeamActivityView({
       statusText: isAllCompleted ? 'Concluído' : 'Em andamento',
       steps,
     }
-  }, [todos, completedStepsCount, totalStepsCount])
+  }, [todos, completedStepsCount, totalStepsCount, running])
 
   const resolvedAgents = useMemo(() => {
     if (agents && agents.length > 0) {
@@ -377,10 +388,11 @@ export function TeamActivityView({
         roleName: sanitizeText(agent.roleName, 'Especialista'),
         currentTask: sanitizeText(agent.currentTask, 'Processando etapa'),
         durationLabel: sanitizeText(agent.durationLabel, '1 min'),
+        status: !running && (agent.status === 'running' || agent.status === 'queued') ? 'completed' : agent.status,
       }))
     }
-    return deriveAgentsFromEvents(events)
-  }, [agents, events])
+    return deriveAgentsFromEvents(events, running)
+  }, [agents, events, running])
 
   const resolvedDecision = useMemo<TeamPendingDecision | null>(() => {
     if (pendingDecision === null) return null

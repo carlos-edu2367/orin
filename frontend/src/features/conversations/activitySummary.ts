@@ -202,23 +202,35 @@ export function applyEventToGroup(group: ActivityGroup, event: ConversationActiv
   if (event.type === 'tool.progressed') {
     const matchIndex = event.invocationId
       ? group.events.findIndex((item) => item.invocationId === event.invocationId && item.type !== 'tool.finished')
-      : findLastOpenToolIndex(group.events)
+      : findLastOpenToolIndex(group.events, event.toolName)
     if (matchIndex >= 0) {
       const existing = group.events[matchIndex]
+      const isAlreadyFinished =
+        existing.type === 'tool.finished' ||
+        existing.type === 'tool.completed' ||
+        existing.type === 'tool.failed'
+      const nextState = isAlreadyFinished ? existing.state : event.state
+      const nextSummary =
+        isAlreadyFinished && existing.summary
+          ? existing.summary
+          : event.summary || existing.summary
       group.events[matchIndex] = {
         ...existing,
         toolName: event.toolName ?? existing.toolName,
         toolKind: event.toolKind ?? existing.toolKind,
-        status: event.status ?? existing.status,
+        status: isAlreadyFinished ? existing.status : event.status ?? existing.status,
         phase: event.phase ?? existing.phase,
         bytesReceived: event.bytesReceived ?? existing.bytesReceived,
         payload: event.payload ?? existing.payload,
-        summary: event.summary || existing.summary,
+        summary: nextSummary,
+        command: event.command ?? existing.command,
+        description: event.description ?? existing.description,
+        bashOutput: event.bashOutput ?? existing.bashOutput,
         outputTail: event.outputTail ?? existing.outputTail,
         elapsedMs: event.elapsedMs ?? existing.elapsedMs,
-        state: 'waiting_tool',
+        state: nextState,
       }
-      group.state = 'waiting_tool'
+      group.state = nextState
       group.label = groupLabel(group)
       return
     }
@@ -237,10 +249,18 @@ export function applyEventToGroup(group: ActivityGroup, event: ConversationActiv
   group.label = groupLabel(group)
 }
 
-function findLastOpenToolIndex(events: ConversationActivityEvent[]): number {
+function findLastOpenToolIndex(events: ConversationActivityEvent[], toolName?: string): number {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const item = events[index]
-    if (item.kind === 'tool' && item.type !== 'tool.finished') return index
+    if (
+      item.kind === 'tool' &&
+      item.type !== 'tool.finished' &&
+      item.type !== 'tool.completed' &&
+      item.type !== 'tool.failed' &&
+      (!toolName || !item.toolName || item.toolName === toolName)
+    ) {
+      return index
+    }
   }
   return -1
 }
@@ -262,23 +282,29 @@ const TERMINAL_TURN_TYPES = new Set([
  * synthetic `invocationId` like `tool-call:1`, while also settling any
  * `tool.progressed` events that lacked an `invocationId`.
  */
-export function computeSettledEventIds(events: ConversationActivityEvent[]): Set<string> {
+export function computeSettledEventIds(
+  events: ConversationActivityEvent[],
+  turnCompleted = false,
+): Set<string> {
   const settled = new Set<string>()
   const openByTurn = new Map<string, ConversationActivityEvent[]>()
 
   for (const event of events) {
-    const turnScope = `${event.agentId}:${event.turnId ?? ''}`
+    const turnScope = `${event.agentId ?? ''}:${event.turnId ?? ''}`
+    const eventCallId = event.invocationId ?? event.toolCallId
     if (event.type === 'tool.started') {
       const list = openByTurn.get(turnScope) ?? []
       const remaining: ConversationActivityEvent[] = []
       for (const openEvent of list) {
+        const openCallId = openEvent.invocationId ?? openEvent.toolCallId
         const isPreStartProgress =
           openEvent.type === 'tool.progressed' &&
-          (event.invocationId
-            ? openEvent.invocationId === event.invocationId || !openEvent.invocationId
+          (eventCallId
+            ? openCallId === eventCallId || !openCallId
             : true)
         if (isPreStartProgress) {
-          settled.add(openEvent.eventId)
+          if (openEvent.eventId) settled.add(openEvent.eventId)
+          if (openEvent.id) settled.add(openEvent.id)
         } else {
           remaining.push(openEvent)
         }
@@ -293,16 +319,18 @@ export function computeSettledEventIds(events: ConversationActivityEvent[]): Set
       openByTurn.set(turnScope, list)
       continue
     }
-    if (event.type === 'tool.finished') {
+    if (event.type === 'tool.finished' || event.type === 'tool.completed' || event.type === 'tool.failed') {
       const list = openByTurn.get(turnScope)
       if (!list || list.length === 0) continue
       const remaining: ConversationActivityEvent[] = []
       for (const openEvent of list) {
-        const matchesInvocation = event.invocationId
-          ? openEvent.invocationId === event.invocationId || !openEvent.invocationId
+        const openCallId = openEvent.invocationId ?? openEvent.toolCallId
+        const matchesInvocation = eventCallId
+          ? openCallId === eventCallId || !openCallId
           : true
         if (matchesInvocation) {
-          settled.add(openEvent.eventId)
+          if (openEvent.eventId) settled.add(openEvent.eventId)
+          if (openEvent.id) settled.add(openEvent.id)
         } else {
           remaining.push(openEvent)
         }
@@ -313,12 +341,25 @@ export function computeSettledEventIds(events: ConversationActivityEvent[]): Set
     if (TERMINAL_TURN_TYPES.has(event.type) && !event.parentAgentId) {
       for (const [scope, list] of openByTurn.entries()) {
         if (scope === turnScope || (event.turnId && scope.endsWith(`:${event.turnId}`))) {
-          for (const openEvent of list) settled.add(openEvent.eventId)
+          for (const openEvent of list) {
+            if (openEvent.eventId) settled.add(openEvent.eventId)
+            if (openEvent.id) settled.add(openEvent.id)
+          }
           openByTurn.set(scope, [])
         }
       }
     }
   }
+
+  if (turnCompleted) {
+    for (const list of openByTurn.values()) {
+      for (const openEvent of list) {
+        if (openEvent.eventId) settled.add(openEvent.eventId)
+        if (openEvent.id) settled.add(openEvent.id)
+      }
+    }
+  }
+
   return settled
 }
 
@@ -446,8 +487,9 @@ function toolGroupLabel(group: ActivityGroup): string {
   // person narrating their own work would say.
   const toolEvents = group.events.filter((event) => event.kind === 'tool')
   const latest = toolEvents.at(-1) ?? group.events.at(-1) ?? group.events[0]
-  if (toolEvents.length > 1 && latest.summary.startsWith('$')) return 'Executando comandos'
-  return latest.summary || `Usou ${toolKindLabel(latest.toolKind)}`
+  const summaryText = latest.summary ?? ''
+  if (toolEvents.length > 1 && summaryText.startsWith('$')) return 'Executando comandos'
+  return summaryText || `Usou ${toolKindLabel(latest.toolKind)}`
 }
 
 function agentLabel(event: ConversationActivityEvent): string {
@@ -498,7 +540,7 @@ type ActionClass = 'read' | 'edit' | 'command' | 'web' | 'memory' | 'skill' | 't
 
 const READ_TOOLS = new Set(['read_file', 'view_file', 'transcribe_pdf', 'list_files', 'search_files', 'search_code', 'project_map', 'read_process_output'])
 const EDIT_TOOLS = new Set(['write_file', 'edit_file', 'write_contract'])
-const COMMAND_TOOLS = new Set(['run_command', 'stop_process', 'verify_project', 'verify_frontend'])
+const COMMAND_TOOLS = new Set(['run_command', 'bash', 'powershell', 'stop_process', 'verify_project', 'verify_frontend'])
 
 function actionClass(event: ConversationActivityEvent): ActionClass {
   const name = event.toolName ?? ''

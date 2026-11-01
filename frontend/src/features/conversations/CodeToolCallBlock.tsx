@@ -5,6 +5,7 @@ export type CodeToolCallBlockProps = {
   event: ConversationActivityEvent
   onOpenFile?: (path: string) => void
   defaultDiffOpen?: boolean
+  defaultExpanded?: boolean
 }
 
 export type ToolVisualStatus = 'completed' | 'running' | 'failed' | 'muted'
@@ -73,8 +74,10 @@ export function CodeToolCallBlock({
   event,
   onOpenFile,
   defaultDiffOpen = true,
+  defaultExpanded,
 }: CodeToolCallBlockProps) {
   const toolName = event.toolName ?? 'tool'
+  const isShellTool = toolName === 'run_command' || toolName === 'bash' || toolName === 'powershell'
   const rawFilePath = event.filePath ?? event.path ?? event.diff?.path ?? ''
   const filePath = rawFilePath || (toolName === 'read_file' ? extractFilePathFromSummary(event.summary) : '')
   const hunks: Array<StructuredPatchHunk | ActivityDiffHunk> =
@@ -89,9 +92,9 @@ export function CodeToolCallBlock({
   const totalDiffLines = hunks.reduce((sum, hunk) => sum + hunk.lines.length, 0)
   const hasLongDiff = totalDiffLines > DIFF_PREVIEW_LINE_LIMIT
 
-  const [diffOpen, setDiffOpen] = useState(defaultDiffOpen)
-  const [diffExpanded, setDiffExpanded] = useState(false)
-  const [terminalExpanded, setTerminalExpanded] = useState(false)
+  const [diffOpen, setDiffOpen] = useState(defaultExpanded ?? defaultDiffOpen)
+  const [diffExpanded, setDiffExpanded] = useState(Boolean(defaultExpanded))
+  const [terminalExpanded, setTerminalExpanded] = useState(Boolean(defaultExpanded))
 
   const visualStatus = resolveVisualStatus(event)
   const isCancelled =
@@ -142,7 +145,7 @@ export function CodeToolCallBlock({
 
   // Combine terminal output from bashOutput (stdout / stderr) or fallback to outputTail / output / content / detail
   const rawTerminalOutput = (() => {
-    if (toolName !== 'run_command' && toolName !== 'bash') return ''
+    if (!isShellTool) return ''
     const parts: string[] = []
     const cleanStdout = sanitizeTerminalText(event.bashOutput?.stdout)
     const cleanStderr = sanitizeTerminalText(event.bashOutput?.stderr)
@@ -167,9 +170,13 @@ export function CodeToolCallBlock({
       ? terminalLines.slice(0, TERMINAL_PREVIEW_LINE_LIMIT)
       : terminalLines
 
+  const effectiveShellDescription =
+    bashDescription ||
+    (isShellTool && arg && arg !== bashCommand && arg !== 'comando' ? arg : '')
+
   const showCommandSubheader =
-    (toolName === 'run_command' || toolName === 'bash') &&
-    Boolean(bashDescription && bashCommand && bashCommand !== bashDescription)
+    isShellTool &&
+    Boolean(effectiveShellDescription && bashCommand && bashCommand !== effectiveShellDescription)
 
   const errorDetailText = (() => {
     if (visualStatus !== 'failed') return ''
@@ -275,7 +282,7 @@ export function CodeToolCallBlock({
             </span>
           )}
 
-          {(toolName === 'run_command' || toolName === 'bash') && isBackground && (
+          {isShellTool && isBackground && (
             <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] text-amber-300">
               <span>em background</span>
               {detectedUrl && (
@@ -317,7 +324,7 @@ export function CodeToolCallBlock({
               cancelado
             </span>
           ) : (
-            (toolName === 'run_command' || toolName === 'bash') &&
+            isShellTool &&
             exitCode !== undefined &&
             exitCode !== null && (
               <span
@@ -405,7 +412,7 @@ export function CodeToolCallBlock({
         </div>
       )}
 
-      {(toolName === 'run_command' || toolName === 'bash') &&
+      {isShellTool &&
         (showCommandSubheader || visibleTerminalLines.length > 0) && (
           <div
             className="border-t border-[var(--border-subtle)] bg-[var(--bg-subtle)] px-3 py-2 font-mono text-[12px] leading-5"
@@ -492,15 +499,31 @@ export function formatToolSignature(
         arg: filePath || cleanLabel || (isFailed ? 'arquivo' : event.summary || 'arquivo'),
       }
     case 'run_command':
-    case 'bash': {
-      const summaryCmd = event.summary?.startsWith('$')
-        ? event.summary.replace(/^\$\s*/, '').trim()
+    case 'bash':
+    case 'powershell': {
+      const rawSummary = event.summary ?? ''
+      const hadExecutandoPrefix = /^Executando:\s*/i.test(rawSummary)
+      const cleanSummary = rawSummary.replace(/^Executando:\s*/i, '').trim()
+      const summaryCmd = cleanSummary.startsWith('$')
+        ? cleanSummary.replace(/^\$\s*/, '').trim()
         : ''
+      const inferredDescription =
+        bashDescription ||
+        ((hadExecutandoPrefix || toolName === 'powershell') &&
+        cleanSummary &&
+        !cleanSummary.startsWith('$') &&
+        cleanSummary.toLowerCase() !== toolName.toLowerCase()
+          ? cleanSummary
+          : '')
+      const safeLabel =
+        cleanLabel && cleanLabel.toLowerCase() !== toolName.toLowerCase()
+          ? cleanLabel
+          : ''
       return {
         verb: 'Bash',
         arg: isFailed
-          ? bashCommand || bashDescription || summaryCmd || cleanLabel || 'comando'
-          : bashDescription || bashCommand || cleanLabel || summaryCmd || event.summary || 'comando',
+          ? bashCommand || inferredDescription || summaryCmd || safeLabel || 'comando'
+          : inferredDescription || bashCommand || safeLabel || summaryCmd || cleanSummary || 'comando',
       }
     }
     case 'search_files':
@@ -556,10 +579,14 @@ export function formatToolSignature(
       return { verb: 'EnterPlanMode', arg: '' }
     case 'exit_plan_mode':
       return { verb: 'ExitPlanMode', arg: '' }
-    default:
+    default: {
+      const cleanSummary = event.summary
+        ? event.summary.replace(/^Executando:\s*/i, '').trim()
+        : ''
       return {
         verb: toolName,
-        arg: cleanLabel || filePath || (isFailed ? '' : event.summary || ''),
+        arg: cleanLabel || filePath || (isFailed ? '' : cleanSummary || ''),
       }
+    }
   }
 }

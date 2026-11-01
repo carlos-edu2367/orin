@@ -70,6 +70,7 @@ const CODE_TOOL_NAMES = new Set([
   'write_file',
   'run_command',
   'bash',
+  'powershell',
   'search_files',
   'glob_files',
   'list_files',
@@ -153,6 +154,7 @@ function isCodeToolEvent(
     mode !== 'chat' &&
     (event.kind === 'tool' ||
       event.type === 'tool.started' ||
+      event.type === 'tool.progressed' ||
       event.type === 'tool.completed' ||
       event.type === 'tool.finished' ||
       event.type === 'tool.failed')
@@ -162,10 +164,32 @@ function isCodeToolEvent(
   return false
 }
 
-function normalizeCodeToolEvent(event: ConversationActivityEvent): ConversationActivityEvent {
+function normalizeCodeToolEvent(
+  event: ConversationActivityEvent,
+  turnCompleted = false,
+): ConversationActivityEvent {
   const toolName = resolveEventToolName(event)
-  if (!toolName || event.toolName === toolName) return event
-  return { ...event, toolName }
+  let next = !toolName || event.toolName === toolName ? event : { ...event, toolName }
+  if (
+    turnCompleted &&
+    (next.state === 'waiting_tool' ||
+      next.state === 'working' ||
+      next.state === 'waiting_agent' ||
+      next.state === 'retrying' ||
+      next.status === 'running' ||
+      next.status === 'in_progress' ||
+      next.status === 'started')
+  ) {
+    next = {
+      ...next,
+      state: 'completed',
+      status: 'succeeded',
+      ...(typeof next.summary === 'string'
+        ? { summary: next.summary.replace(/^Executando:\s*/i, '') }
+        : {}),
+    }
+  }
+  return next
 }
 
 function turnModifiedTurnId(items: TimelineRenderItem[]): string | null {
@@ -201,7 +225,7 @@ function formatPermissionReceiptLabel(event: ConversationActivityEvent): string 
     ''
   const compactTarget = rawTarget.length > 72 ? `${rawTarget.slice(0, 69)}…` : rawTarget
 
-  if (toolName === 'run_command' || toolName === 'bash') {
+  if (toolName === 'run_command' || toolName === 'bash' || toolName === 'powershell') {
     return compactTarget ? `Bash(${compactTarget})` : 'Bash'
   }
   if (toolName === 'edit_file' || toolName === 'notebook_edit') {
@@ -364,7 +388,7 @@ export function summarizeCodeToolBatch(events: ConversationActivityEvent[]): str
     return `Buscou em ${n} ${n === 1 ? 'padrão' : 'padrões'}`
   }
 
-  if (toolNames.every((t) => t === 'run_command' || t === 'bash')) {
+  if (toolNames.every((t) => t === 'run_command' || t === 'bash' || t === 'powershell')) {
     return `Executou ${n} ${n === 1 ? 'comando' : 'comandos'}`
   }
 
@@ -713,6 +737,7 @@ export function TurnTimeline({
     const requestChangesHandler = onRequestPlanChanges ?? onRequestChanges
 
     const isEventSettled =
+      turnCompleted ||
       event.state === 'completed' ||
       event.state === 'failed' ||
       event.state === 'cancelled' ||
@@ -794,7 +819,7 @@ export function TurnTimeline({
     }
 
     while (index < toolEvents.length) {
-      const current = normalizeCodeToolEvent(toolEvents[index])
+      const current = normalizeCodeToolEvent(toolEvents[index], turnCompleted)
       const currentStatus = resolveVisualStatus(current)
       const currentSig = formatToolSignature(current)
 
@@ -802,7 +827,7 @@ export function TurnTimeline({
         const failedRun: ConversationActivityEvent[] = [current]
         let lookahead = index + 1
         while (lookahead < toolEvents.length) {
-          const candidate = normalizeCodeToolEvent(toolEvents[lookahead])
+          const candidate = normalizeCodeToolEvent(toolEvents[lookahead], turnCompleted)
           const candidateStatus = resolveVisualStatus(candidate)
           const candidateSig = formatToolSignature(candidate)
           if (candidateStatus === 'failed' && candidateSig.verb === currentSig.verb) {
@@ -1300,4 +1325,3 @@ export function TurnTimeline({
     </div>
   )
 }
-

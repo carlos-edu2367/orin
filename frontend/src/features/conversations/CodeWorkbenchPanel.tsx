@@ -28,6 +28,7 @@ export type CodeWorkbenchPanelProps = {
   running?: boolean
   elapsedLabel?: string | null
   selectedFilePath?: string | null
+  selectedPath?: string | null
   onSelectFile?: (path: string | null) => void
   onClose?: () => void
 }
@@ -225,7 +226,7 @@ export function CodeWorkbenchPanel({
 
   const changedCount = useMemo(() => {
     const modifiedOrAdded = files.filter((item) => item.status !== 'inspected')
-    return modifiedOrAdded.length > 0 ? modifiedOrAdded.length : files.length
+    return modifiedOrAdded.length
   }, [files])
 
   return (

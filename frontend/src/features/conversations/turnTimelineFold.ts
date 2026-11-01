@@ -28,6 +28,7 @@ export type TimelineActivityItem = {
   kind: 'activity'
   group: ActivityGroup
   toolCall?: TimelineToolCall
+  event?: TimelineToolCall
 }
 export type TimelineThoughtItem = {
   id: string
@@ -231,6 +232,32 @@ export type BuildTurnTimelineOptions = {
   turnCompleted?: boolean
 }
 
+function settleEventForCompletedTurn(event: ConversationActivityEvent): ConversationActivityEvent {
+  const isRunningState =
+    event.state === 'waiting_tool' ||
+    event.state === 'working' ||
+    event.state === 'waiting_agent' ||
+    event.state === 'retrying'
+  const isRunningStatus =
+    event.status === 'running' ||
+    event.status === 'in_progress' ||
+    event.status === 'started'
+  const hasTransientPrefix = typeof event.summary === 'string' && /^Executando:\s*/i.test(event.summary)
+
+  if (!isRunningState && !isRunningStatus && !hasTransientPrefix) {
+    return event
+  }
+
+  return {
+    ...event,
+    ...(isRunningState ? { state: 'completed' as const } : {}),
+    ...(isRunningStatus || isRunningState ? { status: 'succeeded' as const } : {}),
+    ...(typeof event.summary === 'string'
+      ? { summary: event.summary.replace(/^Executando:\s*/i, '') }
+      : {}),
+  }
+}
+
 /**
  * One assistant turn folded into the order it actually happened: narration
  * text broken wherever a tool or agent event landed, instead of prose
@@ -240,7 +267,7 @@ export type BuildTurnTimelineOptions = {
  */
 export function buildTurnTimeline(
   events: ConversationActivityEvent[],
-  turnIdOrOptions?: string | BuildTurnTimelineOptions,
+  turnIdOrOptions?: string | boolean | BuildTurnTimelineOptions,
   messageIdOrCompleted?: string | boolean,
   completeContentOrCompleted: string | boolean = '',
   turnCompletedArg = false,
@@ -250,7 +277,10 @@ export function buildTurnTimeline(
   let completeContent = ''
   let explicitTurnCompleted = turnCompletedArg
 
-  if (typeof turnIdOrOptions === 'object' && turnIdOrOptions !== null) {
+  if (typeof turnIdOrOptions === 'boolean') {
+    explicitTurnCompleted = turnIdOrOptions
+    turnId = events.find((e) => e.turnId)?.turnId ?? ''
+  } else if (typeof turnIdOrOptions === 'object' && turnIdOrOptions !== null) {
     turnId = turnIdOrOptions.turnId ?? events.find((e) => e.turnId)?.turnId ?? ''
     messageId = turnIdOrOptions.messageId ?? ''
     completeContent = turnIdOrOptions.completeContent ?? ''
@@ -314,7 +344,7 @@ export function buildTurnTimeline(
       id: `activity:${group.id}:${firstEvent.originEventId ?? firstEvent.eventId}`,
       kind: 'activity',
       group,
-      ...(group.kind === 'tool' && latestTool ? { toolCall: latestTool } : {}),
+      ...(group.kind === 'tool' && latestTool ? { toolCall: latestTool, event: latestTool } : {}),
     })
     group = null
   }
@@ -361,7 +391,8 @@ export function buildTurnTimeline(
     thoughtBuffer = null
   }
 
-  for (const event of turnEvents) {
+  for (const rawEvent of turnEvents) {
+    const event = isTurnCompleted ? settleEventForCompletedTurn(rawEvent) : rawEvent
     if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
       flushGroup()
       flushText()
@@ -427,7 +458,7 @@ export function buildTurnTimeline(
     if (TERMINAL_TURN_EVENT_TYPES.has(event.type) && !event.parentAgentId) {
       flushThought(true, event.occurredAt)
     }
-    if (!isRenderable(event, settled)) {
+    if (!isRenderable(rawEvent, settled)) {
       if (event.type.startsWith('tool.')) {
         flushThought(true, event.occurredAt)
       }
@@ -461,6 +492,7 @@ export function buildTurnTimeline(
       if (existingWaveItem) {
         applyEventToGroup(existingWaveItem.group, event)
         existingWaveItem.toolCall = event
+        existingWaveItem.event = event
         continue
       }
       const createdGroup: ActivityGroup = {
@@ -480,6 +512,7 @@ export function buildTurnTimeline(
         kind: 'activity',
         group: createdGroup,
         toolCall: event,
+        event,
       }
       items.push(waveItem)
       subagentWaveItems.set(key, waveItem)
@@ -576,4 +609,3 @@ export function buildMessageTimelines(
   }
   return { timelines, claimedTurnIds }
 }
-

@@ -262,6 +262,16 @@ export function ChatPage() {
       setLoadingOlderActivities(false)
       loadingOlderRef.current = false
       dispatch({ type: 'snapshot', events: next.activities, cursor: next.activity_cursor })
+    } else if (next.state !== 'working' && !RUNNING_STATES.has(next.state)) {
+      if (next.activity_cursor) {
+        cursorRef.current = next.activity_cursor
+      }
+      dispatch({
+        type: 'reconcile_snapshot',
+        events: next.activities,
+        cursor: next.activity_cursor,
+        conversationState: next.state,
+      })
     }
     return next
   }, [client, conversationId])
@@ -1898,11 +1908,22 @@ export function ChatPage() {
     ?? conversation?.workspace?.projectName
     ?? (activeConvProjectId ? availableProjects.find((p) => p.project_id === activeConvProjectId)?.name ?? null : null)
 
-  const { codeWorkbenchFiles, codeWorkbenchTerminalEntries, detectedPreviewUrl, latestFilePatchesByPath } = useMemo(() => {
+  const { codeWorkbenchFiles, changedWorkbenchFiles, codeWorkbenchTerminalEntries, detectedPreviewUrl, latestFilePatchesByPath } = useMemo(() => {
     const fileMap = new Map<string, CodeWorkbenchFileItem>()
     const terminalList: CodeWorkbenchTerminalEntry[] = []
     const patchesByPath: Record<string, StructuredPatchHunk[]> = {}
     let previewUrl: string | undefined
+    const ignoredWorkbenchTools = new Set([
+      'search_files',
+      'search_code',
+      'grep',
+      'glob',
+      'glob_files',
+      'list_files',
+      'list_directory',
+      'project_map',
+      'todo_write',
+    ])
 
     for (const event of activity.events) {
       const candidateUrl = event.detectedUrl ?? event.bashOutput?.detected_url
@@ -1912,26 +1933,35 @@ export function ChatPage() {
 
       const toolName = (event.toolName ?? '').toLowerCase()
       const toolKind = (event.toolKind ?? '').toLowerCase()
-      const rawPath =
-        event.path
-        ?? event.filePath
-        ?? event.diff?.path
-        ?? (toolKind === 'filesystem' && event.label && !event.todos ? event.label : undefined)
+      const rawPath = ignoredWorkbenchTools.has(toolName)
+        ? undefined
+        : event.path
+          ?? event.filePath
+          ?? event.diff?.path
+          ?? (typeof event.payload?.file_path === 'string'
+            ? event.payload.file_path
+            : typeof event.payload?.path === 'string'
+              ? event.payload.path
+              : undefined)
 
       const isWriteOrEdit =
         toolName === 'write_file'
         || toolName === 'edit_file'
         || toolName === 'create_file'
+        || toolName === 'notebook_edit'
         || event.type === 'code_mode.file_edited'
         || Boolean(event.structuredPatch?.length)
         || Boolean(event.diff)
       const isRead =
-        toolName === 'read_file'
-        || toolName === 'view_file'
-        || (toolKind === 'filesystem' && !isWriteOrEdit && toolName !== 'todo_write')
+        !ignoredWorkbenchTools.has(toolName)
+        && (
+          toolName === 'read_file'
+          || toolName === 'view_file'
+          || (toolKind === 'filesystem' && !isWriteOrEdit)
+        )
 
       if (rawPath && (isWriteOrEdit || isRead)) {
-        const cleanPath = rawPath.trim()
+        const cleanPath = rawPath.trim().replace(/\\/g, '/').replace(/^\.\//, '')
         if (cleanPath) {
           const patch = event.structuredPatch ?? event.diff?.structured_patch
           if (patch && patch.length > 0) {
@@ -1954,6 +1984,7 @@ export function ChatPage() {
         toolKind === 'terminal'
         || toolName === 'run_command'
         || toolName === 'bash'
+        || toolName === 'powershell'
         || Boolean(event.command)
         || Boolean(event.bashOutput?.command)
 
@@ -1977,8 +2008,10 @@ export function ChatPage() {
       }
     }
 
+    const allWorkbenchFiles = Array.from(fileMap.values())
     return {
-      codeWorkbenchFiles: Array.from(fileMap.values()),
+      codeWorkbenchFiles: allWorkbenchFiles,
+      changedWorkbenchFiles: allWorkbenchFiles.filter((file) => file.status === 'modified' || file.status === 'added'),
       codeWorkbenchTerminalEntries: terminalList,
       detectedPreviewUrl: previewUrl,
       latestFilePatchesByPath: patchesByPath,
@@ -2418,36 +2451,65 @@ export function ChatPage() {
                     </div>
                   )}
                   {timeline
-                    ? (
-                      <TurnTimeline
-                        items={timeline}
-                        conversationId={conversationId}
-                        client={client}
-                        defaultProvider={effectiveChatProvider ?? undefined}
-                        defaultModelId={effectiveChatModelId || undefined}
-                        models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
-                        mode={conversationMode}
-                        permissionMode={codePermissionMode}
-                        turnCompleted={isTurnFinished}
-                        turnStartedAt={isCompletedSuccessTurn ? matchedTurn?.started_at : null}
-                        turnFinishedAt={isCompletedSuccessTurn ? matchedTurn?.finished_at : null}
-                        dockActive={true}
-                        onPreview={setPreviewReference}
-                        openQuestionTurnIds={effectiveOpenQuestionTurnIds}
-                        onAnswer={submitQuestionAnswers}
-                        onMcpApprove={submitMcpApproval}
-                        onMcpDecline={declineMcpApproval}
-                        onPluginApprove={submitPluginApproval}
-                        onPluginDecline={declinePluginApproval}
-                        onToolPermission={submitToolPermissionDecision}
-                        onCodeSessionAccept={submitCodeSessionProposal}
-                        onCodeSessionDecline={declineCodeSessionProposal}
-                        onOpenRewindTurn={(turnId) => { void openRewind(turnId) }}
-                        onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
-                        onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
-                        onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
-                      />
-                    )
+                    ? (() => {
+                        const timelineTextSegments = timeline.filter(
+                          (seg): seg is { id: string; kind: 'text'; content: string } => seg.kind === 'text',
+                        )
+                        const combinedTimelineText = timelineTextSegments.map((seg) => seg.content).join('')
+                        const trimmedContent = item.content?.trim() ?? ''
+                        const trimmedTimelineText = combinedTimelineText.trim()
+                        const missingFinalContent =
+                          item.role === 'assistant' &&
+                          (item.status === 'completed' || isTurnFinished) &&
+                          trimmedContent.length > 0 &&
+                          trimmedTimelineText !== trimmedContent &&
+                          !combinedTimelineText.includes(trimmedContent)
+                            ? combinedTimelineText.length > 0 && item.content.startsWith(combinedTimelineText)
+                              ? item.content.slice(combinedTimelineText.length).trim()
+                              : trimmedContent
+                            : ''
+
+                        return (
+                          <>
+                            <TurnTimeline
+                              items={timeline}
+                              conversationId={conversationId}
+                              client={client}
+                              defaultProvider={effectiveChatProvider ?? undefined}
+                              defaultModelId={effectiveChatModelId || undefined}
+                              models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
+                              mode={conversationMode}
+                              permissionMode={codePermissionMode}
+                              turnCompleted={isTurnFinished}
+                              turnStartedAt={isCompletedSuccessTurn ? matchedTurn?.started_at : null}
+                              turnFinishedAt={isCompletedSuccessTurn ? matchedTurn?.finished_at : null}
+                              dockActive={true}
+                              onPreview={setPreviewReference}
+                              openQuestionTurnIds={effectiveOpenQuestionTurnIds}
+                              onAnswer={submitQuestionAnswers}
+                              onMcpApprove={submitMcpApproval}
+                              onMcpDecline={declineMcpApproval}
+                              onPluginApprove={submitPluginApproval}
+                              onPluginDecline={declinePluginApproval}
+                              onToolPermission={submitToolPermissionDecision}
+                              onCodeSessionAccept={submitCodeSessionProposal}
+                              onCodeSessionDecline={declineCodeSessionProposal}
+                              onOpenRewindTurn={(turnId) => { void openRewind(turnId) }}
+                              onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
+                              onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
+                              onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
+                            />
+                            {missingFinalContent.length > 0 && (
+                              <MarkdownMessage
+                                content={missingFinalContent}
+                                conversationId={conversationId}
+                                client={client}
+                                onPreview={setPreviewReference}
+                              />
+                            )}
+                          </>
+                        )
+                      })()
                     : item.role === 'assistant' && item.content
                       ? (
                         <>
@@ -2569,13 +2631,13 @@ export function ChatPage() {
                 />
               )
             })()}
-            {!loadFailure && conversationMode === 'code' && codeWorkbenchFiles.length > 0 && (
+            {!loadFailure && conversationMode === 'code' && changedWorkbenchFiles.length > 0 && (
               <div className="code-changed-files-card" data-testid="code-changed-files-card">
                 <div className="code-changed-files-card__header">
                   <div className="code-changed-files-card__summary">
                     <span className="code-changed-files-card__icon" aria-hidden="true">📄</span>
                     <span className="code-changed-files-card__count">
-                      {codeWorkbenchFiles.length} {codeWorkbenchFiles.length === 1 ? 'arquivo alterado' : 'arquivos alterados'}
+                      {changedWorkbenchFiles.length} {changedWorkbenchFiles.length === 1 ? 'arquivo alterado' : 'arquivos alterados'}
                     </span>
                     <span className="code-changed-files-card__dot" aria-hidden="true">·</span>
                     <button
@@ -2602,7 +2664,7 @@ export function ChatPage() {
                 </div>
                 {changedFilesExpanded && (
                   <ul className="code-changed-files-card__list">
-                    {codeWorkbenchFiles.map((file) => (
+                    {changedWorkbenchFiles.map((file) => (
                       <li key={file.path} className="code-changed-files-card__item">
                         <button
                           type="button"

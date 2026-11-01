@@ -772,7 +772,7 @@ function parseBashOutput(
   const bashSource = typeof payload.bash_output === 'object' && payload.bash_output !== null && !Array.isArray(payload.bash_output)
     ? (payload.bash_output as Record<string, unknown>)
     : payload
-  const isTerminalTool = toolKind === 'terminal' || toolName === 'run_command' || toolName === 'bash' || toolName === 'bash_output'
+  const isTerminalTool = toolKind === 'terminal' || toolName === 'run_command' || toolName === 'bash' || toolName === 'powershell' || toolName === 'bash_output'
   const command = optionalText(bashSource.command ?? payload.command, 4000)
   const description = optionalText(bashSource.description ?? payload.description, 500)
   const fallbackTail = typeof bashSource.output_tail === 'string' && !isRedactedValue(bashSource.output_tail)

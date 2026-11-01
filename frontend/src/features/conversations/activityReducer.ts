@@ -18,6 +18,12 @@ export type TurnActivityState = ActivityStoreState
 
 export type ActivityAction =
   | { type: 'snapshot'; events: ConversationActivityEvent[]; cursor: string }
+  | {
+      type: 'reconcile_snapshot'
+      events: ConversationActivityEvent[]
+      cursor: string
+      conversationState?: string
+    }
   | { type: 'prepend_older'; events: ConversationActivityEvent[] }
   | { type: 'event'; event: ConversationActivityEvent }
   | { type: 'cursor'; cursor: string }
@@ -106,12 +112,21 @@ function settleTurnEvents(
     if (!sameTurn) return item
     const isStuckState = ACTIVE_ACTIVITY_STATES.has(item.state)
     const isStuckStatus = item.status === 'running' || item.status === 'started' || item.status === 'in_progress'
-    if (!isStuckState && !isStuckStatus) return item
+    const hasTransientPrefix =
+      item.kind === 'tool' && typeof item.summary === 'string' && /^Executando:\s*/i.test(item.summary)
+    if (!isStuckState && !isStuckStatus && !hasTransientPrefix) return item
     mutated = true
+    const cleanedSummary =
+      item.kind === 'tool' && typeof item.summary === 'string'
+        ? item.summary.replace(/^Executando:\s*/i, '')
+        : item.summary
     return {
       ...item,
       state: isStuckState ? settledState : item.state,
-      ...(isStuckStatus ? { status: settledStatus } : {}),
+      ...(isStuckStatus || (isStuckState && (item.kind === 'tool' || item.kind === 'subagent'))
+        ? { status: settledStatus }
+        : {}),
+      ...(cleanedSummary !== undefined ? { summary: cleanedSummary } : {}),
     }
   })
   return mutated ? next : events
@@ -159,6 +174,8 @@ export function createActivityState(cursor = '0'): ActivityStoreState {
   }
 }
 
+export const initialActivityState = createActivityState
+
 export function applyActivityEvent(state: ActivityStoreState, event: ConversationActivityEvent): ActivityStoreState {
   // Identity is the real duplicate guard. The cursor comparison only blocks a
   // genuine regression: if a cursor cannot be ordered at all, dropping the event
@@ -172,11 +189,16 @@ export function applyActivityEvent(state: ActivityStoreState, event: Conversatio
   const rawTodos = event.todos && event.todos.length > 0 ? event.todos : state.todos
   const nextTodos = outcome ? settleTodos(rawTodos, outcome) : rawTodos
   const { activePhase, status } = derivePhaseAndStatus(state.activePhase, state.status, event, outcome)
+  const nextConnection =
+    state.connection === 'connecting' || state.connection === 'degraded'
+      ? 'live'
+      : state.connection
 
   return {
     ...state,
     events: trimActivityEvents([...baseEvents, event], EVENT_LIMIT),
-    cursor: event.cursor,
+    cursor: event.cursor ?? state.cursor,
+    connection: nextConnection,
     resyncRequired: false,
     todos: nextTodos,
     activePhase,
@@ -219,6 +241,67 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
         status,
       }
     }
+    case 'reconcile_snapshot': {
+      const snapshotById = new Map<string, ConversationActivityEvent>()
+      for (const item of action.events) {
+        snapshotById.set(item.eventId, item)
+      }
+      const mergedEvents: ConversationActivityEvent[] = state.events.map(
+        (existing) => snapshotById.get(existing.eventId) ?? existing,
+      )
+      const existingIds = new Set(mergedEvents.map((item) => item.eventId))
+      for (const item of action.events) {
+        if (!existingIds.has(item.eventId)) {
+          mergedEvents.push(item)
+          existingIds.add(item.eventId)
+        }
+      }
+      let settled: ConversationActivityEvent[] = []
+      let todos: TodoItem[] = state.todos
+      let activePhase: string | null = state.activePhase
+      let status: TurnLifecycleStatus = state.status
+      for (const item of mergedEvents) {
+        if (item.todos && item.todos.length > 0) {
+          todos = item.todos
+        }
+        const outcome = resolveTurnOutcome(item, settled)
+        if (outcome) {
+          settled = settleTurnEvents(settled, item.turnId, outcome)
+          todos = settleTodos(todos, outcome)
+        }
+        settled.push(item)
+        const derived = derivePhaseAndStatus(activePhase, status, item, outcome)
+        activePhase = derived.activePhase
+        status = derived.status
+      }
+      const convState = action.conversationState
+      const terminalConvOutcome: 'completed' | 'failed' | 'cancelled' | null =
+        convState === 'completed' || convState === 'completed_with_caveats'
+          ? 'completed'
+          : convState === 'failed' || convState === 'blocked'
+            ? 'failed'
+            : convState === 'cancelled' || convState === 'canceled'
+              ? 'cancelled'
+              : null
+      if (terminalConvOutcome) {
+        settled = settleTurnEvents(settled, undefined, terminalConvOutcome)
+        todos = settleTodos(todos, terminalConvOutcome)
+        activePhase = null
+        status = terminalConvOutcome
+      }
+      const nextCursor = isCursorRegression(state.cursor, action.cursor)
+        ? state.cursor
+        : action.cursor || state.cursor
+      return {
+        ...state,
+        events: trimActivityEvents(settled, EVENT_LIMIT),
+        cursor: nextCursor,
+        resyncRequired: false,
+        todos,
+        activePhase,
+        status,
+      }
+    }
     case 'prepend_older': {
       if (action.events.length === 0) return state
       const combined = dedupe([...action.events, ...state.events])
@@ -243,8 +326,16 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
     }
     case 'event':
       return applyActivityEvent(state, action.event)
-    case 'cursor':
-      return isCursorRegression(state.cursor, action.cursor) ? state : { ...state, cursor: action.cursor }
+    case 'cursor': {
+      const nextConnection =
+        state.connection === 'connecting' || state.connection === 'degraded'
+          ? 'live'
+          : state.connection
+      if (isCursorRegression(state.cursor, action.cursor)) {
+        return nextConnection !== state.connection ? { ...state, connection: nextConnection } : state
+      }
+      return { ...state, cursor: action.cursor, connection: nextConnection }
+    }
     case 'connection':
       return { ...state, connection: action.connection }
     case 'resync':
@@ -369,8 +460,8 @@ export function trimActivityEvents(
 }
 
 /** True only when both cursors are comparable and the next one moves backwards. */
-export function isCursorRegression(current: string, next: string): boolean {
-  if (current === next) return false
+export function isCursorRegression(current: string, next: string | undefined): boolean {
+  if (!next || current === next) return false
   const currentIndex = cursorIndex(current)
   const nextIndex = cursorIndex(next)
   if (currentIndex === null || nextIndex === null) return false
