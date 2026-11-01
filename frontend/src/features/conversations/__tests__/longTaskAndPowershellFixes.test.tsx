@@ -22,12 +22,11 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
 
   it('formats powershell tool signature cleanly without "Executando:" prefix and settles open tool events on completed turns', () => {
     const event: ConversationActivityEvent = {
-      id: 'evt_3989',
       eventId: 'evt_3989',
-      conversationId: 'conv_1',
+      cursor: 'a.28',
       turnId: 'turn_1',
-      seq: 28,
-      timestamp: '2026-04-20T12:00:00Z',
+      agentId: 'agent:conv_1:main',
+      occurredAt: '2026-04-20T12:00:00Z',
       kind: 'tool',
       type: 'tool.progressed',
       state: 'waiting_tool',
@@ -41,13 +40,13 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
 
     const timeline = buildTurnTimeline([event], true);
     expect(timeline.length).toBeGreaterThan(0);
-    const first = timeline[0] as any;
+    const first = timeline[0] as { event?: ConversationActivityEvent; toolCall?: ConversationActivityEvent };
     const settledEvent = first.event ?? first.toolCall;
     expect(settledEvent).toBeDefined();
-    expect(settledEvent.state).toBe('completed');
-    expect(settledEvent.summary).not.toMatch(/^Executando:/i);
+    expect(settledEvent!.state).toBe('completed');
+    expect(settledEvent!.summary).not.toMatch(/^Executando:/i);
 
-    render(<CodeToolCallBlock event={settledEvent} defaultExpanded={true} />);
+    render(<CodeToolCallBlock event={settledEvent!} defaultExpanded={true} />);
     expect(screen.queryByText(/powershell\(Executando:/i)).toBeNull();
     expect(screen.getByText(/Find Ashy providers\.json, mask API keys/i)).toBeTruthy();
     expect(screen.getByText(/Found providers\.json/i)).toBeTruthy();
@@ -81,28 +80,31 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
     const events: ConversationActivityEvent[] = [
       {
         eventId: 'evt_start',
-        conversationId: 'conv_1',
+        cursor: 'a.1',
         turnId: 'turn_1',
+        agentId: 'agent:conv_1:main',
         kind: 'tool',
         type: 'tool.started',
         state: 'waiting_tool',
         toolName: 'powershell',
-        toolCallId: 'call_1',
+        invocationId: 'call_1',
         label: 'PowerShell',
-        timestamp: '2026-04-20T12:00:00Z',
+        summary: 'PowerShell',
+        occurredAt: '2026-04-20T12:00:00Z',
       },
       {
         eventId: 'evt_prog',
-        conversationId: 'conv_1',
+        cursor: 'a.2',
         turnId: 'turn_1',
+        agentId: 'agent:conv_1:main',
         kind: 'tool',
         type: 'tool.progressed',
         state: 'waiting_tool',
         toolName: 'powershell',
-        toolCallId: 'call_1',
+        invocationId: 'call_1',
         label: 'PowerShell',
         summary: 'Executando: Checking status',
-        timestamp: '2026-04-20T12:00:01Z',
+        occurredAt: '2026-04-20T12:00:01Z',
       },
     ];
 
@@ -124,8 +126,9 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
       type: 'event',
       event: {
         eventId: 'evt_1',
-        conversationId: 'conv_1',
+        cursor: 'a.1',
         turnId: 'turn_1',
+        agentId: 'agent:conv_1:main',
         kind: 'tool',
         type: 'tool.progressed',
         state: 'waiting_tool',
@@ -133,7 +136,7 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
         toolName: 'powershell',
         label: 'PowerShell',
         summary: 'Executando: Inspect logs',
-        timestamp: '2026-04-20T12:00:01Z',
+        occurredAt: '2026-04-20T12:00:01Z',
       },
     });
 
@@ -158,13 +161,15 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
       type: 'event',
       event: {
         eventId: 'evt_2',
-        conversationId: 'conv_1',
+        cursor: 'a.2',
         turnId: 'turn_1',
+        agentId: 'agent:conv_1:main',
         kind: 'lifecycle',
         type: 'turn.completed',
         state: 'completed',
         label: 'Turno concluído',
-        timestamp: '2026-04-20T12:00:05Z',
+        summary: 'Turno concluído',
+        occurredAt: '2026-04-20T12:00:05Z',
       },
     });
 
@@ -177,32 +182,30 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
   it('excludes main agent tool events from TeamActivityView and settles subagents when running is false', () => {
     const events: ConversationActivityEvent[] = [
       {
-        id: 'evt_1',
         eventId: 'evt_1',
-        conversationId: 'conv_1',
+        cursor: 'a.1',
         turnId: 'turn_1',
-        seq: 1,
-        timestamp: '2026-04-20T12:00:00Z',
+        occurredAt: '2026-04-20T12:00:00Z',
         kind: 'tool',
         type: 'tool.started',
         state: 'waiting_tool',
         status: 'running',
         label: 'read_file',
+        summary: 'read_file',
         toolName: 'read_file',
         agentId: 'agent:conv_1:main',
       },
       {
-        id: 'evt_2',
         eventId: 'evt_2',
-        conversationId: 'conv_1',
+        cursor: 'a.2',
         turnId: 'turn_1',
-        seq: 2,
-        timestamp: '2026-04-20T12:00:01Z',
-        kind: 'subagent',
-        type: 'subagent.started',
+        occurredAt: '2026-04-20T12:00:01Z',
+        kind: 'agent',
+        type: 'agent.created',
         state: 'waiting_agent',
         status: 'running',
         label: 'Subagente: Researcher',
+        summary: '',
         agentId: 'sub_1',
         agentName: 'Researcher',
       },
@@ -221,8 +224,6 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
           {
             path: 'src/index.ts',
             status: 'inspected',
-            toolName: 'read_file',
-            updatedAt: '2026-04-20T12:00:00Z',
           },
         ]}
         selectedPath="src/index.ts"

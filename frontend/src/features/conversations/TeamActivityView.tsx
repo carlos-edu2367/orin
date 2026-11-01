@@ -148,7 +148,6 @@ function deriveAgentsFromEvents(
     }
     return (
       ev.kind === 'agent' ||
-      ev.kind === 'subagent' ||
       Boolean(ev.parentAgentId) ||
       Boolean(sanitizeText(ev.agentName)) ||
       (ev.kind === 'tool' && Boolean(cleanId)) ||

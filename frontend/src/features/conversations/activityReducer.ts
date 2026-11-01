@@ -123,7 +123,7 @@ function settleTurnEvents(
     return {
       ...item,
       state: isStuckState ? settledState : item.state,
-      ...(isStuckStatus || (isStuckState && (item.kind === 'tool' || item.kind === 'subagent'))
+      ...(isStuckStatus || (isStuckState && (item.kind === 'tool' || item.kind === 'agent'))
         ? { status: settledStatus }
         : {}),
       ...(cleanedSummary !== undefined ? { summary: cleanedSummary } : {}),

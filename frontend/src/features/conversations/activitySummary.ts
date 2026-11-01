@@ -291,12 +291,12 @@ export function computeSettledEventIds(
 
   for (const event of events) {
     const turnScope = `${event.agentId ?? ''}:${event.turnId ?? ''}`
-    const eventCallId = event.invocationId ?? event.toolCallId
+    const eventCallId = event.invocationId
     if (event.type === 'tool.started') {
       const list = openByTurn.get(turnScope) ?? []
       const remaining: ConversationActivityEvent[] = []
       for (const openEvent of list) {
-        const openCallId = openEvent.invocationId ?? openEvent.toolCallId
+        const openCallId = openEvent.invocationId
         const isPreStartProgress =
           openEvent.type === 'tool.progressed' &&
           (eventCallId
@@ -304,7 +304,6 @@ export function computeSettledEventIds(
             : true)
         if (isPreStartProgress) {
           if (openEvent.eventId) settled.add(openEvent.eventId)
-          if (openEvent.id) settled.add(openEvent.id)
         } else {
           remaining.push(openEvent)
         }
@@ -324,13 +323,12 @@ export function computeSettledEventIds(
       if (!list || list.length === 0) continue
       const remaining: ConversationActivityEvent[] = []
       for (const openEvent of list) {
-        const openCallId = openEvent.invocationId ?? openEvent.toolCallId
+        const openCallId = openEvent.invocationId
         const matchesInvocation = eventCallId
           ? openCallId === eventCallId || !openCallId
           : true
         if (matchesInvocation) {
           if (openEvent.eventId) settled.add(openEvent.eventId)
-          if (openEvent.id) settled.add(openEvent.id)
         } else {
           remaining.push(openEvent)
         }
@@ -343,7 +341,6 @@ export function computeSettledEventIds(
         if (scope === turnScope || (event.turnId && scope.endsWith(`:${event.turnId}`))) {
           for (const openEvent of list) {
             if (openEvent.eventId) settled.add(openEvent.eventId)
-            if (openEvent.id) settled.add(openEvent.id)
           }
           openByTurn.set(scope, [])
         }
@@ -355,7 +352,6 @@ export function computeSettledEventIds(
     for (const list of openByTurn.values()) {
       for (const openEvent of list) {
         if (openEvent.eventId) settled.add(openEvent.eventId)
-        if (openEvent.id) settled.add(openEvent.id)
       }
     }
   }
