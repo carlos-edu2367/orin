@@ -331,16 +331,29 @@ class BashTools:
                 is_dev_server_cmd = bool(_DEV_SERVER_CMD_RE.search(command))
                 ready_match_at: float | None = None
                 detected_url: str | None = None
+                exited_at: float | None = None
 
                 while process.poll() is None or t_out.is_alive() or t_err.is_alive():
                     now = time.monotonic()
                     elapsed = now - started_at
+                    if process.poll() is not None:
+                        if exited_at is None:
+                            exited_at = now
+                        elif (now - exited_at) >= 0.25:
+                            for stream_attr in ("stdout", "stderr"):
+                                stream = getattr(process, stream_attr, None)
+                                if stream is not None:
+                                    try:
+                                        stream.close()
+                                    except Exception:
+                                        pass
+                            break
                     if now >= next_cancel_check:
                         next_cancel_check = now + CANCEL_CHECK_SECONDS
                         if self._cancel_requested():
                             _terminate_process_tree(process)
-                            t_out.join(timeout=0.5)
-                            t_err.join(timeout=0.5)
+                            t_out.join(timeout=0.3)
+                            t_err.join(timeout=0.3)
                             try:
                                 process.wait(timeout=0.5)  # the readers own the pipes now; communicate() would read them again
                             except Exception:
@@ -348,11 +361,11 @@ class BashTools:
                             raise AgentToolError("Interrupted by user: the command was stopped.", error_code="INTERRUPTED_BY_USER")
                     if elapsed >= timeout:
                         _terminate_process_tree(process)
-                        t_out.join(timeout=0.5)
-                        t_err.join(timeout=0.5)
-                        if hasattr(process, "communicate"):
+                        t_out.join(timeout=0.3)
+                        t_err.join(timeout=0.3)
+                        if hasattr(process, "wait"):
                             try:
-                                process.communicate(timeout=0.5)
+                                process.wait(timeout=0.5)
                             except Exception:
                                 pass
                         raise AgentToolError(f"Command timed out after {timeout}s.")
@@ -496,8 +509,15 @@ class BashTools:
                                 pass
                     time.sleep(0.02)
 
-                t_out.join(timeout=0.5)
-                t_err.join(timeout=0.5)
+                for stream_attr in ("stdout", "stderr"):
+                    stream = getattr(process, stream_attr, None)
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                t_out.join(timeout=0.3)
+                t_err.join(timeout=0.3)
                 if hasattr(process, "wait"):
                     try:
                         process.wait(timeout=0.5)

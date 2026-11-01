@@ -50,6 +50,7 @@ RECENT_UNAGED_TOOL_RESULTS = 8
 MAX_STREAM_KEEPALIVE_STALL_SECONDS = 180.0
 MICROCOMPACT_TOOL_RESULT_CHARS = 3_000
 MICROCOMPACT_THRESHOLD = 0.65
+MICROCOMPACT_KEEP_RECENT = 16
 # Results shorter than this cost less than the marker that would replace them.
 MICROCOMPACT_MIN_CHARS = 200
 # Autocompact fires at the window minus room for one full reply and a fixed margin.
@@ -1652,7 +1653,7 @@ class AgenticTurnRuntime:
         limit = self.limits.max_context_tokens
         if estimate >= int(limit * MICROCOMPACT_THRESHOLD):
             before = estimate
-            if self._microcompact(messages):
+            if self._microcompact(messages, keep_recent=MICROCOMPACT_KEEP_RECENT):
                 estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
                 self._persist_compact_boundary(turn, kind="microcompact", trigger="auto", pre_tokens=before, post_tokens=estimate)
                 if self.context_reporting:

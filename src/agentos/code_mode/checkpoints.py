@@ -10,6 +10,9 @@ import shutil
 from typing import Any, Mapping
 
 
+MAX_CHECKPOINT_FILE_BYTES = 10 * 1024 * 1024
+
+
 def _workspace_root(workspace: Path | object) -> Path:
     if isinstance(workspace, (Path, str)):
         return Path(workspace).resolve()
@@ -118,6 +121,8 @@ class FileCheckpointStore:
             return dict(files_map[rel_path])
 
         if target.exists() and target.is_file():
+            if target.stat().st_size > MAX_CHECKPOINT_FILE_BYTES:
+                return None
             raw_bytes = target.read_bytes()
             digest = sha256(raw_bytes).hexdigest()
             backup_rel = f"files/{rel_path}"
@@ -290,4 +295,4 @@ class FileCheckpointStore:
         }
 
 
-__all__ = ["FileCheckpointStore"]
+__all__ = ["FileCheckpointStore", "MAX_CHECKPOINT_FILE_BYTES"]

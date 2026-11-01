@@ -1190,6 +1190,20 @@ class TurnSession:
             store = self._transcript_store = TranscriptStore(str(self.turn.get("conversation_id") or "unknown"))
         return store
 
+    @staticmethod
+    def _started_summary(name: str, payload: Mapping[str, object] | None = None) -> str:
+        payload = payload or {}
+        description = str(payload.get("description") or "").strip()
+        command = str(payload.get("command") or "").strip()
+        if name in {"run_command", "bash", "powershell", "Bash", "PowerShell"}:
+            if description:
+                return f"Executando: {description[:80]}"
+            if command:
+                return f"Executando: {command[:80]}"
+        if description:
+            return f"Executando {name}: {description[:80]}"
+        return f"Executando {name}"
+
     def _record(self, event_type: AgentActivityEventType, summary: str, payload: dict[str, object] | None = None, *, agent_id: str | None = None, parent_agent_id: str | None = None) -> None:
         recorder = getattr(self.store, "record", None)
         if recorder is None:
@@ -1299,7 +1313,7 @@ class TurnSession:
                     started_payload["transcript_id"] = entry
             self._record(
                 AgentActivityEventType.TOOL_STARTED,
-                f"Executando {name}",
+                self._started_summary(name, started_payload),
                 started_payload,
                 agent_id=actor,
                 parent_agent_id=self.main_agent_id if is_subagent else None,
@@ -1328,6 +1342,7 @@ class TurnSession:
                     "tool_kind": str(payload.get("tool_kind") or "terminal"),
                     "invocation_id": str(payload.get("invocation_id") or ""),
                     "command": str(payload.get("command") or "")[:240],
+                    "description": str(payload.get("description") or "")[:200],
                     "output_tail": str(payload.get("output_tail") or "")[-2000:],
                     "elapsed_ms": int(payload.get("elapsed_ms") or 0),
                 },
@@ -1509,7 +1524,13 @@ class TurnSession:
             }, agent_id=actor)
             return
         if state == "running" and agent_id is not None:
-            self._record(AgentActivityEventType.TURN_STARTED, f"{agent_name or 'Subagente'} trabalhando", base, agent_id=actor)
+            self._record(
+                AgentActivityEventType.TURN_STARTED,
+                f"{agent_name or 'Subagente'} trabalhando",
+                base,
+                agent_id=actor,
+                parent_agent_id=self.main_agent_id if is_subagent else None,
+            )
             return
         if state in {
             AgentActivityEventType.SPEAK_BLOCK_STARTED.value,
@@ -2242,118 +2263,24 @@ class TurnSession:
         )
         if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             self.agents_store.set_state(agent_id, "working")
-        read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
-        definition = builtin_spec.get("definition") if builtin_spec is not None else None
-        inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
-        initial_history: list[dict[str, Any]] | None = None
-        if resumed_agent_id:
-            with self._subagent_lock:
-                saved_history = self._subagent_histories.get(resumed_agent_id)
-                if saved_history:
-                    initial_history = [dict(item) for item in saved_history]
-        if initial_history is None and inherit_context and hasattr(self.store, "history_for_turn"):
-            try:
-                initial_history = [dict(item) for item in self.store.history_for_turn(self.turn)]
-            except Exception:
-                initial_history = None
-        enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition}
-        sub_store = _SubagentStore(
-            self,
-            subagent_turn,
-            agent_id,
-            clean,
-            self._subagent_task(enriched_record, task_text),
-            initial_history=initial_history,
-        )
-        from .agent_definitions import AgentToolPolicy, child_permission_mode
-
-        # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
-        requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
-        sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
-        sub_reminders = ReminderQueue()
-        subagent_tools = self._toolset(
-            subagents=False,
-            browser_agent_key=agent_id,
-            code_mode_active=is_code_mode,
-            permission_broker=getattr(self, "_active_permission_broker", None),
-            permission_mode=sub_permission_mode,
-            interactive_permissions=bool(self.turn.get("interactive_permissions")),
-            read_only_mode=read_only_subagent,
-            inherit_context=inherit_context,
-            lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
-            non_interactive_ask=self._non_interactive_ask(),
-            # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
-            reminders=sub_reminders,
-        )
-        # W4-R9 still holds: a monitor the subagent starts sinks into the running parent turn, not into a wake.
-        subagent_tools._monitor_sink = self._reminders
-        if record.get("teammate_name"):
-            # W5: a teammate writes to the lead and to its peers.
-            subagent_tools._team_sender = str(record["teammate_name"])
-            subagent_tools._send_team_message = self._send_team_message
-        # W3-R26: its own instruction-file tracker, so a subdirectory's CLAUDE.md and path rules load for its reads.
-        if getattr(self, "_memory", None) is not None:
-            subagent_tools.memory_tracker = self._memory_files(self._workspace_trusted())
-        if definition is not None:
-            # Its tools only narrow what the parent may publish.
-            subagent_tools._policy = AgentToolPolicy(subagent_tools._policy, definition)
-        sub_max_iterations = (
-            self.limits.subagent_max_iterations
-            if self.limits.subagent_max_iterations is not None
-            else self.limits.max_iterations
-        )
-        if definition is not None and definition.max_turns:
-            sub_max_iterations = min(sub_max_iterations or definition.max_turns, definition.max_turns)
-        sub_max_actions = (
-            self.limits.subagent_max_actions
-            if self.limits.subagent_max_actions is not None
-            else (None if self.limits.max_actions is None else min(self.limits.max_actions, SUBAGENT_MAX_ACTIONS))
-        )
-        sub_definitions = subagent_tools.definitions()
-        runtime = AgenticTurnRuntime(
-            store=sub_store,
-            provider=child_provider_instance,
-            toolset=subagent_tools,
-            system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
-            limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
-            tool_kinds={item.name: item.kind for item in sub_definitions},
-            hook_engine=self.hook_engine,
-            phase_controller=None,
-            reminders=sub_reminders,
-            cancelled=self._child_cancelled(hook_cancel),
-            effort=self._definition_effort(definition, active_model_id),
-            **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
-        )
-        result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
-        if (
-            active_model_id != current_model_id
-            and current_model_id
-            and result.state == "failed"
-            and result.actions == 0
-            and result.error_code in {"PROVIDER_STREAM_FAILED", "PROVIDER_RETRY_EXHAUSTED", "PROVIDER_STREAM_NOT_STARTED"}
-        ):
-            failed_model_id = active_model_id
-            active_model_id = current_model_id
-            try:
-                fallback_provider_instance = self._child_provider_factory(active_model_id)
-            except Exception:
-                fallback_provider_instance = self.provider_factory()
-            update_model = getattr(self.agents_store, "set_model", None)
-            if callable(update_model):
-                update_model(agent_id, active_model_id)
-            self._record(
-                AgentActivityEventType.MODEL_ROUTING_STARTED,
-                f"Modelo de {clean} indisponivel; usando o modelo atual",
-                {
-                    "agent_name": clean,
-                    "requested_model_id": failed_model_id,
-                    "fallback_model_id": active_model_id,
-                    "reason": str(result.error_code or "PROVIDER_STREAM_FAILED"),
-                },
-                agent_id=agent_id,
-                parent_agent_id=self.main_agent_id,
-            )
-            subagent_turn = {**self.turn, "model_id": active_model_id, "is_subagent": True}
+        final_agent_state = "failed"
+        delegation_settled = False
+        try:
+            read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
+            definition = builtin_spec.get("definition") if builtin_spec is not None else None
+            inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
+            initial_history: list[dict[str, Any]] | None = None
+            if resumed_agent_id:
+                with self._subagent_lock:
+                    saved_history = self._subagent_histories.get(resumed_agent_id)
+                    if saved_history:
+                        initial_history = [dict(item) for item in saved_history]
+            if initial_history is None and inherit_context and hasattr(self.store, "history_for_turn"):
+                try:
+                    initial_history = [dict(item) for item in self.store.history_for_turn(self.turn)]
+                except Exception:
+                    initial_history = None
+            enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition}
             sub_store = _SubagentStore(
                 self,
                 subagent_turn,
@@ -2362,9 +2289,54 @@ class TurnSession:
                 self._subagent_task(enriched_record, task_text),
                 initial_history=initial_history,
             )
+            from .agent_definitions import AgentToolPolicy, child_permission_mode
+
+            # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
+            requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
+            sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
+            sub_reminders = ReminderQueue()
+            subagent_tools = self._toolset(
+                subagents=False,
+                browser_agent_key=agent_id,
+                code_mode_active=is_code_mode,
+                permission_broker=getattr(self, "_active_permission_broker", None),
+                permission_mode=sub_permission_mode,
+                interactive_permissions=bool(self.turn.get("interactive_permissions")),
+                read_only_mode=read_only_subagent,
+                inherit_context=inherit_context,
+                lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
+                non_interactive_ask=self._non_interactive_ask(),
+                # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
+                reminders=sub_reminders,
+            )
+            # W4-R9 still holds: a monitor the subagent starts sinks into the running parent turn, not into a wake.
+            subagent_tools._monitor_sink = self._reminders
+            if record.get("teammate_name"):
+                # W5: a teammate writes to the lead and to its peers.
+                subagent_tools._team_sender = str(record["teammate_name"])
+                subagent_tools._send_team_message = self._send_team_message
+            # W3-R26: its own instruction-file tracker, so a subdirectory's CLAUDE.md and path rules load for its reads.
+            if getattr(self, "_memory", None) is not None:
+                subagent_tools.memory_tracker = self._memory_files(self._workspace_trusted())
+            if definition is not None:
+                # Its tools only narrow what the parent may publish.
+                subagent_tools._policy = AgentToolPolicy(subagent_tools._policy, definition)
+            sub_max_iterations = (
+                self.limits.subagent_max_iterations
+                if self.limits.subagent_max_iterations is not None
+                else self.limits.max_iterations
+            )
+            if definition is not None and definition.max_turns:
+                sub_max_iterations = min(sub_max_iterations or definition.max_turns, definition.max_turns)
+            sub_max_actions = (
+                self.limits.subagent_max_actions
+                if self.limits.subagent_max_actions is not None
+                else (None if self.limits.max_actions is None else min(self.limits.max_actions, SUBAGENT_MAX_ACTIONS))
+            )
+            sub_definitions = subagent_tools.definitions()
             runtime = AgenticTurnRuntime(
                 store=sub_store,
-                provider=fallback_provider_instance,
+                provider=child_provider_instance,
                 toolset=subagent_tools,
                 system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
                 limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
@@ -2373,66 +2345,132 @@ class TurnSession:
                 phase_controller=None,
                 reminders=sub_reminders,
                 cancelled=self._child_cancelled(hook_cancel),
+                effort=self._definition_effort(definition, active_model_id),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
             )
             result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
-        answer = sub_store.final_answer()
-        prior_transcript = [dict(item) for item in initial_history] if initial_history else []
-        prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
-        if answer:
-            prior_transcript.append({"role": "assistant", "content": answer})
-        with self._subagent_lock:
-            self._subagent_histories[agent_id] = prior_transcript
-        limit_stopped = (
-            result.error_code in {"ACTION_LIMIT", "ITERATION_LIMIT", "TURN_DEADLINE_EXCEEDED"}
-            or result.budget_exhausted
-        )
-        acceptable_state = result.state in {"completed", "completed_with_caveats"} or (limit_stopped and bool(answer))
-        if not acceptable_state or not answer:
-            reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
-            if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
-                agent_final_state = "cancelled" if (result.state == "cancelled" or reason == "TURN_CANCELLED") else "failed"
-                self.agents_store.set_state(agent_id, agent_final_state)
+            if (
+                active_model_id != current_model_id
+                and current_model_id
+                and result.state == "failed"
+                and result.actions == 0
+                and result.error_code in {"PROVIDER_STREAM_FAILED", "PROVIDER_RETRY_EXHAUSTED", "PROVIDER_STREAM_NOT_STARTED"}
+            ):
+                failed_model_id = active_model_id
+                active_model_id = current_model_id
+                try:
+                    fallback_provider_instance = self._child_provider_factory(active_model_id)
+                except Exception:
+                    fallback_provider_instance = self.provider_factory()
+                update_model = getattr(self.agents_store, "set_model", None)
+                if callable(update_model):
+                    update_model(agent_id, active_model_id)
+                self._record(
+                    AgentActivityEventType.MODEL_ROUTING_STARTED,
+                    f"Modelo de {clean} indisponivel; usando o modelo atual",
+                    {
+                        "agent_name": clean,
+                        "requested_model_id": failed_model_id,
+                        "fallback_model_id": active_model_id,
+                        "reason": str(result.error_code or "PROVIDER_STREAM_FAILED"),
+                    },
+                    agent_id=agent_id,
+                    parent_agent_id=self.main_agent_id,
+                )
+                subagent_turn = {**self.turn, "model_id": active_model_id, "is_subagent": True}
+                sub_store = _SubagentStore(
+                    self,
+                    subagent_turn,
+                    agent_id,
+                    clean,
+                    self._subagent_task(enriched_record, task_text),
+                    initial_history=initial_history,
+                )
+                runtime = AgenticTurnRuntime(
+                    store=sub_store,
+                    provider=fallback_provider_instance,
+                    toolset=subagent_tools,
+                    system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
+                    limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
+                    tool_kinds={item.name: item.kind for item in sub_definitions},
+                    hook_engine=self.hook_engine,
+                    phase_controller=None,
+                    reminders=sub_reminders,
+                    cancelled=self._child_cancelled(hook_cancel),
+                    **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
+                )
+                result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
+            answer = sub_store.final_answer()
+            prior_transcript = [dict(item) for item in initial_history] if initial_history else []
+            prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
+            if answer:
+                prior_transcript.append({"role": "assistant", "content": answer})
+            with self._subagent_lock:
+                self._subagent_histories[agent_id] = prior_transcript
+            limit_stopped = (
+                result.error_code in {"ACTION_LIMIT", "ITERATION_LIMIT", "TURN_DEADLINE_EXCEEDED"}
+                or result.budget_exhausted
+            )
+            acceptable_state = result.state in {"completed", "completed_with_caveats"} or (limit_stopped and bool(answer))
+            if not acceptable_state or not answer:
+                reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
+                final_agent_state = "cancelled" if (result.state == "cancelled" or reason == "TURN_CANCELLED") else "failed"
+                delegation_settled = True
+                self._record(
+                    AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
+                    {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": reason},
+                    agent_id=agent_id, parent_agent_id=self.main_agent_id,
+                )
+                return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"}, reason)
+            final_agent_state = "completed"
+            delegation_settled = True
             self._record(
-                AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
-                {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": reason},
+                AgentActivityEventType.AGENT_MESSAGE_RECEIVED,
+                f"Recebeu a resposta de {clean}",
+                {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean,
+                 "content": answer[:PREVIEW_CHARS], "from_agent_id": agent_id, "tool_kind": "agent"},
                 agent_id=agent_id, parent_agent_id=self.main_agent_id,
             )
-            return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"}, reason)
-        if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
-            self.agents_store.set_state(agent_id, "completed")
-        self._record(
-            AgentActivityEventType.AGENT_MESSAGE_RECEIVED,
-            f"Recebeu a resposta de {clean}",
-            {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean,
-             "content": answer[:PREVIEW_CHARS], "from_agent_id": agent_id, "tool_kind": "agent"},
-            agent_id=agent_id, parent_agent_id=self.main_agent_id,
-        )
-        payload: dict[str, object] = {
-            "agent_id": agent_id,
-            "agent_name": clean,
-            "subagent_type": builtin_key if builtin_spec is not None else clean,
-            "read_only": read_only_subagent,
-            "inherited_context": inherit_context,
-            "resumed": bool(resumed_agent_id),
-            "label": clean,
-            "tool_kind": "agent",
-            "partial": bool(limit_stopped),
-            "usage": {
-                "iterations": result.iterations,
-                "tool_uses": result.actions,
-            },
-        }
-        if limit_stopped:
-            payload["budget_exhausted"] = True
-            content = (
-                f"NOTE: {clean} stopped at its limit ({result.error_code or 'budget_exhausted'}: "
-                f"{result.iterations} turns, {result.actions} tool uses) before finishing. "
-                f"The text below is PARTIAL output; treat it as incomplete.\n\n{answer}"
-            )
-        else:
-            content = f"{clean} reported:\n\n{answer}"
-        return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
+            payload: dict[str, object] = {
+                "agent_id": agent_id,
+                "agent_name": clean,
+                "subagent_type": builtin_key if builtin_spec is not None else clean,
+                "read_only": read_only_subagent,
+                "inherited_context": inherit_context,
+                "resumed": bool(resumed_agent_id),
+                "label": clean,
+                "tool_kind": "agent",
+                "partial": bool(limit_stopped),
+                "usage": {
+                    "iterations": result.iterations,
+                    "tool_uses": result.actions,
+                },
+            }
+            if limit_stopped:
+                payload["budget_exhausted"] = True
+                content = (
+                    f"NOTE: {clean} stopped at its limit ({result.error_code or 'budget_exhausted'}: "
+                    f"{result.iterations} turns, {result.actions} tool uses) before finishing. "
+                    f"The text below is PARTIAL output; treat it as incomplete.\n\n{answer}"
+                )
+            else:
+                content = f"{clean} reported:\n\n{answer}"
+            return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
+        finally:
+            if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+                try:
+                    self.agents_store.set_state(agent_id, final_agent_state)
+                except Exception:
+                    pass
+            if not delegation_settled:
+                try:
+                    self._record(
+                        AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
+                        {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": "RUNTIME_EXCEPTION"},
+                        agent_id=agent_id, parent_agent_id=self.main_agent_id,
+                    )
+                except Exception:
+                    pass
 
     @staticmethod
     def _agent_output_file(agent_id: str) -> str:
@@ -2811,23 +2849,38 @@ class TurnSession:
 
     def close_background_subagents(self) -> None:
         # W5: the turn's language servers stop with its background work.
-        self._close_lsp()
+        if hasattr(self, "_lsp_lock"):
+            self._close_lsp()
         with self._subagent_lock:
             executor = self._bg_subagent_executor
             self._bg_subagent_executor = None
             bg_entries = list(self._background_subagents.values())
+        is_cancelled = False
+        try:
+            is_cancelled = bool(self.cancelled(self.turn))
+        except Exception:
+            pass
+        turn_state = str((self.turn or {}).get("state") or "").strip().lower()
+        should_cancel = is_cancelled or turn_state in {"failed", "cancelled", "cancelling"}
+        if should_cancel:
+            for entry in bg_entries:
+                cancel_event = entry.get("cancel")
+                if cancel_event is not None and hasattr(cancel_event, "set"):
+                    try:
+                        cancel_event.set()
+                    except Exception:
+                        pass
         if executor is not None:
-            is_cancelled = False
-            try:
-                is_cancelled = bool(self.cancelled(self.turn))
-            except Exception:
-                pass
-            executor.shutdown(wait=not is_cancelled, cancel_futures=is_cancelled)
-            if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
-                for entry in bg_entries:
-                    future = entry.get("future")
-                    agent_id = str(entry.get("agent_id") or "")
-                    if agent_id and future is not None and (not future.done() or future.cancelled()):
+            executor.shutdown(wait=not should_cancel, cancel_futures=should_cancel)
+        if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+            for entry in bg_entries:
+                future = entry.get("future")
+                agent_id = str(entry.get("agent_id") or "")
+                if agent_id and (
+                    should_cancel
+                    or (future is not None and (not future.done() or future.cancelled()))
+                ):
+                    if future is None or not future.done() or future.cancelled():
                         try:
                             self.agents_store.set_state(agent_id, "cancelled")
                         except Exception:

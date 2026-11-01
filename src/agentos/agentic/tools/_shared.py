@@ -319,6 +319,10 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "run_in_background": "background",
         "timeout": "timeout_seconds",
     },
+    "bash": {
+        "run_in_background": "background",
+        "timeout": "timeout_seconds",
+    },
     "exit_plan_mode": {
         "allowedPrompts": "allowed_prompts",
         "path": "plan_path",
@@ -371,17 +375,43 @@ def _broker_arguments(name: str, arguments: Mapping[str, Any]) -> Mapping[str, A
     return arguments
 
 
+class _CoercedArgumentsResult(tuple):  # type: ignore[type-arg]
+    """2-tuple ``(coerced_dict, note)`` that also supports dict-style key lookup on ``coerced_dict``."""
+
+    def __new__(cls, coerced: dict[str, Any], note: str | None) -> _CoercedArgumentsResult:
+        return super().__new__(cls, (coerced, note))
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, (int, slice)):
+            return super().__getitem__(key)
+        return super().__getitem__(0)[key]
+
+    def __contains__(self, key: object) -> bool:
+        if isinstance(key, str):
+            return key in super().__getitem__(0)
+        return super().__contains__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return super().__getitem__(0).get(key, default)
+
+
 def coerce_tool_arguments(tool_name: str, arguments: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
     """Map common model parameter aliases to canonical schema names."""
     aliases = _PARAM_ALIASES.get(tool_name)
     if not aliases:
-        return dict(arguments), None
+        return _CoercedArgumentsResult(dict(arguments), None)
     coerced = dict(arguments)
+    had_timeout_alias = "timeout" in coerced and "timeout_seconds" not in coerced
     notes: list[str] = []
     for wrong_key, right_key in aliases.items():
         if wrong_key in coerced and right_key not in coerced:
             coerced[right_key] = coerced.pop(wrong_key)
             notes.append(f"parameter '{wrong_key}' was read as '{right_key}'")
+    if had_timeout_alias and tool_name in {"run_command", "powershell", "bash"}:
+        raw_timeout = coerced.get("timeout_seconds")
+        if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool):
+            seconds = int(round(float(raw_timeout) / 1000.0)) if raw_timeout >= 100 else int(round(float(raw_timeout)))
+            coerced["timeout_seconds"] = max(1, min(seconds, MAX_COMMAND_TIMEOUT_SECONDS))
     if tool_name == "edit_file" and isinstance(coerced.get("edits"), list):
         new_edits: list[Any] = []
         for item in coerced["edits"]:
@@ -398,8 +428,8 @@ def coerce_tool_arguments(tool_name: str, arguments: Mapping[str, Any]) -> tuple
                 new_edits.append(item)
         coerced["edits"] = new_edits
     if not notes:
-        return coerced, None
-    return coerced, "\n\n[Note: " + "; ".join(notes) + "]"
+        return _CoercedArgumentsResult(coerced, None)
+    return _CoercedArgumentsResult(coerced, "\n\n[Note: " + "; ".join(notes) + "]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -657,11 +687,25 @@ def _terminate_pid(pid: int) -> None:
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
     """Stop a timed-out shell together with any child retaining its output pipes."""
-    if process.poll() is not None:
-        return
-    _terminate_pid(process.pid)
+    if os.name == "nt":
+        if getattr(process, "pid", None):
+            _terminate_pid(process.pid)
+    else:
+        if process.poll() is not None:
+            return
+        _terminate_pid(process.pid)
     if process.poll() is None:
-        process.kill()
+        try:
+            process.kill()
+        except Exception:
+            pass
+    for stream_attr in ("stdout", "stderr"):
+        stream = getattr(process, stream_attr, None)
+        if stream is not None:
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 def _process_is_running(pid: int) -> bool:
