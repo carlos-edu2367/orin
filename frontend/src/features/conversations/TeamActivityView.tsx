@@ -435,7 +435,24 @@ export function TeamActivityView({
           (finalDeliverable.status === 'ready' ? 'Concluído' : 'Em preparação'),
       }
     }
-    const artifactEvent = events?.find((ev) => ev?.type === 'artifact.created')
+    const artifactEvent = events?.find((ev) => {
+      if (ev?.type !== 'artifact.created') return false
+      const candidate = sanitizeText(ev.filePath || ev.path || ev.title)
+        .replace(/\\/g, '/')
+        .replace(/^\.\//, '')
+      if (
+        !candidate ||
+        candidate === '.orin' ||
+        candidate.startsWith('.orin/') ||
+        candidate.includes('/.orin/') ||
+        candidate === 'uploads' ||
+        candidate.startsWith('uploads/') ||
+        candidate.includes('/uploads/')
+      ) {
+        return false
+      }
+      return true
+    })
     if (artifactEvent) {
       const rawPath = sanitizeText(
         artifactEvent.filePath || artifactEvent.path || artifactEvent.title,

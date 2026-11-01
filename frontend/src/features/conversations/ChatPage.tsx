@@ -1962,7 +1962,14 @@ export function ChatPage() {
 
       if (rawPath && (isWriteOrEdit || isRead)) {
         const cleanPath = rawPath.trim().replace(/\\/g, '/').replace(/^\.\//, '')
-        if (cleanPath) {
+        const isInternalArtifactPath =
+          cleanPath === '.orin'
+          || cleanPath.startsWith('.orin/')
+          || cleanPath.includes('/.orin/')
+          || cleanPath === 'uploads'
+          || cleanPath.startsWith('uploads/')
+          || cleanPath.includes('/uploads/')
+        if (cleanPath && !isInternalArtifactPath) {
           const patch = event.structuredPatch ?? event.diff?.structured_patch
           if (patch && patch.length > 0) {
             patchesByPath[cleanPath] = patch
