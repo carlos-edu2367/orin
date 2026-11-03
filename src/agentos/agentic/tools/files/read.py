@@ -337,8 +337,12 @@ class ReadTools:
                         **info, "content": text, "numLines": count, "startLine": 1, "totalLines": count,
                     }}
                 return result
+        norm_check = (self.workspace.key(target) if target.exists() else path).replace("\\", "/").lstrip("/")
+        is_upload_file = norm_check.startswith("uploads/")
+        effective_allow_large = bool(allow_large) or is_upload_file
         norm_offset = max(1, int(offset or 1))
-        norm_limit = max(1, min(int(limit or 400), LARGE_READ_LINES if allow_large else 800))
+        requested_limit = LARGE_READ_LINES if (is_upload_file and int(limit or 400) == 400) else int(limit or 400)
+        norm_limit = max(1, min(requested_limit, LARGE_READ_LINES if effective_allow_large else 800))
         if target.is_file() and not force_reload:
             norm = self.workspace.key(target)
             with self._read_file_lock:
@@ -393,8 +397,8 @@ class ReadTools:
                     }
         lines, first, total, truncated = self.workspace.read_lines(
             path, offset=norm_offset, limit=norm_limit,
-            max_lines=LARGE_READ_LINES if allow_large else 800,
-            max_bytes=LARGE_READ_BYTES if allow_large else MAX_READ_BYTES,
+            max_lines=LARGE_READ_LINES if effective_allow_large else 800,
+            max_bytes=LARGE_READ_BYTES if effective_allow_large else MAX_READ_BYTES,
         )
         sha = self._record_file_read(
             path,
@@ -447,7 +451,7 @@ class ReadTools:
                 "filePath": str(target), "content": "\n".join(lines), "numLines": len(lines), "startLine": first,
                 "totalLines": total, **({"truncatedByTokenCap": True} if truncated else {}),
             }},
-            **({"max_result_chars": LARGE_READ_RESULT_CHARS} if allow_large else {}),
+            **({"max_result_chars": LARGE_READ_RESULT_CHARS} if effective_allow_large else {}),
         }
 
     def view_file(self, path: str, question: str = "") -> dict[str, Any]:

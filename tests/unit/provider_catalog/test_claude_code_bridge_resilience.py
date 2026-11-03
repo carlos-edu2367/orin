@@ -618,3 +618,118 @@ def test_adversarial_multiple_tool_calls_with_nested_closing_tags_and_max_wall_c
                 popen_factory=_InfiniteTricklePopen,
             )
         )
+
+
+def test_bridge_transcript_closes_tool_results_and_strips_hallucinated_tool_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentos.provider_catalog.opencode import (
+        _format_bridge_conversation_transcript,
+        _parse_orin_tool_calls,
+    )
+
+    system_prompt = _build_bridge_system_prompt(
+        ["Base system."],
+        [{"name": "Read", "description": "Read file", "parameters": {"type": "object"}}],
+    )
+    assert "NEVER write" in system_prompt and "[Tool Result" in system_prompt
+
+    messages = [
+        {"role": "user", "content": "Leia o arquivo uploads/writing-block.md"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_914f11b5f78f",
+                    "name": "Read",
+                    "input": {"file_path": "uploads/writing-block.md"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_914f11b5f78f",
+                    "content": "1\t# PROJETO ASHY\n2\tConteúdo do arquivo",
+                }
+            ],
+        },
+    ]
+    _, prompt_text = _format_bridge_conversation_transcript(messages)
+    assert "[/Tool Result]" in prompt_text
+    assert prompt_text.rstrip().endswith("[Assistant]")
+
+    # If a model hallucinates [Tool Result id=...] in its text output, _parse_orin_tool_calls strips it
+    hallucinated = (
+        "Análise concluída.\n\n"
+        "[Tool Result id=call_7ea69b3fc39c]\n"
+        "300 O treinamento pode ser feito em GPUs na nuvem.\n"
+        "[Tool Result id=call_e05ed4b86ff2]\n"
+        "280 ## Máquina-alvo"
+    )
+    cleaned, calls = _parse_orin_tool_calls(hallucinated, {"Read"})
+    assert "[Tool Result" not in cleaned
+    assert cleaned == "Análise concluída."
+    assert calls == []
+
+    # Streaming text in stream_claude_code_bridge also suppresses hallucinated [Tool Result id=...] blocks
+    monkeypatch.setattr(
+        "agentos.provider_catalog.claude_code._resolve_claude_binary",
+        lambda env=None: r"C:\fake\claude.exe",
+    )
+    ndjson_lines = [
+        json.dumps({"type": "system", "subtype": "init", "apiKeySource": "none"}),
+        json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "[Tool Result id=call_7ea69b3fc39c]\n300 O treinamento pode ser feito em GPUs na nuvem.\n",
+                    },
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "usage": {"input_tokens": 10, "output_tokens": 20},
+            }
+        ),
+    ]
+
+    class _HallucinatingPopen:
+        def __init__(self, cmd: list[str], **kwargs: Any) -> None:
+            self.pid = 1010
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("\n".join(ndjson_lines) + "\n")
+            self.stderr = io.StringIO("")
+            self.returncode = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            pass
+
+        def terminate(self) -> None:
+            pass
+
+    items = list(
+        stream_claude_code_bridge(
+            base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+            model="claude-opus-5-5",
+            messages=messages,
+            tools=[{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}],
+            popen_factory=_HallucinatingPopen,
+        )
+    )
+    emitted_text = "".join(i.text or "" for i in items if i.kind is StreamKind.TEXT)
+    assert "[Tool Result" not in emitted_text

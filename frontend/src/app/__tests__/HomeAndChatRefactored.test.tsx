@@ -308,3 +308,228 @@ describe('Home, ChatPage, and Routes Refactored Shell', () => {
     expect(chatPageSource).not.toMatch(/\b(text-white|bg-black|border-white)\b/);
   });
 });
+
+import { fireEvent, waitFor } from '@testing-library/react';
+
+describe('Oversized prompt automatic .txt conversion in Home and ChatPage', () => {
+  it('automatically converts prompts > 16000 chars into prompt.txt and starts conversation in Home without error', async () => {
+    const uploadedFiles: Array<{ name: string; size: number }> = [];
+    const createdPayloads: Array<{ message?: string; attachments?: string[] }> = [];
+
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (url.includes('/models')) return json({ items: [MODEL] });
+      if (url.includes('/v1/uploads') && method === 'POST') {
+        const body = init?.body as FormData | undefined;
+        const file = body?.get('file') as File | null;
+        if (file) {
+          uploadedFiles.push({ name: file.name, size: file.size });
+        }
+        return json({
+          upload_id: 'up_auto_home_txt',
+          original_name: file?.name ?? 'prompt.txt',
+          media_type: 'text/plain',
+          kind: 'text',
+          bytes: file?.size ?? 18000,
+        }, 201);
+      }
+      if (url.includes('/v1/conversations') && method === 'POST') {
+        const rawBody = typeof init?.body === 'string' ? JSON.parse(init.body) : {};
+        createdPayloads.push(rawBody);
+        if (typeof rawBody.message === 'string' && rawBody.message.length > 16000) {
+          return json({ error: { code: 'validation_error', message: 'message too long' } }, 422);
+        }
+        return json({
+          conversation_id: 'chat_large_home',
+          title: 'Projeto Ashy',
+          turn_id: 'turn_1',
+          message_id: 'msg_1',
+          state: 'queued',
+        }, 201);
+      }
+      if (url.includes('/v1/conversations')) return json({ items: [] });
+      if (url.includes('/v1/projects/sidebar')) return json({ items: [] });
+      if (url.includes('/v1/settings/code-mode')) {
+        return json({ autonomy: 'balanced', system_notifications: false, monitoring_enabled: true });
+      }
+      return json({ items: [] });
+    });
+
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 });
+    const router = createMemoryRouter(
+      [
+        { path: '/', element: <Home client={client} bootstrap={READY_SESSION} /> },
+        { path: '/chats/:conversationId', element: <div data-testid="navigated-chat">Chat opened</div> },
+      ],
+      { initialEntries: ['/'] },
+    );
+
+    render(
+      <ThemeProvider>
+        <RouterProvider router={router} />
+      </ThemeProvider>,
+    );
+
+    const messageInput = await screen.findByRole('textbox', { name: 'Mensagem' });
+    const largePrompt = `# PROJETO ASHY — Arquitetura de Fine-Tuning\n${'Linha detalhada do prompt para validar conversão automática em txt.\n'.repeat(300)}`;
+    expect(largePrompt.length).toBeGreaterThan(16000);
+
+    fireEvent.change(messageInput, { target: { value: largePrompt } });
+    const sendBtn = screen.getByRole('button', { name: 'Enviar mensagem' });
+    await waitFor(() => expect(sendBtn).not.toBeDisabled());
+    fireEvent.click(sendBtn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('navigated-chat')).toBeInTheDocument();
+    });
+    expect(uploadedFiles).toHaveLength(1);
+    expect(uploadedFiles[0].name).toBe('prompt.txt');
+    expect(createdPayloads).toHaveLength(1);
+    expect(createdPayloads[0].attachments).toContain('up_auto_home_txt');
+    expect(String(createdPayloads[0].message ?? '').length).toBeLessThanOrEqual(16000);
+  });
+
+  it('automatically converts prompts > 16000 chars into prompt.txt in ChatPage without opening input-limit-dialog', async () => {
+    const originalFetch = globalThis.fetch;
+    const uploadedFiles: Array<{ name: string; size: number }> = [];
+    const sentMessagePayloads: Array<{ message?: string; attachments?: string[] }> = [];
+
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (url.includes('/events?')) {
+        return new Response('event: heartbeat\ndata: {"cursor":"a.1"}\n\n', {
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      }
+      if (url.includes('/models')) return json({ items: [MODEL] });
+      if (url.includes('/v1/uploads') && method === 'POST') {
+        const body = init?.body as FormData | undefined;
+        const file = body?.get('file') as File | null;
+        if (file) {
+          uploadedFiles.push({ name: file.name, size: file.size });
+        }
+        return json({
+          upload_id: 'up_auto_chat_txt',
+          original_name: file?.name ?? 'prompt.txt',
+          media_type: 'text/plain',
+          kind: 'text',
+          bytes: file?.size ?? 18000,
+        }, 201);
+      }
+      if (url.includes('/v1/conversations/conv_auto_txt/messages') && method === 'POST') {
+        sentMessagePayloads.push(typeof init?.body === 'string' ? JSON.parse(init.body) : {});
+        return json({
+          conversation_id: 'conv_auto_txt',
+          title: 'Chat',
+          turn_id: 'turn_2',
+          message_id: 'msg_2',
+          state: 'queued',
+        }, 202);
+      }
+      if (url.includes('/v1/conversations/conv_auto_txt')) {
+        return json({
+          conversation_id: 'conv_auto_txt',
+          title: 'Chat',
+          state: 'completed',
+          mode: 'code',
+          permission_mode: 'accept_edits',
+          provider: 'openrouter',
+          model_id: 'anthropic/model-a',
+          messages: [],
+          turns: [],
+          activities: [],
+          activity_cursor: 'a.1',
+        });
+      }
+      return json({ items: [] });
+    });
+
+    try {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/chats/conv_auto_txt']}>
+            <Routes>
+              <Route path="/chats/:conversationId" element={<ChatPage />} />
+            </Routes>
+          </MemoryRouter>
+        </ThemeProvider>,
+      );
+
+      const messageInput = await screen.findByRole('textbox', { name: 'Mensagem' });
+      const largePrompt = `# PROJETO ASHY\n${'Conteúdo extenso para enviar automaticamente como txt no ChatPage.\n'.repeat(300)}`;
+      expect(largePrompt.length).toBeGreaterThan(16000);
+
+      fireEvent.change(messageInput, { target: { value: largePrompt } });
+      const sendBtn = screen.getByRole('button', { name: 'Enviar mensagem' });
+      await waitFor(() => expect(sendBtn).not.toBeDisabled());
+      fireEvent.click(sendBtn);
+
+      await waitFor(() => {
+        expect(sentMessagePayloads).toHaveLength(1);
+      });
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(uploadedFiles).toHaveLength(1);
+      expect(uploadedFiles[0].name).toBe('prompt.txt');
+      expect(sentMessagePayloads[0].attachments).toContain('up_auto_chat_txt');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('cleans up the auto-uploaded prompt.txt if conversation creation fails in Home', async () => {
+    const deletedUploads: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input);
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (url.includes('/models')) return json({ items: [MODEL] });
+      if (url.includes('/v1/uploads/') && method === 'DELETE') {
+        deletedUploads.push(url.split('/').at(-1) ?? '');
+        return new Response(null, { status: 204 });
+      }
+      if (url.includes('/v1/uploads') && method === 'POST') {
+        return json({
+          upload_id: 'up_orphan_1',
+          original_name: 'prompt.txt',
+          media_type: 'text/plain',
+          kind: 'text',
+          bytes: 18000,
+        }, 201);
+      }
+      if (url.includes('/v1/conversations') && method === 'POST') {
+        return json({ error: { code: 'internal_error', message: 'boom' } }, 500);
+      }
+      if (url.includes('/v1/conversations')) return json({ items: [] });
+      if (url.includes('/v1/projects/sidebar')) return json({ items: [] });
+      if (url.includes('/v1/settings/code-mode')) {
+        return json({ autonomy: 'balanced', system_notifications: false, monitoring_enabled: true });
+      }
+      return json({ items: [] });
+    });
+
+    const client = new ApiClient({ fetchImpl, maxAttempts: 1 });
+    const router = createMemoryRouter(
+      [{ path: '/', element: <Home client={client} bootstrap={READY_SESSION} /> }],
+      { initialEntries: ['/'] },
+    );
+
+    render(
+      <ThemeProvider>
+        <RouterProvider router={router} />
+      </ThemeProvider>,
+    );
+
+    const messageInput = await screen.findByRole('textbox', { name: 'Mensagem' });
+    const largePrompt = 'A'.repeat(16500);
+    fireEvent.change(messageInput, { target: { value: largePrompt } });
+    const sendBtn = screen.getByRole('button', { name: 'Enviar mensagem' });
+    await waitFor(() => expect(sendBtn).not.toBeDisabled());
+    fireEvent.click(sendBtn);
+
+    await waitFor(() => {
+      expect(deletedUploads).toContain('up_orphan_1');
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(/O backend não conseguiu iniciar a conversa/i);
+  });
+});

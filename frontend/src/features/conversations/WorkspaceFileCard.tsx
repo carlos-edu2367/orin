@@ -186,9 +186,9 @@ export function WorkspaceFileCard({
         </span>
       </button>
       <span className="workspace-file-card__actions">
-        <button type="button" onClick={() => onPreview?.(reference)} aria-label={`Visualizar ${name}`}>Abrir ↗</button>
+        <button type="button" onClick={() => onPreview?.(reference)} aria-label={`Visualizar ${name}`}>Visualizar</button>
         <a href={downloadUrl} aria-label={`Baixar ${name}`}>Baixar</a>
-        {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>}
+        {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir no sistema</button>}
       </span>
     </article>
   )
@@ -307,7 +307,7 @@ export function WorkspaceFilePreview({
               </div>
             )}
             <a href={downloadUrl} aria-label={`Baixar ${name}`}>Baixar</a>
-            {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir</button>}
+            {capabilities.open_in_desktop_app && <button type="button" onClick={() => void open()} disabled={!client} aria-label={`Abrir ${name} no sistema`}>Abrir no sistema</button>}
             <button ref={closeButtonRef} type="button" className="workspace-file-preview__close" onClick={onClose}>Fechar</button>
           </div>
         </header>

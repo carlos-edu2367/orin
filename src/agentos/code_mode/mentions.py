@@ -16,6 +16,8 @@ from agentos.pathsafety import resolve_contained
 MAX_MENTIONED_FILES = 5
 MAX_MENTION_LINES = 400
 MAX_MENTION_CHARS_PER_FILE = 8_000
+MAX_TEXT_ATTACHMENT_LINES = 2_000
+MAX_TEXT_ATTACHMENT_CHARS_PER_FILE = 100_000
 MAX_WORKSPACE_FILE_SCAN = 2_000
 
 # Matches `@path/to/file.ext` when `@` is at start of text or preceded by whitespace or open punctuation.
@@ -171,6 +173,125 @@ def inject_file_mentions_into_history(
     return updated
 
 
+def expand_text_attachments(
+    attachments: Sequence[Mapping[str, Any]],
+    workspace: Any,
+    read_file_state: MutableMapping[str, Any] | None = None,
+    *,
+    max_files: int = MAX_MENTIONED_FILES,
+    max_lines: int = MAX_TEXT_ATTACHMENT_LINES,
+    max_chars_per_file: int = MAX_TEXT_ATTACHMENT_CHARS_PER_FILE,
+) -> str:
+    """Pre-load attached text/markdown files (`kind == 'text'`) into a `<system-reminder>` block."""
+    if not attachments:
+        return ""
+    ws = _as_workspace(workspace)
+    sections: list[str] = []
+    loaded_count = 0
+    seen_paths: set[str] = set()
+
+    for item in attachments:
+        if loaded_count >= max_files:
+            break
+        if not isinstance(item, Mapping) or str(item.get("kind") or "") != "text":
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            target = ws.resolve(raw_path)
+        except WorkspaceError:
+            continue
+        if not target.is_file():
+            continue
+        rel_path = ws.relative(target)
+        if rel_path in seen_paths:
+            continue
+        seen_paths.add(rel_path)
+
+        try:
+            stat = target.stat()
+            raw_bytes = target.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" in raw_bytes[:8192]:
+            continue
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        full_text = raw_bytes.decode("utf-8", "replace")
+        all_lines = full_text.splitlines()
+        total_lines = len(all_lines)
+        bounded_limit = max(1, min(int(max_lines), total_lines or 1))
+        selected_lines = all_lines[:bounded_limit]
+        numbered = "\n".join(f"{idx} | {line}" for idx, line in enumerate(selected_lines, start=1))
+        if len(numbered) > max_chars_per_file:
+            numbered = numbered[:max_chars_per_file] + "\n... [truncated]"
+
+        if read_file_state is not None:
+            record = ReadFileRecord(
+                mtime_ns=stat.st_mtime_ns,
+                sha256=digest,
+                offset=1,
+                limit=bounded_limit,
+                total_lines=total_lines,
+                explicit_read=True,
+            )
+            read_file_state[rel_path] = record
+            if raw_path != rel_path:
+                read_file_state[raw_path] = record
+
+        line_range = f"1-{len(selected_lines)} of {total_lines}" if total_lines else "empty file"
+        sections.append(f"### {rel_path} (lines {line_range})\n{numbered}")
+        loaded_count += 1
+
+    if not sections:
+        return ""
+
+    body = "\n\n".join(sections)
+    return (
+        "<system-reminder>\n"
+        "The user attached the following text file(s) to this message. "
+        "Their contents have been pre-loaded and registered in read_file_state so you can follow their instructions or analyze them directly without calling Read/read_file again unless additional lines are needed:\n\n"
+        f"{body}\n"
+        "</system-reminder>"
+    )
+
+
+def inject_text_attachments_into_history(
+    history: Sequence[Mapping[str, Any]],
+    attachments: Sequence[Mapping[str, Any]],
+    workspace: Any,
+    read_file_state: MutableMapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Append the `<system-reminder>` for any attached text files (`kind == 'text'`) to the latest user message in ``history``."""
+    if not attachments:
+        return [dict(item) for item in history]
+    updated = [dict(item) for item in history]
+    for index in range(len(updated) - 1, -1, -1):
+        if updated[index].get("role") != "user":
+            continue
+        original = updated[index].get("content", "")
+        if isinstance(original, str):
+            if "<system-reminder>" in original and "attached the following text file(s)" in original:
+                return updated
+            reminder = expand_text_attachments(attachments, workspace, read_file_state)
+            if reminder:
+                updated[index]["content"] = f"{original}\n\n{reminder}" if original else reminder
+        elif isinstance(original, list):
+            text_parts = [
+                str(block.get("text") or "")
+                for block in original
+                if isinstance(block, Mapping) and block.get("type") == "text"
+            ]
+            combined = "\n".join(text_parts)
+            if "<system-reminder>" in combined and "attached the following text file(s)" in combined:
+                return updated
+            reminder = expand_text_attachments(attachments, workspace, read_file_state)
+            if reminder:
+                updated[index]["content"] = [*original, {"type": "text", "text": reminder}]
+        return updated
+    return updated
+
+
 def list_workspace_files(workspace: Any, query: str = "", *, limit: int = 20) -> list[str]:
     """List workspace-relative file paths filtered and ranked by ``query`` for `@file` autocomplete."""
     ws = _as_workspace(workspace)
@@ -226,8 +347,12 @@ def list_workspace_files(workspace: Any, query: str = "", *, limit: int = 20) ->
 __all__ = [
     "MAX_MENTIONED_FILES",
     "MAX_MENTION_LINES",
+    "MAX_TEXT_ATTACHMENT_CHARS_PER_FILE",
+    "MAX_TEXT_ATTACHMENT_LINES",
     "expand_file_mentions",
+    "expand_text_attachments",
     "extract_file_mentions",
     "inject_file_mentions_into_history",
+    "inject_text_attachments_into_history",
     "list_workspace_files",
 ]

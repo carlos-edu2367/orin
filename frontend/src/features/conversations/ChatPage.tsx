@@ -81,6 +81,16 @@ import { useComposerAttachments } from './useComposerAttachments'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
 const MAX_MESSAGE_CHARACTERS = 16000
+
+function buildOversizedPromptMessage(rawText: string): string {
+  const firstLine = rawText
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('```'))
+    .map((line) => line.replace(/^[#*>\-\s`]+/, '').trim())
+    .find((line) => line.length > 0)
+  const prefix = firstLine ? `${firstLine.slice(0, 72)} — ` : ''
+  return `${prefix}Enviei o prompt completo no arquivo prompt.txt anexado. Siga as instruções contidas nele.`
+}
 const EMPTY_TURN_IDS: ReadonlySet<string> = new Set()
 
 /** Mirrors the worker's own `_model_calls_tools`: an unrefreshed catalog must not silently disable tools. */
@@ -1605,7 +1615,7 @@ export function ChatPage() {
     }
     if ((!text && readyUploads.length === 0) || turnBusy) return
     if (text.length > MAX_MESSAGE_CHARACTERS) {
-      setOversizedInput({ text, attachments: readyUploads })
+      await sendOversizedTextAutomatically(text, readyUploads, liveModeOverride)
       return
     }
     setMessage('')
@@ -1624,21 +1634,24 @@ export function ChatPage() {
     }
   }
 
-  async function sendOversizedInputAsFile() {
-    if (!oversizedInput || sendingOversizedInput || running) return
+  async function sendOversizedTextAutomatically(
+    rawText: string,
+    baseAttachments: string[],
+    liveModeOverride?: boolean,
+  ) {
+    if (sendingOversizedInput) return
     setSendingOversizedInput(true)
     setError(null)
-    const draft = oversizedInput
+    const prompt = buildOversizedPromptMessage(rawText)
     let uploadedId: string | null = null
     let sent = false
+    setOversizedInput(null)
+    setMessage('')
+    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [], command: null })
     try {
-      const uploaded = await uploadFile(client, new File([draft.text], 'mensagem.txt', { type: 'text/plain' }))
+      const uploaded = await uploadFile(client, new File([rawText], 'prompt.txt', { type: 'text/plain;charset=utf-8' }))
       uploadedId = uploaded.upload_id
-      const prompt = 'Enviei o conteúdo extenso no arquivo mensagem.txt. Leia o arquivo anexado antes de responder.'
-      setOversizedInput(null)
-      setMessage('')
-      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [], command: null })
-      await sendChatMessage(prompt, [...draft.attachments, uploaded.upload_id])
+      await sendChatMessage(prompt, [...baseAttachments, uploaded.upload_id], liveModeOverride)
       sent = true
       resetAttachments()
       await loadSnapshot(false)
@@ -1647,14 +1660,18 @@ export function ChatPage() {
     } catch {
       if (uploadedId && !sent) void deleteUpload(client, uploadedId).catch(() => undefined)
       if (!sent) {
-        setOversizedInput(draft)
-        setMessage(draft.text)
+        setMessage(rawText)
         setPendingUserMessage(null)
       }
-      setError('Não foi possível enviar o input como arquivo .txt. Tente novamente.')
+      setError('Não foi possível enviar. Tente novamente.')
     } finally {
       setSendingOversizedInput(false)
     }
+  }
+
+  async function sendOversizedInputAsFile() {
+    if (!oversizedInput) return
+    await sendOversizedTextAutomatically(oversizedInput.text, oversizedInput.attachments)
   }
 
   const stop = useCallback(async () => {
@@ -1748,6 +1765,10 @@ export function ChatPage() {
         return
       }
       if (!queueId) setMessage('')
+      if (clean.length > MAX_MESSAGE_CHARACTERS) {
+        await sendOversizedTextAutomatically(clean, [])
+        return
+      }
       setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: clean, status: 'completed', retryable: false, attachments: [], command: null })
       await sendChatMessage(clean, [])
       await loadSnapshot(false)

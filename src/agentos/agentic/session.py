@@ -826,11 +826,23 @@ class _MainAgentStore:
         return getattr(self._inner, name)
 
     def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, str]]:
-        from agentos.code_mode.mentions import inject_file_mentions_into_history
+        from agentos.code_mode.mentions import (
+            inject_file_mentions_into_history,
+            inject_text_attachments_into_history,
+        )
 
         history = self._inner.history_for_turn(turn)
         if not self._session.model_calls_tools:
             history = pre_read_attachments(history, self._session.turn_attachments, self._toolset)
+        try:
+            history = inject_text_attachments_into_history(
+                history,
+                self._session.turn_attachments,
+                self._session.workspace,
+                self._session._read_file_state,
+            )
+        except Exception:
+            pass
         try:
             history = inject_file_mentions_into_history(
                 history,

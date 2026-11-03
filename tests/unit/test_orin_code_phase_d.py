@@ -206,3 +206,73 @@ def test_session_history_injects_at_file_mentions(tmp_path: Path) -> None:
 
     files = list_workspace_files(workspace, query="hello")
     assert "hello.py" in files
+
+
+def test_inject_text_attachments_into_history_preloads_markdown_and_txt_uploads(tmp_path: Path) -> None:
+    from agentos.code_mode.mentions import inject_text_attachments_into_history
+
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    lines = [f"Linha {i:03d}: especificação detalhada do projeto Ashy com contexto técnico." for i in range(1, 543)]
+    md_text = "# PROJETO ASHY\n" + "\n".join(lines) + "\n**Identidade da Ashy.**\n"
+    assert len(md_text) > 16_000
+    (uploads_dir / "writing-block.md").write_text(md_text, encoding="utf-8")
+
+    workspace = ConversationWorkspace.at_root(tmp_path)
+    read_state: dict[str, ReadFileRecord] = {}
+    history = [
+        {
+            "role": "user",
+            "content": "\n\n[anexos enviados pela pessoa: uploads/writing-block.md (texto, 38 KB)]",
+        }
+    ]
+    attachments = [
+        {
+            "path": "uploads/writing-block.md",
+            "original_name": "writing-block.md",
+            "media_type": "text/markdown",
+            "kind": "text",
+            "bytes": len(md_text.encode("utf-8")),
+        },
+        {
+            "path": "uploads/foto.png",
+            "original_name": "foto.png",
+            "media_type": "image/png",
+            "kind": "image",
+            "bytes": 1024,
+        },
+        {
+            "path": "../secret.txt",
+            "original_name": "secret.txt",
+            "media_type": "text/plain",
+            "kind": "text",
+            "bytes": 100,
+        },
+    ]
+
+    updated = inject_text_attachments_into_history(history, attachments, workspace, read_state)
+    assert "uploads/writing-block.md" in read_state
+    assert read_state["uploads/writing-block.md"].explicit_read is True
+    assert "<system-reminder>" in updated[-1]["content"]
+    assert "Linha 542:" in updated[-1]["content"]
+    assert "**Identidade da Ashy.**" in updated[-1]["content"]
+
+    # Idempotent on repeated calls
+    updated_twice = inject_text_attachments_into_history(updated, attachments, workspace, read_state)
+    assert updated_twice[-1]["content"] == updated[-1]["content"]
+
+
+def test_read_file_on_uploads_allows_large_without_12k_truncation(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path, "chat_uploads_read")
+    uploads_dir = workspace.root / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    lines = [f"Linha {i:03d}: conteúdo extenso do prompt anexado no arquivo markdown." for i in range(1, 543)]
+    content = "\n".join(lines) + "\nFIM_DO_ARQUIVO_542\n"
+    assert len(content) > 16_000
+    (uploads_dir / "writing-block.md").write_text(content, encoding="utf-8")
+
+    toolset = AgentToolset(workspace)
+    outcome = toolset.invoke("read_file", {"path": "uploads/writing-block.md"})
+    assert outcome.status == "succeeded"
+    assert "[output truncated at" not in outcome.content
+    assert "FIM_DO_ARQUIVO_542" in outcome.content

@@ -429,6 +429,7 @@ def _build_bridge_system_prompt(
         "3. Only call tools from the following authorized Orin tool declarations:\n"
         f"{tools_json}\n"
         "4. You may emit multiple `<orin_tool_call>` blocks in a single response when the tool calls are independent. After emitting your `<orin_tool_call>...</orin_tool_call>` block(s), stop your response and wait for the `[Tool Result]` in the next turn.\n"
+        "5. NEVER write or simulate `[Tool Result ...]` or `[/Tool Result]` blocks in your response. Tool results are provided exclusively by the system after you emit `<orin_tool_call>`.\n"
         "</orin-tool-bridge>"
     )
     return f"{base_system}{bridge_instructions}" if base_system else bridge_instructions.lstrip()
@@ -552,7 +553,7 @@ def _format_bridge_conversation_transcript(
                         or ""
                     )
                     tr_text = _extract_tool_result_text(tr.get("content"))
-                    turns_text.append(f"[Tool Result id={call_id}]\n{tr_text}")
+                    turns_text.append(f"[Tool Result id={call_id}]\n{tr_text}\n[/Tool Result]")
                 if text_content.strip():
                     turns_text.append(f"[User]\n{text_content}")
             else:
@@ -595,11 +596,13 @@ def _format_bridge_conversation_transcript(
                         or ""
                     )
                     tr_text = _extract_tool_result_text(tr.get("content"))
-                    turns_text.append(f"[Tool Result id={call_id}]\n{tr_text}")
+                    turns_text.append(f"[Tool Result id={call_id}]\n{tr_text}\n[/Tool Result]")
             else:
                 call_id = str(msg.get("tool_call_id") or "")
-                turns_text.append(f"[Tool Result id={call_id}]\n{text_content}")
+                turns_text.append(f"[Tool Result id={call_id}]\n{text_content}\n[/Tool Result]")
 
+    if turns_text and turns_text[-1].startswith("[Tool Result "):
+        turns_text.append("[Assistant]")
     if len(turns_text) == 1 and turns_text[0].startswith("[User]\n"):
         prompt_text = turns_text[0][len("[User]\n") :]
     else:
@@ -794,6 +797,17 @@ class _ParsedToolCall(tuple):  # type: ignore[type-arg]
         return False
 
 
+_HALLUCINATED_TOOL_RESULT_RE = re.compile(
+    r"(?:^|\n+)\[Tool Result\b[^\n]*\][\s\S]*$",
+)
+
+
+def _strip_hallucinated_tool_results(text: str) -> str:
+    if "[Tool Result" not in text:
+        return text
+    return _HALLUCINATED_TOOL_RESULT_RE.sub("", text).rstrip()
+
+
 def _parse_orin_tool_calls(
     text: str,
     allowed_names: set[str],
@@ -803,7 +817,7 @@ def _parse_orin_tool_calls(
     open_tag = "<orin_tool_call>"
     close_tag = "</orin_tool_call>"
     if open_tag not in text:
-        return text, calls
+        return _strip_hallucinated_tool_results(text), calls
 
     cleaned_parts: list[str] = []
     cursor = 0
@@ -864,7 +878,7 @@ def _parse_orin_tool_calls(
             )
         )
 
-    cleaned = "".join(cleaned_parts).strip()
+    cleaned = _strip_hallucinated_tool_results("".join(cleaned_parts).strip())
     return cleaned, calls
 
 

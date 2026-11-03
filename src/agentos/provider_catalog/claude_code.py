@@ -939,6 +939,7 @@ def stream_claude_code_bridge(
         saw_unclosed_tool_call = False
         stop_reason: str | None = None
         active_close_tag: str | None = None
+        suppress_hallucinated_tool_result = False
         text_tag_buffer = ""
         emitted_tool_calls: list[tuple[str, str, str]] = []
         emitted_native_tool_ids: set[str] = set()
@@ -958,7 +959,7 @@ def stream_claude_code_bridge(
         )
 
         def _feed_streaming_text(chunk: str) -> Iterator[NormalizedStreamItem]:
-            nonlocal sequence, active_close_tag, text_tag_buffer
+            nonlocal sequence, active_close_tag, suppress_hallucinated_tool_result, text_tag_buffer
             buf = text_tag_buffer + chunk
             text_tag_buffer = ""
             while buf:
@@ -968,6 +969,29 @@ def stream_claude_code_bridge(
                         pos = buf.find(open_tag)
                         if pos != -1 and (matched_pair is None or pos < matched_pair[0]):
                             matched_pair = (pos, open_tag, close_tag)
+                    if suppress_hallucinated_tool_result:
+                        if matched_pair is not None:
+                            _, open_tag, close_tag = matched_pair
+                            active_close_tag = close_tag
+                            suppress_hallucinated_tool_result = False
+                            buf = buf[matched_pair[0] + len(open_tag) :]
+                            continue
+                        prefix_len = max(
+                            _tag_prefix_len(buf, open_tag) for open_tag, _ in tool_tag_pairs
+                        )
+                        text_tag_buffer = buf[-prefix_len:] if prefix_len > 0 else ""
+                        break
+                    hallucinated_pos = buf.find("[Tool Result")
+                    if hallucinated_pos != -1 and (matched_pair is None or hallucinated_pos < matched_pair[0]):
+                        before = buf[:hallucinated_pos].rstrip()
+                        if before:
+                            sequence += 1
+                            yield NormalizedStreamItem(
+                                StreamKind.TEXT, sequence, text=before
+                            )
+                        suppress_hallucinated_tool_result = True
+                        buf = buf[hallucinated_pos + len("[Tool Result") :]
+                        continue
                     if matched_pair is not None:
                         pos, open_tag, close_tag = matched_pair
                         before = buf[:pos]
@@ -981,7 +1005,8 @@ def stream_claude_code_bridge(
                         buf = after
                         continue
                     prefix_len = max(
-                        _tag_prefix_len(buf, open_tag) for open_tag, _ in tool_tag_pairs
+                        max(_tag_prefix_len(buf, open_tag) for open_tag, _ in tool_tag_pairs),
+                        _tag_prefix_len(buf, "[Tool Result"),
                     )
                     if prefix_len > 0:
                         emit_part = buf[:-prefix_len]
@@ -1026,7 +1051,7 @@ def stream_claude_code_bridge(
                     emitted_tool_calls.extend(parsed_calls)
                 else:
                     saw_unclosed_tool_call = True
-            elif leftover.strip():
+            elif leftover.strip() and not suppress_hallucinated_tool_result and not leftover.lstrip().startswith("[Tool Result"):
                 sequence += 1
                 yield NormalizedStreamItem(StreamKind.TEXT, sequence, text=leftover)
 

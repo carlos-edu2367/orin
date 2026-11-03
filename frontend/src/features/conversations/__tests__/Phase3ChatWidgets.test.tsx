@@ -204,7 +204,7 @@ describe('Phase 3 Chat Widgets (Composer, QueuePanel, MemoryLearnedCard, Workspa
   })
 
   describe('WorkspaceFileCard (ref-03)', () => {
-    it('renders article.workspace-file-card with data-deliverable="true" and "Abrir ↗" action label', () => {
+    it('renders article.workspace-file-card with data-deliverable="true" and distinct "Visualizar" and "Abrir no sistema" action labels', () => {
       const onPreview = vi.fn()
       const ref = { conversationId: 'chat_1', path: 'docs/Plano de ação.md', name: 'Plano de ação.md' }
 
@@ -215,7 +215,9 @@ describe('Phase 3 Chat Widgets (Composer, QueuePanel, MemoryLearnedCard, Workspa
       expect(article).toHaveAttribute('data-deliverable', 'true')
 
       const openPreviewBtn = screen.getByRole('button', { name: 'Visualizar Plano de ação.md' })
-      expect(openPreviewBtn).toHaveTextContent('Abrir ↗')
+      expect(openPreviewBtn).toHaveTextContent('Visualizar')
+      const openSystemBtn = screen.getByRole('button', { name: 'Abrir Plano de ação.md no sistema' })
+      expect(openSystemBtn).toHaveTextContent('Abrir no sistema')
       fireEvent.click(openPreviewBtn)
       expect(onPreview).toHaveBeenCalledWith(ref)
     })

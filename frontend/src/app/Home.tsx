@@ -12,6 +12,7 @@ import { listProjectSidebar } from '../api/projects'
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../api/errors'
 import { listPluginCommands, type PluginCommand } from '../api/plugins'
 import { PROVIDER_NAMES, listProviderModels, type ProviderModel, type ProviderName } from '../api/providers'
+import { deleteUpload, uploadFile } from '../api/uploads'
 import { listSkills, type SkillSummary } from '../api/skills'
 import { AmbientField } from '../components/three/AmbientField'
 import { CommandPalette } from '../components/CommandPalette'
@@ -36,6 +37,17 @@ const PROVIDER_STORAGE_KEY = 'agentos.provider'
 const MODEL_STORAGE_KEY = 'agentos.model'
 const USER_NAME_STORAGE_KEY = 'orin.user.displayName'
 const ACTIVE_CONVERSATION_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
+const MAX_MESSAGE_CHARACTERS = 16000
+
+function buildOversizedPromptMessage(rawText: string): string {
+  const firstLine = rawText
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('```'))
+    .map((line) => line.replace(/^[#*>\-\s`]+/, '').trim())
+    .find((line) => line.length > 0)
+  const prefix = firstLine ? `${firstLine.slice(0, 72)} — ` : ''
+  return `${prefix}Enviei o prompt completo no arquivo prompt.txt anexado. Siga as instruções contidas nele.`
+}
 
 export function formatHomeGreeting(hour?: number, rawName?: string | null): string {
   const resolvedHour = hour === undefined ? new Date().getHours() : hour
@@ -238,6 +250,7 @@ export function Home({ client, bootstrap }: HomeProps) {
     setError(null)
     const resolvedMode: ConversationMode = codeMode === 'code' ? 'code' : 'chat'
     const resolvedPermissionMode: CodePermissionMode = codePermissionMode || (resolvedMode === 'code' ? serverPermissionMode : 'ask_permissions')
+    let autoUploadedId: string | null = null
     try {
       if (resolvedMode === 'code') {
         await setCodeModeSettings(apiClient, {
@@ -246,18 +259,30 @@ export function Home({ client, bootstrap }: HomeProps) {
           monitoring_enabled: codeMonitoringEnabled,
         }).catch(() => undefined)
       }
+      let effectiveMessage = text
+      let effectiveAttachments = readyUploads
+      if (text.length > MAX_MESSAGE_CHARACTERS) {
+        const uploaded = await uploadFile(
+          apiClient,
+          new File([text], 'prompt.txt', { type: 'text/plain;charset=utf-8' }),
+        )
+        autoUploadedId = uploaded.upload_id
+        effectiveMessage = buildOversizedPromptMessage(text)
+        effectiveAttachments = [...readyUploads, uploaded.upload_id]
+      }
       const receipt = await createConversation(apiClient, {
-        message: text,
+        message: effectiveMessage,
         provider,
         model_id: modelId,
         project_id: projectId,
         workspace_path: workspacePath,
         workspace_acknowledged_risk: workspaceAcknowledgedRisk,
-        attachments: readyUploads,
+        attachments: effectiveAttachments,
         code_mode: resolvedMode,
         mode: resolvedMode,
         permission_mode: resolvedPermissionMode,
       })
+      autoUploadedId = null
       writeStored(PROVIDER_STORAGE_KEY, provider)
       writeStored(MODEL_STORAGE_KEY, modelId)
       resetAttachments()
@@ -265,6 +290,7 @@ export function Home({ client, bootstrap }: HomeProps) {
         ? `/projects/${encodeURIComponent(projectId)}/chats/${encodeURIComponent(receipt.conversation_id)}`
         : `/chats/${encodeURIComponent(receipt.conversation_id)}`)
     } catch (caught) {
+      if (autoUploadedId) void deleteUpload(apiClient, autoUploadedId).catch(() => undefined)
       setError(errorHeadline(caught))
       setSubmitting(false)
       setFocusSignal((value) => value + 1)
