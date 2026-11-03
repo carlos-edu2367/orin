@@ -266,6 +266,11 @@ export function ChatPage() {
       if (next.activity_cursor) {
         cursorRef.current = next.activity_cursor
       }
+      for (const item of next.activities) {
+        if (item.type === 'assistant.delta') {
+          streamedDeltaIdsRef.current.add(item.eventId)
+        }
+      }
       dispatch({
         type: 'reconcile_snapshot',
         events: next.activities,

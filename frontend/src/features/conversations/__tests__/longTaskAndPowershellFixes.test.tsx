@@ -355,4 +355,436 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
     expect(screen.getByText(/Find Ashy providers\.json, mask API keys/i)).toBeInTheDocument();
     expect(screen.getByText(/providers\.json masked ok/i)).toBeInTheDocument();
   });
+
+  it('does not duplicate assistant text or thoughts when reconcile_snapshot merges backend-compacted deltas over granular SSE deltas', () => {
+    const fullText =
+      'Aqui vai um resumo do que consigo fazer por você:\n\n📁 Arquivos e Código\nSe quiser, posso ajudar diretamente em qualquer uma dessas frentes. O que você precisa agora?';
+    const chunks = [
+      { id: 'activity:turn_dup:2', text: 'Aqu' },
+      { id: 'activity:turn_dup:3', text: 'i vai um resumo do que consigo fazer por você:\n\n' },
+      { id: 'activity:turn_dup:4', text: '📁 Arquivos e Código\n' },
+      {
+        id: 'activity:turn_dup:5',
+        text: 'Se quiser, posso ajudar diretamente em qualquer uma dessas frentes. O que você precisa agora?',
+      },
+    ];
+
+    let state = initialActivityState();
+
+    // Stream granular thought deltas via SSE
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'activity:turn_dup:0',
+        cursor: 'a.0',
+        turnId: 'turn_dup',
+        agentId: 'agent:conv_dup:main',
+        kind: 'agent',
+        type: 'agent.thought_delta',
+        state: 'working',
+        label: 'Pensando',
+        summary: 'Analisando ',
+        detail: 'Analisando ',
+        payload: { delta: 'Analisando ' },
+        occurredAt: '2026-11-03T11:00:00.000Z',
+      },
+    });
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'activity:turn_dup:1',
+        cursor: 'a.1',
+        turnId: 'turn_dup',
+        agentId: 'agent:conv_dup:main',
+        kind: 'agent',
+        type: 'agent.thought_delta',
+        state: 'working',
+        label: 'Pensando',
+        summary: 'o pedido do usuário.',
+        detail: 'o pedido do usuário.',
+        payload: { delta: 'o pedido do usuário.' },
+        occurredAt: '2026-11-03T11:00:00.100Z',
+      },
+    });
+
+    // Stream granular assistant.delta chunks via SSE
+    for (let i = 0; i < chunks.length; i += 1) {
+      state = activityReducer(state, {
+        type: 'event',
+        event: {
+          eventId: chunks[i]!.id,
+          cursor: `a.${i + 2}`,
+          turnId: 'turn_dup',
+          agentId: 'agent:conv_dup:main',
+          messageId: 'msg_dup_1',
+          kind: 'message',
+          type: 'assistant.delta',
+          state: 'working',
+          label: 'Resposta',
+          summary: chunks[i]!.text,
+          content: chunks[i]!.text,
+          occurredAt: `2026-11-03T11:00:0${i + 1}.000Z`,
+        },
+      });
+    }
+
+    // Backend GET /v1/conversations/:id compacts consecutive deltas into the first eventId of each run
+    const compactedSnapshotEvents: ConversationActivityEvent[] = [
+      {
+        eventId: 'activity:turn_dup:0',
+        cursor: 'a.1',
+        turnId: 'turn_dup',
+        agentId: 'agent:conv_dup:main',
+        kind: 'agent',
+        type: 'agent.thought_delta',
+        state: 'completed',
+        label: 'Pensando',
+        summary: 'Analisando ',
+        detail: 'Analisando o pedido do usuário.',
+        payload: { content: 'Analisando o pedido do usuário.', delta: 'Analisando o pedido do usuário.' },
+        occurredAt: '2026-11-03T11:00:00.100Z',
+      },
+      {
+        eventId: 'activity:turn_dup:2',
+        cursor: 'a.5',
+        turnId: 'turn_dup',
+        agentId: 'agent:conv_dup:main',
+        messageId: 'msg_dup_1',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'completed',
+        label: 'Resposta',
+        summary: 'Aqu',
+        content: fullText,
+        occurredAt: '2026-11-03T11:00:04.000Z',
+      },
+      {
+        eventId: 'activity:turn_dup:6',
+        cursor: 'a.6',
+        turnId: 'turn_dup',
+        agentId: 'agent:conv_dup:main',
+        kind: 'lifecycle',
+        type: 'turn.completed',
+        state: 'completed',
+        label: 'Turno concluído',
+        summary: 'Turno concluído',
+        occurredAt: '2026-11-03T11:00:05.000Z',
+      },
+    ];
+
+    const reconciled = activityReducer(state, {
+      type: 'reconcile_snapshot',
+      events: compactedSnapshotEvents,
+      cursor: 'a.6',
+      conversationState: 'completed',
+    });
+
+    const timeline = buildTurnTimeline(reconciled.events, 'turn_dup', 'msg_dup_1', fullText, true);
+    const textItems = timeline.filter((item): item is { id: string; kind: 'text'; content: string } => item.kind === 'text');
+    const combinedText = textItems.map((item) => item.content).join('');
+
+    expect(combinedText).toBe(fullText);
+    expect(combinedText).not.toContain('O que você precisa agora?i vai um resumo');
+
+    const thoughtItems = timeline.filter((item) => item.kind === 'thought');
+    expect(thoughtItems).toHaveLength(1);
+    if (thoughtItems[0]?.kind === 'thought') {
+      expect(thoughtItems[0].thought.content).toBe('Analisando o pedido do usuário.');
+    }
+  });
+
+  it('does not duplicate assistant text in reconcile_snapshot when the first SSE delta was missed or interrupted by a settled tool.progressed', () => {
+    const fullText = 'Aqui vai um resumo completo sem duplicação.';
+    let state = initialActivityState();
+
+    // Simulate SSE missing the first chunk ("Aqu", eventId: evt_d1) and receiving evt_d2..evt_d3 with an intervening tool.progressed
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_d2',
+        cursor: 'a.2',
+        turnId: 'turn_missed',
+        agentId: 'agent:conv_missed:main',
+        messageId: 'msg_missed',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'i vai um resumo ',
+        content: 'i vai um resumo ',
+        occurredAt: '2026-11-03T11:00:01.000Z',
+      },
+    });
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_prog_mid',
+        cursor: 'a.3',
+        turnId: 'turn_missed',
+        agentId: 'agent:conv_missed:main',
+        kind: 'tool',
+        type: 'tool.progressed',
+        state: 'waiting_tool',
+        status: 'running',
+        toolName: 'powershell',
+        label: 'PowerShell',
+        summary: 'Executando: check',
+        occurredAt: '2026-11-03T11:00:02.000Z',
+      },
+    });
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_d3',
+        cursor: 'a.4',
+        turnId: 'turn_missed',
+        agentId: 'agent:conv_missed:main',
+        messageId: 'msg_missed',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'completo sem duplicação.',
+        content: 'completo sem duplicação.',
+        occurredAt: '2026-11-03T11:00:03.000Z',
+      },
+    });
+
+    // Backend dropped tool.progressed on settled turn and compacted evt_d1 + evt_d2 + evt_d3 into evt_d1
+    const reconciled = activityReducer(state, {
+      type: 'reconcile_snapshot',
+      events: [
+        {
+          eventId: 'evt_d1',
+          cursor: 'a.4',
+          turnId: 'turn_missed',
+          agentId: 'agent:conv_missed:main',
+          messageId: 'msg_missed',
+          kind: 'message',
+          type: 'assistant.delta',
+          state: 'completed',
+          label: 'Resposta',
+          summary: 'Aqu',
+          content: fullText,
+          occurredAt: '2026-11-03T11:00:03.000Z',
+        },
+      ],
+      cursor: 'a.4',
+      conversationState: 'completed',
+    });
+
+    const deltaEvents = reconciled.events.filter((e) => e.type === 'assistant.delta');
+    expect(deltaEvents).toHaveLength(1);
+    expect(deltaEvents[0]?.content).toBe(fullText);
+  });
+
+  it('preserves separate paragraphs across surviving tool.finished events even when paragraph texts overlap', () => {
+    let state = initialActivityState();
+
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_p1_a',
+        cursor: 'a.1',
+        turnId: 'turn_two_paras',
+        agentId: 'agent:conv_two:main',
+        messageId: 'msg_two',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'Ok. ',
+        content: 'Ok. ',
+        occurredAt: '2026-11-03T11:00:01.000Z',
+      },
+    });
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_p1_b',
+        cursor: 'a.2',
+        turnId: 'turn_two_paras',
+        agentId: 'agent:conv_two:main',
+        messageId: 'msg_two',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'Vou verificar.',
+        content: 'Vou verificar.',
+        occurredAt: '2026-11-03T11:00:02.000Z',
+      },
+    });
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_tool_done',
+        cursor: 'a.3',
+        turnId: 'turn_two_paras',
+        agentId: 'agent:conv_two:main',
+        kind: 'tool',
+        type: 'tool.finished',
+        state: 'completed',
+        status: 'succeeded',
+        toolName: 'read_file',
+        label: 'read_file',
+        summary: 'Leu config.json',
+        occurredAt: '2026-11-03T11:00:03.000Z',
+      },
+    });
+    // Second paragraph missed its first char "O" (evt_p2_a) and received "k." (evt_p2_b)
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'evt_p2_b',
+        cursor: 'a.5',
+        turnId: 'turn_two_paras',
+        agentId: 'agent:conv_two:main',
+        messageId: 'msg_two',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'k.',
+        content: 'k.',
+        occurredAt: '2026-11-03T11:00:05.000Z',
+      },
+    });
+
+    const reconciled = activityReducer(state, {
+      type: 'reconcile_snapshot',
+      events: [
+        {
+          eventId: 'evt_p1_a',
+          cursor: 'a.2',
+          turnId: 'turn_two_paras',
+          agentId: 'agent:conv_two:main',
+          messageId: 'msg_two',
+          kind: 'message',
+          type: 'assistant.delta',
+          state: 'completed',
+          label: 'Resposta',
+          summary: 'Ok. ',
+          content: 'Ok. Vou verificar.',
+          occurredAt: '2026-11-03T11:00:02.000Z',
+        },
+        {
+          eventId: 'evt_tool_done',
+          cursor: 'a.3',
+          turnId: 'turn_two_paras',
+          agentId: 'agent:conv_two:main',
+          kind: 'tool',
+          type: 'tool.finished',
+          state: 'completed',
+          status: 'succeeded',
+          toolName: 'read_file',
+          label: 'read_file',
+          summary: 'Leu config.json',
+          occurredAt: '2026-11-03T11:00:03.000Z',
+        },
+        {
+          eventId: 'evt_p2_a',
+          cursor: 'a.5',
+          turnId: 'turn_two_paras',
+          agentId: 'agent:conv_two:main',
+          messageId: 'msg_two',
+          kind: 'message',
+          type: 'assistant.delta',
+          state: 'completed',
+          label: 'Resposta',
+          summary: 'O',
+          content: 'Ok.',
+          occurredAt: '2026-11-03T11:00:05.000Z',
+        },
+      ],
+      cursor: 'a.5',
+      conversationState: 'completed',
+    });
+
+    const deltaEvents = reconciled.events.filter((e) => e.type === 'assistant.delta');
+    expect(deltaEvents).toHaveLength(2);
+    expect(deltaEvents[0]?.content).toBe('Ok. Vou verificar.');
+    expect(deltaEvents[1]?.content).toBe('Ok.');
+  });
+
+  it('ignores replayed or late SSE delta chunks after reconcile_snapshot has already compacted them', () => {
+    const fullText = 'Aqui vai um resumo completo.';
+    let state = initialActivityState();
+
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'activity:turn_r:2',
+        cursor: 'a.2',
+        turnId: 'turn_r',
+        agentId: 'agent:conv_r:main',
+        messageId: 'msg_r',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'Aqu',
+        content: 'Aqu',
+      },
+    });
+    state = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'activity:turn_r:3',
+        cursor: 'a.3',
+        turnId: 'turn_r',
+        agentId: 'agent:conv_r:main',
+        messageId: 'msg_r',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'i vai um resumo completo.',
+        content: 'i vai um resumo completo.',
+      },
+    });
+
+    state = activityReducer(state, {
+      type: 'reconcile_snapshot',
+      events: [
+        {
+          eventId: 'activity:turn_r:2',
+          cursor: 'a.3',
+          turnId: 'turn_r',
+          agentId: 'agent:conv_r:main',
+          messageId: 'msg_r',
+          kind: 'message',
+          type: 'assistant.delta',
+          state: 'completed',
+          label: 'Resposta',
+          summary: 'Aqu',
+          content: fullText,
+        },
+      ],
+      cursor: 'a.3',
+      conversationState: 'completed',
+    });
+
+    // Replay chunk 3 (whose cursor equals state.cursor 'a.3') over SSE after compaction
+    const afterReplay = activityReducer(state, {
+      type: 'event',
+      event: {
+        eventId: 'activity:turn_r:3',
+        cursor: 'a.3',
+        turnId: 'turn_r',
+        agentId: 'agent:conv_r:main',
+        messageId: 'msg_r',
+        kind: 'message',
+        type: 'assistant.delta',
+        state: 'working',
+        label: 'Resposta',
+        summary: 'i vai um resumo completo.',
+        content: 'i vai um resumo completo.',
+      },
+    });
+
+    const deltaEvents = afterReplay.events.filter((e) => e.type === 'assistant.delta');
+    expect(deltaEvents).toHaveLength(1);
+    expect(deltaEvents[0]?.content).toBe(fullText);
+  });
 });

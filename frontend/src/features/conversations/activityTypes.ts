@@ -199,6 +199,8 @@ export type ConversationActivityEvent = {
   endedAt?: string
   /** Stable first eventId of a logical tool invocation or delta run across lifecycle transitions. */
   originEventId?: string
+  /** Event IDs of streaming deltas that were compacted into this event. */
+  mergedEventIds?: string[]
   contextUsage?: ContextUsage
   codeStage?: string
   codeApproval?: boolean

@@ -181,8 +181,39 @@ export function applyActivityEvent(state: ActivityStoreState, event: Conversatio
   // genuine regression: if a cursor cannot be ordered at all, dropping the event
   // would silently empty the feed, which is far worse than showing it twice —
   // and the event_id check above already prevents that.
-  if (state.events.some((item) => item.eventId === event.eventId)) return state
+  if (
+    state.events.some(
+      (item) => item.eventId === event.eventId || item.mergedEventIds?.includes(event.eventId),
+    )
+  ) {
+    return state
+  }
   if (isCursorRegression(state.cursor, event.cursor)) return state
+  if (isStreamingDeltaEvent(event)) {
+    const deltaText = extractDeltaText(event)
+    const isTurnSettled =
+      state.status === 'completed' ||
+      state.status === 'failed' ||
+      state.status === 'cancelled' ||
+      Boolean(
+        event.turnId &&
+          state.events.some(
+            (item) => item.turnId === event.turnId && terminalOutcomeFor(item) !== null,
+          ),
+      )
+    if (
+      isTurnSettled &&
+      deltaText.length > 0 &&
+      state.events.some(
+        (item) =>
+          isStreamingDeltaEvent(item) &&
+          isSameDeltaScope(item, event) &&
+          extractDeltaText(item).includes(deltaText),
+      )
+    ) {
+      return state
+    }
+  }
 
   const outcome = resolveTurnOutcome(event, state.events)
   const baseEvents = outcome ? settleTurnEvents(state.events, event.turnId, outcome) : state.events
@@ -242,20 +273,7 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
       }
     }
     case 'reconcile_snapshot': {
-      const snapshotById = new Map<string, ConversationActivityEvent>()
-      for (const item of action.events) {
-        snapshotById.set(item.eventId, item)
-      }
-      const mergedEvents: ConversationActivityEvent[] = state.events.map(
-        (existing) => snapshotById.get(existing.eventId) ?? existing,
-      )
-      const existingIds = new Set(mergedEvents.map((item) => item.eventId))
-      for (const item of action.events) {
-        if (!existingIds.has(item.eventId)) {
-          mergedEvents.push(item)
-          existingIds.add(item.eventId)
-        }
-      }
+      const mergedEvents = reconcileSnapshotEvents(state.events, action.events)
       let settled: ConversationActivityEvent[] = []
       let todos: TodoItem[] = state.todos
       let activePhase: string | null = state.activePhase
@@ -360,6 +378,32 @@ function isStreamingDeltaEvent(event: ConversationActivityEvent): boolean {
   )
 }
 
+function isThoughtDeltaEvent(event: ConversationActivityEvent): boolean {
+  return event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA'
+}
+
+function isAssistantDeltaEvent(event: ConversationActivityEvent): boolean {
+  return event.type === 'assistant.delta' || event.type === 'ASSISTANT_DELTA'
+}
+
+function extractDeltaText(event: ConversationActivityEvent): string {
+  if (isThoughtDeltaEvent(event)) {
+    return String(event.payload?.delta ?? event.payload?.content ?? event.detail ?? event.delta ?? event.content ?? '')
+  }
+  if (isAssistantDeltaEvent(event)) {
+    return String(event.content ?? event.payload?.content ?? '')
+  }
+  return ''
+}
+
+function isNonBreakingDeltaSeparator(event: ConversationActivityEvent): boolean {
+  return (
+    event.type === 'context.updated' ||
+    event.type === 'CONTEXT_UPDATED' ||
+    event.type.startsWith('speak.')
+  )
+}
+
 function isEphemeralDeltaOrContext(
   event: ConversationActivityEvent,
   latestContextIdByTurn: Map<string, string>,
@@ -374,37 +418,62 @@ function isEphemeralDeltaOrContext(
   return false
 }
 
+function combineMergedIds(
+  a: ConversationActivityEvent,
+  b: ConversationActivityEvent,
+): string[] {
+  const ids = new Set<string>(a.mergedEventIds ?? [])
+  if (b.eventId && b.eventId !== a.eventId) {
+    ids.add(b.eventId)
+  }
+  for (const id of b.mergedEventIds ?? []) {
+    if (id !== a.eventId) ids.add(id)
+  }
+  return Array.from(ids)
+}
+
 function mergeAdjacentDelta(
   older: ConversationActivityEvent,
   newer: ConversationActivityEvent,
 ): ConversationActivityEvent | null {
   if (older.turnId !== newer.turnId) return null
-  const olderIsThought = older.type === 'agent.thought_delta' || older.type === 'AGENT_THOUGHT_DELTA'
-  const newerIsThought = newer.type === 'agent.thought_delta' || newer.type === 'AGENT_THOUGHT_DELTA'
+  if ((older.agentId ?? '') !== (newer.agentId ?? '')) return null
+  const olderIsThought = isThoughtDeltaEvent(older)
+  const newerIsThought = isThoughtDeltaEvent(newer)
+  const mergedEventIds = combineMergedIds(older, newer)
   if (olderIsThought && newerIsThought) {
-    const olderText = String(older.payload?.delta ?? older.detail ?? older.delta ?? older.content ?? '')
-    const newerText = String(newer.payload?.delta ?? newer.detail ?? newer.delta ?? newer.content ?? '')
+    const olderText = extractDeltaText(older)
+    const newerText = extractDeltaText(newer)
     const mergedText = `${olderText}${newerText}`
     const endedAt = newer.endedAt ?? newer.occurredAt ?? older.endedAt ?? older.occurredAt
     return {
       ...newer,
       eventId: older.eventId,
       originEventId: older.originEventId ?? older.eventId,
+      ...(mergedEventIds.length > 0 ? { mergedEventIds } : {}),
       ...(older.occurredAt ? { occurredAt: older.occurredAt } : {}),
       ...(endedAt ? { endedAt } : {}),
       detail: mergedText,
-      ...(newer.payload ? { payload: { ...newer.payload, delta: mergedText } } : { payload: { delta: mergedText } }),
+      ...(newer.payload
+        ? { payload: { ...newer.payload, content: mergedText, delta: mergedText } }
+        : { payload: { content: mergedText, delta: mergedText } }),
     }
   }
-  const olderIsAssistant = older.type === 'assistant.delta' || older.type === 'ASSISTANT_DELTA'
-  const newerIsAssistant = newer.type === 'assistant.delta' || newer.type === 'ASSISTANT_DELTA'
-  if (olderIsAssistant && newerIsAssistant && older.messageId === newer.messageId) {
+  const olderIsAssistant = isAssistantDeltaEvent(older)
+  const newerIsAssistant = isAssistantDeltaEvent(newer)
+  if (
+    olderIsAssistant &&
+    newerIsAssistant &&
+    (!older.messageId || !newer.messageId || older.messageId === newer.messageId)
+  ) {
     const mergedContent = `${older.content ?? ''}${newer.content ?? ''}`
     const endedAt = newer.endedAt ?? newer.occurredAt ?? older.endedAt ?? older.occurredAt
     return {
       ...newer,
       eventId: older.eventId,
       originEventId: older.originEventId ?? older.eventId,
+      ...(mergedEventIds.length > 0 ? { mergedEventIds } : {}),
+      ...(older.messageId || newer.messageId ? { messageId: older.messageId ?? newer.messageId } : {}),
       ...(older.occurredAt ? { occurredAt: older.occurredAt } : {}),
       ...(endedAt ? { endedAt } : {}),
       content: mergedContent,
@@ -412,6 +481,204 @@ function mergeAdjacentDelta(
     }
   }
   return null
+}
+
+/**
+ * Mirrors the backend `_compact_snapshot_activities` pass so contiguous SSE
+ * `assistant.delta` and `agent.thought_delta` chunks collapse into the first
+ * event of each run before reconciling with a durable snapshot.
+ */
+export function compactStreamingDeltas(
+  events: ConversationActivityEvent[],
+): ConversationActivityEvent[] {
+  const compacted: ConversationActivityEvent[] = []
+  let activeDeltaIndex = -1
+
+  for (const event of events) {
+    if (isStreamingDeltaEvent(event)) {
+      if (activeDeltaIndex >= 0) {
+        const merged = mergeAdjacentDelta(compacted[activeDeltaIndex]!, event)
+        if (merged) {
+          compacted[activeDeltaIndex] = merged
+          continue
+        }
+      }
+      activeDeltaIndex = compacted.length
+      compacted.push(event)
+      continue
+    }
+    if (!isNonBreakingDeltaSeparator(event)) {
+      activeDeltaIndex = -1
+    }
+    compacted.push(event)
+  }
+
+  return compacted
+}
+
+function isSameDeltaScope(a: ConversationActivityEvent, b: ConversationActivityEvent): boolean {
+  if (a.turnId !== b.turnId) return false
+  if ((a.agentId ?? '') !== (b.agentId ?? '')) return false
+  if (isThoughtDeltaEvent(a) && isThoughtDeltaEvent(b)) return true
+  if (isAssistantDeltaEvent(a) && isAssistantDeltaEvent(b)) {
+    return !a.messageId || !b.messageId || a.messageId === b.messageId
+  }
+  return false
+}
+
+function reconcileDeltaPair(
+  existing: ConversationActivityEvent,
+  snap: ConversationActivityEvent,
+): ConversationActivityEvent {
+  const existingText = extractDeltaText(existing)
+  const snapText = extractDeltaText(snap)
+  const mergedEventIds = combineMergedIds(snap, existing)
+  const withMergedIds = mergedEventIds.length > 0 ? { ...snap, mergedEventIds } : snap
+  if (existingText.length > snapText.length && existingText.startsWith(snapText)) {
+    if (isThoughtDeltaEvent(withMergedIds)) {
+      return {
+        ...withMergedIds,
+        detail: existingText,
+        payload: { ...(withMergedIds.payload ?? {}), content: existingText, delta: existingText },
+      }
+    }
+    if (isAssistantDeltaEvent(withMergedIds)) {
+      return {
+        ...withMergedIds,
+        content: existingText,
+      }
+    }
+  }
+  return withMergedIds
+}
+
+function reconcileSnapshotEvents(
+  existingEvents: ConversationActivityEvent[],
+  incomingSnapshotEvents: ConversationActivityEvent[],
+): ConversationActivityEvent[] {
+  const compactedExisting = compactStreamingDeltas(existingEvents)
+  const snapshotEvents = compactStreamingDeltas(incomingSnapshotEvents)
+  const snapshotById = new Map<string, ConversationActivityEvent>()
+  const snapshotIndexById = new Map<string, number>()
+  for (let i = 0; i < snapshotEvents.length; i += 1) {
+    const item = snapshotEvents[i]!
+    snapshotById.set(item.eventId, item)
+    snapshotIndexById.set(item.eventId, i)
+  }
+
+  const compactedExistingIds = new Set(compactedExisting.map((item) => item.eventId))
+  const usedSnapshotIds = new Set<string>()
+  const unabsorbedRemainderBySnapId = new Map<string, { snap: ConversationActivityEvent; remainder: string }>()
+  const mergedEvents: ConversationActivityEvent[] = []
+  let lastMatchedSnapshotIndex = -1
+
+  for (let existingIdx = 0; existingIdx < compactedExisting.length; existingIdx += 1) {
+    const existing = compactedExisting[existingIdx]!
+    const directSnap = snapshotById.get(existing.eventId)
+    if (directSnap) {
+      usedSnapshotIds.add(directSnap.eventId)
+      const snapIdx = snapshotIndexById.get(directSnap.eventId) ?? -1
+      if (snapIdx > lastMatchedSnapshotIndex) {
+        lastMatchedSnapshotIndex = snapIdx
+      }
+      if (isStreamingDeltaEvent(existing) && isStreamingDeltaEvent(directSnap)) {
+        const existingText = extractDeltaText(existing)
+        const snapText = extractDeltaText(directSnap)
+        if (snapText.length > existingText.length && snapText.startsWith(existingText)) {
+          unabsorbedRemainderBySnapId.set(directSnap.eventId, {
+            snap: directSnap,
+            remainder: snapText.slice(existingText.length),
+          })
+        }
+        mergedEvents.push(reconcileDeltaPair(existing, directSnap))
+      } else {
+        if (!isNonBreakingDeltaSeparator(directSnap)) {
+          unabsorbedRemainderBySnapId.clear()
+        }
+        mergedEvents.push(directSnap)
+      }
+      continue
+    }
+
+    if (isStreamingDeltaEvent(existing)) {
+      const existingText = extractDeltaText(existing)
+      let absorbedByEarlierSnap = false
+      if (existingText.length > 0) {
+        for (const [snapId, entry] of unabsorbedRemainderBySnapId.entries()) {
+          if (!isSameDeltaScope(existing, entry.snap)) continue
+          const idx = entry.remainder.indexOf(existingText)
+          if (idx >= 0) {
+            const nextRemainder = entry.remainder.slice(idx + existingText.length)
+            if (nextRemainder.length > 0) {
+              unabsorbedRemainderBySnapId.set(snapId, { snap: entry.snap, remainder: nextRemainder })
+            } else {
+              unabsorbedRemainderBySnapId.delete(snapId)
+            }
+            absorbedByEarlierSnap = true
+            break
+          }
+        }
+      }
+      if (absorbedByEarlierSnap) {
+        continue
+      }
+
+      // Upper bound in snapshotEvents: cannot cross the next structural event that also exists in compactedExisting
+      let maxSnapshotIndex = snapshotEvents.length
+      for (let lookahead = existingIdx + 1; lookahead < compactedExisting.length; lookahead += 1) {
+        const futureExisting = compactedExisting[lookahead]!
+        if (isStreamingDeltaEvent(futureExisting) || isNonBreakingDeltaSeparator(futureExisting)) continue
+        const futureSnapIdx = snapshotIndexById.get(futureExisting.eventId)
+        if (futureSnapIdx !== undefined) {
+          maxSnapshotIndex = futureSnapIdx
+          break
+        }
+      }
+
+      const unmatchedSnap = snapshotEvents.find((snap, snapIdx) => {
+        if (snapIdx <= lastMatchedSnapshotIndex || snapIdx >= maxSnapshotIndex) return false
+        if (!isStreamingDeltaEvent(snap)) return false
+        if (usedSnapshotIds.has(snap.eventId) || compactedExistingIds.has(snap.eventId)) return false
+        if (!isSameDeltaScope(existing, snap)) return false
+        const snapText = extractDeltaText(snap)
+        return (
+          existingText.length > 0 &&
+          snapText.length > 0 &&
+          (snapText.includes(existingText) || existingText.includes(snapText))
+        )
+      })
+
+      if (unmatchedSnap) {
+        usedSnapshotIds.add(unmatchedSnap.eventId)
+        const snapIdx = snapshotIndexById.get(unmatchedSnap.eventId) ?? -1
+        if (snapIdx > lastMatchedSnapshotIndex) {
+          lastMatchedSnapshotIndex = snapIdx
+        }
+        const snapText = extractDeltaText(unmatchedSnap)
+        const idx = snapText.indexOf(existingText)
+        if (idx >= 0 && idx + existingText.length < snapText.length) {
+          unabsorbedRemainderBySnapId.set(unmatchedSnap.eventId, {
+            snap: unmatchedSnap,
+            remainder: snapText.slice(idx + existingText.length),
+          })
+        }
+        mergedEvents.push(reconcileDeltaPair(existing, unmatchedSnap))
+        continue
+      }
+    }
+
+    mergedEvents.push(existing)
+  }
+
+  const existingIds = new Set(mergedEvents.map((item) => item.eventId))
+  for (const item of snapshotEvents) {
+    if (!existingIds.has(item.eventId) && !usedSnapshotIds.has(item.eventId)) {
+      mergedEvents.push(item)
+      existingIds.add(item.eventId)
+    }
+  }
+
+  return mergedEvents
 }
 
 /**
@@ -478,8 +745,13 @@ function cursorIndex(value: string): number | null {
     return Number.isSafeInteger(parsed) ? parsed : null
   }
   if (!value.startsWith('a.')) return null
+  const rest = value.slice(2)
+  if (/^(0|[1-9]\d*)$/.test(rest)) {
+    const parsed = Number(rest)
+    return Number.isSafeInteger(parsed) ? parsed : null
+  }
   try {
-    const encoded = value.slice(2).replaceAll('-', '+').replaceAll('_', '/')
+    const encoded = rest.replaceAll('-', '+').replaceAll('_', '/')
     const raw = atob(encoded + '='.repeat((4 - encoded.length % 4) % 4))
     const body = raw.slice(0, -33)
     const payload = JSON.parse(body) as { p?: unknown }
