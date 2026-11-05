@@ -2464,7 +2464,9 @@ class AgenticTurnRuntime:
                     self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
                 raise
             with checkpoint_lock:
-                if read_only and outcome.status == "succeeded" and not outcome.images:
+                # The "unchanged" stub points at an earlier result that aging may
+                # have shrunk since, so serving it again could hide the content.
+                if read_only and outcome.status == "succeeded" and not outcome.images and not outcome.payload.get("unchanged"):
                     self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
                 state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
                 # A normal failed ToolOutcome is a definite response from the

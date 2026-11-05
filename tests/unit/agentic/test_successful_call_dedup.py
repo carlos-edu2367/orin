@@ -183,3 +183,20 @@ def test_a_repeated_read_counts_as_redundant_in_the_metrics() -> None:
 
     assert runtime.counters.tool_calls == 2
     assert runtime.counters.redundant_tool_calls == 1
+
+
+class _StubToolset(_Toolset):
+    """The tool answers with the "unchanged" stub, the way read_file does after an earlier full read."""
+
+    def invoke(self, name, arguments):
+        self.invocations.append((name, str(arguments)))
+        return ToolOutcome("succeeded", "inalterado", "[File unchanged since last read]", {"unchanged": True})
+
+
+def test_an_unchanged_stub_is_never_served_from_the_read_cache() -> None:
+    toolset = _StubToolset()
+    runtime = AgenticTurnRuntime(store=object(), provider=object(), toolset=toolset)
+    call = {"id": "c1", "name": "read_file", "arguments": '{"path": "a.txt"}'}
+    runtime._run_toolset(_turn(), [call])
+    runtime._run_toolset(_turn(), [{**call, "id": "c2"}])
+    assert len(toolset.invocations) == 2
