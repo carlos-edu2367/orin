@@ -1,0 +1,435 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+from typing import Mapping, Sequence
+
+from agentos.providers.claude_cli.errors import ProviderTransportError
+
+ISOLATION_FLAGS: tuple[str, ...] = ("--restricted", "--strict-mcp-config")
+MCP_TOOL_TIMEOUT_ENV = "MCP_TOOL_TIMEOUT"
+VALIDATED_CLI_RANGE: tuple[str, str] = (">=2.1.309", "<2.2")
+FORBIDDEN_FLAGS: frozenset[str] = frozenset(
+    {"--bare", "--safe-mode", "--session-id", "--resume"}
+)
+VALID_EFFORT_LEVELS: frozenset[str] = frozenset(
+    {"low", "medium", "high", "xhigh", "max"}
+)
+SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:\-\[\]]{1,128}$")
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_VERSION_CACHE: dict[str, tuple[int, int, int] | None] = {}
+
+STRIPPED_ENV_EXACT: frozenset[str] = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CODE_SIMPLE",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SSE_PORT",
+    }
+)
+STRIPPED_ENV_PREFIXES: tuple[str, ...] = (
+    "ANTHROPIC_",
+    "ANTHROPIC_DEFAULT_",
+    "ANTHROPIC_API_",
+    "ANTHROPIC_AUTH_",
+    "ANTHROPIC_BEDROCK_",
+    "ANTHROPIC_VERTEX_",
+    "ANTHROPIC_FOUNDRY_",
+)
+
+
+def clean_model_id(model: str | None) -> str | None:
+    """Clean a model identifier without translating 5.x to 4.x."""
+    if model is None:
+        return None
+    cleaned = str(model).strip()
+    if not cleaned:
+        return None
+    if "/" in cleaned:
+        _, cleaned = cleaned.split("/", 1)
+        cleaned = cleaned.strip()
+    if not cleaned or cleaned.startswith("-") or not SAFE_MODEL_RE.match(cleaned):
+        raise ValueError(f"Invalid model identifier for Claude CLI: {model!r}")
+    return cleaned
+
+
+def build_isolated_claude_env(
+    base_env: Mapping[str, str] | None = None,
+    *,
+    max_output_tokens: int | None = None,
+    mcp_tool_timeout_ms: int | None = None,
+) -> dict[str, str]:
+    """Return an environment stripped of API keys and shell variables that override OAuth."""
+    source = os.environ if base_env is None else base_env
+    isolated: dict[str, str] = {}
+    for key, val in source.items():
+        upper_key = str(key).upper()
+        if upper_key in STRIPPED_ENV_EXACT:
+            continue
+        if any(upper_key.startswith(prefix) for prefix in STRIPPED_ENV_PREFIXES):
+            continue
+        isolated[str(key)] = str(val)
+
+    isolated["PYTHONIOENCODING"] = "utf-8"
+    isolated["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    isolated["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+    if max_output_tokens is not None:
+        if (
+            not isinstance(max_output_tokens, int)
+            or isinstance(max_output_tokens, bool)
+            or max_output_tokens <= 0
+        ):
+            raise ValueError("max_output_tokens must be a positive integer")
+        isolated["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(int(max_output_tokens))
+    if mcp_tool_timeout_ms is not None:
+        if (
+            not isinstance(mcp_tool_timeout_ms, int)
+            or isinstance(mcp_tool_timeout_ms, bool)
+            or mcp_tool_timeout_ms <= 0
+        ):
+            raise ValueError("mcp_tool_timeout_ms must be a positive integer")
+        isolated[MCP_TOOL_TIMEOUT_ENV] = str(int(mcp_tool_timeout_ms))
+        isolated["MCP_TIMEOUT"] = "30000"
+    return isolated
+
+
+build_isolated_env = build_isolated_claude_env
+
+
+def resolve_claude_binary(env: Mapping[str, str] | None = None) -> str | None:
+    """Locate the native `claude.exe` binary, prioritizing native PE executables over `.cmd` wrappers."""
+    source_env = os.environ if env is None else env
+    appdata = source_env.get("APPDATA")
+    userprofile = source_env.get("USERPROFILE")
+    localappdata = source_env.get("LOCALAPPDATA")
+    home = source_env.get("HOME")
+
+    exe_candidates: list[Path] = []
+    if appdata:
+        exe_candidates.append(
+            Path(appdata)
+            / "npm"
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+            / "bin"
+            / "claude.exe"
+        )
+    if userprofile:
+        exe_candidates.append(Path(userprofile) / ".local" / "bin" / "claude.exe")
+    if localappdata:
+        exe_candidates.append(
+            Path(localappdata) / "Programs" / "claude" / "claude.exe"
+        )
+    if home:
+        exe_candidates.append(Path(home) / ".local" / "bin" / "claude.exe")
+
+    for candidate in exe_candidates:
+        if candidate.is_file():
+            return str(candidate)
+
+    found = shutil.which("claude", path=source_env.get("PATH"))
+    if found:
+        found_path = Path(found)
+        sibling_npm_exe = (
+            found_path.parent
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+            / "bin"
+            / "claude.exe"
+        )
+        if sibling_npm_exe.is_file():
+            return str(sibling_npm_exe)
+        if found_path.suffix.lower() in {".cmd", ".bat", ".ps1"}:
+            direct_exe = found_path.with_suffix(".exe")
+            if direct_exe.is_file():
+                return str(direct_exe)
+        return str(found_path)
+
+    if appdata:
+        for shim_name in ("claude.cmd", "claude.ps1"):
+            cmd_candidate = Path(appdata) / "npm" / shim_name
+            if cmd_candidate.is_file():
+                return str(cmd_candidate)
+    if home:
+        posix_candidate = Path(home) / ".local" / "bin" / "claude"
+        if posix_candidate.is_file():
+            return str(posix_candidate)
+    return None
+
+
+def clear_version_cache() -> None:
+    """Clear the cached CLI version map."""
+    _VERSION_CACHE.clear()
+
+
+def claude_cli_version(
+    binary: str | None = None,
+    *,
+    timeout: float = 5.0,
+    env: Mapping[str, str] | None = None,
+) -> tuple[int, int, int] | None:
+    """Return the parsed `(major, minor, patch)` of `claude --version`, cached per binary."""
+    resolved = binary or resolve_claude_binary(env)
+    if not resolved:
+        return None
+    if resolved in _VERSION_CACHE:
+        return _VERSION_CACHE[resolved]
+
+    isolated_env = build_isolated_claude_env(env)
+    creationflags = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    )
+    try:
+        completed = subprocess.run(
+            [resolved, "--version"],
+            env=isolated_env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=creationflags,
+            check=False,
+        )
+    except Exception:
+        _VERSION_CACHE[resolved] = None
+        return None
+
+    output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
+    match = _VERSION_RE.search(output)
+    if not match:
+        _VERSION_CACHE[resolved] = None
+        return None
+    parsed = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    _VERSION_CACHE[resolved] = parsed
+    return parsed
+
+
+def is_version_validated(version: tuple[int, int, int] | None) -> bool:
+    """Return True when `version` falls within `VALIDATED_CLI_RANGE` (`>=2.1.309, <2.2`)."""
+    if version is None:
+        return False
+    return (2, 1, 309) <= version < (2, 2, 0)
+
+
+def check_claude_cli_status(
+    *,
+    binary: str | None = None,
+    timeout: float = 8.0,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Verify that `claude` CLI is installed and authenticated via a `claude.ai` OAuth subscription."""
+    resolved_binary = binary or resolve_claude_binary(env)
+    if not resolved_binary:
+        raise ProviderTransportError(
+            "Claude Code CLI executable ('claude') was not found on this machine. "
+            "Install @anthropic-ai/claude-code and run 'claude auth login'."
+        )
+
+    isolated_env = build_isolated_claude_env(env)
+    creationflags = (
+        getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    )
+    try:
+        completed = subprocess.run(
+            [resolved_binary, "auth", "status"],
+            env=isolated_env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=creationflags,
+            check=False,
+        )
+    except Exception as exc:
+        raise ProviderTransportError(
+            f"Failed to execute 'claude auth status': {exc}"
+        ) from exc
+
+    raw_output = (completed.stdout or "").strip()
+    if not raw_output:
+        stderr_hint = (completed.stderr or "").strip()
+        raise ProviderTransportError(
+            f"Claude Code CLI returned empty auth status. {stderr_hint}".strip()
+        )
+
+    try:
+        payload = json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        raise ProviderTransportError(
+            "Claude Code CLI returned invalid JSON for 'claude auth status'."
+        ) from exc
+
+    if not isinstance(payload, Mapping):
+        raise ProviderTransportError(
+            "Claude Code CLI returned an unexpected auth status payload."
+        )
+
+    logged_in = payload.get("loggedIn") is True
+    auth_method = str(payload.get("authMethod") or "").strip().lower()
+    if not logged_in:
+        raise ProviderTransportError(
+            "Claude Code CLI is not logged in. Run 'claude auth login' in your terminal."
+        )
+    if auth_method != "claude.ai":
+        raise ProviderTransportError(
+            f"Claude Code CLI is authenticated via '{auth_method}' instead of a 'claude.ai' OAuth subscription. "
+            "Run 'claude auth login' to use your Pro/Max/Team subscription limits."
+        )
+
+    return dict(payload)
+
+
+def ensure_isolated_cwd(base: Path | None = None) -> Path:
+    """Create or return an empty directory outside any project repository for `claude -p`."""
+    root = base if base is not None else (Path(tempfile.gettempdir()) / "orin-claude-cli-cwd")
+    root.mkdir(parents=True, exist_ok=True)
+    for child in root.iterdir():
+        if child.name in {".claude", "CLAUDE.md"}:
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+    return root
+
+
+def _validate_path_arg(value: str | Path, label: str) -> str:
+    text = str(value).strip()
+    if (
+        not text
+        or text.startswith("-")
+        or "\x00" in text
+        or "\n" in text
+        or "\r" in text
+    ):
+        raise ValueError(f"Invalid {label} path")
+    return text
+
+
+def redact_argv(argv: Sequence[str]) -> list[str]:
+    """Redact temporary file paths (`--mcp-config`, `--system-prompt-file`) before logging."""
+    redacted: list[str] = []
+    skip_next = False
+    for item in argv:
+        if skip_next:
+            redacted.append("<redacted>")
+            skip_next = False
+            continue
+        redacted.append(str(item))
+        if item in {"--mcp-config", "--system-prompt-file"}:
+            skip_next = True
+    return redacted
+
+
+def build_claude_command(
+    *,
+    binary: str,
+    system_prompt_file: str | Path,
+    model: str | None = None,
+    effort: str | None = None,
+    max_turns: int = 1,
+    mcp_config_file: str | Path | None = None,
+    autocompact: str | int | None = None,
+    session_id: str | None = None,
+    resume_session_id: str | None = None,
+    resume: str | None = None,
+    persist_session: bool = False,
+) -> list[str]:
+    """Construct the isolated `claude -p` argument list (never using `--bare`, `--safe-mode`, `--session-id`, or `--resume`)."""
+    if not isinstance(binary, str) or not binary.strip() or "\x00" in binary:
+        raise ValueError("Valid Claude CLI binary path is required")
+    if (
+        not isinstance(max_turns, int)
+        or isinstance(max_turns, bool)
+        or max_turns < 1
+    ):
+        raise ValueError("max_turns must be >= 1")
+    if (
+        session_id is not None
+        or resume_session_id is not None
+        or resume is not None
+        or persist_session
+    ):
+        raise ValueError(
+            "CLI session flags (--session-id / --resume / persist_session) are forbidden; "
+            "Orin never writes session state to ~/.claude"
+        )
+
+    prompt_str = _validate_path_arg(system_prompt_file, "system_prompt_file")
+    cmd: list[str] = [
+        binary.strip(),
+        "-p",
+        *ISOLATION_FLAGS,
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--tools",
+        "",
+        "--permission-prompts",
+        "none",
+        "--no-session-persistence",
+        "--max-turns",
+        str(max_turns),
+        "--system-prompt-file",
+        prompt_str,
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+    ]
+
+    if mcp_config_file is not None:
+        cmd.extend(
+            [
+                "--mcp-config",
+                _validate_path_arg(mcp_config_file, "mcp_config_file"),
+                "--allowedTools",
+                "mcp__orin__*",
+            ]
+        )
+
+    if autocompact is not None:
+        if autocompact == "auto":
+            cmd.extend(["--autocompact", "auto"])
+        elif (
+            isinstance(autocompact, int)
+            and not isinstance(autocompact, bool)
+            and 100_000 <= autocompact <= 1_000_000
+        ):
+            cmd.extend(["--autocompact", str(autocompact)])
+        else:
+            raise ValueError(f"Invalid autocompact value for Claude CLI: {autocompact!r}")
+
+    cleaned_model = clean_model_id(model)
+    if cleaned_model is not None:
+        cmd.extend(["--model", cleaned_model])
+
+    if effort is not None and str(effort).strip():
+        cleaned_effort = str(effort).strip().lower()
+        if cleaned_effort not in VALID_EFFORT_LEVELS:
+            raise ValueError(f"Invalid effort level for Claude CLI: {effort!r}")
+        cmd.extend(["--effort", cleaned_effort])
+
+    if any(flag in FORBIDDEN_FLAGS for flag in cmd):
+        raise AssertionError("Forbidden flag leaked into command")
+    return cmd

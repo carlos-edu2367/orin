@@ -29,10 +29,10 @@ _NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _TOOL = re.compile(r"[A-Za-z_][\w.:-]*")
 MODEL_ALIASES = ("sonnet", "opus", "haiku", "fable")
 DEFAULT_MODEL_ALIASES: Mapping[str, str] = {
-    "haiku": "claude-haiku-4-5-20251001",
-    "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-7",
-    "fable": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5",
+    "fable": "claude-fable-5-1",
 }
 # Least to most permissive. dontAsk refuses whatever would prompt, so it ranks with plan mode below the default.
 # Names of Orin's builtin agents. A repository may not replace them (a read-only Explore stays read-only); a
