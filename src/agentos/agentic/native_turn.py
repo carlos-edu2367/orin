@@ -5,6 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 import hashlib
 import json
+import logging
 from pathlib import Path
 import threading
 import time
@@ -18,6 +19,7 @@ from agentos.providers.claude_cli.command import (
     ensure_isolated_cwd,
 )
 from agentos.providers.claude_cli.errors import (
+    CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
@@ -56,6 +58,8 @@ from .speak_stream import SpeakStreamParser
 
 if TYPE_CHECKING:
     from .runtime import AgenticTurnRuntime
+
+_LOGGER = logging.getLogger(__name__)
 
 BATCH_GATHER_SECONDS: float = 0.1
 CLI_PARALLEL_MCP: bool = True
@@ -126,7 +130,7 @@ def _canonical_json(value: Any) -> str:
 
 _ORIN_MCP_PREFIX = "mcp__orin__"
 # Limits the sink enforces from the CLI's usage; when one fired, it is the turn's error code.
-_LIMIT_ABORT_CODES = frozenset({"PROVIDER_TOKEN_LIMIT", "PROVIDER_COST_LIMIT", "MAX_BUDGET_USD"})
+_LIMIT_ABORT_CODES = frozenset({"PROVIDER_TOKEN_LIMIT", "PROVIDER_COST_LIMIT", "MAX_BUDGET_USD", "MAX_TURNS"})
 
 
 def _strip_mcp_prefix(name: str) -> str:
@@ -980,6 +984,9 @@ class _RunnerSink:
         self._round_thinking_parts: list[str] = []
         self.total_tokens: int = 0
         self.total_cost: Decimal = Decimal("0")
+        # Model calls of the whole turn (one per assistant message id), across every follow-up message:
+        # --max-turns only caps one message of the live process.
+        self.model_calls: int = 0
         self._is_live_or_friend = bool(
             runner.runtime._is_live_or_friend(runner.turn)
         )
@@ -1248,6 +1255,7 @@ class _RunnerSink:
         out_tok = usage.output_tokens
         tot_tok = used_in + out_tok
         self.total_tokens += tot_tok
+        self.model_calls += 1
 
         self._runner.runtime.counters.note_usage(
             input_tokens=used_in,
@@ -1288,6 +1296,9 @@ class _RunnerSink:
             breach = "PROVIDER_COST_LIMIT"
         elif limits.max_budget_usd is not None and runtime._spent_usd(self.total_cost) >= limits.max_budget_usd:
             breach = "MAX_BUDGET_USD"
+        elif limits.max_turns is not None and self.model_calls > limits.max_turns:
+            # As the classic loop: max_turns model calls are allowed; the one after them stops the turn.
+            breach = "MAX_TURNS"
         if breach is not None and self._executor.abort_code is None:
             self._executor.abort_code = breach
             handle = self._executor.handle
@@ -1456,6 +1467,15 @@ class NativeTurnRunner:
         return time.monotonic() + rem_sec
 
     def run(self) -> AgenticRunResult | None:
+        self._executor: RuntimeToolExecutor | None = None
+        try:
+            return self._run()
+        finally:
+            # Every exit closes the executor, so no ask_user waiter outlives the runner (retries keep it open).
+            if self._executor is not None:
+                self._executor.close()
+
+    def _run(self) -> AgenticRunResult | None:
         raw_schemas = self.runtime._tool_schemas(self.turn)
         tool_schemas = (
             self.runtime._names.schemas_out(raw_schemas)
@@ -1519,10 +1539,16 @@ class NativeTurnRunner:
             messages=self.messages,
             deadline=self.deadline,
         )
+        self._executor = executor
         sink = _RunnerSink(self, executor)
 
         native_cwd = _resolve_native_cwd()
-        ensure_isolated_cwd(native_cwd)
+        try:
+            ensure_isolated_cwd(native_cwd)
+        except CliSecurityAbort:
+            # An unsafe working folder: the CLI never starts (and no text fallback, which would face the same).
+            _LOGGER.warning("claude_cli native turn refused: unsafe working directory %s", native_cwd, exc_info=True)
+            return self.runtime._fail(self.turn, "PROVIDER_STREAM_NOT_STARTED", 1, 0)
         limits = self.runtime.limits
         max_turns = int(limits.max_iterations or 200)
         if limits.max_turns is not None and limits.max_turns > 0:
@@ -1705,7 +1731,11 @@ class NativeTurnRunner:
                                 proc_alive = bool(alive_fn())
                             except Exception:
                                 proc_alive = False
-                        if not closing_sent and proc_alive:
+                        turns_spent = (
+                            self.runtime.limits.max_turns is not None
+                            and sink.model_calls >= self.runtime.limits.max_turns
+                        )
+                        if not closing_sent and proc_alive and not turns_spent:
                             closing_sent = True
                             handle.refuse_tools("tool budget exhausted")
                             try:
@@ -1756,8 +1786,12 @@ class NativeTurnRunner:
                             gate_ok, gate_reason = completion_gate()
                         except Exception:
                             gate_ok, gate_reason = True, None
+                    turns_used = (
+                        self.runtime.limits.max_turns is not None
+                        and sink.model_calls >= self.runtime.limits.max_turns
+                    )
                     if not gate_ok:
-                        if closing_sent:
+                        if closing_sent or turns_used:
                             self.runtime.store.delta(
                                 self.turn,
                                 f"\n\nRessalva de verificação: {gate_reason}",
@@ -1813,6 +1847,7 @@ class NativeTurnRunner:
 
                     if (
                         not closing_sent
+                        and not turns_used
                         and verify_gate_attempts < 1
                         and self.runtime._needs_verification()
                     ):
@@ -1842,6 +1877,7 @@ class NativeTurnRunner:
                     )
                     if (
                         not closing_sent
+                        and not turns_used
                         and stop_decision is not None
                         and stop_decision.blocked
                         and not stop_decision.stop
