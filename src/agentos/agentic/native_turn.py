@@ -125,6 +125,8 @@ def _canonical_json(value: Any) -> str:
 
 
 _ORIN_MCP_PREFIX = "mcp__orin__"
+# Limits the sink enforces from the CLI's usage; when one fired, it is the turn's error code.
+_LIMIT_ABORT_CODES = frozenset({"PROVIDER_TOKEN_LIMIT", "PROVIDER_COST_LIMIT", "MAX_BUDGET_USD"})
 
 
 def _strip_mcp_prefix(name: str) -> str:
@@ -330,6 +332,7 @@ class RuntimeToolExecutor(ToolExecutor):
         self.messages: list[dict[str, object]] = messages if messages is not None else []
         self.deadline: datetime | float | None = deadline
         self.abort_code: str | None = None
+        self._deferred_queued_records: list[tuple[str, str]] | None = None
         self.stop_reason: str | None = None
         self.action_count: int = 0
         self.tool_rounds: int = 0
@@ -639,13 +642,12 @@ class RuntimeToolExecutor(ToolExecutor):
                 if extra
                 else text
             )
-            self.messages.append({"role": "user", "content": content})
-            self.runtime._queued_turn_count += 1
-            self.runtime._record_step(
-                self.turn,
-                kind=transcript.STEP_QUEUED_INPUT,
-                payload={"content": text},
-            )
+            if self._deferred_queued_records is not None:
+                # Claimed while an ask_user batch is open: recorded after that batch's tool call and results,
+                # so the transcript never shows the answer before the question.
+                self._deferred_queued_records.append((content, text))
+            else:
+                self._record_queued_input(content, text)
             self.runtime._life(
                 self.turn,
                 "queued_input",
@@ -654,6 +656,15 @@ class RuntimeToolExecutor(ToolExecutor):
             )
             claimed.append(content)
         return claimed
+
+    def _record_queued_input(self, content: str, text: str) -> None:
+        self.messages.append({"role": "user", "content": content})
+        self.runtime._queued_turn_count += 1
+        self.runtime._record_step(
+            self.turn,
+            kind=transcript.STEP_QUEUED_INPUT,
+            payload={"content": text},
+        )
 
     def _turn_notes(self, *, claim_queue: bool = True) -> str:
         self.runtime._check_external_changes(self.turn)
@@ -738,6 +749,10 @@ class RuntimeToolExecutor(ToolExecutor):
                 for _ in entries
             ]
 
+        if self._deferred_queued_records is not None:  # an earlier batch broke off before recording them
+            leftover, self._deferred_queued_records = self._deferred_queued_records, None
+            for content, text in leftover:
+                self._record_queued_input(content, text)
         self.runtime._life(self.turn, "waiting_tool", count=len(entries))
 
         calls_dict: dict[str, dict[str, str]] = {}
@@ -786,6 +801,8 @@ class RuntimeToolExecutor(ToolExecutor):
         ask_user_cancelled = False
         had_ask_user_wait = False
         pre_ask_user_queued: list[str] = []
+        if any(bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user" for res in results):
+            self._deferred_queued_records = []
         for res in results:
             if bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user":
                 had_ask_user_wait = True
@@ -849,6 +866,9 @@ class RuntimeToolExecutor(ToolExecutor):
                 tool_call_id=str(res.get("id") or ""),
             )
             self.messages.extend(self.runtime._tool_result_messages(self.turn, res))
+        deferred_records, self._deferred_queued_records = self._deferred_queued_records, None
+        for content, text in deferred_records or ():
+            self._record_queued_input(content, text)
 
         if self.on_batch_finished is not None:
             try:
@@ -1272,10 +1292,15 @@ class _RunnerSink:
             self._executor.abort_code = breach
             handle = self._executor.handle
             if handle is not None:
-                try:
-                    handle.refuse_tools(f"turn stopped: {breach}")
-                except Exception:  # noqa: BLE001 - the abort code is what stops the turn
-                    pass
+                # Stop the CLI at the breach, as the classic loop stops at the call that crossed the limit:
+                # a refused tool result would be one more paid model call.
+                for stop in ("refuse_tools", "close"):
+                    try:
+                        fn = getattr(handle, stop, None)
+                        if callable(fn):
+                            fn(f"turn stopped: {breach}") if stop == "refuse_tools" else fn()
+                    except Exception:  # noqa: BLE001 - the abort code is what stops the turn
+                        pass
 
         limit = (
             self._runner.runtime.limits.context_window_tokens
@@ -1332,6 +1357,14 @@ class NativeTurnRunner:
         self.deadline = deadline
         self.iteration = 1
         self.last_context: dict[str, object] = {}
+
+    def _stop_code_after_stream_error(self, exc: BaseException, executor: RuntimeToolExecutor) -> str | None:
+        """Why the turn really stopped when the CLI stream ended in an error: a limit that fired, or the deadline."""
+        if executor.abort_code in _LIMIT_ABORT_CODES:
+            return executor.abort_code
+        if str(exc).startswith("TURN_DEADLINE_EXCEEDED") or self.runtime.clock() >= self.deadline:
+            return "TURN_DEADLINE_EXCEEDED"
+        return None
 
     def _build_initial_user_content(
         self,
@@ -1490,7 +1523,17 @@ class NativeTurnRunner:
 
         native_cwd = _resolve_native_cwd()
         ensure_isolated_cwd(native_cwd)
-        max_turns = int(self.runtime.limits.max_iterations or 200)
+        limits = self.runtime.limits
+        max_turns = int(limits.max_iterations or 200)
+        if limits.max_turns is not None and limits.max_turns > 0:
+            max_turns = min(max_turns, int(limits.max_turns))
+        # The classic loop fails with MAX_TURNS when that limit is the binding one.
+        turns_limit_code = (
+            "MAX_TURNS"
+            if limits.max_turns is not None and max_turns == int(limits.max_turns)
+            and (limits.max_iterations is None or limits.max_turns < limits.max_iterations)
+            else "ITERATION_LIMIT"
+        )
         autocompact = _resolve_cli_autocompact(self.runtime.autocompact)
         effort = (
             self.runtime.effort
@@ -1549,6 +1592,7 @@ class NativeTurnRunner:
             )
 
             handle: NativeTurnHandle | Any | None = None
+            next_process = False
             try:
                 handle = self.provider.start_native_turn(req)
                 executor.handle = handle
@@ -1556,17 +1600,17 @@ class NativeTurnRunner:
                 while True:
                     try:
                         outcome: NativeTurnOutcome = handle.run_until_result(sink)
-                    except ProviderTransportError:
-                        if closing_sent:
+                    except ProviderTransportError as stream_exc:
+                        if closing_sent and self._stop_code_after_stream_error(stream_exc, executor) is None:
                             self.runtime._effect_finished(
                                 self.turn,
                                 provider_effect_id,
                                 state="APPLIED",
-                                error_code="ITERATION_LIMIT",
+                                error_code=turns_limit_code,
                             )
                             return self.runtime._fail(
                                 self.turn,
-                                "ITERATION_LIMIT",
+                                turns_limit_code,
                                 process_count,
                                 executor.action_count,
                             )
@@ -1673,11 +1717,11 @@ class NativeTurnRunner:
                                     self.turn,
                                     provider_effect_id,
                                     state="APPLIED",
-                                    error_code="ITERATION_LIMIT",
+                                    error_code=turns_limit_code,
                                 )
                                 return self.runtime._fail(
                                     self.turn,
-                                    "ITERATION_LIMIT",
+                                    turns_limit_code,
                                     process_count,
                                     executor.action_count,
                                 )
@@ -1688,11 +1732,11 @@ class NativeTurnRunner:
                             self.turn,
                             provider_effect_id,
                             state="APPLIED",
-                            error_code="ITERATION_LIMIT",
+                            error_code=turns_limit_code,
                         )
                         return self.runtime._fail(
                             self.turn,
-                            "ITERATION_LIMIT",
+                            turns_limit_code,
                             process_count,
                             executor.action_count,
                         )
@@ -1836,6 +1880,15 @@ class NativeTurnRunner:
                     )
 
             except NativeLoopUnavailable as exc:
+                stop_code = self._stop_code_after_stream_error(exc, executor)
+                if stop_code is not None and not self.runtime.cancelled(self.turn):
+                    self.runtime._effect_finished(
+                        self.turn,
+                        provider_effect_id,
+                        state="APPLIED" if stop_code in _LIMIT_ABORT_CODES else "UNKNOWN",
+                        error_code=stop_code,
+                    )
+                    return self.runtime._fail(self.turn, stop_code, process_count, executor.action_count)
                 if getattr(exc, "status_code", None) == 499 or self.runtime.cancelled(
                     self.turn
                 ):
@@ -1885,6 +1938,17 @@ class NativeTurnRunner:
                 return None
 
             except Exception as exc:
+                stop_code = self._stop_code_after_stream_error(exc, executor)
+                if self.runtime.cancelled(self.turn):
+                    stop_code = None
+                if stop_code is not None:
+                    self.runtime._effect_finished(
+                        self.turn,
+                        provider_effect_id,
+                        state="APPLIED" if stop_code in _LIMIT_ABORT_CODES else "UNKNOWN",
+                        error_code=stop_code,
+                    )
+                    return self.runtime._fail(self.turn, stop_code, process_count, executor.action_count)
                 if sink.had_visible_output or executor.action_count > 0:
                     self.runtime._effect_finished(
                         self.turn,
@@ -1923,6 +1987,7 @@ class NativeTurnRunner:
                 )
                 if recovery == "retry":
                     provider_retries += 1
+                    next_process = True
                     continue
                 if recovery == "fallback":
                     provider_retries = 0
@@ -1937,6 +2002,7 @@ class NativeTurnRunner:
                             )
                             else None
                         )
+                        next_process = True
                         continue
                     return None
                 if recovery == "cancel":
@@ -1950,7 +2016,10 @@ class NativeTurnRunner:
                     executor.action_count,
                 )
             finally:
-                executor.close()
+                # The executor serves every process of the turn: closing it on a retry or fallback would make
+                # the next process's ask_user return "interrupted" at once.
+                if not next_process:
+                    executor.close()
                 if handle is not None:
                     try:
                         handle.close()
