@@ -977,6 +977,7 @@ class AgenticTurnRuntime:
                 last_thinking_flush = time.monotonic()
                 self._life(turn, "thinking_delta", delta=delta_text, iteration=iteration)
 
+            last_empty_thinking_flush: float | None = None
             last_progress_at = self.clock()
             try:
                 for raw_event in events:
@@ -1022,6 +1023,11 @@ class AgenticTurnRuntime:
                             buffered_chars = sum(len(part) for part in thinking_buffer)
                             if buffered_chars >= 60 or (time.monotonic() - last_thinking_flush) >= 0.12:
                                 flush_thinking_buffer()
+                        elif not getattr(event, "signature", None) and not getattr(event, "redacted_thinking", None):
+                            now_empty = time.monotonic()
+                            if last_empty_thinking_flush is None or (now_empty - last_empty_thinking_flush) >= 2.0:
+                                last_empty_thinking_flush = now_empty
+                                self._life(turn, "thinking_delta", delta="", iteration=iteration)
                         continue
                     if event.thinking and not saw_thinking_kind:
                         thinking_parts.append(event.thinking)

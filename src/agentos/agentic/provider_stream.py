@@ -668,6 +668,7 @@ class HTTPProviderStreamTransport:
         self._num_ctx = num_ctx
         self._client = client or httpx.Client(timeout=60)
         self._owns_client = client is None
+        self._claude_cli_provider: Any = None
 
     def __repr__(self) -> str:
         return f"HTTPProviderStreamTransport(provider={self.provider!r}, base_url={self.base_url!r}, model={self.model!r})"
@@ -881,20 +882,51 @@ class HTTPProviderStreamTransport:
     def stream(self, request: Mapping[str, object], *, cancel_check: Any = None) -> Iterator[NormalizedStreamItem]:
         if self.provider == "anthropic":
             from agentos.provider_catalog.claude_code import (
+                stream_claude_code_bridge as _facade_stream_claude_code_bridge,
+            )
+            from agentos.providers.claude_cli import (
+                ClaudeCliProvider,
                 is_claude_cli_bridge_url,
                 stream_claude_code_bridge as _default_stream_claude_code_bridge,
             )
 
             if is_claude_cli_bridge_url(self.base_url):
-                yield from (stream_claude_code_bridge or _default_stream_claude_code_bridge)(
-                    request=request,
-                    base_url=self.base_url,
-                    model=self.model,
-                    messages=list(request.get("messages") or []),  # type: ignore[arg-type]
-                    tools=list(request.get("tools") or []),  # type: ignore[arg-type]
-                    tool_choice=request.get("tool_choice"),
-                    effort=str(request.get("effort")) if request.get("effort") is not None else None,
-                    cancel_check=cancel_check or (request.get("cancel_check") if callable(request.get("cancel_check")) else None),
+                effective_cancel = cancel_check or (
+                    request.get("cancel_check")
+                    if callable(request.get("cancel_check"))
+                    else None
+                )
+                hook = stream_claude_code_bridge or (
+                    _facade_stream_claude_code_bridge
+                    if _facade_stream_claude_code_bridge is not _default_stream_claude_code_bridge
+                    else None
+                )
+                if hook is not None:
+                    yield from hook(
+                        request=request,
+                        base_url=self.base_url,
+                        model=self.model,
+                        messages=list(request.get("messages") or []),  # type: ignore[arg-type]
+                        tools=list(request.get("tools") or []),  # type: ignore[arg-type]
+                        tool_choice=request.get("tool_choice"),
+                        effort=str(request.get("effort")) if request.get("effort") is not None else None,
+                        cancel_check=effective_cancel,
+                    )
+                    return
+                if (
+                    self._claude_cli_provider is None
+                    or getattr(self._claude_cli_provider, "base_url", None) != self.base_url
+                    or getattr(self._claude_cli_provider, "model", None) != self.model
+                ):
+                    if self._claude_cli_provider is not None:
+                        self._claude_cli_provider.close()
+                    self._claude_cli_provider = ClaudeCliProvider(
+                        base_url=self.base_url,
+                        model=self.model,
+                    )
+                yield from self._claude_cli_provider.stream(
+                    request,
+                    cancel_check=effective_cancel,
                 )
                 return
         if self.provider == "opencode":
@@ -952,6 +984,9 @@ class HTTPProviderStreamTransport:
             raise ProviderKeyRejected(str(error)) from error
 
     def close(self) -> None:
+        if self._claude_cli_provider is not None:
+            self._claude_cli_provider.close()
+            self._claude_cli_provider = None
         if self._owns_client:
             self._client.close()
 

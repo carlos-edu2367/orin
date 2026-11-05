@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
-from .claude_code import (
+from agentos.providers.claude_cli import (
     DEFAULT_CLAUDE_CLI_BRIDGE_URL,
     ClaudeCodeModelCatalogClient,
     is_claude_cli_bridge_url,

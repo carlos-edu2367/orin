@@ -20,7 +20,7 @@ from agentos.provider_catalog.claude_code import (
     ProviderTransportError,
     stream_claude_code_bridge,
 )
-from agentos.provider_catalog.opencode import _format_bridge_conversation_transcript
+from agentos.providers.claude_cli import CliSlots, TranscriptState
 from agentos.workers.chat import ChatWorker
 
 
@@ -30,9 +30,10 @@ def test_format_bridge_transcript_does_not_duplicate_mid_turn_system_into_system
         {"role": "user", "content": "Hello"},
         {"role": "system", "content": "Mid-turn phase reminder"},
     ]
-    system_parts, prompt_text = _format_bridge_conversation_transcript(messages)
-    assert system_parts == ["Initial system prompt"]
-    assert "[System]\nMid-turn phase reminder" in prompt_text
+    blocks = TranscriptState().blocks_for(messages)
+    texts = [b.get("text", "") for b in blocks]
+    assert not any("Initial system prompt" in t for t in texts)
+    assert any("[System]\nMid-turn phase reminder" in t for t in texts)
 
 
 def test_format_bridge_transcript_preserves_image_blocks_metadata() -> None:
@@ -72,10 +73,9 @@ def test_format_bridge_transcript_preserves_image_blocks_metadata() -> None:
             ],
         },
     ]
-    system_parts, prompt_text, image_blocks = _format_bridge_conversation_transcript(
-        messages, return_images=True
-    )
-    assert system_parts == []
+    blocks = TranscriptState().blocks_for(messages)
+    prompt_text = "\n\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
     assert "Inspect this UI" in prompt_text
     assert "Tool screenshot attached" in prompt_text
     assert len(image_blocks) == 3
@@ -150,25 +150,25 @@ def test_stream_claude_code_bridge_sends_multimodal_content_list_when_images_pre
         )
     )
     assert any(getattr(ev, "text", None) == "Visual check complete." for ev in events)
-    normalize_fn = getattr(claude_code_mod, "_normalize_claude_model_id", lambda m: m)
-    assert normalize_fn("claude-opus-5-5") == "claude-opus-4-7"
-    assert "claude-opus-4-7" in captured_cmd
-    assert "claude-opus-5-5" not in captured_cmd
+    assert not hasattr(claude_code_mod, "_LEGACY_CLAUDE_MODEL_MAP")
+    assert "claude-opus-5-5" in captured_cmd
+    assert "claude-opus-4-7" not in captured_cmd
     assert len(captured_stdin) == 1
     envelope = json.loads(captured_stdin[0].strip())
     content = envelope["message"]["content"]
     assert isinstance(content, list)
-    assert content[0]["type"] == "image"
-    assert content[0]["source"]["data"] == "iVBORw0KGgo="
-    assert content[1]["type"] == "text"
-    assert "Check this screenshot" in content[1]["text"]
+    text_blocks = [b for b in content if b.get("type") == "text"]
+    image_blocks = [b for b in content if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["source"]["data"] == "iVBORw0KGgo="
+    assert any("Check this screenshot" in b["text"] for b in text_blocks)
 
 
 def test_resolve_agent_model_supports_claude_aliases_without_manual_settings() -> None:
-    assert resolve_agent_model("haiku", {}) == "claude-haiku-4-5-20251001"
-    assert resolve_agent_model("sonnet", {}) == "claude-sonnet-4-6"
-    assert resolve_agent_model("opus", {}) == "claude-opus-4-7"
-    assert resolve_agent_model("fable", None) == "claude-sonnet-4-6"
+    assert resolve_agent_model("haiku", {}) == "claude-haiku-5-5"
+    assert resolve_agent_model("sonnet", {}) == "claude-sonnet-5-5"
+    assert resolve_agent_model("opus", {}) == "claude-opus-5-5"
+    assert resolve_agent_model("fable", None) == "claude-fable-5-1"
 
 
 def test_http_provider_stream_transport_forwards_cancel_check_to_claude_bridge(monkeypatch) -> None:
@@ -460,7 +460,11 @@ def test_stream_claude_code_bridge_parses_resets_at_into_retry_after_and_isolate
     assert 35.0 <= exc_info.value.retry_after_seconds <= 45.0
     assert captured_cwds == [tempfile.gettempdir()]
 
-    # Verify semaphore bounds concurrency to at most 3 simultaneous Popen processes
+    # Verify CliSlots bounds concurrency when ORIN_CLI_MAX_PROCESSES is configured
+    monkeypatch.setattr(
+        "agentos.providers.claude_cli.provider.CLI_SLOTS",
+        CliSlots.from_env({"ORIN_CLI_MAX_PROCESSES": "3"}),
+    )
     class _SlowPopen:
         def __init__(self, cmd: list[str], **kwargs: Any) -> None:
             nonlocal active_count, max_concurrent

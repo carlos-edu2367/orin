@@ -17,13 +17,53 @@ from agentos.provider_catalog.claude_code import (
     _resolve_native_tool_call,
     stream_claude_code_bridge,
 )
-from agentos.provider_catalog.opencode import (
-    _build_bridge_system_prompt,
-    _find_orin_tool_call_close,
-    _parse_orin_tool_calls,
-    _resolve_tool_name,
+from agentos.providers.claude_cli.text_protocol import (
+    ToolCallStreamParser,
+    TranscriptState,
+    _find_token_outside_json_strings,
+    _resolve_allowed_tool_name as _resolve_tool_name,
+    build_system_prompt,
 )
 from agentos.providers.models import FinishReason
+
+
+class _CallTuple(tuple):
+    def __getitem__(self, key: Any) -> Any:
+        if key == "id":
+            return super().__getitem__(0)
+        if key == "name":
+            return super().__getitem__(1)
+        if key == "arguments":
+            return json.loads(super().__getitem__(2))
+        return super().__getitem__(key)
+
+
+def _parse_orin_tool_calls(
+    text: str, allowed_names: set[str] | None = None
+) -> tuple[str, list[_CallTuple]]:
+    parser = ToolCallStreamParser(allowed_names=allowed_names)
+    events = [*parser.feed(text), *parser.finish()]
+    cleaned = "".join(e.text for e in events if e.kind == "text").strip()
+    calls = [
+        _CallTuple((e.call_id, e.name, e.arguments))
+        for e in events
+        if e.kind == "tool_call"
+    ]
+    return cleaned, calls
+
+
+def _find_orin_tool_call_close(
+    buf: str, start: int = 0, close_tag: str = "</orin_tool_call>"
+) -> int:
+    sub = buf[start:]
+    idx = _find_token_outside_json_strings(sub, close_tag)
+    return -1 if idx == -1 else start + idx
+
+
+def _build_bridge_system_prompt(
+    system_parts: list[str], declarations: list[dict[str, Any]]
+) -> str:
+    return build_system_prompt("\n\n".join(system_parts), declarations)
 
 
 def test_parse_orin_tool_calls_with_inner_closing_tag_in_json_string() -> None:
@@ -131,7 +171,8 @@ def test_build_bridge_system_prompt_identifies_orin_bridge_and_allows_multiple_c
         ["Base system."],
         [{"name": "read_file", "description": "Read", "parameters": {"type": "object"}}],
     )
-    assert "multiple `<orin_tool_call>`" in prompt
+    assert "<orin_tool_call>" in prompt
+    assert "Never write `[Tool Result`" in prompt
     assert "OpenCode Bridge" not in prompt
 
 
@@ -623,16 +664,11 @@ def test_adversarial_multiple_tool_calls_with_nested_closing_tags_and_max_wall_c
 def test_bridge_transcript_closes_tool_results_and_strips_hallucinated_tool_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from agentos.provider_catalog.opencode import (
-        _format_bridge_conversation_transcript,
-        _parse_orin_tool_calls,
-    )
-
     system_prompt = _build_bridge_system_prompt(
         ["Base system."],
         [{"name": "Read", "description": "Read file", "parameters": {"type": "object"}}],
     )
-    assert "NEVER write" in system_prompt and "[Tool Result" in system_prompt
+    assert "Never write `[Tool Result`" in system_prompt
 
     messages = [
         {"role": "user", "content": "Leia o arquivo uploads/writing-block.md"},
@@ -658,9 +694,10 @@ def test_bridge_transcript_closes_tool_results_and_strips_hallucinated_tool_resu
             ],
         },
     ]
-    _, prompt_text = _format_bridge_conversation_transcript(messages)
+    blocks = TranscriptState().blocks_for(messages)
+    prompt_text = "\n\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
     assert "[/Tool Result]" in prompt_text
-    assert prompt_text.rstrip().endswith("[Assistant]")
+    assert prompt_text.rstrip().endswith("[/Tool Result]")
 
     # If a model hallucinates [Tool Result id=...] in its text output, _parse_orin_tool_calls strips it
     hallucinated = (

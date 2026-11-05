@@ -150,8 +150,9 @@ def test_build_claude_cli_command_never_uses_bare_and_enforces_token_isolation(
     )
 
     assert "--bare" not in cmd
+    assert "--safe-mode" not in cmd
     assert "-p" in cmd
-    assert "--safe-mode" in cmd
+    assert "--restricted" in cmd
     assert "--strict-mcp-config" in cmd
     assert "--disable-slash-commands" in cmd
     assert "--no-chrome" in cmd
@@ -1459,8 +1460,22 @@ def test_fetch_published_claude_cli_models_parses_official_remote_catalog(
 
 
 
+def _parse_text_with_claude_cli_parser(
+    raw_text: str, allowed_names: set[str] | None = None
+) -> tuple[str, list[tuple[str, str, str]]]:
+    from agentos.providers.claude_cli import ToolCallStreamParser
+
+    parser = ToolCallStreamParser(allowed_names=allowed_names)
+    events = [*parser.feed(raw_text), *parser.finish()]
+    cleaned = "".join(e.text for e in events if e.kind == "text").strip()
+    calls = [
+        (e.call_id, e.name, e.arguments) for e in events if e.kind == "tool_call"
+    ]
+    return cleaned, calls
+
+
 def test_format_bridge_conversation_transcript_preserves_anthropic_tool_use_and_tool_result_blocks() -> None:
-    from agentos.provider_catalog.opencode import _format_bridge_conversation_transcript
+    from agentos.providers.claude_cli import TranscriptState
 
     messages = [
         {"role": "system", "content": "System instruction"},
@@ -1515,27 +1530,27 @@ def test_format_bridge_conversation_transcript_preserves_anthropic_tool_use_and_
         },
     ]
 
-    system_parts, prompt_text = _format_bridge_conversation_transcript(messages)
+    blocks = TranscriptState().blocks_for(messages)
+    prompt_text = "\n\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
-    assert system_parts == ["System instruction"]
+    assert "System instruction" not in prompt_text
     assert "[User]\nRun pytest and inspect README.md" in prompt_text
     assert "Vou rodar os testes e ler o README." in prompt_text
     assert (
-        '<orin_tool_call>{"name": "Bash", "arguments": {"command": "pytest -q"}}</orin_tool_call>'
+        '<orin_tool_call id="call_bash_1">{"name": "Bash", "arguments": {"command": "pytest -q"}}</orin_tool_call>'
         in prompt_text
     )
     assert (
-        '<orin_tool_call>{"name": "Read", "arguments": {"file_path": "README.md"}}</orin_tool_call>'
+        '<orin_tool_call id="call_read_2">{"name": "Read", "arguments": {"file_path": "README.md"}}</orin_tool_call>'
         in prompt_text
     )
-    assert "[Tool Result id=call_bash_1]\n12 passed in 0.42s" in prompt_text
+    assert "[Tool Result id=call_bash_1 name=tool status=ok]\n12 passed in 0.42s" in prompt_text
     assert (
-        "[Tool Result id=call_read_2]\n# Orin Project\nAll systems operational."
+        "[Tool Result id=call_read_2 name=tool status=ok]\n# Orin Project\nAll systems operational."
         in prompt_text
     )
-    assert "[Tool Result id=call_extra_3]\nextra output" in prompt_text
+    assert "[Tool Result id=call_extra_3 name=tool status=ok]\nextra output" in prompt_text
     assert "[User]\nAgora gere o relatório final." in prompt_text
-    # Ensure no empty "[User]\n\n" phantom turn was emitted for pure tool_result user messages
     assert "[User]\n\n" not in prompt_text
     assert not prompt_text.endswith("[User]\n")
 
@@ -1622,13 +1637,15 @@ def test_stream_claude_code_bridge_multi_iteration_sends_anthropic_tool_history_
 
     assert len(captured_stdin) == 1
     envelope = json.loads(captured_stdin[0].strip())
-    sent_prompt = envelope["message"]["content"]
+    content_blocks = envelope["message"]["content"]
+    assert isinstance(content_blocks, list)
+    sent_prompt = "\n\n".join(b.get("text", "") for b in content_blocks if isinstance(b, dict))
     assert "[User]\nExecute pytest" in sent_prompt
     assert (
-        '<orin_tool_call>{"name": "Bash", "arguments": {"command": "pytest"}}</orin_tool_call>'
+        '<orin_tool_call id="call_iter1">{"name": "Bash", "arguments": {"command": "pytest"}}</orin_tool_call>'
         in sent_prompt
     )
-    assert "[Tool Result id=call_iter1]\n5 passed in 0.12s" in sent_prompt
+    assert "[Tool Result id=call_iter1 name=tool status=ok]\n5 passed in 0.12s\n[/Tool Result]" in sent_prompt
     assert not sent_prompt.endswith("[User]\n")
     assert "[User]\n\n" not in sent_prompt
     assert [i.text for i in items if i.kind is StreamKind.TEXT] == [
@@ -1637,8 +1654,6 @@ def test_stream_claude_code_bridge_multi_iteration_sends_anthropic_tool_history_
 
 
 def test_parse_orin_tool_calls_supports_input_key_and_case_or_alias_resolution() -> None:
-    from agentos.provider_catalog.opencode import _parse_orin_tool_calls
-
     raw_text = (
         "Vou rodar os comandos.\n"
         '<orin_tool_call>{"id": "c1", "name": "bash", "input": {"command": "ls -la"}}</orin_tool_call>\n'
@@ -1647,8 +1662,7 @@ def test_parse_orin_tool_calls_supports_input_key_and_case_or_alias_resolution()
         '<orin_tool_call>{"id": "c4", "name": "unregistered_tool", "input": {"x": 1}}</orin_tool_call>'
     )
 
-    # Case 1: allowed_names contains public names ("Bash") and internal names ("read_file")
-    cleaned, calls = _parse_orin_tool_calls(raw_text, {"Bash", "read_file"})
+    cleaned, calls = _parse_text_with_claude_cli_parser(raw_text, {"Bash", "read_file"})
     assert cleaned == "Vou rodar os comandos."
     assert len(calls) == 3
     assert calls[0] == ("c1", "Bash", json.dumps({"command": "ls -la"}, ensure_ascii=False))
@@ -1657,10 +1671,7 @@ def test_parse_orin_tool_calls_supports_input_key_and_case_or_alias_resolution()
 
 
 def test_bridge_transcript_and_tool_parser_adversarial_edge_cases() -> None:
-    from agentos.provider_catalog.opencode import (
-        _format_bridge_conversation_transcript,
-        _parse_orin_tool_calls,
-    )
+    from agentos.providers.claude_cli import TranscriptState
 
     messages = [
         {
@@ -1689,14 +1700,15 @@ def test_bridge_transcript_and_tool_parser_adversarial_edge_cases() -> None:
         },
     ]
 
-    _, prompt = _format_bridge_conversation_transcript(messages)
+    blocks = TranscriptState().blocks_for(messages)
+    prompt = "\n\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
     assert (
-        '<orin_tool_call>{"name": "Edit", "arguments": {"file_path": "main.py", "old_string": "a", "new_string": "b"}}</orin_tool_call>'
+        '<orin_tool_call id="call_str_input">{"name": "Edit", "arguments": {"file_path": "main.py", "old_string": "a", "new_string": "b"}}</orin_tool_call>'
         in prompt
     )
-    assert '<orin_tool_call>{"name": "Bash", "arguments": {}}</orin_tool_call>' in prompt
-    assert "[Tool Result id=call_str_input]\n" in prompt
-    assert "[Tool Result id=call_bad_input]\n" in prompt
+    assert '<orin_tool_call id="call_bad_input">{"name": "Bash", "arguments": {}}</orin_tool_call>' in prompt
+    assert "[Tool Result id=call_str_input name=tool status=ok]\n" in prompt
+    assert "[Tool Result id=call_bad_input name=tool status=ok]\n" in prompt
     assert "[User]" not in prompt
 
     fenced_and_aliased = (
@@ -1705,9 +1717,9 @@ def test_bridge_transcript_and_tool_parser_adversarial_edge_cases() -> None:
         "<orin_tool_call>[1, 2, 3]</orin_tool_call>"
         '<orin_tool_call>{"id": "f3", "name": "Write", "input": {"path": "evil.py"}}</orin_tool_call>'
     )
-    cleaned, calls = _parse_orin_tool_calls(fenced_and_aliased, {"run_command", "Read"})
+    cleaned, calls = _parse_text_with_claude_cli_parser(fenced_and_aliased, {"run_command", "Read"})
     assert cleaned == ""
     assert calls == [
         ("f1", "run_command", json.dumps({"command": "echo ok"}, ensure_ascii=False)),
-        ("f2", "Read", json.dumps({"path": "x.py"}, ensure_ascii=False)),
+        ("f2", "Read", json.dumps({"file_path": "x.py"}, ensure_ascii=False)),
     ]

@@ -24,12 +24,17 @@ _ESCAPE_BRACKET_RE = re.compile(
     r"\[(/?)(tool result|user|assistant|system)", re.IGNORECASE
 )
 
-_INTERNAL_BY_PUBLIC = {public: internal for internal, public in PUBLIC_NAMES.items()}
+_INTERNAL_BY_PUBLIC = {
+    "Glob": "list_files",
+    **{public: internal for internal, public in PUBLIC_NAMES.items()},
+}
 _INTERNAL_BY_LOWER_PUBLIC = {
-    public.lower(): internal for internal, public in PUBLIC_NAMES.items()
+    "glob": "list_files",
+    **{public.lower(): internal for internal, public in PUBLIC_NAMES.items()},
 }
 _PUBLIC_BY_LOWER_INTERNAL = {
-    internal.lower(): public for internal, public in PUBLIC_NAMES.items()
+    "list_files": "Glob",
+    **{internal.lower(): public for internal, public in PUBLIC_NAMES.items()},
 }
 
 _ARG_ALIASES: dict[str, dict[str, str]] = {
@@ -45,6 +50,21 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
         "newString": "new_text",
     },
     "run_command": {"cmd": "command", "command_line": "command"},
+}
+
+_PUBLIC_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "Read": {"path": "file_path", "filePath": "file_path", "filepath": "file_path"},
+    "Write": {"path": "file_path", "filePath": "file_path", "filepath": "file_path"},
+    "Edit": {
+        "path": "file_path",
+        "filePath": "file_path",
+        "filepath": "file_path",
+        "old_text": "old_string",
+        "oldString": "old_string",
+        "new_text": "new_string",
+        "newString": "new_string",
+    },
+    "Bash": {"cmd": "command", "command_line": "command"},
 }
 
 
@@ -227,11 +247,26 @@ def _extract_content_text_and_images(
     return "\n".join(text_parts), images
 
 
+def _parse_args_dict(raw_args: Any) -> dict[str, Any]:
+    if isinstance(raw_args, str):
+        try:
+            parsed = json.loads(raw_args)
+            if isinstance(parsed, Mapping):
+                return dict(parsed)
+        except json.JSONDecodeError:
+            return {}
+        return {}
+    if isinstance(raw_args, Mapping):
+        return dict(raw_args)
+    return {}
+
+
 def _format_single_message_group(
     msg: Mapping[str, Any],
 ) -> tuple[str, list[dict[str, Any]]]:
     role = str(msg.get("role") or "user").strip().lower()
-    text, images = _extract_content_text_and_images(msg.get("content"))
+    raw_content = msg.get("content")
+    text, images = _extract_content_text_and_images(raw_content)
 
     if role == "system":
         rendered = f"[System]\n{escape_tool_content(text.strip())}"
@@ -252,17 +287,7 @@ def _format_single_message_group(
                 call_id = str(tc.get("id") or f"call_{idx}").strip()
                 t_name = str(fn.get("name") or tc.get("name") or "").strip()
                 raw_args = fn.get("arguments", tc.get("arguments", {}))
-                if isinstance(raw_args, str):
-                    try:
-                        parsed_args = json.loads(raw_args)
-                        if not isinstance(parsed_args, Mapping):
-                            parsed_args = {}
-                    except json.JSONDecodeError:
-                        parsed_args = {}
-                elif isinstance(raw_args, Mapping):
-                    parsed_args = dict(raw_args)
-                else:
-                    parsed_args = {}
+                parsed_args = _parse_args_dict(raw_args)
                 payload = json.dumps(
                     {"name": t_name, "arguments": parsed_args},
                     ensure_ascii=False,
@@ -270,9 +295,50 @@ def _format_single_message_group(
                 parts.append(
                     f'<orin_tool_call id="{call_id}">{payload}</orin_tool_call>'
                 )
+        if isinstance(raw_content, list):
+            for idx, item in enumerate(raw_content, start=1):
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("type") or "").strip().lower() == "tool_use":
+                    call_id = str(item.get("id") or f"call_{idx}").strip()
+                    t_name = str(item.get("name") or "").strip()
+                    parsed_args = _parse_args_dict(
+                        item.get("input", item.get("arguments", {}))
+                    )
+                    payload = json.dumps(
+                        {"name": t_name, "arguments": parsed_args},
+                        ensure_ascii=False,
+                    )
+                    parts.append(
+                        f'<orin_tool_call id="{call_id}">{payload}</orin_tool_call>'
+                    )
         rendered = "\n".join(parts)
     else:
-        rendered = f"[User]\n{escape_tool_content(text.strip())}"
+        user_segments: list[str] = []
+        if isinstance(raw_content, list):
+            for idx, item in enumerate(raw_content, start=1):
+                if not isinstance(item, Mapping):
+                    continue
+                if str(item.get("type") or "").strip().lower() == "tool_result":
+                    call_id = str(
+                        item.get("tool_use_id") or item.get("id") or f"call_{idx}"
+                    ).strip()
+                    t_name = str(item.get("name") or item.get("tool_name") or "tool").strip()
+                    is_err = bool(item.get("is_error"))
+                    status = "error" if is_err else str(item.get("status") or "ok").strip()
+                    tr_text, tr_images = _extract_content_text_and_images(
+                        item.get("content")
+                    )
+                    escaped_tr = escape_tool_content(tr_text)
+                    user_segments.append(
+                        f"[Tool Result id={call_id} name={t_name} status={status}]\n"
+                        f"{escaped_tr}\n"
+                        f"[/Tool Result]"
+                    )
+                    images.extend(tr_images)
+        if text.strip() or not user_segments:
+            user_segments.append(f"[User]\n{escape_tool_content(text.strip())}")
+        rendered = "\n\n".join(user_segments)
 
     blocks: list[dict[str, Any]] = [{"type": "text", "text": rendered}]
     blocks.extend(images)
@@ -497,6 +563,19 @@ def _resolve_allowed_tool_name(
     if public and public.lower() in lower_map:
         return lower_map[public.lower()]
 
+    secondary = {
+        "list_files": ("Glob", "LS"),
+        "glob": ("glob_files", "list_files"),
+        "ls": ("list_files", "Glob"),
+        "grep": ("search_files",),
+        "search_files": ("Grep",),
+    }.get(candidate.lower(), ())
+    for alt in secondary:
+        if alt in allowed_names:
+            return alt
+        if alt.lower() in lower_map:
+            return lower_map[alt.lower()]
+
     return None
 
 
@@ -513,7 +592,30 @@ def _normalize_tool_arguments(
         for src_key, dst_key in aliases.items():
             if src_key in args and dst_key not in args:
                 args[dst_key] = args.pop(src_key)
+    else:
+        canonical_public = PUBLIC_NAMES.get(
+            canonical_internal,
+            _PUBLIC_BY_LOWER_INTERNAL.get(canonical_internal.lower(), resolved_name),
+        )
+        aliases = _PUBLIC_ARG_ALIASES.get(canonical_public, {})
+        for src_key, dst_key in aliases.items():
+            if src_key in args and dst_key not in args:
+                args[dst_key] = args.pop(src_key)
     return args
+
+
+def resolve_native_tool_call(
+    raw_name: str,
+    raw_input: Mapping[str, Any],
+    allowed_names: set[str] | None,
+) -> tuple[str, str] | None:
+    """Resolve a native or MCP `tool_use` call against `allowed_names` and normalize arguments."""
+    resolved = _resolve_allowed_tool_name(raw_name, allowed_names)
+    if resolved is None:
+        return None
+    args_dict = dict(raw_input) if isinstance(raw_input, Mapping) else {}
+    normalized = _normalize_tool_arguments(resolved, args_dict)
+    return resolved, json.dumps(normalized, ensure_ascii=False)
 
 
 def _parse_json_objects(inner: str) -> list[Mapping[str, Any]]:

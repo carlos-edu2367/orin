@@ -339,7 +339,20 @@ class ClaudeCliModelCatalogClient:
         self._cache_dir = cache_dir
 
     def fetch(self, api_key: str = "", *, base_url: str = "") -> list[dict[str, object]]:
-        status = check_claude_cli_status(timeout=self._timeout)
+        import sys
+
+        facade = sys.modules.get("agentos.provider_catalog.claude_code")
+        patched_status = (
+            getattr(facade, "check_claude_cli_status", None)
+            if facade is not None
+            else None
+        )
+        status_fn = (
+            patched_status
+            if callable(patched_status) and patched_status is not check_claude_cli_status
+            else check_claude_cli_status
+        )
+        status = status_fn(timeout=self._timeout)
         org_id = str(status.get("orgId") or "").strip() or None
         merged: list[tuple[str, str, int]] = []
         seen_ids: set[str] = set()

@@ -105,7 +105,7 @@ def classify_result_error(
                 retry_after_seconds = max(1.0, rate_limit.resets_at)
             rl_type = rate_limit.rate_limit_type or "assinatura"
             formatted = format_reset_local(rate_limit.resets_at, tz=tz)
-            message = f"Limite de uso da assinatura ({rl_type}) atingido; libera em {formatted}"
+            message = f"Limite de uso da assinatura ({rl_type}) atingido; libera em {formatted} ({raw_text})"
         return ProviderTransportError(
             message,
             status_code=429,

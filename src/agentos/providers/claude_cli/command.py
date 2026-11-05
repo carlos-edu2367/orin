@@ -12,6 +12,7 @@ from typing import Mapping, Sequence
 from agentos.providers.claude_cli.errors import ProviderTransportError
 
 ISOLATION_FLAGS: tuple[str, ...] = ("--restricted", "--strict-mcp-config")
+IDLE_TIMEOUT_SECONDS: int = 180
 MCP_TOOL_TIMEOUT_ENV = "MCP_TOOL_TIMEOUT"
 VALIDATED_CLI_RANGE: tuple[str, str] = (">=2.1.309", "<2.2")
 FORBIDDEN_FLAGS: frozenset[str] = frozenset(
@@ -233,6 +234,16 @@ def is_version_validated(version: tuple[int, int, int] | None) -> bool:
     return (2, 1, 309) <= version < (2, 2, 0)
 
 
+def _resolve_binary_compat(env: Mapping[str, str] | None = None) -> str | None:
+    import sys
+
+    facade = sys.modules.get("agentos.provider_catalog.claude_code")
+    patched = getattr(facade, "_resolve_claude_binary", None) if facade is not None else None
+    if callable(patched) and patched is not resolve_claude_binary:
+        return patched(env)
+    return resolve_claude_binary(env)
+
+
 def check_claude_cli_status(
     *,
     binary: str | None = None,
@@ -240,7 +251,7 @@ def check_claude_cli_status(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """Verify that `claude` CLI is installed and authenticated via a `claude.ai` OAuth subscription."""
-    resolved_binary = binary or resolve_claude_binary(env)
+    resolved_binary = binary or _resolve_binary_compat(env)
     if not resolved_binary:
         raise ProviderTransportError(
             "Claude Code CLI executable ('claude') was not found on this machine. "
@@ -301,6 +312,31 @@ def check_claude_cli_status(
         )
 
     return dict(payload)
+
+
+def write_owner_only_temp(
+    content: str,
+    *,
+    prefix: str = "orin-claude-",
+    suffix: str = ".tmp",
+) -> Path:
+    """Create a temporary file with owner-only (`0o600`) permissions."""
+    fd, raw_path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    path = Path(raw_path)
+    try:
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    return path
 
 
 def ensure_isolated_cwd(base: Path | None = None) -> Path:

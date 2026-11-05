@@ -139,14 +139,27 @@ class StreamJsonParser:
         self.init: CliInit | None = None
         self.result: CliResult | None = None
         self.rate_limit: RateLimitState | None = None
+        self.stop_reason: str | None = None
         self._current_message_id: str | None = None
         self._seen_usage_message_ids: set[str] = set()
         self._pending_tools: dict[int, dict[str, Any]] = {}
         self._emitted_tool_end_ids: set[str] = set()
         self._msg_tool_ids_by_seq: dict[str, list[str]] = {}
         self._msg_usage_raw: dict[str, dict[str, Any]] = {}
+        self._latest_usage_raw: dict[str, Any] = {}
         self._saw_stream_text_msgs: set[str] = set()
         self._saw_stream_thinking_msgs: set[str] = set()
+
+    def latest_usage(self) -> CliUsage:
+        if self.result is not None:
+            return self.result.usage
+        return CliUsage.from_raw(self._latest_usage_raw)
+
+    def flush_pending(self) -> list[CliEvent]:
+        events: list[CliEvent] = []
+        for pending_idx in list(self._pending_tools.keys()):
+            events.extend(self._flush_pending_tool(pending_idx, {}))
+        return events
 
     def _flush_pending_tool(self, index: int, raw: Mapping[str, Any]) -> list[CliEvent]:
         entry = self._pending_tools.pop(index, None)
@@ -282,6 +295,7 @@ class StreamJsonParser:
                     if isinstance(msg_obj.get("usage"), Mapping):
                         bucket = self._msg_usage_raw.setdefault(msg_id, {})
                         bucket.update(msg_obj["usage"])
+                        self._latest_usage_raw.update(msg_obj["usage"])
                 return events
 
             if ev_type == "message_delta":
@@ -290,6 +304,12 @@ class StreamJsonParser:
                         self._current_message_id or "_anon", {}
                     )
                     bucket.update(event["usage"])
+                    self._latest_usage_raw.update(event["usage"])
+                delta_obj = event.get("delta")
+                if isinstance(delta_obj, Mapping) and delta_obj.get("stop_reason"):
+                    self.stop_reason = str(delta_obj["stop_reason"])
+                elif event.get("stop_reason"):
+                    self.stop_reason = str(event["stop_reason"])
                 return events
 
             if ev_type == "content_block_start":
@@ -427,6 +447,9 @@ class StreamJsonParser:
             bucket = self._msg_usage_raw.setdefault(msg_id, {})
             if isinstance(msg.get("usage"), Mapping):
                 bucket.update(msg["usage"])
+                self._latest_usage_raw.update(msg["usage"])
+            if msg.get("stop_reason"):
+                self.stop_reason = str(msg["stop_reason"])
             cli_usage = CliUsage.from_raw(bucket)
 
             had_stream_thinking = msg_id in self._saw_stream_thinking_msgs
@@ -567,8 +590,10 @@ class StreamJsonParser:
             stop_reason = (
                 str(packet["stop_reason"])
                 if packet.get("stop_reason") is not None
-                else None
+                else self.stop_reason
             )
+            if stop_reason is not None:
+                self.stop_reason = stop_reason
             num_turns_raw = packet.get("num_turns")
             num_turns = (
                 int(num_turns_raw)
@@ -589,11 +614,9 @@ class StreamJsonParser:
                 and not isinstance(api_status_raw, bool)
                 else None
             )
-            usage = CliUsage.from_raw(
-                packet.get("usage")
-                if isinstance(packet.get("usage"), Mapping)
-                else None
-            )
+            if isinstance(packet.get("usage"), Mapping):
+                self._latest_usage_raw.update(packet["usage"])
+            usage = CliUsage.from_raw(self._latest_usage_raw)
             model_usage: dict[str, CliUsage] = {}
             raw_model_usage = packet.get("modelUsage")
             if isinstance(raw_model_usage, Mapping):
