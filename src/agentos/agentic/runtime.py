@@ -229,6 +229,13 @@ class AgenticRunResult:
     queued_turn_count: int = 0
 
 
+def _exists_in_workspace(toolset: object, path: str) -> bool:
+    try:
+        return bool(toolset.workspace.resolve(path).is_file())  # type: ignore[attr-defined]
+    except Exception:
+        return False
+
+
 def _accepts_call_id(invoke: Callable[..., object]) -> bool:
     """Whether a toolset's invoke takes ``call_id``; older adapters do not."""
     try:
@@ -2267,6 +2274,15 @@ class AgenticTurnRuntime:
             for i, (_, name, arguments, error) in enumerate(prepared)
         ]
 
+        # A remembered read was valid when the batch started; once a
+        # write-capable call precedes it in this batch, it may be stale.
+        write_seen = False
+        for i, (_, name, _, error) in enumerate(prepared):
+            if write_seen:
+                repeated[i] = None
+            if error is None and not (callable(is_read_only) and is_read_only(name)):
+                write_seen = True
+
         # An identical call later in the same batch runs once: the later copy
         # shares the first one's result. Polling tools are never merged.
         first_index: list[int | None] = [None] * len(prepared)
@@ -2277,11 +2293,13 @@ class AgenticTurnRuntime:
             sig = self._signature(name, arguments)
             if name in {"check_subagent", "read_process_output", "preview_logs"}:
                 continue
-            if sig in first_seen:
-                if not duplicate[i] and repeated[i] is None:
-                    first_index[i] = first_seen[sig]
-            else:
-                first_seen[sig] = i
+            if sig in first_seen and not duplicate[i] and repeated[i] is None:
+                first_index[i] = first_seen[sig]
+                continue
+            if not (callable(is_read_only) and is_read_only(name)):
+                # Write barrier: nothing before a write-capable call may be reused after it.
+                first_seen.clear()
+            first_seen[sig] = i
 
         # An edit of a file that was only read earlier in this same batch
         # would run blind (the model has not seen the read result yet).
@@ -2299,7 +2317,7 @@ class AgenticTurnRuntime:
                     continue
                 if name == "read_file":
                     key = read_key(path)
-                    if key is not None and not has_read(path):
+                    if key is not None and not has_read(path) and _exists_in_workspace(self.toolset, path):
                         batch_read_keys.add(key)
                 elif name in {"edit_file", "notebook_edit"} or (name == "write_file" and arguments.get("mode") != "append"):
                     key = read_key(path)
@@ -2502,7 +2520,7 @@ class AgenticTurnRuntime:
             sig = self._signature(name, arguments)
             if outcome.status == "succeeded":
                 self._consecutive_tool_failures.clear()
-            else:
+            elif first_index[index] is None:
                 self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
             is_mutating_fn = getattr(self.toolset, "is_mutating", None)
             if outcome.status == "succeeded" and (

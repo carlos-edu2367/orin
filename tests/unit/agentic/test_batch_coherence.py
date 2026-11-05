@@ -73,3 +73,53 @@ def test_an_edit_of_a_file_read_in_an_earlier_batch_runs(tmp_path: Path) -> None
         _call(3, "edit_file", {"path": "a.txt", "old_text": "one", "new_text": "two"}),
     ])
     assert results[1]["status"] == "succeeded"
+
+
+def test_identical_reads_around_an_edit_both_run(tmp_path: Path) -> None:
+    toolset, runtime = _real(tmp_path)
+    runtime._run_toolset(TURN, [_call(1, "read_file", {"path": "a.txt"})])
+    read = {"path": "a.txt"}
+    results = runtime._run_toolset(TURN, [
+        _call(2, "read_file", read),
+        _call(3, "edit_file", {"path": "a.txt", "old_text": "one", "new_text": "two"}),
+        _call(4, "read_file", read),
+    ])
+    assert "two" in results[2]["content"]
+    assert "[identical to an earlier call" not in results[2]["content"]
+
+
+def test_identical_commands_around_an_edit_both_run() -> None:
+    class Toolset(_CountingToolset):
+        pass
+
+    toolset = Toolset()
+    runtime = AgenticTurnRuntime(store=object(), provider=object(), toolset=toolset)
+    runtime._run_toolset(TURN, [
+        _call(1, "run_command", {"command": "pytest"}),
+        _call(2, "edit_file", {"path": "x"}),
+        _call(3, "run_command", {"command": "pytest"}),
+    ])
+    assert toolset.invocations == ["run_command", "edit_file", "run_command"]
+
+
+def test_a_failed_call_is_counted_once_per_real_execution() -> None:
+    class Failing(_CountingToolset):
+        def invoke(self, name, arguments):
+            self.invocations.append(name)
+            return ToolOutcome("failed", "no", "boom", {})
+
+    toolset = Failing()
+    runtime = AgenticTurnRuntime(store=object(), provider=object(), toolset=toolset)
+    runtime._run_toolset(TURN, [_call(1, "run_command", {"command": "x"}), _call(2, "run_command", {"command": "x"})])
+    assert toolset.invocations == ["run_command"]
+    assert list(runtime._consecutive_tool_failures.values()) == [1]
+
+
+def test_a_read_of_a_missing_file_does_not_block_a_write_in_the_same_batch(tmp_path: Path) -> None:
+    toolset, runtime = _real(tmp_path)
+    results = runtime._run_toolset(TURN, [
+        _call(1, "read_file", {"path": "new.txt"}),
+        _call(2, "write_file", {"path": "new.txt", "content": "hi"}),
+    ])
+    assert results[1]["error_code"] != "READ_IN_SAME_BATCH"
+    assert results[1]["status"] == "succeeded"
