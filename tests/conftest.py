@@ -82,23 +82,39 @@ def _isolated_settings_dirs(
         clear_fetch_cache()
 
 
+_REFUSED_CLAUDE_SPAWNS: list[str] = []
+
+
 def _real_claude_binaries() -> frozenset[str]:
+    """Every real `claude` binary this machine would run: PATH hits and what production's resolver picks."""
     import shutil
 
     found: set[str] = set()
+    candidates: list[str] = []
     for name in ("claude", "claude.exe", "claude.cmd"):
         hit = shutil.which(name)
         if hit:
-            found.add(os.path.normcase(os.path.realpath(hit)))
+            candidates.append(hit)
+    try:
+        from agentos.providers.claude_cli.command import resolve_claude_binary
+
+        resolved = resolve_claude_binary()
+        if resolved:
+            candidates.append(resolved)
+    except Exception:  # noqa: BLE001 - the guard must never break collection
+        pass
+    for candidate in candidates:
+        found.add(os.path.normcase(os.path.realpath(candidate)))
     return frozenset(found)
 
 
 @pytest.fixture(autouse=True, scope="session")
 def _never_spawn_the_real_claude_cli() -> Iterator[None]:
-    """Tests never run the real `claude` CLI: a spawn of the installed binary fails the test instead.
+    """Tests never run the real `claude` CLI: a spawn of an installed binary is refused and fails the test.
 
-    Fakes (scripts in tmp_path, `C:/fake/claude.exe`, monkeypatched resolvers) stay allowed;
-    only the binary found on PATH when the session starts is refused.
+    Fakes (scripts in tmp_path, `C:/fake/claude.exe`, monkeypatched resolvers) stay allowed; only the binaries
+    found when the session starts (PATH and production's resolver) are refused. Production code may swallow the
+    refusal ("CLI unavailable"), so each refusal is also recorded and fails the test in teardown.
     """
     import shlex
     import shutil
@@ -130,6 +146,7 @@ def _never_spawn_the_real_claude_cli() -> Iterator[None]:
             if first:
                 located = first if os.path.isabs(first) else (shutil.which(first) or first)
                 if os.path.normcase(os.path.realpath(located)) in real:
+                    _REFUSED_CLAUDE_SPAWNS.append(first)
                     raise RuntimeError(f"tests must never run the real Claude CLI: {first!r}")
             super().__init__(args, *a, **kw)  # type: ignore[arg-type]
 
@@ -138,3 +155,13 @@ def _never_spawn_the_real_claude_cli() -> Iterator[None]:
         yield
     finally:
         subprocess.Popen = original  # type: ignore[misc]
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_a_refused_claude_spawn() -> Iterator[None]:
+    before = len(_REFUSED_CLAUDE_SPAWNS)
+    yield
+    refused = _REFUSED_CLAUDE_SPAWNS[before:]
+    if refused:
+        del _REFUSED_CLAUDE_SPAWNS[before:]
+        pytest.fail(f"the test tried to run the real Claude CLI: {refused}")
