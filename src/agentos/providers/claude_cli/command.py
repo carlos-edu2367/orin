@@ -375,6 +375,38 @@ def default_isolated_cwd() -> Path:
     return tmp / f"orin-claude-cli-cwd-{getuid()}"
 
 
+_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md")
+
+
+def _refuse_planted_parent_memory(root: Path) -> None:
+    """Claude Code also reads CLAUDE.md / CLAUDE.local.md from every parent of its cwd. One in a shared temp
+    area, or (POSIX) owned by another user, could have been planted: refuse rather than load it."""
+    try:
+        temp_root = Path(tempfile.gettempdir()).resolve()
+    except OSError:
+        temp_root = Path(tempfile.gettempdir())
+    getuid = getattr(os, "getuid", None)
+    try:
+        ancestors = list(root.absolute().parents)
+    except OSError:
+        return
+    for ancestor in ancestors:
+        try:
+            resolved_ancestor = ancestor.resolve()
+        except OSError:
+            resolved_ancestor = ancestor
+        in_temp = resolved_ancestor == temp_root or temp_root in resolved_ancestor.parents
+        for name in _MEMORY_FILES:
+            candidate = ancestor / name
+            try:
+                info = candidate.lstat()
+            except OSError:
+                continue
+            foreign = os.name != "nt" and getuid is not None and info.st_uid != getuid()
+            if in_temp or foreign:
+                raise CliSecurityAbort(f"Refusing to run the Claude CLI under {candidate}: it would load that file")
+
+
 def ensure_isolated_cwd(base: Path | None = None) -> Path:
     """Create or return an empty directory outside any project repository for `claude -p`.
 
@@ -383,6 +415,7 @@ def ensure_isolated_cwd(base: Path | None = None) -> Path:
     Symlinks inside are unlinked, never followed.
     """
     root = base if base is not None else default_isolated_cwd()
+    _refuse_planted_parent_memory(root)
     if root.is_symlink():
         raise CliSecurityAbort(f"Refusing a symlinked Claude CLI working directory: {root}")
     try:

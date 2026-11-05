@@ -145,6 +145,7 @@ class StreamJsonParser:
         # Messages streamed with --include-partial-messages: their `assistant` packets repeat the message_start
         # usage (output_tokens ~1); the final output only comes in message_delta, so USAGE waits for it.
         self._deferred_usage_msgs: set[str] = set()
+        self._invented_start_id: str | None = None
         self._pending_tools: dict[int, dict[str, Any]] = {}
         self._emitted_tool_end_ids: set[str] = set()
         self._msg_tool_ids_by_seq: dict[str, list[str]] = {}
@@ -315,7 +316,10 @@ class StreamJsonParser:
             if ev_type == "message_start":
                 msg_obj = event.get("message")
                 if isinstance(msg_obj, Mapping):
-                    msg_id = str(msg_obj.get("id") or "").strip() or f"msg_{uuid4().hex[:8]}"
+                    real_id = str(msg_obj.get("id") or "").strip()
+                    msg_id = real_id or f"msg_{uuid4().hex[:8]}"
+                    # An invented id is replaced by the first real one an assistant packet carries.
+                    self._invented_start_id = None if real_id else msg_id
                     self._current_message_id = msg_id
                     if isinstance(msg_obj.get("usage"), Mapping):
                         bucket = self._msg_usage_raw.setdefault(msg_id, {})
@@ -473,6 +477,16 @@ class StreamJsonParser:
             if not isinstance(msg, Mapping):
                 return events
             msg_id = str(msg.get("id") or self._current_message_id or f"msg_{uuid4().hex[:8]}")
+            invented = self._invented_start_id
+            if invented and invented != msg_id and msg.get("id"):
+                # Same message: move what message_start recorded under the invented id to the real one.
+                self._invented_start_id = None
+                moved = self._msg_usage_raw.pop(invented, {})
+                self._msg_usage_raw.setdefault(msg_id, {}).update({k: v for k, v in moved.items() if k not in self._msg_usage_raw.get(msg_id, {})})
+                if invented in self._deferred_usage_msgs:
+                    self._deferred_usage_msgs.discard(invented)
+                    if msg_id not in self._seen_usage_message_ids:
+                        self._deferred_usage_msgs.add(msg_id)
             self._current_message_id = msg_id
             bucket = self._msg_usage_raw.setdefault(msg_id, {})
             if isinstance(msg.get("usage"), Mapping):
