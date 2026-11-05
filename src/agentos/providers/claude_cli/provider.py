@@ -20,6 +20,7 @@ from agentos.providers.claude_cli.command import (
     IDLE_TIMEOUT_SECONDS,
     build_claude_command,
     build_isolated_claude_env,
+    merge_with_system_env,
     redact_argv,
     resolve_claude_binary,
     write_owner_only_temp,
@@ -77,10 +78,19 @@ def text_context_budget(env: Mapping[str, str] | None = None) -> int | None:
     return None
 
 
+def is_code_mode_value(value: object) -> bool:
+    """Return True only when `value` is boolean `True` or string `'code'` (never `'off'` or `'chat'`)."""
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    return str(value).strip().lower() == "code"
+
+
 def native_tools_enabled(
     *,
     conversation_mode: str | None = None,
-    code_mode: bool = False,
+    code_mode: bool | str = False,
     mode: str | None = None,
     env: Mapping[str, str] | None = None,
     version: tuple[int, int, int] | None = None,
@@ -376,7 +386,7 @@ class ClaudeCliProvider:
     def native_turn_available(self, turn: Mapping[str, object]) -> bool:
         return native_tools_enabled(
             conversation_mode=str(turn.get("conversation_mode") or ""),
-            code_mode=bool(turn.get("code_mode")),
+            code_mode=is_code_mode_value(turn.get("code_mode")),
             env=self._env,
         )
 
@@ -388,6 +398,10 @@ class ClaudeCliProvider:
         return start_native_turn_for_provider(self, request)
 
     def close(self) -> None:
+        try:
+            atexit.unregister(self.close)
+        except Exception:
+            pass
         if self._prompt_file_path is not None:
             try:
                 self._prompt_file_path.unlink(missing_ok=True)
@@ -395,6 +409,9 @@ class ClaudeCliProvider:
                 pass
             self._prompt_file_path = None
             self._last_system_prompt = None
+        self._union_declarations.clear()
+        self._union_tool_names.clear()
+        self._transcript = TranscriptState()
 
     def stream(
         self,
@@ -489,6 +506,7 @@ class ClaudeCliProvider:
         proc: Any = None
         cmd: list[str] = []
         stderr_chunks: list[str] = []
+        stdout_thread: threading.Thread | None = None
         stderr_thread: threading.Thread | None = None
         parser = StreamJsonParser()
         mono_started = time.monotonic()
@@ -508,7 +526,7 @@ class ClaudeCliProvider:
                 max_turns=1,
             )
             isolated_env = build_isolated_claude_env(
-                self._env,
+                merge_with_system_env(self._env),
                 max_output_tokens=max_output_tokens,
             )
             creationflags = (
@@ -823,15 +841,26 @@ class ClaudeCliProvider:
             if proc is not None:
                 if proc.poll() is None:
                     kill_process_tree(proc)
-                else:
-                    try:
-                        proc.wait(timeout=0.5)
-                    except Exception:
-                        pass
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+                for s_attr in ("stdout", "stderr"):
+                    s_obj = getattr(proc, s_attr, None)
+                    if s_obj is not None:
+                        try:
+                            s_obj.close()
+                        except Exception:
+                            pass
                 exit_code_final = proc.poll()
+            if stdout_thread is not None:
+                try:
+                    stdout_thread.join(timeout=0.5)
+                except Exception:
+                    pass
             if stderr_thread is not None:
                 try:
-                    stderr_thread.join(timeout=0.2)
+                    stderr_thread.join(timeout=0.5)
                 except Exception:
                     pass
             if cmd:

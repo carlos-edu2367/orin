@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -232,3 +233,45 @@ def test_counters_keep_cache_creation() -> None:
     row = counters.as_row()
     assert row["cached_input_tokens"] == 80
     assert row["cache_creation_input_tokens"] == 15
+
+
+def test_runtime_close_closes_provider_and_unregisters_atexit(
+    tmp_path: Path,
+) -> None:
+    """Red Team #2: AgenticTurnRuntime.close() closes ClaudeCliProvider, unlinks prompt temp file, and unregisters atexit."""
+    provider = provider_mod.ClaudeCliProvider()
+    prompt_path = provider._ensure_prompt_file("System prompt test")
+    assert prompt_path.exists()
+
+    rt = AgenticTurnRuntime(
+        store=object(),  # type: ignore[arg-type]
+        provider=provider,  # type: ignore[arg-type]
+        actions=object(),  # type: ignore[arg-type]
+    )
+    rt.close()
+    assert not prompt_path.exists()
+    assert provider._prompt_file_path is None
+
+
+def test_window_overrides_stale_200k_db_row_for_1m_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red Team #9: Even if DB catalog row has legacy 200_000 for claude-opus-5-5, bridge uses 1_000_000."""
+    worker = ChatWorker.__new__(ChatWorker)
+    monkeypatch.setattr(
+        worker,
+        "_catalog_row_for",
+        lambda _turn: {
+            "base_url": DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+            "context_window": 200_000,
+        },
+    )
+    monkeypatch.setattr(provider_mod, "TEXT_CACHE_OK", True)
+    turn = {
+        "user_id": "u1",
+        "provider": "anthropic",
+        "model_id": "claude-opus-5-5",
+        "code_mode": "off",
+    }
+    assert worker._context_window_for(turn) == 1_000_000
+

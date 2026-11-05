@@ -943,11 +943,12 @@ class ChatWorker:
                 from agentos.providers.claude_cli.catalog import context_window_for as _cli_context_window_for
                 import agentos.providers.claude_cli.provider as _cli_provider_mod
 
-                if window is None:
-                    window = _cli_context_window_for(str(turn.get("model_id") or ""))
+                cli_window = _cli_context_window_for(str(turn.get("model_id") or ""))
+                if window is None or (cli_window is not None and cli_window > window):
+                    window = cli_window
                 is_native = _cli_provider_mod.native_tools_enabled(
                     conversation_mode=str(turn.get("conversation_mode") or ""),
-                    code_mode=bool(turn.get("code_mode")),
+                    code_mode=_cli_provider_mod.is_code_mode_value(turn.get("code_mode")),
                 )
                 if not is_native:
                     budget = _cli_provider_mod.text_context_budget()

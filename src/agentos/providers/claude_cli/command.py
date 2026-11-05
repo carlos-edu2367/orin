@@ -116,6 +116,17 @@ def build_isolated_claude_env(
 build_isolated_env = build_isolated_claude_env
 
 
+def merge_with_system_env(
+    overrides: Mapping[str, str] | None,
+) -> Mapping[str, str] | None:
+    """Merge caller env overrides on top of `os.environ` so OS/home/winsock variables are preserved."""
+    if overrides is None:
+        return None
+    merged = dict(os.environ)
+    merged.update(overrides)
+    return merged
+
+
 def resolve_claude_binary(env: Mapping[str, str] | None = None) -> str | None:
     """Locate the native `claude.exe` binary, prioritizing native PE executables over `.cmd` wrappers."""
     source_env = os.environ if env is None else env

@@ -399,6 +399,12 @@ class AgenticTurnRuntime:
                 closer()
             except Exception:
                 pass
+        provider_closer = getattr(self.provider, "close", None)
+        if callable(provider_closer):
+            try:
+                provider_closer()
+            except Exception:
+                pass
         if callable(self._on_close):
             try:
                 self._on_close()
@@ -1578,7 +1584,7 @@ class AgenticTurnRuntime:
                 return bool(
                     _cli_provider_mod.native_tools_enabled(
                         conversation_mode=str(turn.get("conversation_mode") or ""),
-                        code_mode=bool(turn.get("code_mode")),
+                        code_mode=_cli_provider_mod.is_code_mode_value(turn.get("code_mode")),
                     )
                     or _cli_provider_mod.TEXT_CACHE_OK
                 )

@@ -17,6 +17,7 @@ from agentos.providers.claude_cli.command import (
     build_isolated_claude_env,
     claude_cli_version,
     is_version_validated,
+    merge_with_system_env,
     user_event_line,
     write_owner_only_temp,
 )
@@ -130,6 +131,7 @@ class NativeTurnHandle:
         log_run_fn: Callable[..., None],
         stdout_queue: queue.Queue[str | None],
         stderr_chunks: list[str],
+        stdout_thread: threading.Thread,
         stderr_thread: threading.Thread,
         t0: float,
     ) -> None:
@@ -147,6 +149,7 @@ class NativeTurnHandle:
         self._log_run_fn = log_run_fn
         self._stdout_queue = stdout_queue
         self._stderr_chunks = stderr_chunks
+        self._stdout_thread = stdout_thread
         self._stderr_thread = stderr_thread
         self._t0 = t0
 
@@ -157,6 +160,8 @@ class NativeTurnHandle:
         self._exit_code: int | None = None
 
         self._slot_lock = threading.Lock()
+        self._slot_cond = threading.Condition(self._slot_lock)
+        self._reacquiring_slot = False
         self._active_tool_calls = 0
         self._holds_slot = True
         self._closed = False
@@ -176,28 +181,40 @@ class NativeTurnHandle:
         return self._proc.poll() is None
 
     def _before_tool_call(self) -> None:
-        with self._slot_lock:
+        with self._slot_cond:
             self._active_tool_calls += 1
-            if self._active_tool_calls == 1 and self._holds_slot:
+            if self._holds_slot:
                 self._slots.release()
                 self._holds_slot = False
+            self._slot_cond.notify_all()
 
     def _after_tool_call(self) -> None:
-        need_reacquire = False
-        with self._slot_lock:
+        with self._slot_cond:
             self._active_tool_calls = max(0, self._active_tool_calls - 1)
-            if (
+            while (
                 self._active_tool_calls == 0
                 and not self._closed
                 and not self._holds_slot
             ):
-                need_reacquire = True
-        if need_reacquire:
-            acquired = self._slots.acquire(
-                cancel_check=lambda: self._closed or self._cancel_check()
-            )
-            if acquired:
-                with self._slot_lock:
+                if self._reacquiring_slot:
+                    self._slot_cond.wait(timeout=0.05)
+                    continue
+                self._reacquiring_slot = True
+                self._slot_cond.release()
+                try:
+                    acquired = self._slots.acquire(
+                        cancel_check=lambda: (
+                            self._closed
+                            or self._active_tool_calls > 0
+                            or self._holds_slot
+                            or self._cancel_check()
+                        )
+                    )
+                finally:
+                    self._slot_cond.acquire()
+                    self._reacquiring_slot = False
+                    self._slot_cond.notify_all()
+                if acquired:
                     if (
                         self._closed
                         or self._active_tool_calls > 0
@@ -206,6 +223,9 @@ class NativeTurnHandle:
                         self._slots.release()
                     else:
                         self._holds_slot = True
+                else:
+                    if self._closed or self._cancel_check():
+                        break
 
     def refuse_tools(self, reason: str) -> None:
         self._bg_server.handle.refuse_calls(reason)
@@ -213,14 +233,16 @@ class NativeTurnHandle:
     def send_user(self, content: list[dict[str, Any]]) -> None:
         if not PERSISTENT_STDIN_OK:
             raise RuntimeError("follow-up requires a new process")
-        if self._closed or self._proc.poll() is not None:
-            raise RuntimeError("Claude CLI process is already closed")
-        stdin = getattr(self._proc, "stdin", None)
-        if stdin is None or getattr(stdin, "closed", False):
-            raise RuntimeError("Claude CLI stdin is closed")
-        line = user_event_line(content)
-        stdin.write(line)
-        stdin.flush()
+        with self._close_lock:
+            if self._closed or self._proc.poll() is not None:
+                raise RuntimeError("Claude CLI process is already closed")
+            stdin = getattr(self._proc, "stdin", None)
+            if stdin is None or getattr(stdin, "closed", False):
+                raise RuntimeError("Claude CLI stdin is closed")
+            self._bg_server.handle.allow_calls()
+            line = user_event_line(content)
+            stdin.write(line)
+            stdin.flush()
 
     def _dispatch_event(
         self,
@@ -249,6 +271,31 @@ class NativeTurnHandle:
                     )
                 sink.on_init(init)
             return None
+
+        if ev.kind == CliEventKind.ERROR:
+            self.refuse_tools("stream error")
+            err_msg = ev.text or "Claude CLI stream error"
+            self.close()
+            if not self._had_visible_output and self._parser.init is None:
+                raise NativeLoopUnavailable(
+                    err_msg,
+                    status_code=503,
+                    exhausted=False,
+                )
+            raise ProviderTransportError(
+                err_msg,
+                status_code=502,
+                exhausted=False,
+            )
+
+        if self._parser.init is None:
+            self.refuse_tools("missing init")
+            self.close()
+            raise NativeLoopUnavailable(
+                f"Claude CLI emitted {ev.kind.value!r} before system/init validation.",
+                status_code=503,
+                exhausted=False,
+            )
 
         if ev.kind == CliEventKind.TEXT_DELTA:
             self._had_visible_output = True
@@ -302,6 +349,7 @@ class NativeTurnHandle:
         if ev.kind == CliEventKind.RESULT:
             res = self._parser.result
             if res is not None:
+                self.refuse_tools("turn round completed")
                 if res.is_error and res.subtype != "error_max_turns":
                     err = classify_result_error(res, self._parser.rate_limit)
                     self.close()
@@ -424,12 +472,13 @@ class NativeTurnHandle:
 
     def close(self) -> None:
         with self._close_lock:
-            with self._slot_lock:
+            with self._slot_cond:
                 if self._closed:
                     return
                 self._closed = True
                 should_release_slot = self._holds_slot
                 self._holds_slot = False
+                self._slot_cond.notify_all()
 
             try:
                 self._bg_server.handle.refuse_calls("turn closed")
@@ -449,9 +498,28 @@ class NativeTurnHandle:
                         self._exit_code = self._proc.wait(timeout=0.3)
                     except Exception:
                         self._kill_tree_fn(self._proc)
-                        self._exit_code = self._proc.poll()
+                        try:
+                            self._exit_code = self._proc.wait(timeout=1.0)
+                        except Exception:
+                            self._exit_code = self._proc.poll()
                 else:
                     self._exit_code = self._proc.poll()
+                for s_attr in ("stdout", "stderr"):
+                    s_obj = getattr(self._proc, s_attr, None)
+                    if s_obj is not None:
+                        try:
+                            s_obj.close()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            try:
+                self._stdout_thread.join(timeout=0.5)
+            except Exception:
+                pass
+            try:
+                self._stderr_thread.join(timeout=0.5)
             except Exception:
                 pass
 
@@ -468,11 +536,6 @@ class NativeTurnHandle:
 
             if should_release_slot:
                 self._slots.release()
-
-            try:
-                self._stderr_thread.join(timeout=0.5)
-            except Exception:
-                pass
 
             duration_s = max(0.0, self._clock() - self._t0)
             self._log_run_fn(
@@ -493,6 +556,14 @@ def start_native_turn_for_provider(
     request: NativeTurnRequest,
 ) -> NativeTurnHandle:
     """Spawn a `claude -p` native MCP turn for `ClaudeCliProvider`."""
+    now_pre = provider._clock()
+    if request.deadline_monotonic <= now_pre:
+        raise ProviderTransportError(
+            "TURN_DEADLINE_EXCEEDED: Claude CLI native turn deadline already expired",
+            status_code=None,
+            exhausted=False,
+        )
+
     resolved_binary = provider._resolve_binary()
     if not resolved_binary:
         raise NativeLoopUnavailable(
@@ -501,11 +572,7 @@ def start_native_turn_for_provider(
             exhausted=False,
         )
 
-    effective_base_env: Mapping[str, str] | None = provider._env
-    if effective_base_env is not None and os.name == "nt":
-        merged_env = dict(os.environ)
-        merged_env.update(effective_base_env)
-        effective_base_env = merged_env
+    effective_base_env = merge_with_system_env(provider._env)
 
     if provider._popen_factory is None:
         ver = claude_cli_version(resolved_binary, env=effective_base_env)
@@ -652,6 +719,7 @@ def start_native_turn_for_provider(
             log_run_fn=log_cli_run,
             stdout_queue=stdout_queue,
             stderr_chunks=stderr_chunks,
+            stdout_thread=stdout_thread,
             stderr_thread=stderr_thread,
             t0=t0,
         )

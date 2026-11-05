@@ -107,6 +107,53 @@ def main() -> int:
         )
         return 0
 
+    if mode == "no_init":
+        _emit(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "Bypassed init!"},
+                },
+            }
+        )
+        _emit(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "Bypassed init!",
+                "stop_reason": "end_turn",
+                "num_turns": 1,
+                "duration_ms": 5,
+                "session_id": "sess-no-init",
+                "usage": {"input_tokens": 5, "output_tokens": 2},
+            }
+        )
+        return 0
+
+    if mode == "error_event_hang":
+        _emit(
+            {
+                "type": "system",
+                "subtype": "init",
+                "session_id": "sess-fake",
+                "model": model,
+                "apiKeySource": "none",
+                "mcp_servers": [{"name": server_name, "status": "connected"}],
+                "tools": [],
+            }
+        )
+        _emit(
+            {
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "Overloaded stream error"},
+            }
+        )
+        time.sleep(30.0)
+        return 0
+
     tools_names: list[str] = []
     if mcp_url:
         _mcp_rpc(

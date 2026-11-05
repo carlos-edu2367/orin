@@ -231,10 +231,15 @@ class StreamJsonParser:
                     if isinstance(raw_tools, list)
                     else ()
                 )
+                raw_api_key_src = packet.get("apiKeySource")
+                if raw_api_key_src is None and "apiKeySource" not in packet:
+                    api_key_source = "none"
+                else:
+                    api_key_source = str(raw_api_key_src or "").strip() or "missing"
                 self.init = CliInit(
                     session_id=str(packet.get("session_id") or ""),
                     model=str(packet.get("model") or ""),
-                    api_key_source=str(packet.get("apiKeySource") or "none").strip(),
+                    api_key_source=api_key_source,
                     mcp_servers=mcp_map,
                     tools=tools_tuple,
                 )

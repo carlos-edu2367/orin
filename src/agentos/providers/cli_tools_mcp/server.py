@@ -82,6 +82,11 @@ class TurnToolServerHandle:
         with self._lock:
             self._refuse_reason = str(reason or "turn finished").strip() or "turn finished"
 
+    def allow_calls(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._refuse_reason = None
+
     def mcp_config_json(self) -> str:
         payload = {
             "mcpServers": {

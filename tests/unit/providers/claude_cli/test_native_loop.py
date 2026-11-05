@@ -430,3 +430,130 @@ def test_close_is_idempotent_and_logs_once(
         if "claude_cli run mode=native" in r.message
     ]
     assert len(run_logs) == 1
+
+
+def test_concurrent_after_tool_call_with_single_slot_does_not_deadlock(
+    tmp_path: Path,
+) -> None:
+    """Red Team #1: Two concurrent tool calls finishing while the single CLI slot is held externally must not self-deadlock."""
+    slots = CliSlots(limit=1)
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "persistent_followup"},
+        slots=slots,
+    )
+    handle = provider.start_native_turn(_make_request(tmp_path))
+    try:
+        # Both tool calls enter: parent slot is released once
+        handle._before_tool_call()
+        handle._before_tool_call()
+
+        # External subagent acquires the single slot while parent tools are running
+        assert slots.acquire(cancel_check=lambda: False) is True
+
+        finished_t1 = threading.Event()
+        finished_t2 = threading.Event()
+
+        def _finish_1() -> None:
+            handle._after_tool_call()
+            finished_t1.set()
+
+        def _finish_2() -> None:
+            handle._after_tool_call()
+            finished_t2.set()
+
+        t1 = threading.Thread(target=_finish_1, daemon=True)
+        t2 = threading.Thread(target=_finish_2, daemon=True)
+        t1.start()
+        t2.start()
+
+        time.sleep(0.15)
+        # Release the external subagent slot: BOTH t1 and t2 must complete without deadlock!
+        slots.release()
+
+        assert finished_t1.wait(timeout=2.0) is True
+        assert finished_t2.wait(timeout=2.0) is True
+    finally:
+        handle.close()
+
+
+def test_stream_without_init_aborts_before_output(tmp_path: Path) -> None:
+    """Red Team #3B: Output or result before system/init must raise NativeLoopUnavailable without emitting text."""
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "no_init"},
+    )
+    sink = _RecordingSink()
+    handle = provider.start_native_turn(_make_request(tmp_path))
+    try:
+        with pytest.raises(NativeLoopUnavailable):
+            handle.run_until_result(sink)
+        assert sink.texts == []
+    finally:
+        handle.close()
+
+
+def test_error_event_aborts_immediately_without_waiting_for_idle_timeout(
+    tmp_path: Path,
+) -> None:
+    """Red Team #3A: A CLI error event must abort immediately instead of hanging until IDLE_TIMEOUT_SECONDS."""
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "error_event_hang"},
+    )
+    sink = _RecordingSink()
+    handle = provider.start_native_turn(_make_request(tmp_path))
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(ProviderTransportError) as exc_info:
+            handle.run_until_result(sink)
+        assert time.monotonic() - t0 < 4.0
+        assert "overloaded" in str(exc_info.value).lower()
+    finally:
+        handle.close()
+
+
+def test_mcp_calls_refused_after_result_and_reenabled_on_send_user(
+    tmp_path: Path,
+) -> None:
+    """Red Team #4: Between run_until_result() and close(), late MCP calls are refused; send_user() re-enables them."""
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "persistent_followup"},
+    )
+    sink = _RecordingSink()
+    handle = provider.start_native_turn(_make_request(tmp_path))
+    try:
+        out = handle.run_until_result(sink)
+        assert out.result.subtype == "success"
+
+        # Immediately after result, a late tools/call must be refused with isError=True
+        resp = httpx.post(
+            handle.mcp_url,
+            headers={"Authorization": f"Bearer {handle._bg_server.handle.token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 99,
+                "method": "tools/call",
+                "params": {"name": "echo", "arguments": {"text": "late"}},
+            },
+            timeout=2.0,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["result"]["isError"] is True
+    finally:
+        handle.close()
+
+
+def test_expired_deadline_fails_fast_without_spawning_process(
+    tmp_path: Path,
+) -> None:
+    """Red Team #7: Starting a native turn with an already expired deadline fails fast before spawning."""
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "persistent_followup"},
+    )
+    with pytest.raises(ProviderTransportError) as exc_info:
+        provider.start_native_turn(_make_request(tmp_path, deadline_offset=-1.0))
+    assert "TURN_DEADLINE_EXCEEDED" in str(exc_info.value)
+
