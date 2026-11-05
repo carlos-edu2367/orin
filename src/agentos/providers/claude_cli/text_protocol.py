@@ -1,0 +1,743 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import re
+from typing import Any, Iterable, Literal, Mapping, Sequence
+from uuid import uuid4
+
+from agentos.agentic.tools.public_names import PUBLIC_NAMES
+
+TOOL_CALL_OPEN = "<orin_tool_call"
+TOOL_CALL_CLOSE = "</orin_tool_call>"
+_ALT_CALL_OPEN = "<tool_call"
+_ALT_CALL_CLOSE = "</tool_call>"
+_HALLUCINATED_RESULT_MARKER = "[Tool Result"
+
+_OPEN_TAG_RE = re.compile(
+    r"<(?P<tag>orin_tool_call|tool_call)(?:\s+id=(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+)))?\s*>",
+    re.IGNORECASE,
+)
+
+_INTERNAL_BY_PUBLIC = {public: internal for internal, public in PUBLIC_NAMES.items()}
+_INTERNAL_BY_LOWER_PUBLIC = {
+    public.lower(): internal for internal, public in PUBLIC_NAMES.items()
+}
+_PUBLIC_BY_LOWER_INTERNAL = {
+    internal.lower(): public for internal, public in PUBLIC_NAMES.items()
+}
+
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "read_file": {"file_path": "path", "filePath": "path", "filepath": "path"},
+    "write_file": {"file_path": "path", "filePath": "path", "filepath": "path"},
+    "edit_file": {
+        "file_path": "path",
+        "filePath": "path",
+        "filepath": "path",
+        "old_string": "old_text",
+        "oldString": "old_text",
+        "new_string": "new_text",
+        "newString": "new_text",
+    },
+    "run_command": {"cmd": "command", "command_line": "command"},
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TextProtocolEvent:
+    kind: Literal["text", "tool_call_started", "tool_call", "stop"]
+    text: str = ""
+    call_id: str = ""
+    name: str = ""
+    arguments: str = ""
+
+
+def escape_tool_content(text: str) -> str:
+    """Escape protocol delimiters inside tool results and untrusted content to prevent tag/role injection."""
+    if not text:
+        return ""
+    out = str(text)
+    replacements = (
+        ("<orin_tool_call", "&lt;orin_tool_call"),
+        ("</orin_tool_call", "&lt;/orin_tool_call"),
+        ("<tool_call", "&lt;tool_call"),
+        ("</tool_call", "&lt;/tool_call"),
+        ("[Tool Result", "&#91;Tool Result"),
+        ("[/Tool Result]", "&#91;/Tool Result]"),
+        ("[User]", "&#91;User]"),
+        ("[Assistant]", "&#91;Assistant]"),
+        ("[System]", "&#91;System]"),
+    )
+    for src, dst in replacements:
+        out = out.replace(src, dst)
+    return out
+
+
+def extract_tool_declarations(
+    tools: Iterable[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Extract normalized tool declarations and the set of declared tool names."""
+    declarations: list[dict[str, Any]] = []
+    allowed: set[str] = set()
+    for item in tools or ():
+        if not isinstance(item, Mapping):
+            continue
+        fn = item.get("function") if isinstance(item.get("function"), Mapping) else item
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(fn.get("description") or "").strip()
+        parameters = (
+            dict(fn["parameters"])
+            if isinstance(fn.get("parameters"), Mapping)
+            else (
+                dict(fn["input_schema"])
+                if isinstance(fn.get("input_schema"), Mapping)
+                else {"type": "object", "properties": {}}
+            )
+        )
+        declarations.append(
+            {
+                "name": name,
+                "description": description,
+                "parameters": parameters,
+            }
+        )
+        allowed.add(name)
+    return declarations, allowed
+
+
+def build_system_prompt(
+    stable_system: str,
+    declarations: Sequence[Mapping[str, Any]],
+) -> str:
+    """Build a cache-stable system prompt containing the base system prompt and union of turn tools."""
+    base = (stable_system or "").strip() or "You are a helpful assistant."
+    if not declarations:
+        return base
+
+    normalized_decls: list[dict[str, Any]] = []
+    for decl in declarations:
+        if not isinstance(decl, Mapping):
+            continue
+        fn = decl.get("function") if isinstance(decl.get("function"), Mapping) else decl
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        params = (
+            fn.get("parameters")
+            if isinstance(fn.get("parameters"), Mapping)
+            else (
+                fn.get("input_schema")
+                if isinstance(fn.get("input_schema"), Mapping)
+                else {"type": "object", "properties": {}}
+            )
+        )
+        normalized_decls.append(
+            {
+                "name": name,
+                "description": str(fn.get("description") or "").strip(),
+                "parameters": dict(params),
+            }
+        )
+
+    if not normalized_decls:
+        return base
+
+    tools_json = json.dumps(normalized_decls, ensure_ascii=False, indent=2)
+    protocol_section = (
+        "\n\n# Orin Tool Calling Protocol\n"
+        "When you need to invoke a tool from the catalog below, emit an XML block in the exact format:\n"
+        '<orin_tool_call>{"name": "<tool_name>", "arguments": {<json_arguments>}}</orin_tool_call>\n\n'
+        "Rules:\n"
+        "1. Use only tool names declared in the catalog below and currently available.\n"
+        "2. `arguments` must be a valid JSON object matching the tool's `parameters` schema.\n"
+        "3. Do not wrap `<orin_tool_call>` inside markdown code fences.\n"
+        "4. Emit only the independent tool calls for this step, all together, and stop. Never write `[Tool Result`.\n\n"
+        "## Tool Catalog\n"
+        f"{tools_json}"
+    )
+    return f"{base}{protocol_section}"
+
+
+def _extract_content_text_and_images(
+    raw_content: Any,
+) -> tuple[str, list[dict[str, Any]]]:
+    if isinstance(raw_content, str):
+        return raw_content, []
+    if not isinstance(raw_content, list):
+        return (str(raw_content) if raw_content is not None else ""), []
+
+    text_parts: list[str] = []
+    images: list[dict[str, Any]] = []
+    for part in raw_content:
+        if isinstance(part, str):
+            text_parts.append(part)
+            continue
+        if not isinstance(part, Mapping):
+            continue
+        p_type = str(part.get("type") or "").strip().lower()
+        if p_type in {"text", "input_text"}:
+            val = part.get("text") or part.get("content") or ""
+            if isinstance(val, str) and val:
+                text_parts.append(val)
+        elif p_type == "image":
+            source = part.get("source")
+            if isinstance(source, Mapping) and source.get("data"):
+                images.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": str(
+                                source.get("media_type") or "image/png"
+                            ),
+                            "data": str(source["data"]),
+                        },
+                    }
+                )
+            elif part.get("data"):
+                images.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": str(
+                                part.get("media_type")
+                                or part.get("mime_type")
+                                or "image/png"
+                            ),
+                            "data": str(part["data"]),
+                        },
+                    }
+                )
+        elif p_type in {"image_url", "input_image"}:
+            url_obj = part.get("image_url")
+            url_str = (
+                str(url_obj.get("url") or "")
+                if isinstance(url_obj, Mapping)
+                else str(url_obj or part.get("url") or "")
+            )
+            if url_str.startswith("data:") and ";base64," in url_str:
+                header, b64_data = url_str.split(";base64,", 1)
+                media_type = header[5:] or "image/png"
+                images.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64_data.strip(),
+                        },
+                    }
+                )
+    return "\n".join(text_parts), images
+
+
+def _format_single_message_group(
+    msg: Mapping[str, Any],
+) -> tuple[str, list[dict[str, Any]]]:
+    role = str(msg.get("role") or "user").strip().lower()
+    text, images = _extract_content_text_and_images(msg.get("content"))
+
+    if role == "system":
+        rendered = f"[System]\n{escape_tool_content(text.strip())}"
+    elif role == "assistant":
+        parts: list[str] = ["[Assistant]"]
+        if text.strip():
+            parts.append(escape_tool_content(text.strip()))
+        raw_calls = msg.get("tool_calls")
+        if isinstance(raw_calls, list):
+            for idx, tc in enumerate(raw_calls, start=1):
+                if not isinstance(tc, Mapping):
+                    continue
+                fn = (
+                    tc.get("function")
+                    if isinstance(tc.get("function"), Mapping)
+                    else tc
+                )
+                call_id = str(tc.get("id") or f"call_{idx}").strip()
+                t_name = str(fn.get("name") or tc.get("name") or "").strip()
+                raw_args = fn.get("arguments", tc.get("arguments", {}))
+                if isinstance(raw_args, str):
+                    try:
+                        parsed_args = json.loads(raw_args)
+                        if not isinstance(parsed_args, Mapping):
+                            parsed_args = {}
+                    except json.JSONDecodeError:
+                        parsed_args = {}
+                elif isinstance(raw_args, Mapping):
+                    parsed_args = dict(raw_args)
+                else:
+                    parsed_args = {}
+                payload = json.dumps(
+                    {"name": t_name, "arguments": parsed_args},
+                    ensure_ascii=False,
+                )
+                parts.append(
+                    f'<orin_tool_call id="{call_id}">{payload}</orin_tool_call>'
+                )
+        rendered = "\n".join(parts)
+    else:
+        rendered = f"[User]\n{escape_tool_content(text.strip())}"
+
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": rendered}]
+    blocks.extend(images)
+    digest = hashlib.sha256(
+        json.dumps(blocks, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return digest, blocks
+
+
+def _format_tool_batch_group(
+    tool_msgs: Sequence[Mapping[str, Any]],
+) -> tuple[str, list[dict[str, Any]]]:
+    text_entries: list[str] = []
+    all_images: list[dict[str, Any]] = []
+    for msg in tool_msgs:
+        call_id = str(msg.get("tool_call_id") or msg.get("id") or "call").strip()
+        name = str(msg.get("name") or msg.get("tool_name") or "tool").strip()
+        is_err = bool(msg.get("is_error"))
+        status = "error" if is_err else str(msg.get("status") or "ok").strip()
+        raw_text, images = _extract_content_text_and_images(msg.get("content"))
+        escaped = escape_tool_content(raw_text)
+        text_entries.append(
+            f"[Tool Result id={call_id} name={name} status={status}]\n"
+            f"{escaped}\n"
+            f"[/Tool Result]"
+        )
+        all_images.extend(images)
+
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": "\n\n".join(text_entries)}
+    ]
+    blocks.extend(all_images)
+    digest = hashlib.sha256(
+        json.dumps(blocks, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    return digest, blocks
+
+
+class TranscriptState:
+    """Per-turn append-only multi-block transcript builder for `claude -p`."""
+
+    def __init__(self) -> None:
+        self.last_rebuild_reason: str | None = None
+        self._group_digests: list[str] = []
+        self._group_blocks: list[list[dict[str, Any]]] = []
+
+    def blocks_for(
+        self,
+        window: Sequence[Mapping[str, Any]],
+        *,
+        allowed_now: set[str] | None = None,
+        closing: bool = False,
+    ) -> list[dict[str, Any]]:
+        msgs = [m for m in window if isinstance(m, Mapping)]
+        if msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
+            msgs = msgs[1:]
+
+        groups: list[tuple[str, list[dict[str, Any]]]] = []
+        idx = 0
+        while idx < len(msgs):
+            role = str(msgs[idx].get("role") or "").strip().lower()
+            if role == "tool":
+                batch: list[Mapping[str, Any]] = []
+                while (
+                    idx < len(msgs)
+                    and str(msgs[idx].get("role") or "").strip().lower() == "tool"
+                ):
+                    batch.append(msgs[idx])
+                    idx += 1
+                groups.append(_format_tool_batch_group(batch))
+            else:
+                groups.append(_format_single_message_group(msgs[idx]))
+                idx += 1
+
+        new_digests = [d for d, _ in groups]
+        old_len = len(self._group_digests)
+
+        if (
+            old_len > 0
+            and len(new_digests) >= old_len
+            and new_digests[:old_len] == self._group_digests
+        ):
+            self.last_rebuild_reason = None
+            for d, b in groups[old_len:]:
+                self._group_digests.append(d)
+                self._group_blocks.append(b)
+        else:
+            self.last_rebuild_reason = (
+                "history_rewritten" if old_len > 0 else None
+            )
+            self._group_digests = new_digests
+            self._group_blocks = [b for _, b in groups]
+
+        result_blocks: list[dict[str, Any]] = [
+            dict(block)
+            for grp in self._group_blocks
+            for block in grp
+        ]
+
+        if closing:
+            result_blocks.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "[System]\n"
+                        "Ferramentas disponíveis agora: nenhuma. "
+                        "Responda diretamente sem emitir `<orin_tool_call>`."
+                    ),
+                }
+            )
+        elif allowed_now is not None:
+            if allowed_now:
+                sorted_names = ", ".join(sorted(allowed_now))
+                result_blocks.append(
+                    {
+                        "type": "text",
+                        "text": f"[System]\nFerramentas disponíveis agora: {sorted_names}",
+                    }
+                )
+            else:
+                result_blocks.append(
+                    {
+                        "type": "text",
+                        "text": (
+                            "[System]\n"
+                            "Ferramentas disponíveis agora: nenhuma. "
+                            "Responda diretamente sem emitir `<orin_tool_call>`."
+                        ),
+                    }
+                )
+
+        if not result_blocks:
+            result_blocks.append({"type": "text", "text": "[User]\nContinue."})
+        return result_blocks
+
+
+def _longest_suffix_prefix(text: str, target: str) -> int:
+    max_k = min(len(text), len(target) - 1)
+    for k in range(max_k, 0, -1):
+        if text[-k:].lower() == target[:k].lower():
+            return k
+    return 0
+
+
+def _find_close_tag_outside_json_strings(
+    buf: str, close_tag: str
+) -> int:
+    in_string = False
+    escaped = False
+    target_lower = close_tag.lower()
+    target_len = len(close_tag)
+    buf_lower = buf.lower()
+    i = 0
+    limit = len(buf) - target_len
+    while i <= limit:
+        ch = buf[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            i += 1
+            continue
+        if buf_lower[i : i + target_len] == target_lower:
+            return i
+        i += 1
+    return -1
+
+
+def _resolve_allowed_tool_name(
+    raw_name: str, allowed_names: set[str] | None
+) -> str | None:
+    candidate = (raw_name or "").strip()
+    if not candidate:
+        return None
+    if candidate.startswith("mcp__"):
+        parts = candidate.split("__", 2)
+        if len(parts) == 3 and parts[2]:
+            candidate = parts[2]
+
+    if allowed_names is None:
+        return _INTERNAL_BY_PUBLIC.get(
+            candidate, _INTERNAL_BY_LOWER_PUBLIC.get(candidate.lower(), candidate)
+        )
+
+    if not allowed_names:
+        return None
+
+    if candidate in allowed_names:
+        return candidate
+
+    lower_map = {n.lower(): n for n in allowed_names}
+    if candidate.lower() in lower_map:
+        return lower_map[candidate.lower()]
+
+    internal = _INTERNAL_BY_PUBLIC.get(
+        candidate, _INTERNAL_BY_LOWER_PUBLIC.get(candidate.lower())
+    )
+    if internal and internal in allowed_names:
+        return internal
+    if internal and internal.lower() in lower_map:
+        return lower_map[internal.lower()]
+
+    public = PUBLIC_NAMES.get(
+        candidate, _PUBLIC_BY_LOWER_INTERNAL.get(candidate.lower())
+    )
+    if public and public in allowed_names:
+        return public
+    if public and public.lower() in lower_map:
+        return lower_map[public.lower()]
+
+    return None
+
+
+def _normalize_tool_arguments(
+    resolved_name: str, raw_args: Mapping[str, Any]
+) -> dict[str, Any]:
+    args = dict(raw_args)
+    canonical_internal = _INTERNAL_BY_PUBLIC.get(
+        resolved_name,
+        _INTERNAL_BY_LOWER_PUBLIC.get(resolved_name.lower(), resolved_name),
+    )
+    if resolved_name == canonical_internal:
+        aliases = _ARG_ALIASES.get(canonical_internal, {})
+        for src_key, dst_key in aliases.items():
+            if src_key in args and dst_key not in args:
+                args[dst_key] = args.pop(src_key)
+    return args
+
+
+def _parse_json_objects(inner: str) -> list[Mapping[str, Any]]:
+    text = inner.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if len(lines) >= 2:
+            if lines[-1].strip().startswith("```"):
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+            text = "\n".join(lines).strip()
+
+    decoder = json.JSONDecoder()
+    results: list[Mapping[str, Any]] = []
+    idx = 0
+    length = len(text)
+    while idx < length:
+        while idx < length and text[idx] in " \t\r\n,":
+            idx += 1
+        if idx >= length:
+            break
+        if text[idx] != "{":
+            brace = text.find("{", idx)
+            if brace == -1:
+                break
+            idx = brace
+        try:
+            obj, end = decoder.raw_decode(text, idx)
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, Mapping):
+            results.append(obj)
+        idx = end
+    return results
+
+
+class ToolCallStreamParser:
+    """Streaming parser for `<orin_tool_call>` blocks that stops immediately on hallucinated `[Tool Result`."""
+
+    def __init__(self, allowed_names: set[str] | None = None) -> None:
+        self._allowed_names = (
+            set(allowed_names) if allowed_names is not None else None
+        )
+        self.stopped: bool = False
+        self.saw_unclosed_tool_call: bool = False
+        self._buf: str = ""
+        self._active_close_tag: str | None = None
+        self._active_attr_id: str | None = None
+        self._seen_call_ids: set[str] = set()
+
+    def _allocate_call_id(self, preferred: str | None) -> str:
+        candidate = (preferred or "").strip()
+        if candidate and candidate not in self._seen_call_ids:
+            self._seen_call_ids.add(candidate)
+            return candidate
+        while True:
+            generated = f"call_{uuid4().hex[:12]}"
+            if generated not in self._seen_call_ids:
+                self._seen_call_ids.add(generated)
+                return generated
+
+    def _parse_inner_calls(
+        self, inner_xml: str, attr_id: str | None
+    ) -> list[TextProtocolEvent]:
+        objs = _parse_json_objects(inner_xml)
+        events: list[TextProtocolEvent] = []
+        for idx, obj in enumerate(objs):
+            raw_name = str(
+                obj.get("name") or obj.get("tool") or obj.get("function") or ""
+            ).strip()
+            resolved = _resolve_allowed_tool_name(raw_name, self._allowed_names)
+            if resolved is None:
+                continue
+            raw_args = obj.get("arguments")
+            if raw_args is None:
+                raw_args = obj.get("input") or obj.get("parameters") or {}
+            if isinstance(raw_args, str):
+                try:
+                    parsed = json.loads(raw_args)
+                    args_map = dict(parsed) if isinstance(parsed, Mapping) else {}
+                except json.JSONDecodeError:
+                    args_map = {}
+            elif isinstance(raw_args, Mapping):
+                args_map = dict(raw_args)
+            else:
+                args_map = {}
+
+            normalized_args = _normalize_tool_arguments(resolved, args_map)
+            preferred_id = (
+                str(obj.get("id") or "").strip()
+                or (attr_id if idx == 0 else None)
+            )
+            call_id = self._allocate_call_id(preferred_id)
+            events.append(
+                TextProtocolEvent(
+                    kind="tool_call",
+                    call_id=call_id,
+                    name=resolved,
+                    arguments=json.dumps(normalized_args, ensure_ascii=False),
+                )
+            )
+        return events
+
+    def feed(self, chunk: str) -> list[TextProtocolEvent]:
+        if self.stopped or not chunk:
+            return []
+        self._buf += chunk
+        events: list[TextProtocolEvent] = []
+
+        while self._buf and not self.stopped:
+            if self._active_close_tag is None:
+                hallucinated_pos = self._buf.find(_HALLUCINATED_RESULT_MARKER)
+                tag_match = _OPEN_TAG_RE.search(self._buf)
+                tag_pos = tag_match.start() if tag_match is not None else -1
+
+                if hallucinated_pos != -1 and (
+                    tag_pos == -1 or hallucinated_pos < tag_pos
+                ):
+                    before = self._buf[:hallucinated_pos].rstrip()
+                    if before:
+                        events.append(TextProtocolEvent(kind="text", text=before))
+                    events.append(TextProtocolEvent(kind="stop"))
+                    self.stopped = True
+                    self._buf = ""
+                    break
+
+                if tag_match is not None:
+                    before = self._buf[:tag_pos]
+                    if before:
+                        events.append(TextProtocolEvent(kind="text", text=before))
+                    tag_name = tag_match.group("tag").lower()
+                    self._active_close_tag = (
+                        TOOL_CALL_CLOSE
+                        if tag_name == "orin_tool_call"
+                        else _ALT_CALL_CLOSE
+                    )
+                    attr_id = (
+                        tag_match.group(2)
+                        or tag_match.group(3)
+                        or tag_match.group(4)
+                        or ""
+                    )
+                    self._active_attr_id = attr_id.strip() or None
+                    events.append(
+                        TextProtocolEvent(
+                            kind="tool_call_started",
+                            call_id=self._active_attr_id or "",
+                        )
+                    )
+                    self._buf = self._buf[tag_match.end() :]
+                    continue
+
+                # Check if the tail of _buf could be an incomplete opening tag or `[Tool Result`
+                hold_len = max(
+                    _longest_suffix_prefix(self._buf, TOOL_CALL_OPEN),
+                    _longest_suffix_prefix(self._buf, _ALT_CALL_OPEN),
+                    _longest_suffix_prefix(self._buf, _HALLUCINATED_RESULT_MARKER),
+                )
+                # Also hold if `<orin_tool_call` or `<tool_call` started with attributes but has no closing `>` yet
+                lower_buf = self._buf.lower()
+                for open_prefix in (TOOL_CALL_OPEN, _ALT_CALL_OPEN):
+                    last_open = lower_buf.rfind(open_prefix)
+                    if last_open != -1 and ">" not in self._buf[last_open:]:
+                        hold_len = max(hold_len, len(self._buf) - last_open)
+
+                if hold_len > 0:
+                    emit_part = self._buf[:-hold_len]
+                    self._buf = self._buf[-hold_len:]
+                else:
+                    emit_part = self._buf
+                    self._buf = ""
+
+                if emit_part:
+                    events.append(TextProtocolEvent(kind="text", text=emit_part))
+                break
+            else:
+                close_pos = _find_close_tag_outside_json_strings(
+                    self._buf, self._active_close_tag
+                )
+                if close_pos != -1:
+                    inner_xml = self._buf[:close_pos]
+                    after = self._buf[close_pos + len(self._active_close_tag) :]
+                    attr_id = self._active_attr_id
+                    self._active_close_tag = None
+                    self._active_attr_id = None
+                    events.extend(self._parse_inner_calls(inner_xml, attr_id))
+                    self._buf = after
+                    continue
+                break
+
+        return events
+
+    def finish(self) -> list[TextProtocolEvent]:
+        if self.stopped:
+            self._buf = ""
+            self._active_close_tag = None
+            self._active_attr_id = None
+            return []
+
+        events: list[TextProtocolEvent] = []
+        leftover = self._buf
+        self._buf = ""
+
+        if self._active_close_tag is not None:
+            attr_id = self._active_attr_id
+            self._active_close_tag = None
+            self._active_attr_id = None
+            parsed = self._parse_inner_calls(leftover, attr_id)
+            if parsed:
+                events.extend(parsed)
+            else:
+                self.saw_unclosed_tool_call = True
+            return events
+
+        if leftover:
+            if _HALLUCINATED_RESULT_MARKER in leftover:
+                pos = leftover.find(_HALLUCINATED_RESULT_MARKER)
+                before = leftover[:pos].rstrip()
+                if before:
+                    events.append(TextProtocolEvent(kind="text", text=before))
+                events.append(TextProtocolEvent(kind="stop"))
+                self.stopped = True
+            else:
+                events.append(TextProtocolEvent(kind="text", text=leftover))
+        return events
