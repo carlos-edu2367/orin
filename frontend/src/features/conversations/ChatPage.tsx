@@ -825,7 +825,7 @@ export function ChatPage() {
   // takes the next queued input as the answer). A normal message queued earlier and delivered before that wait is
   // not an answer: the question stays open. A question is closed once answered here or by such a delivery; a later
   // ask_user of the same turn stays open.
-  const { closedQuestionEventIds, answerDeliveries } = useMemo(() => {
+  const { closedQuestionEventIds, answerDeliveries, waitingTurnIds } = useMemo(() => {
     const closed = new Set(answeredQuestionEventIds)
     const deliveries: ConversationActivityEvent[] = []
     const askedByTurn = new Map<string, string[]>()
@@ -850,7 +850,8 @@ export function ChatPage() {
         deliveries.push(event)
       }
     }
-    return { closedQuestionEventIds: closed, answerDeliveries: deliveries }
+    // waitingTurnIds: turns the back-end is waiting in for an answer now (a queued text it reads is the answer).
+    return { closedQuestionEventIds: closed, answerDeliveries: deliveries, waitingTurnIds: waitingTurnIds as ReadonlySet<string> }
   }, [activity.events, answerQueueIds, answeredQuestionEventIds])
   const answerDeliveryEventIds = useMemo(() => new Set(answerDeliveries.map((event) => event.eventId)), [answerDeliveries])
 
@@ -864,18 +865,25 @@ export function ChatPage() {
       return item
     })
     // One bubble per answer a live turn read from the queue, right after that turn's assistant message (or at the
-    // end), unless a persisted user message already says the same.
+    // end), unless the same turn already has that text persisted as a user message after its assistant message.
+    // An earlier message with the same text is not this answer.
+    const lastAssistantIndexByTurn = new Map<string, number>()
+    base.forEach((item, index) => { if (item.role === 'assistant' && item.turn_id) lastAssistantIndexByTurn.set(item.turn_id, index) })
     const answersByTurn = new Map<string, ConversationMessage[]>()
     for (const event of answerDeliveries) {
       const content = typeof event.payload?.queued_text === 'string' ? event.payload.queued_text.trim() : ''
-      if (!content || !event.turnId || base.some((item) => item.role === 'user' && item.content.trim() === content)) continue
+      if (!content || !event.turnId) continue
+      const turnId = event.turnId
+      const anchor = lastAssistantIndexByTurn.get(turnId)
+      const persisted = anchor !== undefined && base.slice(anchor + 1).some(
+        (item) => item.role === 'user' && (!item.turn_id || item.turn_id === turnId) && item.content.trim() === content,
+      )
+      if (persisted) continue
       const answer: ConversationMessage = {
         message_id: `${QUEUED_ANSWER_MESSAGE_PREFIX}${event.eventId}`, role: 'user', content, status: 'completed', retryable: false, attachments: [], command: null,
       }
       answersByTurn.set(event.turnId, [...(answersByTurn.get(event.turnId) ?? []), answer])
     }
-    const lastAssistantIndexByTurn = new Map<string, number>()
-    base.forEach((item, index) => { if (item.role === 'assistant' && item.turn_id) lastAssistantIndexByTurn.set(item.turn_id, index) })
     const withAnswers: ConversationMessage[] = []
     base.forEach((item, index) => {
       withAnswers.push(item)
@@ -1745,24 +1753,33 @@ export function ChatPage() {
       if (outcome.kind === 'failed') { setError('O comando não pôde ser concluído. Tente novamente.'); return }
     }
     if ((!text && readyUploads.length === 0) || turnBusy) return
-    if (text.length > MAX_MESSAGE_CHARACTERS) {
-      await sendOversizedTextAutomatically(text, readyUploads, liveModeOverride)
-      return
-    }
-    if (liveTurnAwaitingAnswer && readyUploads.length === 0 && !afterStop) {
-      // The turn shows the text once it reads it (as the answer), so there is no optimistic bubble.
+    if (liveTurnAwaitingAnswer && !afterStop) {
+      // The live turn reads only the queue, which takes text: never start a new turn behind it. Files (and text
+      // too long for the queue) stay in the composer until the turn ends.
+      if (!text || text.length > MAX_MESSAGE_CHARACTERS) {
+        setCommandNotice('Espere o turno atual terminar para enviar.')
+        return
+      }
+      // Once the turn waits in the turn, the text it reads is the answer, and it shows then (no optimistic bubble).
+      // Before that wait it reads the text as a normal message, so the question stays open.
+      const asAnswer = Boolean(activeTurn && waitingTurnIds.has(activeTurn.turn_id))
       setMessage('')
       setError(null)
+      if (readyUploads.length > 0) setCommandNotice('Espere o turno atual terminar para enviar.')
       try {
         const receipt = await enqueueMessage(client, conversationId, text)
         const queueId = receipt.queueId
-        if (queueId) setAnswerQueueIds((current) => new Set(current).add(queueId))
+        if (asAnswer && queueId) setAnswerQueueIds((current) => new Set(current).add(queueId))
         if (!receipt.queued) await loadSnapshot(false) // the turn had already ended: the text was sent as a new turn
         await refreshQueue()
       } catch {
         setMessage(text)
         setError('Não foi possível pôr a mensagem na fila.')
       }
+      return
+    }
+    if (text.length > MAX_MESSAGE_CHARACTERS) {
+      await sendOversizedTextAutomatically(text, readyUploads, liveModeOverride)
       return
     }
     setMessage('')

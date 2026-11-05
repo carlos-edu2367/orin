@@ -126,6 +126,11 @@ function installFetch(scenario: Scenario, onQueue: (body: string) => void = () =
         headers: { 'Content-Type': 'text/event-stream' },
       })
     }
+    if (url.endsWith('/v1/uploads') && method === 'POST') {
+      return new Response(JSON.stringify({ upload_id: 'up-1', filename: 'shot.png', media_type: 'image/png', kind: 'image', bytes: 4 }), {
+        status: 201, headers: { 'Content-Type': 'application/json' },
+      })
+    }
     if (url.endsWith(`/v1/conversations/${CONVERSATION_ID}/queue`) && method === 'POST') {
       onQueue(body)
       return new Response(JSON.stringify({ queued: true, queue_id: `q-${posted.length}`, turn_id: 'turn-1' }), {
@@ -181,6 +186,7 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
   beforeEach(() => {
     localStorage.clear()
     document.head.innerHTML = '<meta name="agentos-auth-mode" content="loopback">'
+    if (!('createObjectURL' in URL)) Object.assign(URL, { createObjectURL: () => 'blob:x', revokeObjectURL: () => undefined })
   })
 
   afterEach(() => {
@@ -319,6 +325,39 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
     await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'false'), { timeout: 3000 })
     await waitFor(() => expect(userBubbleTexts().filter((text) => text.includes('Use Postgres, por favor'))).toHaveLength(1))
     expect(userBubbles()).toHaveLength(2)
+  })
+
+  it('never starts a new turn behind a live turn waiting for an answer: files stay in the composer', async () => {
+    const scenario: Scenario = {
+      turnState: 'running',
+      conversationState: 'running',
+      activities: [
+        makeActivity(1, 'tool.finished', 'Aguardando resposta para 1 pergunta', Q1),
+        makeActivity(2, 'turn.waiting_user', 'Aguardando sua resposta', { in_turn: true }),
+      ],
+    }
+    const posted = installFetch(scenario)
+    renderChat()
+    await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'true'))
+    const fileInput = document.body.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(fileInput, { target: { files: [new File(['abcd'], 'shot.png', { type: 'image/png' })] } })
+    await waitFor(() => expect(posted.some((item) => item.url.endsWith('/v1/uploads'))).toBe(true))
+    const input = screen.getByRole('textbox', { name: 'Mensagem' }) as HTMLTextAreaElement
+
+    // Only a file: blocked, nothing sent.
+    await waitFor(() => expect(screen.getAllByText(/shot\.png/).length).toBeGreaterThan(0))
+    fireEvent.submit(input.closest('form') as HTMLFormElement)
+    await waitFor(() => expect(screen.getAllByText('Espere o turno atual terminar para enviar.').length).toBeGreaterThan(0))
+    expect(messagePosts(posted)).toHaveLength(0)
+    expect(queuePosts(posted)).toHaveLength(0)
+
+    // Text and a file: the text goes to the queue as the answer, the file stays in the composer.
+    fireEvent.change(input, { target: { value: 'Postgres, veja o print' } })
+    fireEvent.submit(input.closest('form') as HTMLFormElement)
+    await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
+    expect(queuedText(queuePosts(posted)[0].body)).toBe('Postgres, veja o print')
+    expect(messagePosts(posted)).toHaveLength(0)
+    expect(screen.getAllByText(/shot\.png/).length).toBeGreaterThan(0)
   })
 
   it('keeps the classic waiting_user flow: a new message and the optimistic user bubble', async () => {
