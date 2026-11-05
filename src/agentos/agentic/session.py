@@ -1557,6 +1557,14 @@ class TurnSession:
         if state == "waiting_user":
             self._record(AgentActivityEventType.TURN_WAITING_USER, "Aguardando sua resposta", base, agent_id=actor)
             return
+        if state == "waiting_user_in_turn":
+            self._record(
+                AgentActivityEventType.TURN_WAITING_USER,
+                "Aguardando sua resposta",
+                {**base, "in_turn": True},
+                agent_id=actor,
+            )
+            return
         if state == "code_validation_required":
             self._record(
                 AgentActivityEventType.CODE_MODE_VALIDATION_STARTED,

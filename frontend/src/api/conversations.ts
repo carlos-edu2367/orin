@@ -644,11 +644,16 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   const phase = optionalText(payload.phase, 64)
   const callId = optionalText(payload.call_id, 255)
   const payloadToolName = optionalText(payload.tool_name, 64)
+  const queueId = optionalText(payload.queue_id, 255)
+  const queuedText = optionalText(payload.queued_text, 2000)
   if (modelId) extraPayload.model_id = modelId
   if (subagentType) extraPayload.subagent_type = subagentType
   if (phase) extraPayload.phase = phase
   if (callId) extraPayload.call_id = callId
   if (payloadToolName) extraPayload.tool_name = payloadToolName
+  if (queueId) extraPayload.queue_id = queueId
+  if (queuedText) extraPayload.queued_text = queuedText
+  if (payload.in_turn === true) extraPayload.in_turn = true
   if (typeof payload.delta === 'string' && payload.delta.length <= 16_000 && !isRedactedValue(payload.delta)) {
     extraPayload.delta = payload.delta
   }

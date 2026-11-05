@@ -36,6 +36,7 @@ from .lifecycle import HookEvent
 from .reminders import render_reminders, system_reminder
 from .runtime import (
     CLOSING_INSTRUCTION,
+    INTERRUPTED_TOOL_RESULT,
     MAX_STOP_CONTINUATIONS,
     VERIFY_REQUIRED_MESSAGE,
     AgenticRunResult,
@@ -231,16 +232,25 @@ class RuntimeToolExecutor(ToolExecutor):
         runtime: AgenticTurnRuntime,
         turn: dict[str, object],
         *,
-        tool_schemas: list[dict[str, object]],
+        tool_schemas: list[dict[str, object]] | None = None,
         correlate: Callable[[str, Mapping[str, Any], Mapping[str, Any]], str] | None = None,
         messages: list[dict[str, object]] | None = None,
         gather_seconds: float = BATCH_GATHER_SECONDS,
+        deadline: datetime | float | None = None,
     ) -> None:
         self.runtime = runtime
         self.turn = turn
+        if tool_schemas is None:
+            raw_schemas = runtime._tool_schemas(turn)
+            tool_schemas = (
+                runtime._names.schemas_out(raw_schemas)
+                if runtime._names is not None
+                else raw_schemas
+            )
         self._tool_schemas = list(tool_schemas)
         self._custom_correlate = correlate
         self.messages: list[dict[str, object]] = messages if messages is not None else []
+        self.deadline: datetime | float | None = deadline
         self.abort_code: str | None = None
         self.stop_reason: str | None = None
         self.action_count: int = 0
@@ -455,6 +465,111 @@ class RuntimeToolExecutor(ToolExecutor):
             read_only=read_only,
         )
 
+    def _deadline_exceeded(self) -> bool:
+        if self.deadline is None:
+            return False
+        try:
+            now = self.runtime.clock()
+        except Exception:
+            return False
+        if isinstance(now, (int, float)) and isinstance(self.deadline, (int, float)):
+            return float(now) >= float(self.deadline)
+        if isinstance(now, datetime) and isinstance(self.deadline, datetime):
+            return now >= self.deadline
+        if isinstance(self.deadline, (int, float)):
+            return time.monotonic() >= float(self.deadline)
+        return False
+
+    def _claim_queued_texts(self) -> list[str]:
+        claim = getattr(self.runtime.store, "claim_queued_inputs", None)
+        if not callable(claim):
+            return []
+        try:
+            items = list(claim(self.turn) or ())
+        except Exception:  # noqa: BLE001
+            return []
+        claimed: list[str] = []
+        for item in items:
+            text = str((item or {}).get("content") or "").strip()
+            queue_id = str((item or {}).get("queue_id") or "")
+            if not text:
+                continue
+            decision = self.runtime._emit(HookEvent.USER_PROMPT_SUBMIT, prompt=text)
+            if decision is not None and (decision.blocked or decision.stop):
+                marker = getattr(self.runtime.store, "mark_queued_input_blocked", None)
+                if callable(marker):
+                    try:
+                        marker(queue_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+                reason = decision.reason or decision.stop_reason or "blocked by hook"
+                self.runtime.store.delta(
+                    self.turn,
+                    f"\n\n⚠️ Mensagem da fila bloqueada por um hook: {reason}\n\n",
+                )
+                continue
+            extra = [
+                entry
+                for entry in (decision.additional_context if decision is not None else [])
+                if entry
+            ]
+            content = (
+                f"{text}\n\n{system_reminder(chr(10).join(extra))}"
+                if extra
+                else text
+            )
+            self.messages.append({"role": "user", "content": content})
+            self.runtime._queued_turn_count += 1
+            self.runtime._record_step(
+                self.turn,
+                kind=transcript.STEP_QUEUED_INPUT,
+                payload={"content": text},
+            )
+            self.runtime._life(
+                self.turn,
+                "queued_input",
+                queued_text=text[:2000],
+                queue_id=queue_id,
+            )
+            claimed.append(content)
+        return claimed
+
+    def _turn_notes(self, *, claim_queue: bool = True) -> str:
+        self.runtime._check_external_changes(self.turn)
+        self.runtime._add_periodic_reminders()
+        try:
+            pending = self.runtime.reminders.drain()
+        except Exception:  # noqa: BLE001
+            pending = []
+        reminder_body = render_reminders(pending)
+        queued_texts = self._claim_queued_texts() if claim_queue else []
+        parts: list[str] = []
+        if reminder_body:
+            parts.append(reminder_body)
+        if queued_texts:
+            parts.append(
+                system_reminder(
+                    "The user sent a message while you were working:\n"
+                    + "\n\n".join(queued_texts)
+                )
+            )
+        return "\n\n".join(parts)
+
+    def _wait_for_answer(self, poll_seconds: float = 0.25) -> str | None:
+        step = max(0.02, min(0.1, float(poll_seconds)))
+        while True:
+            if self.runtime.cancelled(self.turn) or self._deadline_exceeded():
+                return None
+            claimed = self._claim_queued_texts()
+            if claimed:
+                return "\n\n".join(claimed)
+            waited = 0.0
+            while waited < poll_seconds:
+                if self.runtime.cancelled(self.turn) or self._deadline_exceeded():
+                    return None
+                time.sleep(min(step, poll_seconds - waited))
+                waited += step
+
     def _execute_batch(
         self,
         entries: list[_BatchEntry],
@@ -498,6 +613,23 @@ class RuntimeToolExecutor(ToolExecutor):
         self.tool_rounds += 1
         self.runtime._advance_phase(self.turn, results)
 
+        ask_user_cancelled = False
+        had_ask_user_wait = False
+        for res in results:
+            if bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user":
+                had_ask_user_wait = True
+                self.runtime._life(self.turn, "waiting_user_in_turn")
+                answer = self._wait_for_answer()
+                if answer is None:
+                    ask_user_cancelled = True
+                    res["status"] = "failed"
+                    res["content"] = INTERRUPTED_TOOL_RESULT
+                    res["wait_for_user"] = False
+                else:
+                    res["status"] = "succeeded"
+                    res["content"] = f"Resposta da pessoa:\n{answer}"
+                    res["wait_for_user"] = False
+
         self.messages.append(
             self.runtime._assistant_tool_message(
                 self.turn,
@@ -527,7 +659,9 @@ class RuntimeToolExecutor(ToolExecutor):
             self.messages.extend(self.runtime._tool_result_messages(self.turn, res))
 
         stop_reason = getattr(self.runtime.toolset, "stop_requested", None)
-        if stop_reason:
+        if ask_user_cancelled:
+            self.abort_code = "TURN_CANCELLED"
+        elif stop_reason:
             self.stop_reason = str(stop_reason)
             self.abort_code = "HOOK_STOPPED"
         elif max(self.runtime._consecutive_tool_failures.values(), default=0) >= 3:
@@ -550,15 +684,26 @@ class RuntimeToolExecutor(ToolExecutor):
             except Exception:
                 pass
 
+        trailing_notes = (
+            self._turn_notes(claim_queue=not had_ask_user_wait)
+            if self.abort_code is None
+            else ""
+        )
+
         out_results: list[ToolCallResult] = []
-        for res in results:
+        for idx, res in enumerate(results):
             status = str(res.get("status") or "failed")
             is_err = status != "succeeded"
             text = str(res.get("content") or "")
-            if self.abort_code is not None and self.abort_code != "WAITING_USER":
+            if self.abort_code is not None and self.abort_code not in {"WAITING_USER", "TURN_CANCELLED"}:
                 is_err = True
                 stop_suffix = f"turn stopped: {self.abort_code}"
                 text = f"{text}\n{stop_suffix}".strip() if text else stop_suffix
+            elif self.abort_code == "TURN_CANCELLED":
+                is_err = True
+                text = INTERRUPTED_TOOL_RESULT
+            elif trailing_notes and idx == len(results) - 1:
+                text = f"{text}\n\n{trailing_notes}" if text else trailing_notes
             images = _convert_tool_images(res.get("images"))
             out_results.append(
                 ToolCallResult(
@@ -931,6 +1076,7 @@ class NativeTurnRunner:
             self.turn,
             tool_schemas=tool_schemas,
             messages=self.messages,
+            deadline=self.deadline,
         )
         sink = _RunnerSink(self, executor)
 

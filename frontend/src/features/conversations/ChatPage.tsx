@@ -929,6 +929,16 @@ export function ChatPage() {
         ids.add(event.turnId)
       }
       if (
+        (event.type === 'turn.started' || event.type === 'TURN_STARTED')
+        && Boolean(
+          (event as { queueId?: unknown; queue_id?: unknown }).queueId
+          || (event as { queueId?: unknown; queue_id?: unknown }).queue_id
+          || event.payload?.queue_id,
+        )
+      ) {
+        ids.delete(event.turnId)
+      }
+      if (
         event.type === 'turn.completed'
         || event.type === 'TURN_COMPLETED'
         || event.type === 'code_mode.completed'
@@ -1297,7 +1307,19 @@ export function ChatPage() {
     setError(null)
     setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
-      await sendChatMessage(response)
+      const isLiveActiveTurn = Boolean(
+        conversationId
+        && activeTurn
+        && activeTurn.turn_id === event.turnId
+        && RUNNING_STATES.has(activeTurn.state)
+        && !hasTerminalEventForActiveTurn
+        && !isActivityTerminal,
+      )
+      if (isLiveActiveTurn) {
+        await enqueueMessage(client, conversationId, response)
+      } else {
+        await sendChatMessage(response)
+      }
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
     } catch (caught) {
@@ -1307,7 +1329,7 @@ export function ChatPage() {
     } finally {
       questionSubmitInFlightRef.current = false
     }
-  }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
+  }, [activeTurn, client, conversationId, hasTerminalEventForActiveTurn, isActivityTerminal, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const submitMcpApproval = useCallback(async (event: ConversationActivityEvent, secrets: Record<string, string>) => {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
@@ -3336,7 +3358,7 @@ function terminalConversationState(event: ConversationActivityEvent): 'completed
       : 'failed'
   }
   if (
-    event.type === 'turn.waiting_user'
+    (event.type === 'turn.waiting_user' && event.payload?.in_turn !== true)
     || event.type === 'code_mode.blocked'
     || event.type === 'code_mode.plan_ready'
     || event.type === 'tool.permission_required'
