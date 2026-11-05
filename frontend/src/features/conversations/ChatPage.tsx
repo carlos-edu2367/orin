@@ -120,16 +120,25 @@ const MANAGED_WORKSPACE: WorkspaceState = { kind: 'managed', path: null, folderN
 
 const RUNNING_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
 
-/** The back-end delivered a queued input (e.g. an ask_user answer) to the turn that is still running. */
+/** How submitQuestionAnswers starts an answer; the native turn also reads a queued text with it as an answer. */
+const QUESTION_ANSWERS_HEADER = 'Respostas às perguntas do agente:'
+/** Id prefix of the user bubble shown for an ask_user answer a live turn read from the queue. */
+const QUEUED_ANSWER_MESSAGE_PREFIX = 'queued-answer-'
+
+function queuedInputId(event: ConversationActivityEvent): string | null {
+  const raw = (event as { queueId?: unknown }).queueId
+    ?? (event as { queue_id?: unknown }).queue_id
+    ?? event.payload?.queue_id
+  return typeof raw === 'string' && raw ? raw : null
+}
+
+/** The back-end delivered a queued input (an ask_user answer or a normal queued message) to the running turn. */
 function isQueuedInputEvent(event: ConversationActivityEvent): boolean {
   if (event.type === 'turn.queued_input') return true
-  return (event.type === 'turn.started' || event.type === 'TURN_STARTED')
-    && Boolean(
-      (event as { queueId?: unknown; queue_id?: unknown }).queueId
-      || (event as { queueId?: unknown; queue_id?: unknown }).queue_id
-      || event.payload?.queue_id,
-    )
+  return (event.type === 'turn.started' || event.type === 'TURN_STARTED') && queuedInputId(event) !== null
 }
+
+const isQueuedAnswerMessage = (message: ConversationMessage) => message.message_id.startsWith(QUEUED_ANSWER_MESSAGE_PREFIX)
 
 function asProviderName(value: string): ProviderName | null {
   return PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null
@@ -179,6 +188,8 @@ export function ChatPage() {
   // ask_user batches answered inside a live (native) turn, by event id: the turn keeps running, so the turn
   // alone cannot say which of its questions is still open.
   const [answeredQuestionEventIds, setAnsweredQuestionEventIds] = useState<ReadonlySet<string>>(() => new Set())
+  // Queue ids of texts sent here as an answer to an open in-turn question (from its card or the composer).
+  const [answerQueueIds, setAnswerQueueIds] = useState<ReadonlySet<string>>(() => new Set())
   const [error, setError] = useState<string | null>(null)
   const [loadFailure, setLoadFailure] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -658,6 +669,7 @@ export function ChatPage() {
     setChatModels([])
     setPendingUserMessage(null)
     setAnsweredQuestionEventIds(new Set())
+    setAnswerQueueIds(new Set())
     setStopping(false)
     setError(null)
     setOversizedInput(null)
@@ -807,6 +819,41 @@ export function ChatPage() {
     })
   }, [activity.events, conversationId])
 
+  // ask_user answers a live (native) turn read from the queue, derived from the activity so they survive a reload.
+  // A queued-input delivery is the answer when its text is one (submitQuestionAnswers builds them), when its queue
+  // id came from an answer sent here, or when it arrives while the turn waits in the turn for the answer (it then
+  // takes the next queued input as the answer). A normal message queued earlier and delivered before that wait is
+  // not an answer: the question stays open. A question is closed once answered here or by such a delivery; a later
+  // ask_user of the same turn stays open.
+  const { closedQuestionEventIds, answerDeliveries } = useMemo(() => {
+    const closed = new Set(answeredQuestionEventIds)
+    const deliveries: ConversationActivityEvent[] = []
+    const askedByTurn = new Map<string, string[]>()
+    const waitingTurnIds = new Set<string>()
+    for (const event of activity.events) {
+      if (!event.turnId || event.parentAgentId) continue
+      if (event.questions) {
+        askedByTurn.set(event.turnId, [...(askedByTurn.get(event.turnId) ?? []), event.eventId])
+        waitingTurnIds.delete(event.turnId)
+      } else if (event.type === 'turn.waiting_user' && event.payload?.in_turn === true) {
+        waitingTurnIds.add(event.turnId)
+      } else if (isQueuedInputEvent(event)) {
+        const text = typeof event.payload?.queued_text === 'string' ? event.payload.queued_text : ''
+        const queueId = queuedInputId(event)
+        const isAnswer = text.trimStart().startsWith(QUESTION_ANSWERS_HEADER)
+          || (queueId !== null && answerQueueIds.has(queueId))
+          || waitingTurnIds.has(event.turnId)
+        if (!isAnswer) continue
+        for (const eventId of askedByTurn.get(event.turnId) ?? []) closed.add(eventId)
+        askedByTurn.delete(event.turnId)
+        waitingTurnIds.delete(event.turnId)
+        deliveries.push(event)
+      }
+    }
+    return { closedQuestionEventIds: closed, answerDeliveries: deliveries }
+  }, [activity.events, answerQueueIds, answeredQuestionEventIds])
+  const answerDeliveryEventIds = useMemo(() => new Set(answerDeliveries.map((event) => event.eventId)), [answerDeliveries])
+
   const messages = useMemo(() => {
     const base = (conversation?.messages ?? []).map((item) => {
       if (item.role !== 'assistant') return item
@@ -816,12 +863,34 @@ export function ChatPage() {
       }
       return item
     })
+    // One bubble per answer a live turn read from the queue, right after that turn's assistant message (or at the
+    // end), unless a persisted user message already says the same.
+    const answersByTurn = new Map<string, ConversationMessage[]>()
+    for (const event of answerDeliveries) {
+      const content = typeof event.payload?.queued_text === 'string' ? event.payload.queued_text.trim() : ''
+      if (!content || !event.turnId || base.some((item) => item.role === 'user' && item.content.trim() === content)) continue
+      const answer: ConversationMessage = {
+        message_id: `${QUEUED_ANSWER_MESSAGE_PREFIX}${event.eventId}`, role: 'user', content, status: 'completed', retryable: false, attachments: [], command: null,
+      }
+      answersByTurn.set(event.turnId, [...(answersByTurn.get(event.turnId) ?? []), answer])
+    }
+    const lastAssistantIndexByTurn = new Map<string, number>()
+    base.forEach((item, index) => { if (item.role === 'assistant' && item.turn_id) lastAssistantIndexByTurn.set(item.turn_id, index) })
+    const withAnswers: ConversationMessage[] = []
+    base.forEach((item, index) => {
+      withAnswers.push(item)
+      if (item.turn_id && lastAssistantIndexByTurn.get(item.turn_id) === index) {
+        withAnswers.push(...(answersByTurn.get(item.turn_id) ?? []))
+        answersByTurn.delete(item.turn_id)
+      }
+    })
+    for (const answers of answersByTurn.values()) withAnswers.push(...answers)
     // The optimistic echo is dropped as soon as the durable snapshot contains
     // the same text, so a re-render can never show the message twice.
     const alreadyDurable = pendingUserMessage !== null
-      && base.some((item) => item.role === 'user' && item.content.trim() === pendingUserMessage.content.trim())
-    return pendingUserMessage && !alreadyDurable ? [...base, pendingUserMessage] : base
-  }, [conversation?.messages, streamedByMessage, pendingUserMessage])
+      && withAnswers.some((item) => item.role === 'user' && item.content.trim() === pendingUserMessage.content.trim())
+    return pendingUserMessage && !alreadyDurable ? [...withAnswers, pendingUserMessage] : withAnswers
+  }, [answerDeliveries, conversation?.messages, streamedByMessage, pendingUserMessage])
 
   if (
     pendingUserMessage !== null &&
@@ -833,23 +902,6 @@ export function ChatPage() {
   }
 
   const [resolvedPermissionDecisions, setResolvedPermissionDecisions] = useState<Map<string, 'allowed' | 'denied'>>(() => new Map())
-
-  // A question is closed once answered here, or once the turn has read a queued input after it (that input is
-  // its answer; this also holds after a reload). A later ask_user of the same turn stays open.
-  const closedQuestionEventIds = useMemo(() => {
-    const closed = new Set(answeredQuestionEventIds)
-    const askedByTurn = new Map<string, string[]>()
-    for (const event of activity.events) {
-      if (!event.turnId) continue
-      if (event.questions) {
-        askedByTurn.set(event.turnId, [...(askedByTurn.get(event.turnId) ?? []), event.eventId])
-      } else if (isQueuedInputEvent(event)) {
-        for (const eventId of askedByTurn.get(event.turnId) ?? []) closed.add(eventId)
-        askedByTurn.delete(event.turnId)
-      }
-    }
-    return closed
-  }, [activity.events, answeredQuestionEventIds])
 
   const consolidatedEvents = useMemo(() => {
     const lastTerminalLifecycleByTurn = new Map<string, string>()
@@ -961,7 +1013,7 @@ export function ChatPage() {
       ) {
         ids.add(event.turnId)
       }
-      if (isQueuedInputEvent(event)) {
+      if (answerDeliveryEventIds.has(event.eventId)) {
         ids.delete(event.turnId)
       }
       if (
@@ -983,7 +1035,7 @@ export function ChatPage() {
       ids.delete(key)
     }
     return ids
-  }, [activity.events, cancelledTurnIds, conversation?.turns, decidedPlanKeys, resolvedPermissionDecisions])
+  }, [activity.events, answerDeliveryEventIds, cancelledTurnIds, conversation?.turns, decidedPlanKeys, resolvedPermissionDecisions])
 
   const pendingToolPermissions = useMemo<DockToolPermissionRequest[]>(() => {
     const map = new Map<string, DockToolPermissionRequest>()
@@ -1065,6 +1117,17 @@ export function ChatPage() {
     && openQuestionTurnIds.size === 0
     && !hasTerminalEventForActiveTurn
     && !isActivityTerminal
+  // A live (native) turn waiting inside the turn for an ask_user answer: it reads only the queue, so the composer
+  // sends there and the turn takes that text as the answer. A classic waiting_user turn has ended and is not this.
+  const liveTurnAwaitingAnswer = Boolean(
+    !stopping
+    && activeTurn
+    && RUNNING_STATES.has(activeTurn.state)
+    && openQuestionTurnIds.has(activeTurn.turn_id)
+    && !hasTerminalEventForActiveTurn
+    && !isActivityTerminal
+    && activity.events.some((event) => event.turnId === activeTurn.turn_id && event.questions && !closedQuestionEventIds.has(event.eventId)),
+  )
 
   const friendDisplayName = friendPersona?.display_name || (conversationMode === 'friend' ? conversation?.title : undefined) || 'Orin'
 
@@ -1186,7 +1249,7 @@ export function ChatPage() {
 
   // W7: the person's messages in this conversation, oldest first, for up/down and ctrl+r in the composer.
   const sentHistory = useMemo(
-    () => messages.filter((item) => item.role === 'user' && item.content.trim() && !item.message_id.startsWith('pending-')).map((item) => item.content),
+    () => messages.filter((item) => item.role === 'user' && item.content.trim() && !item.message_id.startsWith('pending-') && !isQueuedAnswerMessage(item)).map((item) => item.content),
     [messages],
   )
 
@@ -1323,7 +1386,7 @@ export function ChatPage() {
     ) return
     questionSubmitInFlightRef.current = true
     const byId = new Map(event.questions.map((question) => [question.id, question]))
-    const text = ['Respostas às perguntas do agente:']
+    const text = [QUESTION_ANSWERS_HEADER]
     for (const answer of answers) {
       const question = byId.get(answer.id)
       if (!question) continue
@@ -1352,7 +1415,9 @@ export function ChatPage() {
     }
     try {
       if (isLiveActiveTurn) {
-        await enqueueMessage(client, conversationId, response)
+        const receipt = await enqueueMessage(client, conversationId, response)
+        const queueId = receipt.queueId
+        if (queueId) setAnswerQueueIds((current) => new Set(current).add(queueId))
       } else {
         await sendChatMessage(response)
       }
@@ -1682,6 +1747,22 @@ export function ChatPage() {
     if ((!text && readyUploads.length === 0) || turnBusy) return
     if (text.length > MAX_MESSAGE_CHARACTERS) {
       await sendOversizedTextAutomatically(text, readyUploads, liveModeOverride)
+      return
+    }
+    if (liveTurnAwaitingAnswer && readyUploads.length === 0 && !afterStop) {
+      // The turn shows the text once it reads it (as the answer), so there is no optimistic bubble.
+      setMessage('')
+      setError(null)
+      try {
+        const receipt = await enqueueMessage(client, conversationId, text)
+        const queueId = receipt.queueId
+        if (queueId) setAnswerQueueIds((current) => new Set(current).add(queueId))
+        if (!receipt.queued) await loadSnapshot(false) // the turn had already ended: the text was sent as a new turn
+        await refreshQueue()
+      } catch {
+        setMessage(text)
+        setError('Não foi possível pôr a mensagem na fila.')
+      }
       return
     }
     setMessage('')
@@ -2125,7 +2206,7 @@ export function ChatPage() {
       {transcriptOpen && <TranscriptView messages={messages} events={activity.events} onClose={() => setTranscriptOpen(false)} />}
       {rewindState && (
         <RewindPicker
-          messages={messages.filter((item) => item.role === 'user' && !item.message_id.startsWith('pending-')).map((item) => ({ messageId: item.message_id, content: item.content }))}
+          messages={messages.filter((item) => item.role === 'user' && !item.message_id.startsWith('pending-') && !isQueuedAnswerMessage(item)).map((item) => ({ messageId: item.message_id, content: item.content }))}
           history={rewindState.history}
           busy={rewindState.busy}
           error={rewindState.error}
@@ -2473,7 +2554,8 @@ export function ChatPage() {
                 && oldestEventId
                 && timeline.some((seg) => seg.kind === 'activity' && seg.group.events.some((ev) => ev.eventId === oldestEventId)),
               )
-              const hasSubsequentUserMessage = messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user')
+              // An answer a live turn read from the queue does not end that turn.
+              const hasSubsequentUserMessage = messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user' && !isQueuedAnswerMessage(candidate))
               const timelineTurnIds = timeline
                 ? Array.from(
                     new Set(

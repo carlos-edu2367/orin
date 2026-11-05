@@ -170,6 +170,9 @@ function renderChat() {
 const queuePosts = (posted: Posted[]) => posted.filter((item) => item.url.endsWith(`/v1/conversations/${CONVERSATION_ID}/queue`))
 const messagePosts = (posted: Posted[]) => posted.filter((item) => item.url.endsWith(`/v1/conversations/${CONVERSATION_ID}/messages`))
 const userBubbles = () => screen.queryAllByTestId('user-message-avatar')
+const userBubbleTexts = () => Array.from(document.querySelectorAll('.bubble--user')).map((node) => node.textContent ?? '')
+/** The text the page enqueued: the back-end reports exactly this as the delivered queued_text. */
+const queuedText = (body: string) => (JSON.parse(body) as { message: string }).message
 const cards = () => screen.queryAllByTestId('user-question-card')
 
 describe('ChatPage native ask_user: answers inside a live turn', () => {
@@ -201,7 +204,7 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
       const posted = installFetch(scenario, (body) => {
         queueCalls += 1
         // The turn reads the answer and the back-end reports it (the answer's own bubble comes from this event).
-        emit(scenario, queuedInputActivity(scenario.activities.length + 1, shape, body, `q-${queueCalls}`))
+        emit(scenario, queuedInputActivity(scenario.activities.length + 1, shape, queuedText(body), `q-${queueCalls}`))
       })
       renderChat()
 
@@ -212,10 +215,10 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
       await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
       expect(queuePosts(posted)[0].body).toContain('SQLite')
       expect(messagePosts(posted)).toHaveLength(0)
-      // No optimistic pending bubble on the live path: only the user's original message is a bubble.
-      expect(userBubbles()).toHaveLength(1)
       await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'false'))
-      expect(userBubbles()).toHaveLength(1)
+      // No optimistic pending bubble on the live path: the answer shows once, from the delivered queued input.
+      await waitFor(() => expect(userBubbles()).toHaveLength(2), { timeout: 3000 })
+      expect(userBubbleTexts().filter((text) => text.includes('Seleção: SQLite'))).toHaveLength(1)
 
       // A second ask_user arrives later in the same live turn, with a new event id.
       emit(scenario, makeActivity(scenario.activities.length + 1, 'tool.finished', 'Aguardando resposta para 1 pergunta', Q2))
@@ -232,7 +235,9 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
       expect(messagePosts(posted)).toHaveLength(0)
       await waitFor(() => expect(cards()[1]).toHaveAttribute('data-active', 'false'))
       expect(cards()[0]).toHaveAttribute('data-active', 'false')
-      expect(userBubbles()).toHaveLength(1)
+      await waitFor(() => expect(userBubbles()).toHaveLength(3), { timeout: 3000 })
+      expect(userBubbleTexts().filter((text) => text.includes('Seleção: SQLite'))).toHaveLength(1)
+      expect(userBubbleTexts().filter((text) => text.includes('Seleção: Redis'))).toHaveLength(1)
     },
   )
 
@@ -260,6 +265,60 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(queuePosts(posted)).toHaveLength(1)
     expect(cards()[0]).toHaveAttribute('data-active', 'false')
+  })
+
+  it('after a reload, an answered question stays closed and its answer shows once; a normal queued message does not close it', async () => {
+    const answer = 'Respostas às perguntas do agente:\n\nQual banco de dados usar?\nSeleção: Postgres'
+    const scenario: Scenario = {
+      turnState: 'running',
+      conversationState: 'running',
+      activities: [
+        makeActivity(1, 'tool.finished', 'Aguardando resposta para 1 pergunta', Q1),
+        // A normal message queued before the question, delivered before the turn waits: not the answer.
+        queuedInputActivity(2, 'turn.started', 'Lembrete: use Python 3.12', 'q-pre'),
+        makeActivity(3, 'turn.waiting_user', 'Aguardando sua resposta', { in_turn: true }),
+        queuedInputActivity(4, 'turn.started', answer, 'q-answer'),
+        makeActivity(5, 'tool.finished', 'Aguardando resposta para 1 pergunta', Q2),
+        makeActivity(6, 'turn.waiting_user', 'Aguardando sua resposta', { in_turn: true }),
+      ],
+    }
+    installFetch(scenario)
+    renderChat()
+
+    await waitFor(() => expect(cards()).toHaveLength(2))
+    expect(cards()[0]).toHaveAttribute('data-active', 'false')
+    expect(cards()[1]).toHaveAttribute('data-active', 'true')
+    expect(userBubbles()).toHaveLength(2)
+    expect(userBubbleTexts().filter((text) => text.includes('Seleção: Postgres'))).toHaveLength(1)
+    // The normal queued message renders as before: no bubble of its own.
+    expect(userBubbleTexts().some((text) => text.includes('Lembrete'))).toBe(false)
+  })
+
+  it('an answer typed in the composer goes to the queue and closes the open question once the turn reads it', async () => {
+    const scenario: Scenario = {
+      turnState: 'running',
+      conversationState: 'running',
+      activities: [
+        makeActivity(1, 'tool.finished', 'Aguardando resposta para 1 pergunta', Q1),
+        makeActivity(2, 'turn.waiting_user', 'Aguardando sua resposta', { in_turn: true }),
+      ],
+    }
+    const posted = installFetch(scenario, (body) => {
+      emit(scenario, queuedInputActivity(scenario.activities.length + 1, 'turn.started', queuedText(body), 'q-composer'))
+    })
+    renderChat()
+
+    await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'true'))
+    const input = screen.getByRole('textbox', { name: 'Mensagem' }) as HTMLTextAreaElement
+    fireEvent.change(input, { target: { value: 'Use Postgres, por favor' } })
+    fireEvent.submit(input.closest('form') as HTMLFormElement)
+
+    await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
+    expect(queuedText(queuePosts(posted)[0].body)).toBe('Use Postgres, por favor')
+    expect(messagePosts(posted)).toHaveLength(0)
+    await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'false'), { timeout: 3000 })
+    await waitFor(() => expect(userBubbleTexts().filter((text) => text.includes('Use Postgres, por favor'))).toHaveLength(1))
+    expect(userBubbles()).toHaveLength(2)
   })
 
   it('keeps the classic waiting_user flow: a new message and the optimistic user bubble', async () => {
