@@ -73,3 +73,39 @@ VALIDATED_CLI_RANGE = (">=2.1.309", "<2.2")
    catálogo.
 7. **Item 6c (prompt de sistema no `--resume`) e 7b (`cache_control` explícito)** não foram rodados: o ramo A foi
    descartado e o cache já passa sem `cache_control` explícito.
+
+## Aceite — roteiro do replay manual (Tarefa 14)
+
+Ainda não executado: precisa da CLI `claude` real logada na assinatura, e os testes nunca a chamam. Rodar no PC do
+Carlos, com o Orin desta branch (`uv run orin`), modo código, modelo `claude-opus-5-5` pela assinatura.
+
+**Preparo:** `ORIN_CLAUDE_CLI_NATIVE_TOOLS=auto` (padrão); `claude --version` dentro de `>=2.1.309, <2.2`;
+`claude auth status` com `authMethod = claude.ai`. Log do Orin em nível INFO.
+
+**Tarefa A — análise de upsell no Educly.** Abrir o projeto Educly e repetir o pedido da sessão `chat_7e63…` de
+05/11 12:32 (análise do upsell), com o mesmo texto e os mesmos anexos.
+
+**Tarefa B — investigação de contexto no Orin.** Abrir o projeto Orin e repetir o pedido da sessão `chat_64b2…` de
+05/11 12:33 (por que o contexto/medidor do Opus 5.5 está errado), com o mesmo texto.
+
+**Critérios (spec, aceite da Fase 2), anotados por tarefa:**
+
+1. O log tem `claude_cli run mode=native … actual=claude-opus-5-5` (com `cache_read` e `cache_creation`). Nenhum
+   erro `apiKeySource=… instead of 'none'`: com outra fonte de chave, o turno aborta antes de qualquer saída.
+2. O medidor de contexto mostra `limit_tokens = 1000000`.
+3. Nenhuma resposta tem mais de uma rodada de chamadas dependentes: cada `tools/call` de escrita chega depois do
+   resultado da anterior (conferir os `claudecode/toolUseId` no log).
+4. Nenhum `[Tool Result` no texto do modelo.
+5. O progresso fica visível do começo ao fim: "Pensando"/"Preparando…" sem buraco maior que
+   `IDLE_TIMEOUT_SECONDS` (180 s).
+6. Os tokens de entrada do turno ficam abaixo de 216k para 10 iterações, com `cache_read` por processo anotado.
+7. `ask_user`, se aparecer: a resposta aparece uma vez só (sem bolha duplicada) e o card respondido fica desativado.
+8. Ao fim e após cancelar no meio, não sobra processo `claude`, porta loopback aberta nem diretório
+   `orin-claude-mcp-*` ou `orin-claude-sys-*` no temp.
+
+**Contraprova no texto:** repetir a Tarefa B com `ORIN_CLAUDE_CLI_NATIVE_TOOLS=off` e anotar `cache_read` e
+`cache_creation` por iteração (confirma o item 7 do spike em uso real).
+
+**Resultado:** anotar aqui, por tarefa e critério, passou/falhou com o trecho de log. Se o modo código passar, o
+loop nativo de chat/friend (Tarefa 13) fica liberado; se falhar, abrir a pendência aqui com a evidência e usar
+`ORIN_CLAUDE_CLI_NATIVE_TOOLS=off` até corrigir.
