@@ -120,6 +120,17 @@ const MANAGED_WORKSPACE: WorkspaceState = { kind: 'managed', path: null, folderN
 
 const RUNNING_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
 
+/** The back-end delivered a queued input (e.g. an ask_user answer) to the turn that is still running. */
+function isQueuedInputEvent(event: ConversationActivityEvent): boolean {
+  if (event.type === 'turn.queued_input') return true
+  return (event.type === 'turn.started' || event.type === 'TURN_STARTED')
+    && Boolean(
+      (event as { queueId?: unknown; queue_id?: unknown }).queueId
+      || (event as { queueId?: unknown; queue_id?: unknown }).queue_id
+      || event.payload?.queue_id,
+    )
+}
+
 function asProviderName(value: string): ProviderName | null {
   return PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null
 }
@@ -165,6 +176,9 @@ export function ChatPage() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(client)
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
+  // ask_user batches answered inside a live (native) turn, by event id: the turn keeps running, so the turn
+  // alone cannot say which of its questions is still open.
+  const [answeredQuestionEventIds, setAnsweredQuestionEventIds] = useState<ReadonlySet<string>>(() => new Set())
   const [error, setError] = useState<string | null>(null)
   const [loadFailure, setLoadFailure] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -643,6 +657,7 @@ export function ChatPage() {
     setChatModelId('')
     setChatModels([])
     setPendingUserMessage(null)
+    setAnsweredQuestionEventIds(new Set())
     setStopping(false)
     setError(null)
     setOversizedInput(null)
@@ -819,6 +834,23 @@ export function ChatPage() {
 
   const [resolvedPermissionDecisions, setResolvedPermissionDecisions] = useState<Map<string, 'allowed' | 'denied'>>(() => new Map())
 
+  // A question is closed once answered here, or once the turn has read a queued input after it (that input is
+  // its answer; this also holds after a reload). A later ask_user of the same turn stays open.
+  const closedQuestionEventIds = useMemo(() => {
+    const closed = new Set(answeredQuestionEventIds)
+    const askedByTurn = new Map<string, string[]>()
+    for (const event of activity.events) {
+      if (!event.turnId) continue
+      if (event.questions) {
+        askedByTurn.set(event.turnId, [...(askedByTurn.get(event.turnId) ?? []), event.eventId])
+      } else if (isQueuedInputEvent(event)) {
+        for (const eventId of askedByTurn.get(event.turnId) ?? []) closed.add(eventId)
+        askedByTurn.delete(event.turnId)
+      }
+    }
+    return closed
+  }, [activity.events, answeredQuestionEventIds])
+
   const consolidatedEvents = useMemo(() => {
     const lastTerminalLifecycleByTurn = new Map<string, string>()
     const cancelledTurns = new Set<string>(cancelledTurnIds)
@@ -848,6 +880,7 @@ export function ChatPage() {
         return true
       })
       .map((event): ConversationActivityEvent => {
+        if (event.questions && closedQuestionEventIds.has(event.eventId)) return { ...event, questionsAnswered: true }
         const reqId = event.toolPermission?.requestId
         const resolvedState = reqId ? resolvedPermissionDecisions.get(reqId) : undefined
         if (!resolvedState || !event.toolPermission) return event
@@ -860,7 +893,7 @@ export function ChatPage() {
           },
         }
       })
-  }, [activity.events, cancelledTurnIds, resolvedPermissionDecisions])
+  }, [activity.events, cancelledTurnIds, closedQuestionEventIds, resolvedPermissionDecisions])
 
   // Each assistant message gets its own text/action timeline, folded from the
   // turn it belongs to; a turn no message could claim (still running before
@@ -928,14 +961,7 @@ export function ChatPage() {
       ) {
         ids.add(event.turnId)
       }
-      if (
-        (event.type === 'turn.started' || event.type === 'TURN_STARTED')
-        && Boolean(
-          (event as { queueId?: unknown; queue_id?: unknown }).queueId
-          || (event as { queueId?: unknown; queue_id?: unknown }).queue_id
-          || event.payload?.queue_id,
-        )
-      ) {
+      if (isQueuedInputEvent(event)) {
         ids.delete(event.turnId)
       }
       if (
@@ -1291,7 +1317,10 @@ export function ChatPage() {
   const questionSubmitInFlightRef = useRef(false)
 
   const submitQuestionAnswers = useCallback(async (event: ConversationActivityEvent, answers: UserQuestionAnswer[]) => {
-    if (!event.questions || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running || questionSubmitInFlightRef.current) return
+    if (
+      !event.questions || !event.turnId || !openQuestionTurnIds.has(event.turnId) || closedQuestionEventIds.has(event.eventId)
+      || running || questionSubmitInFlightRef.current
+    ) return
     questionSubmitInFlightRef.current = true
     const byId = new Map(event.questions.map((question) => [question.id, question]))
     const text = ['Respostas às perguntas do agente:']
@@ -1305,16 +1334,23 @@ export function ChatPage() {
     }
     const response = text.join('\n').trim()
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    const isLiveActiveTurn = Boolean(
+      conversationId
+      && activeTurn
+      && activeTurn.turn_id === event.turnId
+      && RUNNING_STATES.has(activeTurn.state)
+      && !hasTerminalEventForActiveTurn
+      && !isActivityTerminal,
+    )
+    const answeredEventId = event.eventId
+    if (isLiveActiveTurn) {
+      // The turn reads the answer from the queue and reports it (turn.started with queue_id): no optimistic
+      // bubble here, or the answer would show twice. The card closes now; a later ask_user stays open.
+      setAnsweredQuestionEventIds((current) => new Set(current).add(answeredEventId))
+    } else {
+      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    }
     try {
-      const isLiveActiveTurn = Boolean(
-        conversationId
-        && activeTurn
-        && activeTurn.turn_id === event.turnId
-        && RUNNING_STATES.has(activeTurn.state)
-        && !hasTerminalEventForActiveTurn
-        && !isActivityTerminal,
-      )
       if (isLiveActiveTurn) {
         await enqueueMessage(client, conversationId, response)
       } else {
@@ -1323,13 +1359,21 @@ export function ChatPage() {
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
     } catch (caught) {
-      setPendingUserMessage(null)
+      if (isLiveActiveTurn) {
+        setAnsweredQuestionEventIds((current) => {
+          const next = new Set(current)
+          next.delete(answeredEventId)
+          return next
+        })
+      } else {
+        setPendingUserMessage(null)
+      }
       setError('Não foi possível enviar as respostas. Tente novamente.')
       throw caught
     } finally {
       questionSubmitInFlightRef.current = false
     }
-  }, [activeTurn, client, conversationId, hasTerminalEventForActiveTurn, isActivityTerminal, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
+  }, [activeTurn, client, closedQuestionEventIds, conversationId, hasTerminalEventForActiveTurn, isActivityTerminal, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const submitMcpApproval = useCallback(async (event: ConversationActivityEvent, secrets: Record<string, string>) => {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return

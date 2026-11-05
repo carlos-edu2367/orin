@@ -201,6 +201,8 @@ export type ConversationActivityEvent = {
   originEventId?: string
   /** Event IDs of streaming deltas that were compacted into this event. */
   mergedEventIds?: string[]
+  /** UI-only: this ask_user batch was already answered inside a live turn, so its card stays closed. */
+  questionsAnswered?: boolean
   contextUsage?: ContextUsage
   codeStage?: string
   codeApproval?: boolean
