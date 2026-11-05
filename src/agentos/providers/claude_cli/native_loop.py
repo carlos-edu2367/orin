@@ -23,6 +23,7 @@ from agentos.providers.claude_cli.command import (
     write_owner_only_temp,
 )
 from agentos.providers.claude_cli.errors import (
+    CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
@@ -262,11 +263,9 @@ class NativeTurnHandle:
             if init is not None:
                 if init.api_key_source.lower() != "none":
                     self.close()
-                    raise NativeLoopUnavailable(
+                    raise CliSecurityAbort(
                         f"Claude CLI reported apiKeySource='{init.api_key_source}' instead of 'none'. "
-                        "Refusing to consume API credits.",
-                        status_code=401,
-                        exhausted=True,
+                        "Refusing to consume API credits."
                     )
                 mcp_status = init.mcp_servers.get(self._server_name)
                 if mcp_status != "connected":
@@ -763,7 +762,9 @@ def start_native_turn_for_provider(
             except Exception:
                 pass
         slots.release()
-        if isinstance(exc, NativeLoopUnavailable):
+        # A security abort is never "native unavailable": that would fall back to the text path with the
+        # same credentials.
+        if isinstance(exc, (NativeLoopUnavailable, CliSecurityAbort)):
             raise
         raise NativeLoopUnavailable(
             f"Failed to start native Claude CLI turn: {exc}",

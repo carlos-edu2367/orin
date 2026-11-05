@@ -102,7 +102,9 @@ def test_stream_claude_code_bridge_sends_multimodal_content_list_when_images_pre
             captured_cmd.extend(cmd)
             self.stdin = _FakeStdin()
             self.stdout = io.StringIO(
-                json.dumps(
+                json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-5-5", "apiKeySource": "none"})
+                + "\n"
+                + json.dumps(
                     {
                         "type": "result",
                         "subtype": "success",

@@ -22,6 +22,17 @@ class NativeLoopUnavailable(ProviderTransportError):
     """Raised before the first user-visible delta when native MCP loop cannot start."""
 
 
+class CliSecurityAbort(ProviderTransportError):
+    """The CLI would not run on the OAuth subscription (apiKeySource != "none", or no init first).
+
+    Never retried, never a fallback to another path or model: the same credentials would be used again.
+    Not a NativeLoopUnavailable on purpose, so the native runner does not fall back to the text path.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(message, status_code=401, exhausted=True)
+
+
 @dataclass(frozen=True, slots=True)
 class RateLimitState:
     status: str

@@ -29,6 +29,7 @@ from agentos.providers.claude_cli.command import (
     write_owner_only_temp,
 )
 from agentos.providers.claude_cli.errors import (
+    CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
@@ -783,7 +784,7 @@ class ClaudeCliProvider:
                             api_key_source = parser.init.api_key_source.strip()
                             if api_key_source.lower() != "none":
                                 kill_process_tree(proc)
-                                raise ProviderTransportError(
+                                raise CliSecurityAbort(
                                     f"Security abort: Claude CLI reported apiKeySource={api_key_source!r} instead of 'none'. "
                                     "Refusing to run to prevent unexpected API token charges; only OAuth subscription is permitted."
                                 )
@@ -792,14 +793,18 @@ class ClaudeCliProvider:
                         raise ProviderTransportError(
                             ev.text or "Claude CLI error"
                         )
-                    elif ev.kind in {
-                        CliEventKind.THINKING_DELTA,
-                        CliEventKind.THINKING_SIGNATURE,
-                        CliEventKind.TEXT_DELTA,
-                        CliEventKind.TOOL_USE_END,
-                    } and parser.init is None:
+                    elif parser.init is None and not (
+                        ev.kind == CliEventKind.RATE_LIMIT
+                        or (
+                            ev.kind == CliEventKind.RESULT
+                            and parser.result is not None
+                            and parser.result.is_error
+                        )
+                    ):
+                        # Nothing visible (text, thinking, tools, usage or a successful result) counts before
+                        # the init proved the run is on the subscription; an error result is classified below.
                         kill_process_tree(proc)
-                        raise ProviderTransportError(
+                        raise CliSecurityAbort(
                             f"Security abort: Claude CLI emitted {ev.kind.value!r} before system/init packet."
                         )
                     elif ev.kind == CliEventKind.THINKING_DELTA:

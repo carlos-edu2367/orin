@@ -232,10 +232,8 @@ class StreamJsonParser:
                     else ()
                 )
                 raw_api_key_src = packet.get("apiKeySource")
-                if raw_api_key_src is None and "apiKeySource" not in packet:
-                    api_key_source = "none"
-                else:
-                    api_key_source = str(raw_api_key_src or "").strip() or "missing"
+                # Fail closed: an init without apiKeySource is not proof of the subscription.
+                api_key_source = str(raw_api_key_src or "").strip() or "missing"
                 self.init = CliInit(
                     session_id=str(packet.get("session_id") or ""),
                     model=str(packet.get("model") or ""),

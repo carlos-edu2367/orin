@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from agentos.providers.claude_cli.errors import (
+    CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
@@ -171,9 +172,12 @@ def test_api_key_source_aborts(tmp_path: Path) -> None:
     sink = _RecordingSink()
     handle = provider.start_native_turn(_make_request(tmp_path))
     try:
-        with pytest.raises(NativeLoopUnavailable) as exc_info:
+        with pytest.raises(CliSecurityAbort) as exc_info:
             handle.run_until_result(sink)
         assert exc_info.value.status_code == 401
+        assert exc_info.value.exhausted is True
+        # Not "native unavailable": that would fall back to the text path with the same credentials.
+        assert not isinstance(exc_info.value, NativeLoopUnavailable)
         assert sink.texts == []
     finally:
         handle.close()

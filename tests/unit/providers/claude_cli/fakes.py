@@ -62,6 +62,14 @@ class FakeClaudePopen:
         parent = self
 
         class _Stdout:
+            _it: Any = None
+
+            def readline(self) -> str:
+                # The native loop reads with iter(stdout.readline, ""); share the iterator with __iter__.
+                if self._it is None:
+                    self._it = iter(self)
+                return next(self._it, "")
+
             def __iter__(self) -> Any:
                 for idx, line in enumerate(parent._lines):
                     gate = parent._gate_before_line.get(idx)
