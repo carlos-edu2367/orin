@@ -941,18 +941,20 @@ class ChatWorker:
             base_url = str(row.get("base_url") or "") or self._provider_base_url("anthropic", user_id=str(turn.get("user_id") or ""))
             if is_claude_cli_bridge_url(base_url):
                 from agentos.providers.claude_cli.catalog import context_window_for as _cli_context_window_for
+                from agentos.providers.claude_cli.command import claude_cli_version as _claude_cli_version
                 import agentos.providers.claude_cli.provider as _cli_provider_mod
 
                 cli_window = _cli_context_window_for(str(turn.get("model_id") or ""))
                 if window is None or (cli_window is not None and cli_window > window):
                     window = cli_window
-                is_native = _cli_provider_mod.native_tools_enabled(
-                    conversation_mode=str(turn.get("conversation_mode") or ""),
-                    code_mode=_cli_provider_mod.is_code_mode_value(turn.get("code_mode")),
-                )
-                if not is_native:
-                    budget = _cli_provider_mod.text_context_budget()
-                    if budget is not None:
+                budget = _cli_provider_mod.text_context_budget()
+                if budget is not None:
+                    is_native = _cli_provider_mod.native_tools_enabled(
+                        conversation_mode=str(turn.get("conversation_mode") or ""),
+                        code_mode=_cli_provider_mod.is_code_mode_value(turn.get("code_mode")),
+                        version=_claude_cli_version(),
+                    )
+                    if not is_native:
                         window = min(window, budget) if window else budget
         return window
 
@@ -1164,7 +1166,9 @@ class ChatWorker:
             )
 
         if provider == "anthropic" and is_claude_cli_bridge_url(base_url):
-            return build("")
+            from agentos.providers.claude_cli.provider import ClaudeCliProvider
+
+            return ClaudeCliProvider(base_url=base_url, model=resolved_model_id)
         if first_key is None:
             if provider not in PROVIDERS_WITH_BASE_URL or (
                 provider == "anthropic" and not is_claude_cli_bridge_url(base_url)
@@ -1212,7 +1216,9 @@ class ChatWorker:
                 cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
             )
         if provider == "anthropic" and is_claude_cli_bridge_url(base_url):
-            return build("")
+            from agentos.providers.claude_cli.provider import ClaudeCliProvider
+
+            return ClaudeCliProvider(base_url=base_url, model=model_id)
         if first_key is None:
             return build("")
         return MultiKeyProviderStreamTransport(
@@ -1311,7 +1317,7 @@ class ChatWorker:
         except Exception:
             return False
 
-    def _child_provider_for_turn(self, turn: dict[str, object], model_id: str) -> HTTPProviderStreamTransport:
+    def _child_provider_for_turn(self, turn: dict[str, object], model_id: str) -> object:
         favorites = self._favorite_child_model_ids(turn)
         raw_model_id = str(model_id or "").strip()
         resolved_model_id = (
@@ -1329,6 +1335,27 @@ class ChatWorker:
             and is_claude_cli_bridge_url(self._provider_base_url("anthropic", user_id=str(turn.get("user_id") or "")))
             and (normalized_child.startswith("claude-") or normalized_child in {"haiku", "sonnet", "opus", "fable"})
         )
+        if keep_cli_subscription:
+            from agentos.providers.claude_cli.catalog import (
+                FAMILY_DEFAULTS,
+                discover_cached_models,
+                resolve_family_alias,
+            )
+
+            default_to_family = {val.lower(): fam for fam, val in FAMILY_DEFAULTS.items()}
+            raw_slug = raw_model_id.split("/", 1)[-1].strip().lower()
+            family = (
+                raw_slug
+                if raw_slug in FAMILY_DEFAULTS
+                else default_to_family.get(
+                    normalized_child,
+                    normalized_child if normalized_child in FAMILY_DEFAULTS else None,
+                )
+            )
+            if family is not None:
+                alias_resolved = resolve_family_alias(family, discover_cached_models())
+                if alias_resolved:
+                    resolved_model_id = alias_resolved
         try:
             with self.store._engine.connect() as connection:
                 allowed_providers = self._allowed_child_providers(connection, turn)

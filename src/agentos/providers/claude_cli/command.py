@@ -209,7 +209,7 @@ def claude_cli_version(
     if resolved in _VERSION_CACHE:
         return _VERSION_CACHE[resolved]
 
-    isolated_env = build_isolated_claude_env(env)
+    isolated_env = build_isolated_claude_env(merge_with_system_env(env))
     creationflags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     )
@@ -277,7 +277,7 @@ def check_claude_cli_status(
             "Install @anthropic-ai/claude-code and run 'claude auth login'."
         )
 
-    isolated_env = build_isolated_claude_env(env)
+    isolated_env = build_isolated_claude_env(merge_with_system_env(env))
     creationflags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     )

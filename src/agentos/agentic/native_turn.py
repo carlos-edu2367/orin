@@ -1381,7 +1381,13 @@ class NativeTurnRunner:
                         budget_exhausted=closing_sent,
                     )
 
-            except NativeLoopUnavailable:
+            except NativeLoopUnavailable as exc:
+                recorder = getattr(self.provider, "record_native_unavailable", None)
+                if callable(recorder):
+                    try:
+                        recorder(exc)
+                    except Exception:
+                        pass
                 if sink.had_visible_output or executor.action_count > 0:
                     self.runtime._effect_finished(
                         self.turn,

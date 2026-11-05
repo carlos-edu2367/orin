@@ -1185,15 +1185,19 @@ def test_chat_worker_anthropic_transport_uses_local_bridge_when_configured_and_r
     worker.store = type("S", (), {"_engine": engine})()
 
     # Local CLI bridge mode with 0 keys
+    from agentos.providers.claude_cli.provider import ClaudeCliProvider
+
     transport = worker._provider_transport(
         {"provider": "anthropic", "user_id": "user-1", "model_id": "claude-sonnet-4-6"}
     )
-    assert isinstance(transport, HTTPProviderStreamTransport)
+    assert isinstance(transport, ClaudeCliProvider)
     assert transport.base_url == DEFAULT_CLAUDE_CLI_BRIDGE_URL
+    transport.close()
 
     direct = worker._transport_for("user-1", "anthropic", "claude-sonnet-4-6")
-    assert isinstance(direct, HTTPProviderStreamTransport)
+    assert isinstance(direct, ClaudeCliProvider)
     assert direct.base_url == DEFAULT_CLAUDE_CLI_BRIDGE_URL
+    direct.close()
 
     # Cloud mode (base_url=None)
     assert (

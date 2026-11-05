@@ -20,7 +20,7 @@ from agentos.provider_catalog.claude_code import (
     ProviderTransportError,
     stream_claude_code_bridge,
 )
-from agentos.providers.claude_cli import CliSlots, TranscriptState
+from agentos.providers.claude_cli import ClaudeCliProvider, CliSlots, TranscriptState
 from agentos.workers.chat import ChatWorker
 
 
@@ -312,18 +312,22 @@ def test_chat_worker_provider_transport_bypasses_multikey_wrapper_for_claude_cli
     worker = ChatWorker.__new__(ChatWorker)
     worker.store = _FakeStore()
 
-    turn = {"user_id": "u1", "provider": "anthropic", "model_id": "claude-sonnet-4-6"}
+    turn = {"user_id": "u1", "provider": "anthropic", "model_id": "claude-opus-5-5"}
     transport = worker._provider_transport(turn)
-    assert isinstance(transport, HTTPProviderStreamTransport)
+    assert isinstance(transport, ClaudeCliProvider)
+    assert not isinstance(transport, HTTPProviderStreamTransport)
     assert not isinstance(transport, MultiKeyProviderStreamTransport)
     assert transport.base_url == CLAUDE_CODE_LOCAL_BASE_URL
-    assert transport._api_key == ""
+    assert transport.model == "claude-opus-5-5"
+    transport.close()
 
-    sub_transport = worker._transport_for("u1", "anthropic", "claude-haiku-4-5-20251001")
-    assert isinstance(sub_transport, HTTPProviderStreamTransport)
+    sub_transport = worker._transport_for("u1", "anthropic", "claude-haiku-5-5")
+    assert isinstance(sub_transport, ClaudeCliProvider)
+    assert not isinstance(sub_transport, HTTPProviderStreamTransport)
     assert not isinstance(sub_transport, MultiKeyProviderStreamTransport)
     assert sub_transport.base_url == CLAUDE_CODE_LOCAL_BASE_URL
-    assert sub_transport._api_key == ""
+    assert sub_transport.model == "claude-haiku-5-5"
+    sub_transport.close()
 
 
 def test_chat_worker_child_provider_keeps_anthropic_on_claude_cli_subscription_and_caps_context_window(

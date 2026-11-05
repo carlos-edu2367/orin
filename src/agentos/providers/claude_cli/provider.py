@@ -20,12 +20,15 @@ from agentos.providers.claude_cli.command import (
     IDLE_TIMEOUT_SECONDS,
     build_claude_command,
     build_isolated_claude_env,
+    claude_cli_version,
+    is_version_validated,
     merge_with_system_env,
     redact_argv,
     resolve_claude_binary,
     write_owner_only_temp,
 )
 from agentos.providers.claude_cli.errors import (
+    NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
     classify_result_error,
@@ -58,8 +61,60 @@ _CLOUD_HOSTS = frozenset({"api.anthropic.com", "anthropic.com"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 TEXT_CACHE_OK: bool = True
+NATIVE_LOOP_VALIDATED: bool = True
+NATIVE_MODES: frozenset[str] = frozenset({"code"})
 _FALLBACK_TEXT_BUDGET = 200_000
 _MIN_TEXT_BUDGET = 50_000
+_CIRCUIT_BREAKER_SECONDS: float = 600.0
+_CIRCUIT_LOCK = threading.Lock()
+_CIRCUIT_BREAKER_UNTIL: dict[str, float] = {}
+_WARNED_INVALID_NATIVE_FLAGS: set[str] = set()
+
+
+def clear_circuit_breaker() -> None:
+    """Reset the native loop circuit breaker state (used in tests)."""
+    with _CIRCUIT_LOCK:
+        _CIRCUIT_BREAKER_UNTIL.clear()
+        _WARNED_INVALID_NATIVE_FLAGS.clear()
+
+
+def record_native_unavailable(
+    binary: str,
+    *,
+    now: float | None = None,
+    reason: object = "",
+) -> None:
+    """Open the circuit breaker for `binary` for 10 minutes (logged once per open period)."""
+    key = str(binary or "claude")
+    ts = time.monotonic() if now is None else float(now)
+    until = ts + _CIRCUIT_BREAKER_SECONDS
+    already_open = False
+    with _CIRCUIT_LOCK:
+        prev_until = _CIRCUIT_BREAKER_UNTIL.get(key, 0.0)
+        if prev_until > ts:
+            already_open = True
+        else:
+            _CIRCUIT_BREAKER_UNTIL[key] = until
+    if not already_open:
+        _LOGGER.warning(
+            "claude_cli native loop circuit breaker opened for %.0fs on binary=%s: %s",
+            _CIRCUIT_BREAKER_SECONDS,
+            key,
+            reason,
+        )
+
+
+def _is_circuit_open(binary: str, *, now: float | None = None) -> bool:
+    key = str(binary or "claude")
+    ts = time.monotonic() if now is None else float(now)
+    with _CIRCUIT_LOCK:
+        until = _CIRCUIT_BREAKER_UNTIL.get(key)
+        if until is None:
+            return False
+        if ts >= until:
+            _CIRCUIT_BREAKER_UNTIL.pop(key, None)
+            return False
+        return True
 
 
 def text_context_budget(env: Mapping[str, str] | None = None) -> int | None:
@@ -95,9 +150,34 @@ def native_tools_enabled(
     env: Mapping[str, str] | None = None,
     version: tuple[int, int, int] | None = None,
 ) -> bool:
-    """Determine whether the native MCP tool loop is enabled (full body enters in Task 12)."""
-    del conversation_mode, code_mode, mode, env, version
-    return False
+    """Return True when the native MCP tool loop is enabled for the given mode and CLI version."""
+    source = os.environ if env is None else env
+    raw_flag = str(source.get("ORIN_CLAUDE_CLI_NATIVE_TOOLS") or "").strip().lower()
+    if raw_flag in {"off", "0", "false", "no", "disabled"}:
+        return False
+    if raw_flag not in {"", "auto", "on", "1", "true", "yes"}:
+        with _CIRCUIT_LOCK:
+            should_warn = raw_flag not in _WARNED_INVALID_NATIVE_FLAGS
+            if should_warn:
+                _WARNED_INVALID_NATIVE_FLAGS.add(raw_flag)
+        if should_warn:
+            _LOGGER.warning(
+                "Invalid ORIN_CLAUDE_CLI_NATIVE_TOOLS=%r; defaulting to 'auto'",
+                raw_flag,
+            )
+
+    if not NATIVE_LOOP_VALIDATED:
+        return False
+    if not is_version_validated(version):
+        return False
+
+    if is_code_mode_value(code_mode):
+        effective_mode = "code"
+    elif mode is not None and str(mode).strip():
+        effective_mode = str(mode).strip().lower()
+    else:
+        effective_mode = str(conversation_mode or "").strip().lower()
+    return effective_mode in NATIVE_MODES
 
 
 def normalize_anthropic_base_url(value: str) -> str:
@@ -383,11 +463,22 @@ class ClaudeCliProvider:
     def _effective_slots(self) -> CliSlots:
         return self._slots if self._slots is not None else CLI_SLOTS
 
+    def record_native_unavailable(self, reason: object = "") -> None:
+        binary = self._resolve_binary() or self._binary or "claude"
+        record_native_unavailable(binary, now=self._clock(), reason=reason)
+
     def native_turn_available(self, turn: Mapping[str, object]) -> bool:
+        binary = self._resolve_binary()
+        if not binary:
+            return False
+        if _is_circuit_open(binary, now=self._clock()):
+            return False
+        version = claude_cli_version(binary, env=self._env)
         return native_tools_enabled(
             conversation_mode=str(turn.get("conversation_mode") or ""),
             code_mode=is_code_mode_value(turn.get("code_mode")),
             env=self._env,
+            version=version,
         )
 
     def start_native_turn(self, request: Any) -> Any:
@@ -395,7 +486,11 @@ class ClaudeCliProvider:
             start_native_turn_for_provider,
         )
 
-        return start_native_turn_for_provider(self, request)
+        try:
+            return start_native_turn_for_provider(self, request)
+        except NativeLoopUnavailable as exc:
+            self.record_native_unavailable(exc)
+            raise
 
     def close(self) -> None:
         try:
