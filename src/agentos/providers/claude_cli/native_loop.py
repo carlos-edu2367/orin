@@ -16,6 +16,7 @@ from agentos.providers.claude_cli.command import (
     build_claude_command,
     build_isolated_claude_env,
     claude_cli_version,
+    ensure_isolated_cwd,
     is_version_validated,
     merge_with_system_env,
     user_event_line,
@@ -99,6 +100,12 @@ class _SlotReleasingExecutor:
 
     def list_tools(self) -> Sequence[McpToolSpec]:
         return self._inner.list_tools()
+
+    def is_known_tool(self, name: str) -> bool:
+        fn = getattr(self._inner, "is_known_tool", None)
+        if callable(fn):
+            return bool(fn(name))
+        return any(s.name == name for s in self._inner.list_tools())
 
     def call_tool(self, request: ToolCallRequest) -> ToolCallResult:
         handle = self.handle
@@ -297,15 +304,20 @@ class NativeTurnHandle:
                 exhausted=False,
             )
 
+        if ev.message_id and hasattr(sink, "on_message_id"):
+            try:
+                sink.on_message_id(ev.message_id)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         if ev.kind == CliEventKind.TEXT_DELTA:
-            self._had_visible_output = True
             if ev.text:
+                self._had_visible_output = True
                 text_parts.append(ev.text)
                 sink.on_text(ev.text)
             return None
 
         if ev.kind == CliEventKind.THINKING_DELTA:
-            self._had_visible_output = True
             sink.on_thinking(ev.text)
             return None
 
@@ -315,7 +327,10 @@ class NativeTurnHandle:
             tname = ev.tool_name or ""
             self._tool_bytes[uid] = 0
             self._tool_names[uid] = tname
-            sink.on_tool_use_started(uid, tname)
+            try:
+                sink.on_tool_use_started(uid, tname, ev.message_id)  # type: ignore[call-arg]
+            except TypeError:
+                sink.on_tool_use_started(uid, tname)
             return None
 
         if ev.kind == CliEventKind.TOOL_INPUT_DELTA:
@@ -329,7 +344,10 @@ class NativeTurnHandle:
         if ev.kind == CliEventKind.TOOL_USE_END:
             uid = ev.tool_use_id or ""
             tname = ev.tool_name or self._tool_names.get(uid, "")
-            sink.on_tool_use_complete(uid, tname, ev.tool_input or {})
+            try:
+                sink.on_tool_use_complete(uid, tname, ev.tool_input or {}, ev.message_id)  # type: ignore[call-arg]
+            except TypeError:
+                sink.on_tool_use_complete(uid, tname, ev.tool_input or {})
             return None
 
         if ev.kind == CliEventKind.USAGE:
@@ -652,7 +670,7 @@ def start_native_turn_for_provider(
         creationflags = (
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         )
-        request.cwd.mkdir(parents=True, exist_ok=True)
+        ensure_isolated_cwd(request.cwd)
 
         t0 = provider._clock()
         proc = popen_fn(

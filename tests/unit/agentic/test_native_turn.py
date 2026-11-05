@@ -880,3 +880,338 @@ def test_tools_list_marks_read_only_tools_with_read_only_hint(tmp_path: Path) ->
         assert item["annotations"]["readOnlyHint"] == toolset.is_read_only(item["name"])
     assert by_name["Read"]["annotations"]["readOnlyHint"] is True
     assert by_name["Edit"]["annotations"]["readOnlyHint"] is False
+
+
+def test_same_message_read_and_edit_of_unread_file_is_rejected_with_read_in_same_batch(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "blind.py").write_text("x = 1\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.01)
+
+    # Read and Edit in the same message_id "msg_blind_1"
+    r_read = executor.call_tool(
+        ToolCallRequest(
+            name="Read",
+            arguments={"file_path": "blind.py"},
+            meta={TOOL_USE_ID_META_KEY: "tu_r1", "message_id": "msg_blind_1"},
+        )
+    )
+    assert r_read.is_error is False
+
+    r_edit = executor.call_tool(
+        ToolCallRequest(
+            name="Edit",
+            arguments={"file_path": "blind.py", "old_string": "x = 1", "new_string": "x = 2"},
+            meta={TOOL_USE_ID_META_KEY: "tu_e1", "message_id": "msg_blind_1"},
+        )
+    )
+    assert r_edit.is_error is True
+    assert "mesmo lote" in r_edit.text or "same batch" in r_edit.text.lower()
+    assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 1\n"
+
+    # In the NEXT assistant message ("msg_blind_2"), Edit succeeds because file was read in msg_blind_1
+    r_edit_next = executor.call_tool(
+        ToolCallRequest(
+            name="Edit",
+            arguments={"file_path": "blind.py", "old_string": "x = 1", "new_string": "x = 2"},
+            meta={TOOL_USE_ID_META_KEY: "tu_e2", "message_id": "msg_blind_2"},
+        )
+    )
+    assert r_edit_next.is_error is False
+    assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_write_barrier_waits_for_closing_read_batch_even_with_multiple_concurrent_writes() -> None:
+    import threading as _th
+
+    order: list[str] = []
+    read_entered_batch = _th.Event()
+    allow_read_finish = _th.Event()
+
+    def _run_batch(entries, message_id: str) -> list[ToolCallResult]:
+        ids = [e.call_id for e in entries]
+        if "r1" in ids:
+            read_entered_batch.set()
+            allow_read_finish.wait(timeout=2.0)
+        order.extend(ids)
+        return [ToolCallResult(text=f"ok:{e.call_id}") for e in entries]
+
+    collector = ToolBatchCollector(_run_batch, gather_seconds=0.02)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_r1 = pool.submit(collector.submit, "r1", "read_file", {}, message_id="m1", read_only=True)
+        # Wait until r1's gather window expires and enters _run_batch
+        assert read_entered_batch.wait(timeout=2.0)
+        f_w1 = pool.submit(collector.submit, "w1", "edit_file", {}, message_id="m1", read_only=False)
+        f_w2 = pool.submit(collector.submit, "w2", "edit_file", {}, message_id="m1", read_only=False)
+        time.sleep(0.03)
+        allow_read_finish.set()
+        f_r1.result(timeout=2.0)
+        f_w1.result(timeout=2.0)
+        f_w2.result(timeout=2.0)
+
+    assert order[0] == "r1"
+    assert set(order[1:]) == {"w1", "w2"}
+
+
+def test_deferred_mcp_tool_and_empty_tool_schemas_validation(tmp_path: Path) -> None:
+    import httpx
+    from agentos.providers.cli_tools_mcp import BackgroundTurnToolServer
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    # 1. Empty tool_schemas=[] must reject unknown tools
+    empty_exec = RuntimeToolExecutor(runtime, store.turn, tool_schemas=[])
+    denied = empty_exec.call_tool(ToolCallRequest(name="Read", arguments={"file_path": "a.txt"}, meta={}))
+    assert denied.is_error is True
+    assert "Unknown tool" in denied.text
+
+    # 2. Deferred MCP tool activated mid-turn via active_mcp_tool_names passes through TurnToolServer
+    toolset.active_mcp_tool_names = {"Read"}  # simulate dynamic activation
+    bg = BackgroundTurnToolServer.start(TurnToolServer(empty_exec))
+    try:
+        (workspace.root / "dyn.txt").write_text("dynamic_ok\n", encoding="utf-8")
+        resp = httpx.post(
+            bg.handle.url,
+            headers={"Authorization": f"Bearer {bg.handle.token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "Read", "arguments": {"file_path": "dyn.txt"}, "_meta": {}},
+            },
+            timeout=5.0,
+        ).json()
+    finally:
+        bg.close()
+    assert resp["result"]["isError"] is False
+    assert "dynamic_ok" in resp["result"]["content"][0]["text"]
+
+
+def test_thinking_delta_does_not_block_retry_on_transient_failure_and_compaction_releases_read_stubs(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "stub.txt").write_text("linha 1\nlinha 2\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+
+    attempts = 0
+
+    def _make_handle(req: NativeTurnRequest) -> ScriptedHandle:
+        def _round(r: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+            nonlocal attempts
+            attempts += 1
+            init = _make_init(r.model)
+            sink.on_init(init)
+            sink.on_thinking("")
+            sink.on_thinking("thinking before any text or tool...")
+            if attempts == 1:
+                raise ProviderTransportError("529 Overloaded", status_code=529, exhausted=False)
+            # First read populates read stub state
+            res1 = r.executor.call_tool(
+                ToolCallRequest("Read", {"file_path": "stub.txt"}, {TOOL_USE_ID_META_KEY: "tu_s1", "message_id": "m1"})
+            )
+            assert "linha 1" in res1.text
+            # Compaction happens -> must release read stubs so re-reading returns full content
+            sink.on_compacted()
+            res2 = r.executor.call_tool(
+                ToolCallRequest("Read", {"file_path": "stub.txt"}, {TOOL_USE_ID_META_KEY: "tu_s2", "message_id": "m2"})
+            )
+            assert "linha 1" in res2.text
+            assert "File unchanged since last read" not in res2.text
+            return NativeTurnOutcome(result=_make_result(text="Recovered!"), init=init, final_text="Recovered!", exit_code=0)
+
+        return ScriptedHandle(req, [_round])
+
+    fake_provider = FakeNativeProvider(handle_factory=_make_handle)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=2,
+            context_window_tokens=1_000_000,
+        ),
+    )
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    assert attempts == 2
+
+
+def test_max_turns_when_process_already_exited_and_caveats_on_closing_gate_failure(
+    tmp_path: Path,
+) -> None:
+    # 1. Process already exited on error_max_turns (send_user raises RuntimeError) -> ITERATION_LIMIT
+    store1 = FakeStore()
+    workspace1 = ConversationWorkspace(tmp_path / "w1", "c1")
+    workspace1.root.mkdir(parents=True, exist_ok=True)
+    toolset1 = _make_toolset(workspace1)
+
+    class _DeadAfterMaxTurnsHandle(ScriptedHandle):
+        def is_process_alive(self) -> bool:
+            return False
+
+        def send_user(self, content: list[dict[str, Any]]) -> None:
+            raise RuntimeError("Claude CLI process is already closed")
+
+    def _round_dead(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        return NativeTurnOutcome(
+            result=_make_result(subtype="error_max_turns", is_error=True, text=""),
+            init=init,
+            final_text="",
+            exit_code=1,
+        )
+
+    prov1 = FakeNativeProvider(handle_factory=lambda req: _DeadAfterMaxTurnsHandle(req, [_round_dead]))
+    rt1 = AgenticTurnRuntime(
+        store=store1,
+        provider=prov1,
+        toolset=toolset1,
+        limits=AgenticLimits(max_iterations=5, max_actions=10, context_window_tokens=1_000_000),
+    )
+    out1 = rt1.run("t1", turn=store1.turn)
+    assert out1.state == "failed"
+    assert out1.error_code == "ITERATION_LIMIT"
+
+    # 2. Closing summary after error_max_turns with failing code_completion_gate -> completed_with_caveats
+    store2 = FakeStore()
+    workspace2 = ConversationWorkspace(tmp_path / "w2", "c2")
+    workspace2.root.mkdir(parents=True, exist_ok=True)
+    toolset2 = _make_toolset(workspace2)
+    toolset2.code_completion_gate = lambda: (False, "Faltou rodar pytest")  # type: ignore[method-assign]
+
+    def _round_closing(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        return NativeTurnOutcome(
+            result=_make_result(subtype="success", is_error=False, text="Resumo final parcial."),
+            init=_make_init(req.model),
+            final_text="Resumo final parcial.",
+            exit_code=0,
+        )
+
+    prov2 = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round_dead, _round_closing])
+    )
+    rt2 = AgenticTurnRuntime(
+        store=store2,
+        provider=prov2,
+        toolset=toolset2,
+        completion_gate=True,
+        limits=AgenticLimits(max_iterations=5, max_actions=10, context_window_tokens=1_000_000),
+    )
+    out2 = rt2.run("t1", turn=store2.turn)
+    assert out2.state == "completed_with_caveats"
+    assert out2.error_code == "CODE_VALIDATION_REQUIRED"
+    assert out2.budget_exhausted is True
+    assert any("Ressalva de verificação: Faltou rodar pytest" in d for d in store2.deltas)
+
+
+def test_token_and_cost_limits_enforced_in_native_turn(tmp_path: Path) -> None:
+    from decimal import Decimal
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_assistant_usage("m_cost", CliUsage(input_tokens=5000, output_tokens=1000))
+        return NativeTurnOutcome(result=_make_result(text="Done"), init=init, final_text="Done", exit_code=0)
+
+    prov = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    rt = AgenticTurnRuntime(
+        store=store,
+        provider=prov,
+        toolset=toolset,
+        cost_estimator=lambda inp, out: Decimal("2.50"),
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_cost=Decimal("1.00"),
+            context_window_tokens=1_000_000,
+        ),
+    )
+    out = rt.run("t1", turn=store.turn)
+    assert out.state == "failed"
+    assert out.error_code == "PROVIDER_COST_LIMIT"
+
+
+def test_native_history_avoids_orin_tool_call_and_session_plan_cli_flags_and_final_text_fallback(
+    tmp_path: Path,
+) -> None:
+    from agentos.agentic.native_turn import SessionPlan
+
+    assert SessionPlan().cli_flags() == ()
+
+    store = FakeStore()
+    store.history_for_turn = lambda _t: [  # type: ignore[method-assign]
+        {"role": "user", "content": "Turno anterior"},
+        {
+            "role": "assistant",
+            "content": "Vou ler",
+            "tool_calls": [
+                {
+                    "id": "call_prev_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path":"a.txt"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_prev_1", "name": "Read", "content": "ok"},
+        {"role": "user", "content": "Turno atual"},
+    ]
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+
+    def _round_no_delta(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        # No sink.on_text(...) called before returning NativeTurnOutcome with final_text
+        return NativeTurnOutcome(
+            result=_make_result(text="Texto apenas no result packet."),
+            init=init,
+            final_text="Texto apenas no result packet.",
+            exit_code=0,
+        )
+
+    prov = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round_no_delta]))
+    rt = AgenticTurnRuntime(
+        store=store,
+        provider=prov,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    out = rt.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    # 1. No <orin_tool_call> tag injected into native user_content
+    sent_blocks_text = "\n".join(
+        str(b.get("text") or "") for b in prov.requests[0].user_content if isinstance(b, Mapping)
+    )
+    assert "<orin_tool_call" not in sent_blocks_text
+    assert "</orin_tool_call>" not in sent_blocks_text
+    # 2. final_text fallback was emitted to store.deltas
+    assert "Texto apenas no result packet." in "".join(store.deltas)
+
+

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport, StreamKind
+from agentos.providers.claude_cli.errors import ProviderTransportError
 from agentos.providers.claude_cli.provider import (
     DEFAULT_CLAUDE_CLI_BRIDGE_URL,
     ClaudeCliProvider,
@@ -16,14 +17,14 @@ from agentos.providers.claude_cli.provider import (
 from .fakes import FakeClaudePopen
 
 
-def _init_line(model: str = "claude-opus-5-5") -> str:
+def _init_line(model: str = "claude-opus-5-5", *, api_key_source: str = "none") -> str:
     return json.dumps(
         {
             "type": "system",
             "subtype": "init",
             "session_id": "s1",
             "model": model,
-            "apiKeySource": "none",
+            "apiKeySource": api_key_source,
         }
     )
 
@@ -383,3 +384,63 @@ def test_cli_slots_respects_env_limit_or_unlimited() -> None:
     assert limited.acquire() is True
     assert limited.acquire(cancel_check=lambda: True) is False
     limited.release()
+
+
+def test_stream_uses_isolated_cwd_and_requires_init_with_strict_api_key_source_none() -> None:
+    captured_cwds: list[str] = []
+
+    def _popen_capture(cmd: list[str], **kw: Any) -> FakeClaudePopen:
+        captured_cwds.append(str(kw.get("cwd") or ""))
+        return FakeClaudePopen(
+            cmd,
+            ndjson_lines=[_init_line("claude-opus-5-5", api_key_source="none"), _result_line("ok")],
+            env=kw.get("env"),
+        )
+
+    provider = ClaudeCliProvider(
+        base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+        model="claude-opus-5-5",
+        binary="C:/fake/claude.exe",
+        popen_factory=_popen_capture,
+    )
+    try:
+        list(provider.stream({"messages": [{"role": "user", "content": "Oi"}]}))
+        assert len(captured_cwds) == 1
+        assert "orin-claude-empty-cwd" in captured_cwds[0]
+    finally:
+        provider.close()
+
+    # Empty apiKeySource ("") must be rejected
+    provider_empty_src = ClaudeCliProvider(
+        base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+        model="claude-opus-5-5",
+        binary="C:/fake/claude.exe",
+        popen_factory=lambda cmd, **kw: FakeClaudePopen(
+            cmd,
+            ndjson_lines=[_init_line("claude-opus-5-5", api_key_source=""), _result_line("ok")],
+            env=kw.get("env"),
+        ),
+    )
+    try:
+        with pytest.raises(ProviderTransportError, match="apiKeySource"):
+            list(provider_empty_src.stream({"messages": [{"role": "user", "content": "Oi"}]}))
+    finally:
+        provider_empty_src.close()
+
+    # Content emitted before system/init must be rejected
+    provider_no_init = ClaudeCliProvider(
+        base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+        model="claude-opus-5-5",
+        binary="C:/fake/claude.exe",
+        popen_factory=lambda cmd, **kw: FakeClaudePopen(
+            cmd,
+            ndjson_lines=[_text_delta_line("Hello without init"), _result_line("Hello without init")],
+            env=kw.get("env"),
+        ),
+    )
+    try:
+        with pytest.raises(ProviderTransportError, match="system/init"):
+            list(provider_no_init.stream({"messages": [{"role": "user", "content": "Oi"}]}))
+    finally:
+        provider_no_init.close()
+

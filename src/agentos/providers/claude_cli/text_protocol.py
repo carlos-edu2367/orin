@@ -263,6 +263,8 @@ def _parse_args_dict(raw_args: Any) -> dict[str, Any]:
 
 def _format_single_message_group(
     msg: Mapping[str, Any],
+    *,
+    native_history: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
     role = str(msg.get("role") or "user").strip().lower()
     raw_content = msg.get("content")
@@ -285,6 +287,7 @@ def _format_single_message_group(
                     else tc
                 )
                 call_id = str(tc.get("id") or f"call_{idx}").strip()
+                safe_call_id = re.sub(r"[^A-Za-z0-9_.\-:]", "_", call_id)
                 t_name = str(fn.get("name") or tc.get("name") or "").strip()
                 raw_args = fn.get("arguments", tc.get("arguments", {}))
                 parsed_args = _parse_args_dict(raw_args)
@@ -292,15 +295,24 @@ def _format_single_message_group(
                     {"name": t_name, "arguments": parsed_args},
                     ensure_ascii=False,
                 )
-                parts.append(
-                    f'<orin_tool_call id="{call_id}">{payload}</orin_tool_call>'
-                )
+                safe_payload = escape_tool_content(payload).replace("</", "<\\/")
+                if native_history:
+                    parts.append(
+                        f"[Tool Use id={safe_call_id} name={t_name}]\n"
+                        f"{safe_payload}\n"
+                        f"[/Tool Use]"
+                    )
+                else:
+                    parts.append(
+                        f'<orin_tool_call id="{safe_call_id}">{safe_payload}</orin_tool_call>'
+                    )
         if isinstance(raw_content, list):
             for idx, item in enumerate(raw_content, start=1):
                 if not isinstance(item, Mapping):
                     continue
                 if str(item.get("type") or "").strip().lower() == "tool_use":
                     call_id = str(item.get("id") or f"call_{idx}").strip()
+                    safe_call_id = re.sub(r"[^A-Za-z0-9_.\-:]", "_", call_id)
                     t_name = str(item.get("name") or "").strip()
                     parsed_args = _parse_args_dict(
                         item.get("input", item.get("arguments", {}))
@@ -309,9 +321,17 @@ def _format_single_message_group(
                         {"name": t_name, "arguments": parsed_args},
                         ensure_ascii=False,
                     )
-                    parts.append(
-                        f'<orin_tool_call id="{call_id}">{payload}</orin_tool_call>'
-                    )
+                    safe_payload = escape_tool_content(payload).replace("</", "<\\/")
+                    if native_history:
+                        parts.append(
+                            f"[Tool Use id={safe_call_id} name={t_name}]\n"
+                            f"{safe_payload}\n"
+                            f"[/Tool Use]"
+                        )
+                    else:
+                        parts.append(
+                            f'<orin_tool_call id="{safe_call_id}">{safe_payload}</orin_tool_call>'
+                        )
         rendered = "\n".join(parts)
     else:
         user_segments: list[str] = []
@@ -398,10 +418,15 @@ class TranscriptState:
         *,
         allowed_now: set[str] | None = None,
         closing: bool = False,
+        native_history: bool = False,
     ) -> list[dict[str, Any]]:
         msgs = [m for m in window if isinstance(m, Mapping)]
         if msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
             msgs = msgs[1:]
+
+        volatile_system_msgs: list[Mapping[str, Any]] = []
+        while msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
+            volatile_system_msgs.append(msgs.pop(0))
 
         groups: list[tuple[str, list[dict[str, Any]]]] = []
         idx = 0
@@ -417,7 +442,11 @@ class TranscriptState:
                     idx += 1
                 groups.append(_format_tool_batch_group(batch))
             else:
-                groups.append(_format_single_message_group(msgs[idx]))
+                groups.append(
+                    _format_single_message_group(
+                        msgs[idx], native_history=native_history
+                    )
+                )
                 idx += 1
 
         new_digests = [d for d, _ in groups]
@@ -444,6 +473,13 @@ class TranscriptState:
             for grp in self._group_blocks
             for block in grp
         ]
+
+        for v_msg in volatile_system_msgs:
+            _, v_blocks = _format_single_message_group(
+                v_msg, native_history=native_history
+            )
+            for block in v_blocks:
+                result_blocks.append(_clone_block(block))
 
         if closing:
             result_blocks.append(

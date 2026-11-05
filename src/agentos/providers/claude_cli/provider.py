@@ -21,6 +21,7 @@ from agentos.providers.claude_cli.command import (
     build_claude_command,
     build_isolated_claude_env,
     claude_cli_version,
+    ensure_isolated_cwd,
     is_version_validated,
     merge_with_system_env,
     redact_argv,
@@ -464,6 +465,8 @@ class ClaudeCliProvider:
         return self._slots if self._slots is not None else CLI_SLOTS
 
     def record_native_unavailable(self, reason: object = "") -> None:
+        if getattr(reason, "status_code", None) == 499:
+            return
         binary = self._resolve_binary() or self._binary or "claude"
         record_native_unavailable(binary, now=self._clock(), reason=reason)
 
@@ -489,7 +492,8 @@ class ClaudeCliProvider:
         try:
             return start_native_turn_for_provider(self, request)
         except NativeLoopUnavailable as exc:
-            self.record_native_unavailable(exc)
+            if getattr(exc, "status_code", None) != 499:
+                self.record_native_unavailable(exc)
             raise
 
     def close(self) -> None:
@@ -627,7 +631,7 @@ class ClaudeCliProvider:
             creationflags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            safe_cwd = tempfile.gettempdir()
+            safe_cwd = str(ensure_isolated_cwd())
 
             if self._popen_factory is not None:
                 try:
@@ -777,7 +781,7 @@ class ClaudeCliProvider:
                     if ev.kind == CliEventKind.INIT:
                         if parser.init is not None:
                             api_key_source = parser.init.api_key_source.strip()
-                            if api_key_source.lower() not in {"none", ""}:
+                            if api_key_source.lower() != "none":
                                 kill_process_tree(proc)
                                 raise ProviderTransportError(
                                     f"Security abort: Claude CLI reported apiKeySource={api_key_source!r} instead of 'none'. "
@@ -787,6 +791,16 @@ class ClaudeCliProvider:
                         kill_process_tree(proc)
                         raise ProviderTransportError(
                             ev.text or "Claude CLI error"
+                        )
+                    elif ev.kind in {
+                        CliEventKind.THINKING_DELTA,
+                        CliEventKind.THINKING_SIGNATURE,
+                        CliEventKind.TEXT_DELTA,
+                        CliEventKind.TOOL_USE_END,
+                    } and parser.init is None:
+                        kill_process_tree(proc)
+                        raise ProviderTransportError(
+                            f"Security abort: Claude CLI emitted {ev.kind.value!r} before system/init packet."
                         )
                     elif ev.kind == CliEventKind.THINKING_DELTA:
                         if ev.text:

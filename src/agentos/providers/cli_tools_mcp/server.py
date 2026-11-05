@@ -305,7 +305,13 @@ class TurnToolServer:
 
                     known_specs = self._executor.list_tools()
                     known_names = {s.name for s in known_specs}
-                    if not tool_name or tool_name not in known_names:
+                    is_known_fn = getattr(self._executor, "is_known_tool", None)
+                    is_known = (
+                        bool(is_known_fn(tool_name))
+                        if callable(is_known_fn)
+                        else (tool_name in known_names)
+                    )
+                    if not tool_name or not is_known:
                         valid_list = ", ".join(sorted(known_names)) or "(none)"
                         return (
                             {

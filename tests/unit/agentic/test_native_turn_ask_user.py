@@ -353,3 +353,50 @@ def test_session_records_turn_waiting_user_with_in_turn_flag(tmp_path: Path) -> 
     assert str(event_type) == "turn.waiting_user" or getattr(event_type, "value", "") == "turn.waiting_user"
     assert summary == "Aguardando sua resposta"
     assert payload.get("in_turn") is True
+
+
+def test_pre_queued_message_is_not_mistaken_for_ask_user_answer_and_close_stops_wait(
+    tmp_path: Path,
+) -> None:
+    store = _RecordingStore()
+    # User queued a normal message BEFORE ask_user was invoked
+    store.enqueue_now("Lembrete: use Python 3.12", queue_id="q-pre")
+    toolset = _make_toolset(tmp_path)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=object(),
+        toolset=toolset,
+        cancelled=lambda _t: False,
+        clock=time.monotonic,
+    )
+    turn = _make_turn(tmp_path)
+    executor = RuntimeToolExecutor(
+        runtime=runtime,
+        turn=turn,
+        messages=[],
+        deadline=time.monotonic() + 10.0,
+    )
+
+    store.queue_after(
+        seconds=0.25,
+        text="Respostas às perguntas do agente:\nPostgres",
+        queue_id="q-real-ans",
+    )
+    result = executor.call_tool(ToolCallRequest("AskUserQuestion", QUESTIONS, {}))
+    assert result.is_error is False
+    assert "Resposta da pessoa:\nRespostas às perguntas do agente:\nPostgres" in result.text
+    assert "Lembrete: use Python 3.12" in result.text
+
+    # Also verify executor.close() immediately stops _wait_for_answer()
+    executor2 = RuntimeToolExecutor(
+        runtime=runtime,
+        turn=turn,
+        messages=[],
+        deadline=time.monotonic() + 30.0,
+    )
+    threading.Timer(0.15, executor2.close).start()
+    t0 = time.monotonic()
+    res2 = executor2.call_tool(ToolCallRequest("AskUserQuestion", QUESTIONS, {}))
+    assert (time.monotonic() - t0) < 1.0
+    assert res2.is_error is True
+

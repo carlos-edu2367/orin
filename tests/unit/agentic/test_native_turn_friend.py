@@ -386,3 +386,186 @@ def test_chat_native_turn_advances_phase_from_results(
     assert len(phase_events) == 1
     assert phase_events[0]["previous_phase"] == "orient"
     assert phase_events[0]["phase"] == "execute"
+
+
+def test_chat_native_turn_allows_report_verification_and_blocks_write_in_verify_phase(
+    tmp_path: Path,
+) -> None:
+    store = _FriendStore(conversation_mode="chat")
+    ws = ConversationWorkspace(tmp_path)
+    ts = AgentToolset(ws, public_tool_names=False)
+    phases = PhaseController()
+
+    round_num = 0
+    write_in_verify_result: list[Any] = []
+    report_verify_result: list[Any] = []
+
+    class _VerifyHandle:
+        def __init__(self, req: NativeTurnRequest) -> None:
+            self.req = req
+            self.sent_users: list[Any] = []
+
+        def refuse_tools(self, reason: str = "") -> None:
+            pass
+
+        def send_user(self, content: Any) -> None:
+            self.sent_users.append(content)
+
+        def close(self) -> None:
+            pass
+
+        def run_until_result(self, sink: NativeTurnSink) -> NativeTurnOutcome:
+            nonlocal round_num
+            round_num += 1
+            init = _make_init()
+            if round_num == 1:
+                sink.on_init(init)
+                # Write a file in ORIENT -> triggers _needs_verification() at end of round 1
+                res_w = self.req.executor.call_tool(
+                    ToolCallRequest(
+                        name="write_file",
+                        arguments={"path": "out.txt", "content": "hello"},
+                        meta={"claudecode/toolUseId": "call_w1", "message_id": "msg_1"},
+                    )
+                )
+                assert res_w.is_error is False
+                sink.on_text("Escrevi o arquivo.")
+                return NativeTurnOutcome(
+                    init=init,
+                    result=_make_result(text="Escrevi o arquivo."),
+                    final_text="Escrevi o arquivo.",
+                    exit_code=0,
+                )
+            # Round 2: we are now in Phase.VERIFY
+            assert phases.current == Phase.VERIFY
+            # Trying to write_file in VERIFY must be rejected by phase enforcement
+            res_illegal = self.req.executor.call_tool(
+                ToolCallRequest(
+                    name="write_file",
+                    arguments={"path": "out2.txt", "content": "illegal"},
+                    meta={"claudecode/toolUseId": "call_w2", "message_id": "msg_2"},
+                )
+            )
+            write_in_verify_result.append(res_illegal)
+            # Calling report_verification in VERIFY must succeed and transition to RESPOND
+            res_ver = self.req.executor.call_tool(
+                ToolCallRequest(
+                    name="report_verification",
+                    arguments={"passed": True, "checked": ["out.txt exists"], "findings": "ok"},
+                    meta={"claudecode/toolUseId": "call_rv", "message_id": "msg_2"},
+                )
+            )
+            report_verify_result.append(res_ver)
+            sink.on_text("Verificado com sucesso.")
+            return NativeTurnOutcome(
+                init=init,
+                result=_make_result(text="Verificado com sucesso."),
+                final_text="Verificado com sucesso.",
+                exit_code=0,
+            )
+
+    class _VerifyProvider:
+        def native_turn_available(self, turn: Mapping[str, object]) -> bool:
+            return True
+
+        def start_native_turn(self, req: NativeTurnRequest) -> _VerifyHandle:
+            return _VerifyHandle(req)
+
+    rt = AgenticTurnRuntime(
+        store=store,  # type: ignore[arg-type]
+        provider=_VerifyProvider(),  # type: ignore[arg-type]
+        actions=object(),  # type: ignore[arg-type]
+        limits=AgenticLimits(
+            deadline=timedelta(minutes=5),
+            max_iterations=5,
+            max_actions=10,
+            max_context_tokens=200_000,
+        ),
+        toolset=ts,
+        phase_controller=phases,
+    )
+    res = rt.run("t_friend")
+    assert res.state == "completed"
+    assert len(write_in_verify_result) == 1
+    assert write_in_verify_result[0].is_error is True
+    assert not (tmp_path / "out2.txt").exists()
+    assert len(report_verify_result) == 1
+    assert report_verify_result[0].is_error is False
+    assert phases.current == Phase.RESPOND
+
+
+def test_friend_optimistic_speak_retracted_when_read_succeeds_then_write_fails_in_same_message(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("x = 1\n", encoding="utf-8")
+    store = _FriendStore(conversation_mode="friend")
+    ws = ConversationWorkspace(tmp_path)
+    ts = AgentToolset(ws, public_tool_names=False)
+
+    class _RetractHandle:
+        def __init__(self, req: NativeTurnRequest) -> None:
+            self.req = req
+
+        def refuse_tools(self, reason: str = "") -> None:
+            pass
+
+        def send_user(self, content: Any) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def run_until_result(self, sink: NativeTurnSink) -> NativeTurnOutcome:
+            init = _make_init()
+            sink.on_init(init)
+            # Same assistant message msg_1: speak + read_file (succeeds) + edit_file (fails)
+            if hasattr(sink, "on_message_id"):
+                sink.on_message_id("msg_1")
+            sink.on_text("<speak>Pronto, já editei o arquivo para você!</speak>")
+            r1 = self.req.executor.call_tool(
+                ToolCallRequest(
+                    name="read_file",
+                    arguments={"path": "a.txt"},
+                    meta={"claudecode/toolUseId": "c_read", "message_id": "msg_1"},
+                )
+            )
+            assert r1.is_error is False
+            r2 = self.req.executor.call_tool(
+                ToolCallRequest(
+                    name="edit_file",
+                    arguments={"path": "a.txt", "old_string": "nao_existe", "new_string": "x = 2"},
+                    meta={"claudecode/toolUseId": "c_edit", "message_id": "msg_1"},
+                )
+            )
+            assert r2.is_error is True
+            return NativeTurnOutcome(
+                init=init,
+                result=_make_result(text=""),
+                final_text="",
+                exit_code=0,
+            )
+
+    class _RetractProvider:
+        def native_turn_available(self, turn: Mapping[str, object]) -> bool:
+            return True
+
+        def start_native_turn(self, req: NativeTurnRequest) -> _RetractHandle:
+            return _RetractHandle(req)
+
+    rt = AgenticTurnRuntime(
+        store=store,  # type: ignore[arg-type]
+        provider=_RetractProvider(),  # type: ignore[arg-type]
+        actions=object(),  # type: ignore[arg-type]
+        limits=AgenticLimits(
+            deadline=timedelta(minutes=5),
+            max_iterations=5,
+            max_actions=10,
+            max_context_tokens=200_000,
+        ),
+        toolset=ts,
+    )
+    res = rt.run("t_friend")
+    assert res.state == "completed"
+    # Optimistic lie retraction must have been emitted
+    assert any("Não consegui concluir a ação anterior" in d for d in store.deltas)
+

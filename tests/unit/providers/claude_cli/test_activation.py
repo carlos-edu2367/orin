@@ -293,3 +293,24 @@ def test_child_alias_resolved_by_catalog(
     child_2 = worker._child_provider_for_turn(turn, "claude-opus-5-5")
     assert captured_calls[-1] == ("u1", "anthropic", "claude-opus-5-6")
     child_2.close()
+
+
+def test_cancelled_slot_wait_does_not_trip_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    reset_native_breaker()
+    provider = ClaudeCliProvider(
+        base_url=CLAUDE_CODE_LOCAL_BASE_URL,
+        model="claude-opus-5-5",
+        binary="C:/fake/claude.exe",
+    )
+    monkeypatch.setattr(
+        "agentos.providers.claude_cli.provider.start_native_turn_for_provider",
+        lambda *_a, **_kw: (_ for _ in ()).throw(
+            NativeLoopUnavailable("Cancelled while waiting for a Claude CLI process slot.", status_code=499)
+        ),
+    )
+    with pytest.raises(NativeLoopUnavailable) as exc_info:
+        provider.start_native_turn(object())  # type: ignore[arg-type]
+    assert exc_info.value.status_code == 499
+    assert is_native_breaker_open() is False
+    provider.close()
+

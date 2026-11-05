@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -11,8 +12,15 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from agentos.installation.paths import orin_paths
-from agentos.providers.claude_cli.command import TOOL_USE_ID_META_KEY
-from agentos.providers.claude_cli.errors import NativeLoopUnavailable, RateLimitState
+from agentos.providers.claude_cli.command import (
+    TOOL_USE_ID_META_KEY,
+    ensure_isolated_cwd,
+)
+from agentos.providers.claude_cli.errors import (
+    NativeLoopUnavailable,
+    ProviderTransportError,
+    RateLimitState,
+)
 from agentos.providers.claude_cli.native_loop import (
     NATIVE_LOOP_VALIDATED,
     PERSISTENT_STDIN_OK,
@@ -63,6 +71,9 @@ def _resolve_native_cwd() -> Path:
 class SessionPlan:
     session_id: str = ""
     resume: bool = False
+
+    def cli_flags(self) -> tuple[str, ...]:
+        return ()
 
 
 def prompt_digest(system_prompt: str) -> str:
@@ -177,6 +188,7 @@ class ToolBatchCollector:
         self._state_lock = threading.Lock()
         self._exec_lock = threading.Lock()
         self._open_batches: dict[str, _OpenReadBatch] = {}
+        self._in_flight_reads: dict[str, list[_BatchEntry]] = {}
 
     def submit(
         self,
@@ -197,14 +209,13 @@ class ToolBatchCollector:
         )
 
         if not entry.read_only:
-            prior_entries: list[_BatchEntry] = []
             with self._state_lock:
                 open_batch = self._open_batches.pop(msg_key, None)
                 if open_batch is not None and not open_batch.closed:
                     open_batch.closed = True
-                    prior_entries = list(open_batch.entries)
                     with open_batch.cond:
                         open_batch.cond.notify_all()
+                prior_entries = list(self._in_flight_reads.get(msg_key, ()))
             for prior in prior_entries:
                 prior.done.wait()
 
@@ -216,8 +227,9 @@ class ToolBatchCollector:
 
         with self._state_lock:
             now = self._clock()
+            self._in_flight_reads.setdefault(msg_key, []).append(entry)
             batch = self._open_batches.get(msg_key)
-            if batch is not None and not batch.closed and now < batch.deadline:
+            if batch is not None and not batch.closed:
                 batch.entries.append(entry)
                 is_leader = False
             else:
@@ -259,6 +271,16 @@ class ToolBatchCollector:
             for ent in entries:
                 ent.error = exc
         finally:
+            with self._state_lock:
+                in_flight = self._in_flight_reads.get(msg_key)
+                if in_flight is not None:
+                    for ent in entries:
+                        try:
+                            in_flight.remove(ent)
+                        except ValueError:
+                            pass
+                    if not in_flight:
+                        del self._in_flight_reads[msg_key]
             for ent in entries:
                 ent.done.set()
 
@@ -308,6 +330,10 @@ class RuntimeToolExecutor(ToolExecutor):
         self._tool_use_message_id: dict[str, str] = {}
         self._current_message_id: str = "msg_1"
         self._msg_seq: int = 1
+        self._closed = threading.Event()
+        self._first_read_keys_by_message_id: dict[str, set[str]] = {}
+        self._seen_tool_round_message_ids: set[str] = set()
+        self.consume_round_buffers: Callable[[], tuple[list[str], list[str]]] | None = None
 
         self._specs: list[McpToolSpec] = []
         self._valid_public_names: set[str] = set()
@@ -317,6 +343,21 @@ class RuntimeToolExecutor(ToolExecutor):
         self.collector = ToolBatchCollector(
             self._execute_batch,
             gather_seconds=gather_seconds,
+        )
+
+    def close(self) -> None:
+        self._closed.set()
+
+    def is_known_tool(self, name: str) -> bool:
+        raw_name = _strip_mcp_prefix(name)
+        if not raw_name:
+            return False
+        internal_name = self._resolve_internal_name(raw_name)
+        active_mcp = set(getattr(self.runtime.toolset, "active_mcp_tool_names", ()) or ())
+        return (
+            raw_name in self._valid_public_names
+            or internal_name in self._valid_internal_names
+            or internal_name in active_mcp
         )
 
     def _resolve_internal_name(self, name: str) -> str:
@@ -476,8 +517,7 @@ class RuntimeToolExecutor(ToolExecutor):
         active_mcp = set(getattr(self.runtime.toolset, "active_mcp_tool_names", ()) or ())
 
         if (
-            self._valid_internal_names
-            and internal_name not in self._valid_internal_names
+            internal_name not in self._valid_internal_names
             and raw_name not in self._valid_public_names
             and internal_name not in active_mcp
         ):
@@ -486,6 +526,29 @@ class RuntimeToolExecutor(ToolExecutor):
                 text=f"Unknown tool '{request.name}'. Valid tools: {valid_list}",
                 is_error=True,
             )
+
+        if self.runtime.phases is not None:
+            phase_schemas = self.runtime._tool_schemas(self.turn)
+            phase_allowed: set[str] = set()
+            for s in phase_schemas:
+                if isinstance(s, Mapping):
+                    fn = s.get("function") if isinstance(s.get("function"), Mapping) else s
+                    sname = str(fn.get("name") or "").strip()
+                    if sname:
+                        phase_allowed.add(self._resolve_internal_name(sname))
+            if internal_name not in phase_allowed and (
+                self.runtime.phases.current == phases.Phase.VERIFY
+                or internal_name not in active_mcp
+            ):
+                allowed_str = ", ".join(sorted(phase_allowed)) or "none"
+                return ToolCallResult(
+                    text=(
+                        f"Tool '{request.name}' is not allowed in phase "
+                        f"'{self.runtime.phases.current.value}'. "
+                        f"Allowed tools in this phase: {allowed_str}"
+                    ),
+                    is_error=True,
+                )
 
         call_id = self.correlate(raw_name, request.arguments, request.meta)
         with self._corr_lock:
@@ -609,14 +672,32 @@ class RuntimeToolExecutor(ToolExecutor):
     def _wait_for_answer(self, poll_seconds: float = 0.25) -> str | None:
         step = max(0.02, min(0.1, float(poll_seconds)))
         while True:
-            if self.runtime.cancelled(self.turn) or self._deadline_exceeded():
+            if (
+                self._closed.is_set()
+                or self.runtime.cancelled(self.turn)
+                or self._deadline_exceeded()
+                or (
+                    self.handle is not None
+                    and callable(getattr(self.handle, "is_process_alive", None))
+                    and not self.handle.is_process_alive()
+                )
+            ):
                 return None
             claimed = self._claim_queued_texts()
             if claimed:
                 return "\n\n".join(claimed)
             waited = 0.0
             while waited < poll_seconds:
-                if self.runtime.cancelled(self.turn) or self._deadline_exceeded():
+                if (
+                    self._closed.is_set()
+                    or self.runtime.cancelled(self.turn)
+                    or self._deadline_exceeded()
+                    or (
+                        self.handle is not None
+                        and callable(getattr(self.handle, "is_process_alive", None))
+                        and not self.handle.is_process_alive()
+                    )
+                ):
                     return None
                 time.sleep(min(step, poll_seconds - waited))
                 waited += step
@@ -659,18 +740,58 @@ class RuntimeToolExecutor(ToolExecutor):
             calls_dict[ent.call_id] = call_obj
             raw_calls.append(call_obj)
 
-        results = self.runtime._run_toolset(self.turn, raw_calls)
+        msg_first_reads = self._first_read_keys_by_message_id.setdefault(
+            str(message_id or "default"), set()
+        )
+        self.runtime._native_message_first_read_keys = msg_first_reads
+        try:
+            results = self.runtime._run_toolset(self.turn, raw_calls)
+        finally:
+            self.runtime._native_message_first_read_keys = None
+
         self.action_count += len(results)
-        self.tool_rounds += 1
+        msg_round_key = str(message_id or "").strip()
+        if not msg_round_key or msg_round_key == "default":
+            self.tool_rounds += 1
+        elif msg_round_key not in self._seen_tool_round_message_ids:
+            self._seen_tool_round_message_ids.add(msg_round_key)
+            self.tool_rounds += 1
+
+        prev_phase = (
+            self.runtime.phases.current if self.runtime.phases is not None else None
+        )
         self.runtime._advance_phase(self.turn, results)
+        if (
+            self.runtime.phases is not None
+            and self.runtime.phases.current != prev_phase
+            and self.runtime.phases.current != phases.Phase.RESPOND
+            and not getattr(self.runtime, "_phase_transition_note", None)
+        ):
+            self.runtime._phase_transition_note = phases.PHASE_INSTRUCTIONS[
+                self.runtime.phases.current
+            ]
 
         ask_user_cancelled = False
         had_ask_user_wait = False
+        pre_ask_user_queued: list[str] = []
         for res in results:
             if bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user":
                 had_ask_user_wait = True
+                pre_claimed = self._claim_queued_texts()
+                direct_answers = [
+                    item
+                    for item in pre_claimed
+                    if item.lstrip().startswith("Respostas às perguntas do agente:")
+                ]
+                for item in pre_claimed:
+                    if not item.lstrip().startswith("Respostas às perguntas do agente:"):
+                        pre_ask_user_queued.append(item)
                 self.runtime._life(self.turn, "waiting_user_in_turn")
-                answer = self._wait_for_answer()
+                answer = (
+                    "\n\n".join(direct_answers)
+                    if direct_answers
+                    else self._wait_for_answer()
+                )
                 if answer is None:
                     ask_user_cancelled = True
                     res["status"] = "failed"
@@ -681,18 +802,26 @@ class RuntimeToolExecutor(ToolExecutor):
                     res["content"] = f"Resposta da pessoa:\n{answer}"
                     res["wait_for_user"] = False
 
+        round_text_parts, round_thinking_parts = (
+            self.consume_round_buffers()
+            if callable(self.consume_round_buffers)
+            else ([], [])
+        )
         self.messages.append(
             self.runtime._assistant_tool_message(
                 self.turn,
-                [],
+                round_text_parts,
                 calls_dict,
-                [],
+                round_thinking_parts,
             )
         )
         self.runtime._record_step(
             self.turn,
             kind=transcript.STEP_ASSISTANT_TOOL_CALL,
-            payload=transcript.assistant_tool_call_payload("", calls_dict.values()),
+            payload=transcript.assistant_tool_call_payload(
+                "".join(round_text_parts),
+                calls_dict.values(),
+            ),
         )
         for res in results:
             self.runtime._record_step(
@@ -746,6 +875,14 @@ class RuntimeToolExecutor(ToolExecutor):
             if self.abort_code is None
             else ""
         )
+        if pre_ask_user_queued and self.abort_code is None:
+            pre_note = system_reminder(
+                "The user sent a message while you were working:\n"
+                + "\n\n".join(pre_ask_user_queued)
+            )
+            trailing_notes = (
+                f"{trailing_notes}\n\n{pre_note}" if trailing_notes else pre_note
+            )
 
         out_results: list[ToolCallResult] = []
         for idx, res in enumerate(results):
@@ -802,10 +939,15 @@ class _RunnerSink:
         self._last_empty_thinking_flush: float | None = None
         self._tool_gen_last_emit: dict[str, float] = {}
         self._seen_usage_message_ids: set[str] = set()
+        self._current_sink_message_id: str | None = None
         self._emitted_text_in_turn = False
         self._last_text_ended_with_newline = True
         self._message_wrote_text = False
         self.text_parts: list[str] = []
+        self._round_text_parts: list[str] = []
+        self._round_thinking_parts: list[str] = []
+        self.total_tokens: int = 0
+        self.total_cost: Decimal = Decimal("0")
         self._is_live_or_friend = bool(
             runner.runtime._is_live_or_friend(runner.turn)
         )
@@ -820,6 +962,23 @@ class _RunnerSink:
         )
         executor.speak_state = self.speak_state
         executor.on_batch_finished = self._on_tool_batch_finished
+        executor.consume_round_buffers = self.consume_round_buffers
+
+    def on_message_id(self, message_id: str | None) -> None:
+        msg_key = str(message_id or "").strip()
+        if not msg_key or msg_key == self._current_sink_message_id:
+            return
+        prev = self._current_sink_message_id
+        self._current_sink_message_id = msg_key
+        if prev is not None and self._is_live_or_friend:
+            self.speak_state.iteration_had_speak = False
+
+    def consume_round_buffers(self) -> tuple[list[str], list[str]]:
+        t_parts = list(self._round_text_parts)
+        th_parts = list(self._round_thinking_parts)
+        self._round_text_parts.clear()
+        self._round_thinking_parts.clear()
+        return t_parts, th_parts
 
     def _emit_visual_delta(self, chunk_text: str) -> None:
         if not chunk_text:
@@ -858,7 +1017,6 @@ class _RunnerSink:
                     for res in results
                 ):
                     self.speak_state.pending_retraction = True
-            self.speak_state.iteration_had_speak = False
             self._speak_parser = SpeakStreamParser(
                 live_voice_enabled=self._live_fallback_enabled
                 and not self.speak_state.pending_retraction
@@ -885,6 +1043,7 @@ class _RunnerSink:
 
     def reset_for_new_message(self) -> None:
         self._message_wrote_text = False
+        self._current_sink_message_id = None
         if self._is_live_or_friend:
             self.speak_state.iteration_had_speak = False
             self._speak_parser = SpeakStreamParser(
@@ -927,6 +1086,7 @@ class _RunnerSink:
         if not text:
             return
         self.had_visible_output = True
+        self._round_text_parts.append(text)
         self.flush_thinking_buffer()
         chunk_text = text
         if self._speak_parser is not None:
@@ -941,8 +1101,8 @@ class _RunnerSink:
             self._emit_visual_delta(chunk_text)
 
     def on_thinking(self, text: str) -> None:
-        self.had_visible_output = True
         if text:
+            self._round_thinking_parts.append(text)
             self._thinking_buffer.append(text)
             buffered_chars = sum(len(p) for p in self._thinking_buffer)
             if (
@@ -971,6 +1131,8 @@ class _RunnerSink:
         message_id: str | None = None,
     ) -> None:
         self.had_visible_output = True
+        if message_id:
+            self.on_message_id(message_id)
         self.flush_thinking_buffer()
         if self._speak_parser is not None:
             tail_text = self._runner.runtime._emit_speak_events(
@@ -1031,6 +1193,8 @@ class _RunnerSink:
         tool_input: Mapping[str, Any],
         message_id: str | None = None,
     ) -> None:
+        if message_id:
+            self.on_message_id(message_id)
         self.flush_thinking_buffer()
         self._executor.register_tool_use_complete(
             tool_use_id,
@@ -1042,6 +1206,7 @@ class _RunnerSink:
     def on_assistant_usage(self, message_id: str, usage: CliUsage) -> None:
         msg_key = str(message_id or "").strip()
         if msg_key:
+            self.on_message_id(msg_key)
             if msg_key in self._seen_usage_message_ids:
                 return
             self._seen_usage_message_ids.add(msg_key)
@@ -1050,6 +1215,7 @@ class _RunnerSink:
         used_in = usage.context_tokens
         out_tok = usage.output_tokens
         tot_tok = used_in + out_tok
+        self.total_tokens += tot_tok
 
         self._runner.runtime.counters.note_usage(
             input_tokens=used_in,
@@ -1067,6 +1233,41 @@ class _RunnerSink:
                 output_tokens=out_tok,
                 total_tokens=tot_tok,
             )
+
+        if self._runner.runtime._cost_estimator is not None:
+            try:
+                step_cost = self._runner.runtime._cost_estimator(
+                    str(self._runner.turn.get("model_id") or ""),
+                    used_in,
+                    out_tok,
+                )
+            except Exception:
+                step_cost = Decimal("0")
+            self.total_cost += step_cost
+            if self._runner.runtime._add_spending is not None and step_cost > 0:
+                try:
+                    self._runner.runtime._add_spending(
+                        str(self._runner.turn.get("user_id") or ""),
+                        step_cost,
+                    )
+                except Exception:
+                    pass
+
+        max_tok = self._runner.runtime.limits.max_tokens
+        if (
+            max_tok is not None
+            and self.total_tokens > max_tok
+            and self._executor.abort_code is None
+        ):
+            self._executor.abort_code = "PROVIDER_TOKEN_LIMIT"
+
+        max_cost = self._runner.runtime.limits.max_cost_usd
+        if (
+            max_cost is not None
+            and self.total_cost > max_cost
+            and self._executor.abort_code is None
+        ):
+            self._executor.abort_code = "PROVIDER_COST_LIMIT"
 
         limit = (
             self._runner.runtime.limits.context_window_tokens
@@ -1087,6 +1288,16 @@ class _RunnerSink:
 
     def on_compacted(self) -> None:
         self._runner.runtime._compaction_count += 1
+        try:
+            self._runner.runtime._release_read_stubs(
+                self._runner.messages, folded=True
+            )
+        except Exception:
+            pass
+        try:
+            self._runner.runtime._succeeded_reads.clear()
+        except Exception:
+            pass
 
     def on_rate_limit(self, state: RateLimitState) -> None:
         pass
@@ -1117,6 +1328,7 @@ class NativeTurnRunner:
     def _build_initial_user_content(
         self,
         tool_schemas: list[dict[str, object]],
+        window: list[dict[str, object]] | None = None,
     ) -> list[dict[str, Any]]:
         self.runtime._check_external_changes(self.turn)
         self.runtime._add_periodic_reminders()
@@ -1126,25 +1338,36 @@ class NativeTurnRunner:
             pending_reminders = []
         reminder_body = render_reminders(pending_reminders)
 
-        pinned = self.runtime._pinned_index
-        if not isinstance(pinned, int) or pinned < 0 or pinned >= len(self.messages):
-            pinned = self.runtime._last_user_index(self.messages)
+        source_msgs = window if window is not None else self.messages
+        pinned = self.runtime._last_user_index(source_msgs)
 
         if pinned is not None:
-            prior_messages = self.messages[:pinned]
-            current_msg = self.messages[pinned]
+            prior_messages = [
+                m for m in source_msgs[:pinned] if m.get("role") != "system"
+            ]
+            current_msg = source_msgs[pinned]
         else:
-            prior_messages = self.messages[:-1] if self.messages else []
-            current_msg = self.messages[-1] if self.messages else {"role": "user", "content": ""}
+            prior_messages = (
+                [m for m in source_msgs[:-1] if m.get("role") != "system"]
+                if source_msgs
+                else []
+            )
+            current_msg = (
+                source_msgs[-1]
+                if source_msgs
+                else {"role": "user", "content": ""}
+            )
 
         blocks: list[dict[str, Any]] = []
         if prior_messages:
             out_prior = (
                 self.runtime._names.messages_out(prior_messages)
-                if self.runtime._names is not None
+                if (window is None and self.runtime._names is not None)
                 else prior_messages
             )
-            blocks.extend(TranscriptState().blocks_for(out_prior))
+            blocks.extend(
+                TranscriptState().blocks_for(out_prior, native_history=True)
+            )
 
         volatile_parts: list[str] = []
         if self.runtime.first_user_context:
@@ -1198,6 +1421,34 @@ class NativeTurnRunner:
             if self.runtime._names is not None
             else raw_schemas
         )
+        # If phases are active, advertise the full toolset schemas in MCP tools/list
+        # so tools that only become active in later phases (e.g. report_verification)
+        # are already known to the CLI after system/init, while call_tool enforces
+        # the current phase's allowed tool list dynamically.
+        if self.runtime.phases is not None:
+            try:
+                all_raw = list(self.runtime.toolset.schemas())
+            except Exception:
+                all_raw = list(raw_schemas)
+            seen_names = {
+                str(s.get("function", {}).get("name", ""))
+                for s in all_raw
+                if isinstance(s, Mapping)
+            }
+            for s in raw_schemas:
+                if isinstance(s, Mapping):
+                    nm = str(s.get("function", {}).get("name", ""))
+                    if nm and nm not in seen_names:
+                        all_raw.append(s)
+                        seen_names.add(nm)
+            executor_schemas = (
+                self.runtime._names.schemas_out(all_raw)
+                if self.runtime._names is not None
+                else all_raw
+            )
+        else:
+            executor_schemas = tool_schemas
+
         window = self.runtime._request_messages(self.messages)
         if self.runtime._names is not None:
             window = self.runtime._names.messages_out(window)
@@ -1217,18 +1468,20 @@ class NativeTurnRunner:
         self.last_context = context
         self.runtime._life(self.turn, "context_updated", **context)
 
-        user_content = self._build_initial_user_content(tool_schemas)
+        user_content = self._build_initial_user_content(
+            tool_schemas, window=window
+        )
         executor = RuntimeToolExecutor(
             self.runtime,
             self.turn,
-            tool_schemas=tool_schemas,
+            tool_schemas=executor_schemas,
             messages=self.messages,
             deadline=self.deadline,
         )
         sink = _RunnerSink(self, executor)
 
         native_cwd = _resolve_native_cwd()
-        native_cwd.mkdir(parents=True, exist_ok=True)
+        ensure_isolated_cwd(native_cwd)
         max_turns = int(self.runtime.limits.max_iterations or 200)
         autocompact = _resolve_cli_autocompact(self.runtime.autocompact)
         effort = (
@@ -1241,6 +1494,7 @@ class NativeTurnRunner:
         provider_retries = 0
         process_count = 0
         code_gate_rejections = 0
+        verify_gate_attempts = 0
         closing_sent = False
 
         while True:
@@ -1292,8 +1546,26 @@ class NativeTurnRunner:
                 executor.handle = handle
 
                 while True:
-                    outcome: NativeTurnOutcome = handle.run_until_result(sink)
+                    try:
+                        outcome: NativeTurnOutcome = handle.run_until_result(sink)
+                    except ProviderTransportError:
+                        if closing_sent:
+                            self.runtime._effect_finished(
+                                self.turn,
+                                provider_effect_id,
+                                state="APPLIED",
+                                error_code="ITERATION_LIMIT",
+                            )
+                            return self.runtime._fail(
+                                self.turn,
+                                "ITERATION_LIMIT",
+                                process_count,
+                                executor.action_count,
+                            )
+                        raise
                     sink.flush_thinking_buffer()
+                    if not sink._emitted_text_in_turn and outcome.final_text:
+                        sink.on_text(outcome.final_text)
                     sink.finish_speak()
 
                     if (
@@ -1374,12 +1646,33 @@ class NativeTurnRunner:
                         )
 
                     if outcome.result.subtype == "error_max_turns":
-                        if not closing_sent:
+                        proc_alive = True
+                        alive_fn = getattr(handle, "is_process_alive", None)
+                        if callable(alive_fn):
+                            try:
+                                proc_alive = bool(alive_fn())
+                            except Exception:
+                                proc_alive = False
+                        if not closing_sent and proc_alive:
                             closing_sent = True
                             handle.refuse_tools("tool budget exhausted")
-                            handle.send_user(
-                                [{"type": "text", "text": CLOSING_INSTRUCTION}]
-                            )
+                            try:
+                                handle.send_user(
+                                    [{"type": "text", "text": CLOSING_INSTRUCTION}]
+                                )
+                            except RuntimeError:
+                                self.runtime._effect_finished(
+                                    self.turn,
+                                    provider_effect_id,
+                                    state="APPLIED",
+                                    error_code="ITERATION_LIMIT",
+                                )
+                                return self.runtime._fail(
+                                    self.turn,
+                                    "ITERATION_LIMIT",
+                                    process_count,
+                                    executor.action_count,
+                                )
                             handle.refuse_tools("tool budget exhausted")
                             sink.reset_for_new_message()
                             continue
@@ -1405,13 +1698,51 @@ class NativeTurnRunner:
                         callable(completion_gate)
                         and self.runtime.completion_gate
                         and not self.turn.get("is_subagent")
-                        and code_gate_rejections < 1
+                        and (code_gate_rejections < 1 or closing_sent)
                     ):
                         try:
                             gate_ok, gate_reason = completion_gate()
                         except Exception:
                             gate_ok, gate_reason = True, None
                     if not gate_ok:
+                        if closing_sent:
+                            self.runtime.store.delta(
+                                self.turn,
+                                f"\n\nRessalva de verificação: {gate_reason}",
+                            )
+                            self.runtime._effect_finished(
+                                self.turn,
+                                provider_effect_id,
+                                state="APPLIED",
+                                result_ref=f"conversation-message:{self.turn.get('assistant_message_id', '')}",
+                                private_result={"outcome": "completed_with_caveats"},
+                            )
+                            self.runtime._emit_optimistic_lie_retraction(
+                                self.turn, sink.speak_state
+                            )
+                            self.runtime._settle_remaining_todos(
+                                self.turn, str(self.turn_id)
+                            )
+                            self.runtime._life(
+                                self.turn,
+                                "completed_with_caveats",
+                                reason=gate_reason,
+                            )
+                            self.runtime.store.finish(
+                                self.turn, code="CODE_VALIDATION_REQUIRED"
+                            )
+                            self.runtime._settle_quality(
+                                self.turn,
+                                "completed_with_caveats",
+                                "CODE_VALIDATION_REQUIRED",
+                            )
+                            return AgenticRunResult(
+                                "completed_with_caveats",
+                                process_count,
+                                executor.action_count,
+                                "CODE_VALIDATION_REQUIRED",
+                                budget_exhausted=True,
+                            )
                         code_gate_rejections += 1
                         self.runtime._life(
                             self.turn,
@@ -1428,7 +1759,12 @@ class NativeTurnRunner:
                             self.runtime._life(self.turn, "running")
                             continue
 
-                    if self.runtime._needs_verification():
+                    if (
+                        not closing_sent
+                        and verify_gate_attempts < 1
+                        and self.runtime._needs_verification()
+                    ):
+                        verify_gate_attempts += 1
                         if self.runtime.phases is not None:
                             previous_phase = self.runtime.phases.current
                             self.runtime.phases.force_verify()
@@ -1453,7 +1789,8 @@ class NativeTurnRunner:
                         last_assistant_message="".join(sink.text_parts)[:4000],
                     )
                     if (
-                        stop_decision is not None
+                        not closing_sent
+                        and stop_decision is not None
                         and stop_decision.blocked
                         and not stop_decision.stop
                         and self.runtime._stop_continuations < MAX_STOP_CONTINUATIONS
@@ -1491,6 +1828,18 @@ class NativeTurnRunner:
                     )
 
             except NativeLoopUnavailable as exc:
+                if getattr(exc, "status_code", None) == 499 or self.runtime.cancelled(
+                    self.turn
+                ):
+                    self.runtime._effect_finished(
+                        self.turn,
+                        provider_effect_id,
+                        state="NOT_APPLIED",
+                        error_code="PROVIDER_CANCELLED_DURING_EFFECT",
+                    )
+                    return self.runtime._cancel(
+                        self.turn, process_count, executor.action_count
+                    )
                 recorder = getattr(self.provider, "record_native_unavailable", None)
                 if callable(recorder):
                     try:
@@ -1593,6 +1942,7 @@ class NativeTurnRunner:
                     executor.action_count,
                 )
             finally:
+                executor.close()
                 if handle is not None:
                     try:
                         handle.close()

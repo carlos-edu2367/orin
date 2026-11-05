@@ -2330,7 +2330,10 @@ class AgenticTurnRuntime:
         read_key = getattr(self.toolset, "read_key", None)
         has_read = getattr(self.toolset, "has_read", None)
         if callable(read_key) and callable(has_read):
-            batch_read_keys: set[str] = set()
+            native_msg_keys = getattr(self, "_native_message_first_read_keys", None)
+            batch_read_keys: set[str] = (
+                set(native_msg_keys) if isinstance(native_msg_keys, set) else set()
+            )
             for i, (_, name, arguments, error) in enumerate(prepared):
                 if error is not None or not isinstance(arguments, Mapping):
                     continue
@@ -2341,6 +2344,8 @@ class AgenticTurnRuntime:
                     key = read_key(path)
                     if key is not None and not has_read(path) and _exists_in_workspace(self.toolset, path):
                         batch_read_keys.add(key)
+                        if isinstance(native_msg_keys, set):
+                            native_msg_keys.add(key)
                 elif name in {"edit_file", "notebook_edit"} or (name == "write_file" and arguments.get("mode") != "append"):
                     key = read_key(path)
                     if key is not None and key in batch_read_keys:
