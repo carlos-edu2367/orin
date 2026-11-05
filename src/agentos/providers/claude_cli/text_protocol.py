@@ -287,7 +287,7 @@ def _format_single_message_group(
                     else tc
                 )
                 call_id = str(tc.get("id") or f"call_{idx}").strip()
-                safe_call_id = re.sub(r"[^A-Za-z0-9_.\-:]", "_", call_id)
+                safe_call_id = _safe_call_id(call_id)
                 t_name = str(fn.get("name") or tc.get("name") or "").strip()
                 raw_args = fn.get("arguments", tc.get("arguments", {}))
                 parsed_args = _parse_args_dict(raw_args)
@@ -312,7 +312,7 @@ def _format_single_message_group(
                     continue
                 if str(item.get("type") or "").strip().lower() == "tool_use":
                     call_id = str(item.get("id") or f"call_{idx}").strip()
-                    safe_call_id = re.sub(r"[^A-Za-z0-9_.\-:]", "_", call_id)
+                    safe_call_id = _safe_call_id(call_id)
                     t_name = str(item.get("name") or "").strip()
                     parsed_args = _parse_args_dict(
                         item.get("input", item.get("arguments", {}))
@@ -368,13 +368,19 @@ def _format_single_message_group(
     return digest, blocks
 
 
+def _safe_call_id(call_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.\-:]", "_", call_id)
+
+
 def _format_tool_batch_group(
     tool_msgs: Sequence[Mapping[str, Any]],
 ) -> tuple[str, list[dict[str, Any]]]:
     text_entries: list[str] = []
     all_images: list[dict[str, Any]] = []
     for msg in tool_msgs:
-        call_id = str(msg.get("tool_call_id") or msg.get("id") or "call").strip()
+        raw_call_id = str(msg.get("tool_call_id") or msg.get("id") or "call").strip()
+        # Same sanitizing as the tool-use header, so the call and its result keep one id.
+        call_id = _safe_call_id(raw_call_id)
         name = str(msg.get("name") or msg.get("tool_name") or "tool").strip()
         is_err = bool(msg.get("is_error"))
         status = "error" if is_err else str(msg.get("status") or "ok").strip()
