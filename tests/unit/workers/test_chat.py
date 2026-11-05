@@ -189,6 +189,33 @@ def test_unlimited_runtime_setting_removes_the_action_limit(monkeypatch: pytest.
     assert captured["limits"].max_actions is None
 
 
+def test_turns_of_one_conversation_share_a_read_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Settings:
+        def get(self, user_id):
+            return {"max_iterations": None}
+
+    class SkillLibrary:
+        def registry_for(self, user_id, *, agent_id):
+            return None
+
+    monkeypatch.setattr(chat_module, "PostgresSkillLibraryService", lambda engine: SkillLibrary())
+    monkeypatch.setattr(chat_module, "ConversationAgentStore", lambda *args, **kwargs: object())
+    monkeypatch.setattr(chat_module, "PostgresAgentMemoryStore", lambda *args, **kwargs: None)
+    monkeypatch.setattr(chat_module, "search_client_from_environment", lambda: None)
+    captured: list[object] = []
+
+    def capture_session(**kwargs):
+        captured.append(kwargs["read_file_state"])
+        return type("Session", (), {"build_runtime": lambda self: object()})()
+
+    monkeypatch.setattr(chat_module, "TurnSession", capture_session)
+    worker = ChatWorker(Store(), runtime_settings=Settings())
+    worker._runtime_for(dict(TURN))
+    worker._runtime_for(dict(TURN))
+    worker._runtime_for({**TURN, "conversation_id": "conversation-2"})
+    assert captured[0] is captured[1] and captured[2] is not captured[0]
+
+
 def _catalog_engine(*rows: dict[str, object]):
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)

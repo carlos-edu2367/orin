@@ -50,6 +50,7 @@ from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
 from .loop_settings import BudgetMeter, bypass_disabled
+from .read_state import copy_read_state, prepare_carried_state
 from .reminders import ReminderQueue, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
@@ -993,6 +994,7 @@ class TurnSession:
         file_history_root: Path | str | None = None,
         friend_persona_store=None,
         conversation_mode: str | None = None,
+        read_file_state: dict[str, object] | None = None,
     ) -> None:
         self.turn = turn
         self.friend_persona_store = friend_persona_store
@@ -1122,7 +1124,12 @@ class TurnSession:
         self._subagent_records: dict[str, dict[str, object]] = {}
         self._background_subagents: dict[str, dict[str, Any]] = {}
         self._bg_subagent_executor: ThreadPoolExecutor | None = None
-        self._read_file_state: dict[str, object] = {}
+        self._read_file_state: dict[str, object] = read_file_state if read_file_state is not None else {}
+        if read_file_state:
+            try:
+                prepare_carried_state(self._read_file_state, self.workspace)
+            except Exception:
+                pass
         self._todos_state: list[dict[str, str]] = []
         raw_perm = str(turn.get("permission_mode") or "").strip()
         raw_perm = known_permission_mode(raw_perm)
@@ -3223,6 +3230,7 @@ class TurnSession:
         lifecycle_context: Mapping[str, str] | None = None,
         reminders: ReminderQueue | None = None,
         non_interactive_ask: str = "allow",
+        share_read_state: bool | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -3284,7 +3292,11 @@ class TurnSession:
             user_message_id=str(self.turn.get("user_message_id") or "") or None,
             web_answerer=self._web_answer,
             conversation_id=str(self.turn.get("conversation_id") or "") or None,
-            read_file_state=self._read_file_state if (subagents or inherit_context) else {},
+            read_file_state=(
+                self._read_file_state
+                if (subagents if share_read_state is None else share_read_state)
+                else (copy_read_state(self._read_file_state) if inherit_context else {})
+            ),
             todos_state=self._todos_state,
             read_only_mode=read_only_mode,
             default_provider=str(self.turn.get("provider") or "").strip() or None,
@@ -4462,6 +4474,7 @@ class TurnSession:
             self._load_file_mcp_servers(trusted_workspace)
         toolset = self._toolset(
             subagents=self.enable_subagents,
+            share_read_state=True,
             non_interactive_ask=self._non_interactive_ask(),
             code_mode_active=self.turn.get("code_mode") == "code",
             code_mode_permits_push=(

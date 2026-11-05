@@ -36,6 +36,7 @@ from agentos.provider_catalog.opencode import (
     OPENCODE_CLOUD_BASE_URL,
     normalize_opencode_base_url,
 )
+from agentos.agentic.read_state import ConversationReadStates
 from agentos.agentic.runtime import AgenticLimits, AgenticRunResult, AgenticTurnRuntime
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.agentic.events import AgentActivityEventType
@@ -448,6 +449,7 @@ class ChatWorker:
         self._hook_engine = HookEngine(enabled=self._capabilities.plugin_hooks)
         self._state_lock = threading.Lock()
         self._last_heartbeat_mono: float = 0.0
+        self._read_states = ConversationReadStates()
 
     def _refresh_heartbeat_if_due(self) -> None:
         now_mono = time.monotonic()
@@ -1559,6 +1561,7 @@ class ChatWorker:
             catalog_pricing=self._catalog_pricing_for(turn),
             model_capabilities=self._catalog_capabilities_for(turn),
             fallback_provider_factory=lambda model_id: self._provider_transport({**turn, "model_id": model_id}),
+            read_file_state=self._read_states.state_for(str(turn["user_id"]), str(turn["conversation_id"])),
         )
         return session.build_runtime()
 
