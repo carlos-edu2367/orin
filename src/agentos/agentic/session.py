@@ -4146,9 +4146,13 @@ class TurnSession:
 
     def _code_prompt_parts(self, *, toolset: AgentToolset, plan_path: str | None, environment: Mapping[str, str], trusted: bool) -> tuple[str, str]:
         """Code mode's stable prompt and its per-turn context."""
+        from datetime import date
+
+        from agentos.agentic.git_exclude import find_git_dir
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
         from agentos.code_mode import git_context
         from agentos.code_mode.system_prompt import CodePromptOptions, render_code_turn_context
+        from agentos.host_shell import windows_to_posix_path
 
         names = frozenset(item.name for item in toolset.definitions() if item.name in CODE_MODE_CORE_TOOLS)
         public = toolset.name_translator is not None
@@ -4181,6 +4185,9 @@ class TurnSession:
             git_status=git_context.git_status_summary(self.workspace.root) if (self.workspace_is_local and trusted) else "",
             public_names=public,
             host_access=self.host_folders,
+            is_git_repo=find_git_dir(self.workspace.root) is not None,
+            today=date.today().isoformat(),
+            workspace_root_in_shell=windows_to_posix_path(self.workspace.root) if os.name == "nt" and environment.get("shell_dialect") == "posix" else "",
         )
         cli = getattr(self, "cli_options", None)
         if cli is not None and (cli.append_system_prompt or "").strip():

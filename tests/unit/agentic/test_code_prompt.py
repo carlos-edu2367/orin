@@ -149,3 +149,58 @@ def test_public_text_leaves_a_windows_path_alone() -> None:
     """W3-R30: a backslash before a tool id is a path separator, so the id inside a path is not rewritten."""
     assert public_text(r"C:\tools\read_file") == r"C:\tools\read_file"
     assert public_text(r"see C:\tools\read_file and read_file") == r"see C:\tools\read_file and Read"
+
+
+BASH_ENV = {
+    "os": "Windows 11", "os_version": "10.0.26200", "platform": "win32",
+    "shell": r"bash (Git Bash, C:\Program Files\Git\bin\bash.exe)", "shell_dialect": "posix",
+    "python": "3.12", "available": "git, uv",
+}
+
+
+def _context(environment, **extra):
+    return render_code_turn_context(
+        permission_mode="accept_edits", plan_path=None, permits_push=False, environment=environment,
+        workspace_root=r"C:\work", workspace_is_local=True, git_status="", public_names=True, **extra,
+    )
+
+
+def test_the_environment_section_has_the_facts_claude_code_gives() -> None:
+    text = _context(BASH_ENV, is_git_repo=True, today="2026-11-05", workspace_root_in_shell="/c/work")
+    for expected in (
+        "# Environment", "Is a git repository: yes", "Platform: win32", "OS Version: Windows 11 10.0.26200",
+        "Git Bash", "Today's date: 2026-11-05", "/c/work", "/dev/null",
+    ):
+        assert expected in text
+
+
+def test_a_cmd_shell_says_unix_commands_do_not_exist() -> None:
+    text = _context({**BASH_ENV, "shell": "cmd.exe (Git Bash unavailable)", "shell_dialect": "cmd"}, is_git_repo=False)
+    assert "Is a git repository: no" in text
+    assert "cmd.exe has no Unix commands" in text and "/dev/null" not in text
+
+
+def test_the_stable_prompt_names_no_shell_specific_syntax() -> None:
+    assert "nohup" not in render_code_system_prompt(_options())
+
+
+def test_code_mode_turn_session_populates_environment_sections(tmp_path: Path) -> None:
+    runtime = _session(tmp_path, code_mode="code").build_runtime()
+    assert "# Environment" in runtime.volatile_prompt
+    assert "Is a git repository: no" in runtime.volatile_prompt
+    assert "Today's date:" in runtime.volatile_prompt
+    assert "Platform:" in runtime.volatile_prompt
+    assert "OS Version:" in runtime.volatile_prompt
+
+
+def test_code_mode_turn_session_detects_git_repository(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    runtime = _session(tmp_path, code_mode="code").build_runtime()
+    assert "Is a git repository: yes" in runtime.volatile_prompt
+
+
+def test_context_handles_sparse_environment_without_trailing_spaces() -> None:
+    text = _context({"os": "Windows 10"})
+    assert "- OS Version: Windows 10\n" in text or "- OS Version: Windows 10\r\n" in text
+    assert "- OS Version: Windows 10 " not in text
+    assert "Is a git repository: no" in text

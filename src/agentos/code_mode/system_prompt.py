@@ -7,12 +7,13 @@ status) changes as the session moves and travels separately.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 from agentos.agentic.tools.public_names import public_name
 
-PROMPT_VERSION = "orin-code-w3.1"
+PROMPT_VERSION = "orin-code-w3.2"
 
 
 def tool_label(internal: str, public_names: bool) -> str:
@@ -83,7 +84,7 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
         using.append("- Read a file before you edit or overwrite it. An edit to a file you have not read, or that changed since you read it, is refused.")
     using.append("- When several calls do not depend on each other, make them in the same response so they run in parallel.")
     if has("run_command"):
-        using.append(f"- Give every {t('run_command')} call a short description. Start long-running servers in the background (run_in_background) instead of using `&` or `nohup`.")
+        using.append(f"- Give every {t('run_command')} call a short description. Start long-running servers in the background (run_in_background) instead of backgrounding them in the shell.")
     if has("search_code"):
         if has("project_map"):
             using.append(f"- {t('search_code')} finds code by meaning and {t('project_map')} summarizes the project's structure; use them before broad text searches.")
@@ -164,6 +165,9 @@ def render_code_turn_context(
     git_status: str,
     public_names: bool,
     host_access: bool = False,
+    is_git_repo: bool = False,
+    today: str = "",
+    workspace_root_in_shell: str = "",
 ) -> str:
     exit_label = f"`{tool_label('exit_plan_mode', public_names)}`"
     lines = ["# Session", f"- {_mode_text(permission_mode, plan_path, exit_label, host_access=host_access)}"]
@@ -174,14 +178,55 @@ def render_code_turn_context(
         if workspace_is_local
         else "a private workspace for this conversation"
     )
+    in_shell = f" In Bash it is {workspace_root_in_shell}." if workspace_root_in_shell else ""
+    is_git = "yes" if is_git_repo else "no"
+    platform_name = environment.get("platform") or sys.platform
+    os_name = environment.get("os", "unknown")
+    os_version = (environment.get("os_version") or "").strip()
+    os_display = f"{os_name} {os_version}".strip() if os_version else os_name
+    shell_label = tool_label("run_command", public_names)
+    shell_name = environment.get("shell", "unknown")
+
     lines += [
         "",
         "# Environment",
-        f"- Working directory: {workspace_root} ({where}). File paths are relative to it.",
-        f"- Operating system: {environment.get('os', 'unknown')}",
-        f"- {tool_label('run_command', public_names)} runs through: {environment.get('shell', 'unknown')}; use that shell's syntax.",
-        f"- Python: {environment.get('python', 'unknown')}. Also on PATH: {environment.get('available', 'unknown')}.",
+        f"- Working directory: {workspace_root} ({where}). File paths are relative to it.{in_shell}",
+        f"- Is a git repository: {is_git}",
+        f"- Platform: {platform_name}",
+        f"- OS Version: {os_display}",
+        f"- {shell_label} runs through: {shell_name}; use that shell's syntax.",
     ]
+
+    dialect = environment.get("shell_dialect")
+    if not dialect:
+        shell_lower = str(environment.get("shell", "")).lower()
+        if "cmd" in shell_lower:
+            dialect = "cmd"
+        elif "bash" in shell_lower or "sh" in shell_lower:
+            dialect = "posix"
+
+    is_windows = (
+        environment.get("platform") == "win32"
+        or "windows" in str(environment.get("os", "")).lower()
+        or "git bash" in str(environment.get("shell", "")).lower()
+    )
+
+    if dialect == "posix" and is_windows:
+        lines.append(
+            '- Use Unix shell syntax: forward slashes, /dev/null (not NUL), $VAR (not %VAR%); quote Windows paths ("C:\\...").'
+        )
+    elif dialect == "cmd":
+        lines.append(
+            "- cmd.exe has no Unix commands (cat, ls, grep, head, tail, nohup, & for background): "
+            "use the dedicated file tools, cmd syntax, or run_in_background."
+        )
+
+    lines.append(
+        f"- Python: {environment.get('python', 'unknown')}. Also on PATH: {environment.get('available', 'unknown')}."
+    )
+    if today:
+        lines.append(f"- Today's date: {today}")
+
     if git_status.strip():
         lines += ["", "# Git status", "```", git_status.strip(), "```"]
     return "\n".join(lines)
