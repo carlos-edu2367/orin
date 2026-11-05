@@ -93,6 +93,21 @@ class ReadTools:
         except Exception:
             return ""
 
+    def read_key(self, path: str) -> str | None:
+        """Normalised key under which a read of ``path`` is recorded, or ``None`` if it does not resolve."""
+        try:
+            return self.workspace.key(self.workspace.resolve(path))
+        except Exception:
+            return None
+
+    def has_read(self, path: str) -> bool:
+        """Whether a read of ``path`` has been recorded."""
+        key = self.read_key(path)
+        if key is None:
+            return False
+        with self._read_file_lock:
+            return key in self._read_file_state
+
     def _note_memory_for(self, target: Path) -> None:
         """A read below a directory brings in its instruction files and matching rules (once each)."""
         tracker = self.memory_tracker

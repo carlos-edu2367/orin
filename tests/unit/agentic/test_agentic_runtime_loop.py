@@ -616,7 +616,7 @@ def test_a_write_call_is_not_reordered_around_read_only_calls_that_follow_it() -
                         'data: {"choices":[{"delta":{"tool_calls":['
                         '{"index":0,"id":"call-1","function":{"name":"write_file","arguments":"{}"}},'
                         '{"index":1,"id":"call-2","function":{"name":"read_file","arguments":"{}"}},'
-                        '{"index":2,"id":"call-3","function":{"name":"read_file","arguments":"{}"}}'
+                        '{"index":2,"id":"call-3","function":{"name":"read_file","arguments":"{\\"path\\":\\"b\\"}"}}'
                         ']},"finish_reason":"tool_calls"}]}',
                         "data: [DONE]",
                     ],

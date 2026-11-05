@@ -136,6 +136,7 @@ CONTINUE_AFTER_OUTPUT_LIMIT = (
     "do not repeat what you already wrote, do not apologize and do not summarize."
 )
 INTERRUPTED_TOOL_RESULT = "Interrupted by user: this tool call was not run."
+SAME_BATCH_READ_MESSAGE = "You read this file in the same batch; look at the read result before editing it."
 
 VERIFY_REQUIRED_MESSAGE = (
     "[Sistema] Você alterou o workspace nesta tarefa e ainda não verificou o resultado. Antes de responder, "
@@ -2266,10 +2267,51 @@ class AgenticTurnRuntime:
             for i, (_, name, arguments, error) in enumerate(prepared)
         ]
 
+        # An identical call later in the same batch runs once: the later copy
+        # shares the first one's result. Polling tools are never merged.
+        first_index: list[int | None] = [None] * len(prepared)
+        first_seen: dict[str, int] = {}
+        for i, (_, name, arguments, error) in enumerate(prepared):
+            if error is not None or arguments is None:
+                continue
+            sig = self._signature(name, arguments)
+            if name in {"check_subagent", "read_process_output", "preview_logs"}:
+                continue
+            if sig in first_seen:
+                if not duplicate[i] and repeated[i] is None:
+                    first_index[i] = first_seen[sig]
+            else:
+                first_seen[sig] = i
+
+        # An edit of a file that was only read earlier in this same batch
+        # would run blind (the model has not seen the read result yet).
+        # Decided before anything runs, from the state at the start of the batch.
+        same_batch_read = [False] * len(prepared)
+        read_key = getattr(self.toolset, "read_key", None)
+        has_read = getattr(self.toolset, "has_read", None)
+        if callable(read_key) and callable(has_read):
+            batch_read_keys: set[str] = set()
+            for i, (_, name, arguments, error) in enumerate(prepared):
+                if error is not None or not isinstance(arguments, Mapping):
+                    continue
+                path = arguments.get("path")
+                if not isinstance(path, str) or not path:
+                    continue
+                if name == "read_file":
+                    key = read_key(path)
+                    if key is not None and not has_read(path):
+                        batch_read_keys.add(key)
+                elif name in {"edit_file", "notebook_edit"} or (name == "write_file" and arguments.get("mode") != "append"):
+                    key = read_key(path)
+                    if key is not None and key in batch_read_keys:
+                        same_batch_read[i] = True
+
         eligible = [
             error is None
             and not duplicate[i]
             and repeated[i] is None
+            and first_index[i] is None
+            and not same_batch_read[i]
             and ((callable(is_read_only) and is_read_only(name)) or name in {"run_subagent", "ask_agent", "check_subagent"})
             for i, (_, name, _, error) in enumerate(prepared)
         ]
@@ -2392,7 +2434,22 @@ class AgenticTurnRuntime:
                 break
             if not eligible[index]:
                 _, name, arguments, error = prepared[index]
-                if duplicate[index]:
+                if same_batch_read[index]:
+                    outcomes[index] = ToolOutcome(
+                        "failed", "Edição recusada: arquivo lido neste mesmo lote",
+                        SAME_BATCH_READ_MESSAGE, {}, "READ_IN_SAME_BATCH",
+                    )
+                elif first_index[index] is not None:
+                    first = outcomes.get(first_index[index])
+                    if first is None:
+                        outcomes[index] = interrupted_outcome()
+                    else:
+                        outcomes[index] = ToolOutcome(
+                            first.status, first.summary,
+                            f"{first.content}\n\n[identical to an earlier call in this batch; it ran once]",
+                            dict(first.payload), first.error_code,
+                        )
+                elif duplicate[index]:
                     outcomes[index] = duplicate_outcome(name, arguments)
                 elif repeated[index] is not None:
                     outcomes[index] = repeated[index]
@@ -2464,7 +2521,7 @@ class AgenticTurnRuntime:
                 or (callable(is_mutating_fn) and is_mutating_fn(name))
             ):
                 self._failed_signatures.clear()
-            elif outcome.status == "failed" and not duplicate[index] and not outcome.payload.get("transient"):
+            elif outcome.status == "failed" and not duplicate[index] and not outcome.payload.get("transient") and outcome.error_code != "READ_IN_SAME_BATCH":
                 self._failed_signatures[sig] = outcome.content
             self._life(
                 turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
