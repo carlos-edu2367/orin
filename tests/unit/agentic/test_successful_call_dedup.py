@@ -154,6 +154,24 @@ def test_the_repeated_read_still_gets_the_original_content() -> None:
     assert "conteudo #1" in seen[-1]
 
 
+class _ImageToolset(_Toolset):
+    READ_ONLY = {"view_file"}
+
+    def invoke(self, name, arguments):
+        self.invocations.append((name, str(arguments)))
+        return ToolOutcome("succeeded", "visto", "[imagem]", {}, images=[{"type": "image", "media_type": "image/png", "data": "AAAA"}])
+
+
+def test_reopening_an_image_reaches_the_tool_again_and_brings_the_pixels() -> None:
+    toolset = _ImageToolset()
+    runtime = AgenticTurnRuntime(store=object(), provider=object(), toolset=toolset)
+    call = {"id": "c1", "name": "view_file", "arguments": '{"path": "dot.png"}'}
+    runtime._run_toolset(_turn(), [call])
+    second = runtime._run_toolset(_turn(), [{**call, "id": "c2"}])
+    assert len(toolset.invocations) == 2
+    assert second[0]["images"]
+
+
 def test_a_repeated_read_counts_as_redundant_in_the_metrics() -> None:
     """The measurement must still see the model asking twice."""
     toolset = _Toolset()
