@@ -444,3 +444,52 @@ def test_file_checkpoint_store_skips_files_larger_than_max_checkpoint_file_bytes
 
     large_entry = store.snapshot_before_write("turn-1", "huge.bin")
     assert large_entry is None
+
+
+def _edit(session: Any, inv: str, status: str) -> None:
+    session.emit_lifecycle(session.turn, "tool_started", tool_name="edit_file", invocation_id=inv, path="a.py")
+    session.emit_lifecycle(session.turn, "tool_finished", tool_name="edit_file", invocation_id=inv, status=status,
+                           summary="edit", tool_payload={}, tool_arguments={"path": "a.py"})
+
+
+def _pytest(session: Any, inv: str, failed_tests: list[str]) -> None:
+    failed = bool(failed_tests)
+    content = "exit=1\n" + "\n".join(f"FAILED tests/test_x.py::{t} - AssertionError" for t in failed_tests) if failed else "exit=0\n1 passed"
+    session.emit_lifecycle(session.turn, "tool_started", tool_name="run_command", invocation_id=inv, command="pytest -q")
+    session.emit_lifecycle(session.turn, "tool_finished", tool_name="run_command", invocation_id=inv, status="succeeded",
+                           summary="$ pytest -q", tool_payload={"command": "pytest -q", "failed": failed, "exit_code": 1 if failed else 0},
+                           tool_arguments={"command": "pytest -q"}, tool_content=content)
+
+
+def test_a_failed_edit_does_not_enter_implementing(tmp_path: Path) -> None:
+    session, _store, _ = _make_minimal_session(tmp_path)
+    session._code_mode_stage = "validating_done"
+    _edit(session, "e1", "failed")
+    assert session._code_mode_stage == "validating_done"
+    _edit(session, "e2", "succeeded")
+    assert session._code_mode_stage == "implementing"
+
+
+def test_a_failure_that_existed_before_any_edit_is_not_fixing(tmp_path: Path) -> None:
+    session, store, _ = _make_minimal_session(tmp_path)
+    _pytest(session, "v1", ["test_old"])
+    assert session._code_mode_stage != "fixing"
+    _edit(session, "e1", "succeeded")
+    _pytest(session, "v2", ["test_old"])
+    assert session._code_mode_stage != "fixing"
+    assert store.events[-1][2].get("preexisting") is True
+
+
+def test_a_new_failure_after_an_edit_is_fixing(tmp_path: Path) -> None:
+    session, _store, _ = _make_minimal_session(tmp_path)
+    _pytest(session, "v1", ["test_old"])
+    _edit(session, "e1", "succeeded")
+    _pytest(session, "v2", ["test_old", "test_new"])
+    assert session._code_mode_stage == "fixing"
+
+
+def test_a_failure_with_no_reference_before_the_edit_is_fixing(tmp_path: Path) -> None:
+    session, _store, _ = _make_minimal_session(tmp_path)
+    _edit(session, "e1", "succeeded")
+    _pytest(session, "v1", ["test_a"])
+    assert session._code_mode_stage == "fixing"

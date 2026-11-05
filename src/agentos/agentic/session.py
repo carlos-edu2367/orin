@@ -30,6 +30,7 @@ from agentos.installation import orin_paths
 from agentos.agentic.tools.public_names import public_subagent_type
 from agentos.code_mode.file_history import FileHistory
 from agentos.code_mode.models import INTERNAL_PERMISSION_MODES, known_permission_mode, public_permission_mode
+from agentos.code_mode.verification_baseline import VerificationBaseline, verification_observations
 from agentos.settings import EffectiveSettings, detect_changes, empty_settings, load_effective_settings
 from agentos.settings.paths import claude_user_dir, orin_user_dir, workspace_grants_file
 from agentos.hooks import (
@@ -1147,6 +1148,8 @@ class TurnSession:
         )
         self._in_plan_mode: bool = self.permission_mode == "plan_mode"
         self._code_mode_stage: str = "planning" if self._in_plan_mode else "implementing"
+        self._verification_baseline: VerificationBaseline = VerificationBaseline()
+        self._code_mode_edit_succeeded: bool = False
         self.main_agent_id = store.main_agent_id(turn) if hasattr(store, "main_agent_id") else str(turn.get("agent_id", "agent:main"))
         from .cli_turn import cli_options_for
 
@@ -1345,11 +1348,7 @@ class TurnSession:
                 parent_agent_id=self.main_agent_id if is_subagent else None,
             )
             if self.turn.get("code_mode") == "code":
-                if name in {"write_file", "edit_file", "notebook_edit"}:
-                    if self._code_mode_stage != "implementing":
-                        self._code_mode_stage = "implementing"
-                        self._record(AgentActivityEventType.CODE_MODE_STAGE_CHANGED, "Implementando alteração", {"stage": "implementing"}, agent_id=actor)
-                elif name == "verify_project" or (
+                if name == "verify_project" or (
                     name in {"run_command", "powershell"} and is_verification_command(str(payload.get("command") or ""))
                 ):
                     if self._code_mode_stage != "validating":
@@ -1458,6 +1457,16 @@ class TurnSession:
                         decision_payload,
                         agent_id=actor,
                     )
+                elif name in {"write_file", "edit_file", "notebook_edit"} and status == "succeeded":
+                    self._code_mode_edit_succeeded = True
+                    if self._code_mode_stage != "implementing":
+                        self._code_mode_stage = "implementing"
+                        self._record(
+                            AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
+                            "Implementando alteração",
+                            {"stage": "implementing"},
+                            agent_id=actor,
+                        )
                 elif name in {"todo_write", "task_create", "task_update"} and status == "succeeded":
                     self._code_mode_stage = "implementing"
                     self._record(
@@ -1480,17 +1489,67 @@ class TurnSession:
                     name in {"run_command", "powershell"}
                     and is_verification_command(str(extra.get("command") or tool_arguments.get("command") or ""))
                 ):
+                    observations = verification_observations(
+                        name,
+                        {**extra, "status": status},
+                        str(payload.get("tool_content") or ""),
+                        tool_arguments,
+                    )
+                    baseline = getattr(self, "_verification_baseline", None)
+                    if baseline is None:
+                        baseline = VerificationBaseline()
+                        self._verification_baseline = baseline
+                    after_edit = getattr(self, "_code_mode_edit_succeeded", False)
+                    observed = [
+                        baseline.observe(k, failed=f, fingerprint=fp, after_edit=after_edit)
+                        for k, f, fp in observations
+                    ]
+                    new_failure = any(observed)
+
                     cmd_failed = (
                         status != "succeeded"
                         or bool(extra.get("failed"))
                         or (name == "verify_project" and extra.get("all_passed") is False)
                     )
-                    event = AgentActivityEventType.CODE_MODE_STAGE_CHANGED if cmd_failed else AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED
-                    val_summary = "Corrigindo falha de validação" if cmd_failed else "Validação concluída"
-                    stage = "fixing" if cmd_failed else "validating"
-                    if cmd_failed or self._code_mode_stage != "validating_done":
-                        self._code_mode_stage = "fixing" if cmd_failed else "validating_done"
-                        self._record(event, val_summary, {"stage": stage, "status": "failed" if cmd_failed else status, "error_code": payload.get("error_code")}, agent_id=actor)
+                    if cmd_failed:
+                        if new_failure:
+                            self._code_mode_stage = "fixing"
+                            self._record(
+                                AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
+                                "Corrigindo falha de validação",
+                                {
+                                    "stage": "fixing",
+                                    "status": "failed",
+                                    "error_code": payload.get("error_code"),
+                                },
+                                agent_id=actor,
+                            )
+                        else:
+                            self._code_mode_stage = "validating_done"
+                            self._record(
+                                AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED,
+                                "Validação concluída com falhas já existentes",
+                                {
+                                    "stage": "validating",
+                                    "status": "failed",
+                                    "preexisting": True,
+                                    "error_code": payload.get("error_code"),
+                                },
+                                agent_id=actor,
+                            )
+                    else:
+                        if self._code_mode_stage != "validating_done":
+                            self._code_mode_stage = "validating_done"
+                            self._record(
+                                AgentActivityEventType.CODE_MODE_VALIDATION_FINISHED,
+                                "Validação concluída",
+                                {
+                                    "stage": "validating",
+                                    "status": status,
+                                    "error_code": payload.get("error_code"),
+                                },
+                                agent_id=actor,
+                            )
             return
         if state == "waiting_tool":
             self._record(AgentActivityEventType.TOOL_REQUESTED, "Preparando ferramentas", {**base, "count": payload.get("count")}, agent_id=actor)
