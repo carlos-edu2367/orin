@@ -43,10 +43,12 @@ class TurnQualityCounters:
     # None means no provider ever reported cache usage for this turn, which is
     # not the same as "reported zero cached tokens".
     cached_input_tokens: int | None = None
+    cache_creation_input_tokens: int | None = None
     _succeeded: set[str] = field(default_factory=set, repr=False)
     _pending_input: int | None = field(default=None, repr=False)
     _pending_output: int | None = field(default=None, repr=False)
     _pending_cached: int | None = field(default=None, repr=False)
+    _pending_cache_creation: int | None = field(default=None, repr=False)
 
     def note_call(self, name: str, arguments: Mapping[str, object], status: str) -> None:
         """Record one tool invocation and whether it repeated earlier work.
@@ -65,7 +67,14 @@ class TurnQualityCounters:
     def note_iteration(self) -> None:
         self.iterations += 1
 
-    def note_usage(self, *, input_tokens: int | None, output_tokens: int | None, cached_input_tokens: int | None) -> None:
+    def note_usage(
+        self,
+        *,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cached_input_tokens: int | None,
+        cache_creation_input_tokens: int | None = None,
+    ) -> None:
         """Keep the latest known value per field within one provider call.
 
         Some streaming protocols send input usage at the start of a call and
@@ -78,6 +87,8 @@ class TurnQualityCounters:
             self._pending_output = output_tokens
         if cached_input_tokens is not None:
             self._pending_cached = cached_input_tokens
+        if cache_creation_input_tokens is not None:
+            self._pending_cache_creation = cache_creation_input_tokens
 
     def settle_provider_call(self) -> None:
         """Fold one provider call's usage into the turn total.
@@ -90,7 +101,9 @@ class TurnQualityCounters:
         self.output_tokens += self._pending_output or 0
         if self._pending_cached is not None:
             self.cached_input_tokens = (self.cached_input_tokens or 0) + self._pending_cached
-        self._pending_input = self._pending_output = self._pending_cached = None
+        if self._pending_cache_creation is not None:
+            self.cache_creation_input_tokens = (self.cache_creation_input_tokens or 0) + self._pending_cache_creation
+        self._pending_input = self._pending_output = self._pending_cached = self._pending_cache_creation = None
 
     def as_row(self) -> dict[str, object]:
         return {
@@ -100,6 +113,7 @@ class TurnQualityCounters:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cached_input_tokens": self.cached_input_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
         }
 
 

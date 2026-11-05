@@ -1109,6 +1109,7 @@ class AgenticTurnRuntime:
                                 input_tokens=event.usage.input_tokens,
                                 output_tokens=event.usage.output_tokens,
                                 cached_input_tokens=event.usage.cached_input_tokens,
+                                cache_creation_input_tokens=getattr(event.usage, "cache_creation_input_tokens", None),
                             )
                     elif event.kind is StreamKind.FINISH:
                         flush_thinking_buffer()
@@ -1571,9 +1572,16 @@ class AgenticTurnRuntime:
         provider_name = str(turn.get("provider", "")).lower()
         if provider_name == "anthropic":
             from agentos.provider_catalog.claude_code import is_claude_cli_bridge_url
+            import agentos.providers.claude_cli.provider as _cli_provider_mod
 
             if is_claude_cli_bridge_url(getattr(self.provider, "base_url", None)):
-                return False
+                return bool(
+                    _cli_provider_mod.native_tools_enabled(
+                        conversation_mode=str(turn.get("conversation_mode") or ""),
+                        code_mode=bool(turn.get("code_mode")),
+                    )
+                    or _cli_provider_mod.TEXT_CACHE_OK
+                )
         if self.counters.cached_input_tokens:
             return True
         return provider_name in PREFIX_CACHING_PROVIDERS

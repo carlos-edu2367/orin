@@ -190,7 +190,7 @@ def test_http_provider_stream_transport_forwards_cancel_check_to_claude_bridge(m
     assert captured.get("cancel_check") is cancel_fn
 
 
-def test_runtime_prefix_caching_is_false_on_claude_cli_bridge_and_ages_tool_results() -> None:
+def test_runtime_prefix_caching_is_true_on_claude_cli_bridge_when_cache_ok() -> None:
     class _StubProvider:
         base_url = CLAUDE_CODE_LOCAL_BASE_URL
 
@@ -211,7 +211,7 @@ def test_runtime_prefix_caching_is_false_on_claude_cli_bridge_and_ages_tool_resu
             max_context_tokens=50_000,
         ),
     )
-    assert rt._prefix_caching({"provider": "anthropic"}) is False
+    assert rt._prefix_caching({"provider": "anthropic"}) is True
 
     cloud_rt = AgenticTurnRuntime(
         store=_DummyStore(),
@@ -384,13 +384,10 @@ def test_chat_worker_child_provider_keeps_anthropic_on_claude_cli_subscription_a
     worker._child_provider_for_turn(turn, "claude-haiku-4-5-20251001")
     assert captured_calls[-1] == ("u1", "anthropic", "claude-haiku-4-5-20251001")
 
-    # Also verify context window capping at 200_000 for Claude CLI bridge unless [1m] is in model_id
+    # Verify context window comes directly from catalog (1_000_000) without 200_000 cap
+    assert worker._context_window_for(turn) == 1_000_000
     max_ctx = worker._max_context_tokens_for(turn)
-    assert max_ctx <= 200_000
-
-    turn_1m = {"user_id": "u1", "provider": "anthropic", "model_id": "claude-opus-4-7[1m]"}
-    max_ctx_1m = worker._max_context_tokens_for(turn_1m)
-    assert max_ctx_1m > 200_000
+    assert max_ctx > 200_000
 
 
 def test_stream_claude_code_bridge_parses_resets_at_into_retry_after_and_isolates_cwd_and_semaphore(

@@ -57,7 +57,8 @@ _CLOUD_HOSTS = frozenset({"api.anthropic.com", "anthropic.com"})
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 TEXT_CACHE_OK: bool = True
-_FALLBACK_TEXT_BUDGET = 160_000
+_FALLBACK_TEXT_BUDGET = 200_000
+_MIN_TEXT_BUDGET = 50_000
 
 
 def text_context_budget(env: Mapping[str, str] | None = None) -> int | None:
@@ -68,7 +69,7 @@ def text_context_budget(env: Mapping[str, str] | None = None) -> int | None:
         try:
             parsed = int(raw)
             if parsed > 0:
-                return parsed
+                return max(_MIN_TEXT_BUDGET, parsed)
         except ValueError:
             pass
     if not TEXT_CACHE_OK:
@@ -78,16 +79,15 @@ def text_context_budget(env: Mapping[str, str] | None = None) -> int | None:
 
 def native_tools_enabled(
     *,
-    mode: str = "code",
+    conversation_mode: str | None = None,
+    code_mode: bool = False,
+    mode: str | None = None,
     env: Mapping[str, str] | None = None,
     version: tuple[int, int, int] | None = None,
 ) -> bool:
-    """Determine whether the native MCP tool loop is enabled (full circuit breaker enters in Task 12)."""
-    source = os.environ if env is None else env
-    flag = str(source.get("ORIN_CLAUDE_CLI_NATIVE_TOOLS") or "auto").strip().lower()
-    if flag in {"0", "off", "false", "no"}:
-        return False
-    return True
+    """Determine whether the native MCP tool loop is enabled (full body enters in Task 12)."""
+    del conversation_mode, code_mode, mode, env, version
+    return False
 
 
 def normalize_anthropic_base_url(value: str) -> str:

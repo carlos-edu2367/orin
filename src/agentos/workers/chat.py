@@ -939,8 +939,20 @@ class ChatWorker:
         window = int(context_window) if context_window else None
         if str(turn.get("provider") or "") == "anthropic":
             base_url = str(row.get("base_url") or "") or self._provider_base_url("anthropic", user_id=str(turn.get("user_id") or ""))
-            if is_claude_cli_bridge_url(base_url) and "[1m]" not in str(turn.get("model_id") or "").lower():
-                window = min(window, 200_000) if window else 200_000
+            if is_claude_cli_bridge_url(base_url):
+                from agentos.providers.claude_cli.catalog import context_window_for as _cli_context_window_for
+                import agentos.providers.claude_cli.provider as _cli_provider_mod
+
+                if window is None:
+                    window = _cli_context_window_for(str(turn.get("model_id") or ""))
+                is_native = _cli_provider_mod.native_tools_enabled(
+                    conversation_mode=str(turn.get("conversation_mode") or ""),
+                    code_mode=bool(turn.get("code_mode")),
+                )
+                if not is_native:
+                    budget = _cli_provider_mod.text_context_budget()
+                    if budget is not None:
+                        window = min(window, budget) if window else budget
         return window
 
     def _model_sees_images(self, turn: dict[str, object]) -> bool:
