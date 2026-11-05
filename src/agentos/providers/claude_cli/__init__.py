@@ -32,6 +32,14 @@ from agentos.providers.claude_cli.errors import (
     classify_result_error,
     format_reset_local,
 )
+from agentos.providers.claude_cli.native_loop import (
+    NATIVE_LOOP_VALIDATED,
+    PERSISTENT_STDIN_OK,
+    NativeTurnHandle,
+    NativeTurnOutcome,
+    NativeTurnRequest,
+    NativeTurnSink,
+)
 from agentos.providers.claude_cli.provider import (
     ANTHROPIC_CLOUD_BASE_URL,
     CLAUDE_CODE_LOCAL_BASE_URL,

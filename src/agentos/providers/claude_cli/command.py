@@ -201,9 +201,16 @@ def claude_cli_version(
     creationflags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     )
+    import sys
+
+    version_cmd = (
+        [sys.executable, resolved, "--version"]
+        if str(resolved).lower().endswith(".py")
+        else [resolved, "--version"]
+    )
     try:
         completed = subprocess.run(
-            [resolved, "--version"],
+            version_cmd,
             env=isolated_env,
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -378,6 +385,23 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
         if item in {"--mcp-config", "--system-prompt-file"}:
             skip_next = True
     return redacted
+
+
+def user_event_line(content: str | list[dict[str, object]]) -> str:
+    """Format a user message for `--input-format stream-json` stdin."""
+    return (
+        json.dumps(
+            {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": content,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
 
 
 def build_claude_command(

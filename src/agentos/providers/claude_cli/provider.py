@@ -146,7 +146,19 @@ def is_anthropic_cloud(base_url: str | None) -> bool:
 class CliSlots:
     """Optional concurrency limiter for `claude -p` processes (`ORIN_CLI_MAX_PROCESSES`)."""
 
-    def __init__(self, limit: int | None = None) -> None:
+    def __init__(
+        self,
+        limit: int | None = None,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        if limit is None and env is not None:
+            raw = str(env.get("ORIN_CLI_MAX_PROCESSES") or "").strip()
+            if raw:
+                try:
+                    limit = int(raw)
+                except ValueError:
+                    limit = None
         self.limit: int | None = (
             int(limit)
             if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1
@@ -234,6 +246,7 @@ def log_cli_run(
     duration_s: float,
     stderr_tail: str,
     mode: Literal["text", "native"],
+    usage: Any = None,
 ) -> None:
     """Log one structured diagnostic line per `claude -p` execution with redacted paths."""
     redacted_argv = redact_argv(argv)
@@ -242,11 +255,11 @@ def log_cli_run(
         or requested_model
         or "default"
     )
-    usage = result.usage if result is not None else None
-    in_tok = usage.input_tokens if usage is not None else 0
-    out_tok = usage.output_tokens if usage is not None else 0
-    cache_read = usage.cache_read_input_tokens if usage is not None else 0
-    cache_creation = usage.cache_creation_input_tokens if usage is not None else 0
+    effective_usage = usage if usage is not None else (result.usage if result is not None else None)
+    in_tok = effective_usage.input_tokens if effective_usage is not None else 0
+    out_tok = effective_usage.output_tokens if effective_usage is not None else 0
+    cache_read = effective_usage.cache_read_input_tokens if effective_usage is not None else 0
+    cache_creation = effective_usage.cache_creation_input_tokens if effective_usage is not None else 0
 
     lines = (stderr_tail or "").splitlines()[-20:]
     tail = "\n".join(lines)
@@ -353,6 +366,26 @@ class ClaudeCliProvider:
         )
         self._last_system_prompt = content
         return self._prompt_file_path
+
+    def _resolve_binary(self) -> str | None:
+        return _resolve_binary_for_provider(self._binary, self._env)
+
+    def _effective_slots(self) -> CliSlots:
+        return self._slots if self._slots is not None else CLI_SLOTS
+
+    def native_turn_available(self, turn: Mapping[str, object]) -> bool:
+        return native_tools_enabled(
+            conversation_mode=str(turn.get("conversation_mode") or ""),
+            code_mode=bool(turn.get("code_mode")),
+            env=self._env,
+        )
+
+    def start_native_turn(self, request: Any) -> Any:
+        from agentos.providers.claude_cli.native_loop import (
+            start_native_turn_for_provider,
+        )
+
+        return start_native_turn_for_provider(self, request)
 
     def close(self) -> None:
         if self._prompt_file_path is not None:

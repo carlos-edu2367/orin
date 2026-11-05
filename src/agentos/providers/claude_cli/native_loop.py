@@ -1,0 +1,686 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from typing import Any, Callable, Mapping, Protocol, Sequence
+
+from agentos.providers.claude_cli.command import (
+    IDLE_TIMEOUT_SECONDS,
+    VALIDATED_CLI_RANGE,
+    build_claude_command,
+    build_isolated_claude_env,
+    claude_cli_version,
+    is_version_validated,
+    user_event_line,
+    write_owner_only_temp,
+)
+from agentos.providers.claude_cli.errors import (
+    NativeLoopUnavailable,
+    ProviderTransportError,
+    RateLimitState,
+    classify_result_error,
+)
+from agentos.providers.claude_cli.stream import (
+    CliEvent,
+    CliEventKind,
+    CliInit,
+    CliResult,
+    CliUsage,
+    StreamJsonParser,
+)
+from agentos.providers.cli_tools_mcp import (
+    BackgroundTurnToolServer,
+    McpToolSpec,
+    ToolCallRequest,
+    ToolCallResult,
+    ToolExecutor,
+    TurnToolServer,
+)
+
+PERSISTENT_STDIN_OK: bool = True
+NATIVE_LOOP_VALIDATED: bool = True
+
+
+@dataclass(slots=True)
+class NativeTurnRequest:
+    model: str
+    system_prompt: str
+    user_content: list[dict[str, Any]]
+    executor: ToolExecutor
+    cancel_check: Callable[[], bool]
+    deadline_monotonic: float
+    max_turns: int
+    cwd: Path
+    effort: str | None = None
+    fallback_model: str | None = None
+    max_output_tokens: int | None = None
+    autocompact: str | int | None = None
+    session: Any | None = None
+    server_name: str = "orin"
+
+
+class NativeTurnSink(Protocol):
+    def on_init(self, init: CliInit) -> None: ...
+    def on_text(self, text: str) -> None: ...
+    def on_thinking(self, text: str) -> None: ...
+    def on_tool_use_started(self, tool_use_id: str, tool_name: str) -> None: ...
+    def on_tool_input_progress(
+        self, tool_use_id: str, tool_name: str, bytes_received: int
+    ) -> None: ...
+    def on_tool_use_complete(
+        self, tool_use_id: str, tool_name: str, tool_input: Mapping[str, Any]
+    ) -> None: ...
+    def on_assistant_usage(self, message_id: str, usage: CliUsage) -> None: ...
+    def on_compacted(self) -> None: ...
+    def on_rate_limit(self, state: RateLimitState) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class NativeTurnOutcome:
+    result: CliResult
+    init: CliInit | None
+    final_text: str
+    exit_code: int | None
+
+
+class _SlotReleasingExecutor:
+    """Wraps a `ToolExecutor` so the CLI slot is released while a tool executes (preventing parent/subagent deadlock)."""
+
+    def __init__(self, inner: ToolExecutor) -> None:
+        self._inner = inner
+        self.handle: NativeTurnHandle | None = None
+
+    def list_tools(self) -> Sequence[McpToolSpec]:
+        return self._inner.list_tools()
+
+    def call_tool(self, request: ToolCallRequest) -> ToolCallResult:
+        handle = self.handle
+        if handle is not None:
+            handle._before_tool_call()
+        try:
+            return self._inner.call_tool(request)
+        finally:
+            if handle is not None:
+                handle._after_tool_call()
+
+
+class NativeTurnHandle:
+    """Manages one active `claude -p` process and its loopback MCP server for a turn."""
+
+    def __init__(
+        self,
+        *,
+        proc: Any,
+        cmd: list[str],
+        requested_model: str,
+        server_name: str,
+        bg_server: BackgroundTurnToolServer,
+        temp_files: Sequence[Path],
+        slots: Any,
+        cancel_check: Callable[[], bool],
+        deadline_monotonic: float,
+        clock: Callable[[], float],
+        kill_tree_fn: Callable[[Any], None],
+        log_run_fn: Callable[..., None],
+        stdout_queue: queue.Queue[str | None],
+        stderr_chunks: list[str],
+        stderr_thread: threading.Thread,
+        t0: float,
+    ) -> None:
+        self._proc = proc
+        self._cmd = cmd
+        self._requested_model = requested_model
+        self._server_name = server_name
+        self._bg_server = bg_server
+        self._temp_files = list(temp_files)
+        self._slots = slots
+        self._cancel_check = cancel_check
+        self._deadline_monotonic = deadline_monotonic
+        self._clock = clock
+        self._kill_tree_fn = kill_tree_fn
+        self._log_run_fn = log_run_fn
+        self._stdout_queue = stdout_queue
+        self._stderr_chunks = stderr_chunks
+        self._stderr_thread = stderr_thread
+        self._t0 = t0
+
+        self._parser = StreamJsonParser()
+        self._tool_bytes: dict[str, int] = {}
+        self._tool_names: dict[str, str] = {}
+        self._had_visible_output = False
+        self._exit_code: int | None = None
+
+        self._slot_lock = threading.Lock()
+        self._active_tool_calls = 0
+        self._holds_slot = True
+        self._closed = False
+        self._close_lock = threading.Lock()
+
+    @property
+    def mcp_url(self) -> str:
+        return self._bg_server.handle.url
+
+    @property
+    def in_flight(self) -> int:
+        with self._slot_lock:
+            active = self._active_tool_calls
+        return max(active, self._bg_server.handle.in_flight)
+
+    def is_process_alive(self) -> bool:
+        return self._proc.poll() is None
+
+    def _before_tool_call(self) -> None:
+        with self._slot_lock:
+            self._active_tool_calls += 1
+            if self._active_tool_calls == 1 and self._holds_slot:
+                self._slots.release()
+                self._holds_slot = False
+
+    def _after_tool_call(self) -> None:
+        need_reacquire = False
+        with self._slot_lock:
+            self._active_tool_calls = max(0, self._active_tool_calls - 1)
+            if (
+                self._active_tool_calls == 0
+                and not self._closed
+                and not self._holds_slot
+            ):
+                need_reacquire = True
+        if need_reacquire:
+            acquired = self._slots.acquire(
+                cancel_check=lambda: self._closed or self._cancel_check()
+            )
+            if acquired:
+                with self._slot_lock:
+                    if (
+                        self._closed
+                        or self._active_tool_calls > 0
+                        or self._holds_slot
+                    ):
+                        self._slots.release()
+                    else:
+                        self._holds_slot = True
+
+    def refuse_tools(self, reason: str) -> None:
+        self._bg_server.handle.refuse_calls(reason)
+
+    def send_user(self, content: list[dict[str, Any]]) -> None:
+        if not PERSISTENT_STDIN_OK:
+            raise RuntimeError("follow-up requires a new process")
+        if self._closed or self._proc.poll() is not None:
+            raise RuntimeError("Claude CLI process is already closed")
+        stdin = getattr(self._proc, "stdin", None)
+        if stdin is None or getattr(stdin, "closed", False):
+            raise RuntimeError("Claude CLI stdin is closed")
+        line = user_event_line(content)
+        stdin.write(line)
+        stdin.flush()
+
+    def _dispatch_event(
+        self,
+        ev: CliEvent,
+        sink: NativeTurnSink,
+        text_parts: list[str],
+    ) -> NativeTurnOutcome | None:
+        if ev.kind == CliEventKind.INIT:
+            init = self._parser.init
+            if init is not None:
+                if init.api_key_source.lower() != "none":
+                    self.close()
+                    raise NativeLoopUnavailable(
+                        f"Claude CLI reported apiKeySource='{init.api_key_source}' instead of 'none'. "
+                        "Refusing to consume API credits.",
+                        status_code=401,
+                        exhausted=True,
+                    )
+                mcp_status = init.mcp_servers.get(self._server_name)
+                if mcp_status != "connected":
+                    self.close()
+                    raise NativeLoopUnavailable(
+                        f"Claude CLI MCP server '{self._server_name}' status is '{mcp_status}' (expected 'connected').",
+                        status_code=503,
+                        exhausted=False,
+                    )
+                sink.on_init(init)
+            return None
+
+        if ev.kind == CliEventKind.TEXT_DELTA:
+            self._had_visible_output = True
+            if ev.text:
+                text_parts.append(ev.text)
+                sink.on_text(ev.text)
+            return None
+
+        if ev.kind == CliEventKind.THINKING_DELTA:
+            self._had_visible_output = True
+            sink.on_thinking(ev.text)
+            return None
+
+        if ev.kind == CliEventKind.TOOL_USE_START:
+            self._had_visible_output = True
+            uid = ev.tool_use_id or ""
+            tname = ev.tool_name or ""
+            self._tool_bytes[uid] = 0
+            self._tool_names[uid] = tname
+            sink.on_tool_use_started(uid, tname)
+            return None
+
+        if ev.kind == CliEventKind.TOOL_INPUT_DELTA:
+            uid = ev.tool_use_id or ""
+            tname = ev.tool_name or self._tool_names.get(uid, "")
+            added = len((ev.text or "").encode("utf-8"))
+            self._tool_bytes[uid] = self._tool_bytes.get(uid, 0) + added
+            sink.on_tool_input_progress(uid, tname, self._tool_bytes[uid])
+            return None
+
+        if ev.kind == CliEventKind.TOOL_USE_END:
+            uid = ev.tool_use_id or ""
+            tname = ev.tool_name or self._tool_names.get(uid, "")
+            sink.on_tool_use_complete(uid, tname, ev.tool_input or {})
+            return None
+
+        if ev.kind == CliEventKind.USAGE:
+            if ev.usage is not None:
+                sink.on_assistant_usage(ev.message_id or "", ev.usage)
+            return None
+
+        if ev.kind == CliEventKind.COMPACT_BOUNDARY:
+            sink.on_compacted()
+            return None
+
+        if ev.kind == CliEventKind.RATE_LIMIT:
+            if self._parser.rate_limit is not None:
+                sink.on_rate_limit(self._parser.rate_limit)
+            return None
+
+        if ev.kind == CliEventKind.RESULT:
+            res = self._parser.result
+            if res is not None:
+                if res.is_error and res.subtype != "error_max_turns":
+                    err = classify_result_error(res, self._parser.rate_limit)
+                    self.close()
+                    raise err
+                final_text = "".join(text_parts) or res.result_text
+                return NativeTurnOutcome(
+                    result=res,
+                    init=self._parser.init,
+                    final_text=final_text,
+                    exit_code=self._proc.poll(),
+                )
+        return None
+
+    def run_until_result(self, sink: NativeTurnSink) -> NativeTurnOutcome:
+        self._parser.result = None
+        text_parts: list[str] = []
+        idle_deadline = self._clock() + float(IDLE_TIMEOUT_SECONDS)
+
+        while True:
+            if self._cancel_check():
+                self.refuse_tools("turn cancelled")
+                self.close()
+                cancelled_res = CliResult(
+                    subtype="cancelled",
+                    is_error=False,
+                    result_text="".join(text_parts),
+                    stop_reason="cancelled",
+                    num_turns=0,
+                    duration_ms=int(max(0.0, self._clock() - self._t0) * 1000),
+                    session_id=self._parser.init.session_id if self._parser.init else "",
+                    api_error_status=None,
+                    usage=self._parser.latest_usage(),
+                    model_usage={},
+                )
+                return NativeTurnOutcome(
+                    result=cancelled_res,
+                    init=self._parser.init,
+                    final_text="".join(text_parts),
+                    exit_code=self._exit_code,
+                )
+
+            now = self._clock()
+            if now >= self._deadline_monotonic:
+                self.refuse_tools("turn deadline exceeded")
+                self.close()
+                raise ProviderTransportError(
+                    "TURN_DEADLINE_EXCEEDED: Claude CLI native turn exceeded deadline",
+                    status_code=None,
+                    exhausted=False,
+                )
+
+            if self.in_flight > 0:
+                idle_deadline = now + float(IDLE_TIMEOUT_SECONDS)
+            elif now >= idle_deadline:
+                self.refuse_tools("idle timeout")
+                self.close()
+                raise ProviderTransportError(
+                    f"Claude CLI sem saída por {IDLE_TIMEOUT_SECONDS}s",
+                    status_code=None,
+                    exhausted=False,
+                )
+
+            try:
+                line = self._stdout_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+
+            if line is None:
+                for ev in self._parser.flush_pending():
+                    outcome = self._dispatch_event(ev, sink, text_parts)
+                    if outcome is not None:
+                        return outcome
+                break
+
+            idle_deadline = self._clock() + float(IDLE_TIMEOUT_SECONDS)
+            for ev in self._parser.feed_line(line):
+                outcome = self._dispatch_event(ev, sink, text_parts)
+                if outcome is not None:
+                    return outcome
+
+        if self._cancel_check():
+            self.close()
+            cancelled_res = CliResult(
+                subtype="cancelled",
+                is_error=False,
+                result_text="".join(text_parts),
+                stop_reason="cancelled",
+                num_turns=0,
+                duration_ms=int(max(0.0, self._clock() - self._t0) * 1000),
+                session_id=self._parser.init.session_id if self._parser.init else "",
+                api_error_status=None,
+                usage=self._parser.latest_usage(),
+                model_usage={},
+            )
+            return NativeTurnOutcome(
+                result=cancelled_res,
+                init=self._parser.init,
+                final_text="".join(text_parts),
+                exit_code=self._exit_code,
+            )
+
+        try:
+            self._exit_code = self._proc.wait(timeout=1.0)
+        except Exception:
+            self._exit_code = self._proc.poll()
+
+        stderr_tail = "".join(self._stderr_chunks).strip()
+        self.close()
+        if not self._had_visible_output and self._parser.init is None:
+            raise NativeLoopUnavailable(
+                f"Claude CLI exited before initialization (code={self._exit_code}): {stderr_tail}",
+                status_code=503,
+                exhausted=False,
+            )
+        raise ProviderTransportError(
+            f"Claude CLI exited without result packet (code={self._exit_code}): {stderr_tail}",
+            status_code=502,
+            exhausted=False,
+        )
+
+    def close(self) -> None:
+        with self._close_lock:
+            with self._slot_lock:
+                if self._closed:
+                    return
+                self._closed = True
+                should_release_slot = self._holds_slot
+                self._holds_slot = False
+
+            try:
+                self._bg_server.handle.refuse_calls("turn closed")
+            except Exception:
+                pass
+
+            try:
+                stdin = getattr(self._proc, "stdin", None)
+                if stdin is not None and not getattr(stdin, "closed", False):
+                    stdin.close()
+            except Exception:
+                pass
+
+            try:
+                if self._proc.poll() is None:
+                    try:
+                        self._exit_code = self._proc.wait(timeout=0.3)
+                    except Exception:
+                        self._kill_tree_fn(self._proc)
+                        self._exit_code = self._proc.poll()
+                else:
+                    self._exit_code = self._proc.poll()
+            except Exception:
+                pass
+
+            try:
+                self._bg_server.close(timeout=2.0)
+            except Exception:
+                pass
+
+            for tmp in self._temp_files:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            if should_release_slot:
+                self._slots.release()
+
+            try:
+                self._stderr_thread.join(timeout=0.5)
+            except Exception:
+                pass
+
+            duration_s = max(0.0, self._clock() - self._t0)
+            self._log_run_fn(
+                mode="native",
+                argv=self._cmd,
+                requested_model=self._requested_model,
+                init=self._parser.init,
+                result=self._parser.result,
+                usage=self._parser.latest_usage(),
+                duration_s=duration_s,
+                exit_code=self._exit_code,
+                stderr_tail="".join(self._stderr_chunks),
+            )
+
+
+def start_native_turn_for_provider(
+    provider: Any,
+    request: NativeTurnRequest,
+) -> NativeTurnHandle:
+    """Spawn a `claude -p` native MCP turn for `ClaudeCliProvider`."""
+    resolved_binary = provider._resolve_binary()
+    if not resolved_binary:
+        raise NativeLoopUnavailable(
+            "Claude Code CLI executable ('claude') was not found on this machine.",
+            status_code=503,
+            exhausted=False,
+        )
+
+    effective_base_env: Mapping[str, str] | None = provider._env
+    if effective_base_env is not None and os.name == "nt":
+        merged_env = dict(os.environ)
+        merged_env.update(effective_base_env)
+        effective_base_env = merged_env
+
+    if provider._popen_factory is None:
+        ver = claude_cli_version(resolved_binary, env=effective_base_env)
+        if ver is not None and not is_version_validated(ver):
+            raise NativeLoopUnavailable(
+                f"Claude CLI version {ver} is outside validated range {VALIDATED_CLI_RANGE}",
+                status_code=503,
+                exhausted=False,
+            )
+
+    slots = provider._effective_slots()
+    if not slots.acquire(cancel_check=request.cancel_check):
+        raise NativeLoopUnavailable(
+            "Turn cancelled while waiting for a Claude CLI process slot.",
+            status_code=499,
+            exhausted=False,
+        )
+
+    wrapped_executor = _SlotReleasingExecutor(request.executor)
+    bg_server: BackgroundTurnToolServer | None = None
+    temp_files: list[Path] = []
+    proc: Any | None = None
+
+    try:
+        bg_server = BackgroundTurnToolServer.start(
+            TurnToolServer(wrapped_executor, server_name=request.server_name)
+        )
+        mcp_config_path = write_owner_only_temp(
+            bg_server.handle.mcp_config_json(),
+            prefix="orin-claude-mcp-",
+            suffix=".json",
+        )
+        temp_files.append(mcp_config_path)
+
+        prompt_path = write_owner_only_temp(
+            request.system_prompt or "You are a helpful assistant.",
+            prefix="orin-claude-sys-",
+            suffix=".txt",
+        )
+        temp_files.append(prompt_path)
+
+        now = provider._clock()
+        remaining_s = max(1.0, request.deadline_monotonic - now)
+        mcp_tool_timeout_ms = max(1_000, int(remaining_s * 1000))
+
+        isolated_env = build_isolated_claude_env(
+            effective_base_env,
+            max_output_tokens=request.max_output_tokens,
+            mcp_tool_timeout_ms=mcp_tool_timeout_ms,
+        )
+
+        session_kwargs: dict[str, Any] = {}
+        if request.session is not None and hasattr(request.session, "cli_flags"):
+            flags = request.session.cli_flags()
+            if isinstance(flags, Mapping):
+                session_kwargs.update(flags)
+
+        cmd = build_claude_command(
+            binary=resolved_binary,
+            system_prompt_file=prompt_path,
+            model=request.model or provider.model,
+            effort=request.effort,
+            fallback_model=request.fallback_model,
+            max_turns=max(1, int(request.max_turns)),
+            mcp_config_file=mcp_config_path,
+            mcp_server_name=request.server_name,
+            autocompact=request.autocompact,
+            **session_kwargs,
+        )
+
+        popen_cmd = (
+            [sys.executable, *cmd]
+            if provider._popen_factory is None and str(cmd[0]).lower().endswith(".py")
+            else cmd
+        )
+        popen_fn = provider._popen_factory or subprocess.Popen
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        )
+        request.cwd.mkdir(parents=True, exist_ok=True)
+
+        t0 = provider._clock()
+        proc = popen_fn(
+            popen_cmd,
+            cwd=str(request.cwd),
+            env=isolated_env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            creationflags=creationflags,
+        )
+
+        stdout_queue: queue.Queue[str | None] = queue.Queue()
+        stderr_chunks: list[str] = []
+
+        def _read_stdout() -> None:
+            try:
+                if proc.stdout is not None:
+                    for raw_line in iter(proc.stdout.readline, ""):
+                        stdout_queue.put(raw_line)
+            except Exception:
+                pass
+            finally:
+                stdout_queue.put(None)
+
+        def _read_stderr() -> None:
+            try:
+                if proc.stderr is not None:
+                    data = proc.stderr.read()
+                    if data:
+                        stderr_chunks.append(data)
+            except Exception:
+                pass
+
+        stdout_thread = threading.Thread(target=_read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        if proc.stdin is not None:
+            proc.stdin.write(user_event_line(request.user_content))
+            proc.stdin.flush()
+            if not PERSISTENT_STDIN_OK:
+                proc.stdin.close()
+
+        from agentos.providers.claude_cli.provider import kill_process_tree, log_cli_run
+
+        handle = NativeTurnHandle(
+            proc=proc,
+            cmd=cmd,
+            requested_model=request.model or provider.model,
+            server_name=request.server_name,
+            bg_server=bg_server,
+            temp_files=temp_files,
+            slots=slots,
+            cancel_check=request.cancel_check,
+            deadline_monotonic=request.deadline_monotonic,
+            clock=provider._clock,
+            kill_tree_fn=kill_process_tree,
+            log_run_fn=log_cli_run,
+            stdout_queue=stdout_queue,
+            stderr_chunks=stderr_chunks,
+            stderr_thread=stderr_thread,
+            t0=t0,
+        )
+        wrapped_executor.handle = handle
+        return handle
+
+    except Exception as exc:
+        if proc is not None:
+            try:
+                from agentos.providers.claude_cli.provider import kill_process_tree
+
+                kill_process_tree(proc)
+            except Exception:
+                pass
+        if bg_server is not None:
+            try:
+                bg_server.close(timeout=1.0)
+            except Exception:
+                pass
+        for tmp in temp_files:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+        slots.release()
+        if isinstance(exc, NativeLoopUnavailable):
+            raise
+        raise NativeLoopUnavailable(
+            f"Failed to start native Claude CLI turn: {exc}",
+            status_code=503,
+            exhausted=False,
+        ) from exc
