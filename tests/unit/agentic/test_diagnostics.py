@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from agentos.agentic.diagnostics import detect_recipe, file_diagnostic_command
@@ -108,3 +109,39 @@ def test_file_diagnostic_only_lints_typescript_when_a_node_project_and_local_esl
 
 def test_file_diagnostic_has_nothing_to_say_about_an_unrecognized_extension(tmp_path: Path) -> None:
     assert file_diagnostic_command("README.md", project_root=tmp_path) is None
+
+
+PYPROJECT = "[project]\nname = \"demo\"\n\n[tool.ruff]\n\n[tool.pytest.ini_options]\n"
+
+
+def test_a_uv_project_runs_its_checks_through_uv(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
+    (tmp_path / "uv.lock").write_text("", encoding="utf-8")
+    recipe = detect_recipe(tmp_path)
+    assert recipe.command_for("test") == "uv run python -m pytest"
+    assert recipe.command_for("lint") == "uv run python -m ruff check ."
+    assert recipe.command_for("install") == "uv sync"
+    assert "install" not in recipe.available_steps()
+
+
+def test_a_poetry_project_runs_through_poetry(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
+    (tmp_path / "poetry.lock").write_text("", encoding="utf-8")
+    recipe = detect_recipe(tmp_path)
+    assert recipe.command_for("test") == "poetry run python -m pytest"
+    assert recipe.command_for("install") == "poetry install"
+
+
+def test_a_local_venv_is_used_without_a_lockfile(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
+    relative = Path(".venv", "Scripts", "python.exe") if os.name == "nt" else Path(".venv", "bin", "python")
+    (tmp_path / relative).parent.mkdir(parents=True)
+    (tmp_path / relative).write_bytes(b"")
+    assert detect_recipe(tmp_path).command_for("test") == f'"{relative}" -m pytest'
+
+
+def test_plain_python_never_installs_by_default(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
+    recipe = detect_recipe(tmp_path)
+    assert "install" not in recipe.available_steps()
+    assert recipe.command_for("install") == "pip install -e ."

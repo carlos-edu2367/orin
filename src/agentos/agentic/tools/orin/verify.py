@@ -1,22 +1,97 @@
 """Verify tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
+from pathlib import Path
 import subprocess
+import time
 from typing import Any, Mapping
 
 from agentos.agentic.diagnostics import STEP_ORDER, detect_recipe
 from agentos.agentic.tools._shared import (
     AgentToolError,
+    CANCEL_CHECK_SECONDS,
     MAX_COMMAND_TIMEOUT_SECONDS,
     MAX_VERIFY_STEP_CHARS,
     SCAFFOLD_RECIPES,
     VERIFY_STEP_TIMEOUT_SECONDS,
     _bounded_output,
+    _terminate_process_tree,
     _TEXT,
     _schema,
 )
 from agentos.agentic.tools.spec import ToolSpec
+
+
+def _run_verification_step(
+    command: str,
+    *,
+    cwd: Path,
+    timeout: int,
+    cancelled: Callable[[], bool],
+) -> tuple[bool, str]:
+    if cancelled():
+        raise AgentToolError(
+            "Interrupted by user: the verification was stopped.",
+            error_code="INTERRUPTED_BY_USER",
+        )
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
+        env={**os.environ, "CI": "1", "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"},
+        **popen_kwargs,
+    )
+    started_at = time.monotonic()
+    deadline = started_at + timeout
+    try:
+        while True:
+            if cancelled():
+                _terminate_process_tree(process)
+                try:
+                    process.communicate(timeout=1)
+                except Exception:
+                    pass
+                raise AgentToolError(
+                    "Interrupted by user: the verification was stopped.",
+                    error_code="INTERRUPTED_BY_USER",
+                )
+            now = time.monotonic()
+            if now >= deadline:
+                _terminate_process_tree(process)
+                try:
+                    process.communicate(timeout=1)
+                except Exception:
+                    pass
+                return False, f"[timed out after {timeout}s]"
+            wait_time = min(CANCEL_CHECK_SECONDS, max(0.01, deadline - now))
+            try:
+                stdout, _ = process.communicate(timeout=wait_time)
+                output = (stdout or b"").decode("utf-8", errors="replace")
+                passed = (process.returncode == 0)
+                return passed, output
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if process.poll() is None:
+            _terminate_process_tree(process)
+            try:
+                process.communicate(timeout=1)
+            except Exception:
+                pass
 
 
 class VerifyTools:
@@ -74,18 +149,13 @@ class VerifyTools:
             if command is None:
                 step_results.append({"step": step, "command": None, "ran": False, "passed": None})
                 continue
-            try:
-                completed = subprocess.run(
-                    command, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
-                    timeout=VERIFY_STEP_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
-                    env={**os.environ, "CI": "1", "PYTHONIOENCODING": "utf-8", "NO_COLOR": "1"},
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
-                )
-                passed = completed.returncode == 0
-                output, _ = _bounded_output(((completed.stdout or "") + (completed.stderr or "")).strip() or "[no output]", MAX_VERIFY_STEP_CHARS)
-            except subprocess.TimeoutExpired:
-                passed = False
-                output = f"[timed out after {VERIFY_STEP_TIMEOUT_SECONDS}s]"
+            passed, raw_output = _run_verification_step(
+                command,
+                cwd=self.workspace.root,
+                timeout=VERIFY_STEP_TIMEOUT_SECONDS,
+                cancelled=self._cancel_requested,
+            )
+            output, _ = _bounded_output(raw_output.strip() or "[no output]", MAX_VERIFY_STEP_CHARS)
             step_results.append({"step": step, "command": command, "ran": True, "passed": passed, "output": output})
             if step == "install" and not passed:
                 stopped_early = True

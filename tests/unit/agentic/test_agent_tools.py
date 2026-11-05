@@ -40,7 +40,9 @@ def test_code_mode_requires_structured_project_evidence_after_it_changes_code(tm
     assert tools.code_completion_gate()[0] is False
 
     tools.invoke("write_file", {"path": "pyproject.toml", "content": "[project]\nname = 'demo'\n\n[tool.ruff]\n"})
-    monkeypatch.setattr(agent_tools.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "ok", "stderr": ""})())
+    from agentos.agentic.tools.orin import verify as verify_module
+
+    monkeypatch.setattr(verify_module, "_run_verification_step", lambda *a, **k: (True, "ok"))
     tools.invoke("verify_project", {"steps": ["lint"]})
     assert tools.code_completion_gate()[0] is True
 
@@ -124,12 +126,9 @@ def test_verify_project_rejects_an_unknown_step(toolset: AgentToolset) -> None:
 def test_verify_project_stops_after_a_failing_install_step(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
     toolset.invoke("write_file", {"path": "package.json", "content": '{"scripts": {"build": "vite build"}}'})
 
-    class FailedInstall:
-        returncode = 1
-        stdout = ""
-        stderr = "npm ERR! network timeout"
+    from agentos.agentic.tools.orin import verify as verify_module
 
-    monkeypatch.setattr(agent_tools.subprocess, "run", lambda *a, **k: FailedInstall())
+    monkeypatch.setattr(verify_module, "_run_verification_step", lambda *a, **k: (False, "npm ERR! network timeout"))
 
     outcome = toolset.invoke("verify_project", {})
 

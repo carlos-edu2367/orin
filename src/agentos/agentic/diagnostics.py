@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import tomllib
 
@@ -27,12 +28,13 @@ class ProjectRecipe:
     kind: str
     manifest: str
     commands: dict[str, str]
+    opt_in_steps: frozenset[str] = frozenset()
 
     def command_for(self, step: str) -> str | None:
         return self.commands.get(step)
 
     def available_steps(self) -> tuple[str, ...]:
-        return tuple(step for step in STEP_ORDER if step in self.commands)
+        return tuple(step for step in STEP_ORDER if step in self.commands and step not in self.opt_in_steps)
 
 
 def _read_json(path: Path) -> dict:
@@ -95,22 +97,50 @@ def _has_tool_config(pyproject: dict, table: str, *config_files: Path) -> bool:
     return any(path.is_file() for path in config_files)
 
 
+def python_runner(root: Path) -> str:
+    if (root / "uv.lock").is_file():
+        return "uv run python"
+    if (root / "poetry.lock").is_file():
+        return "poetry run python"
+    sub = Path("Scripts", "python.exe") if os.name == "nt" else Path("bin", "python")
+    for venv_name in (".venv", "venv"):
+        rel = Path(venv_name) / sub
+        if (root / rel).is_file():
+            return f'"{rel}"'
+    return "python"
+
+
 def _python_recipe(root: Path) -> ProjectRecipe:
     pyproject_path = root / "pyproject.toml"
     pyproject = _read_toml(pyproject_path) if pyproject_path.is_file() else {}
+    runner = python_runner(root)
     commands: dict[str, str] = {}
-    if pyproject_path.is_file() and "project" in pyproject:
-        commands["install"] = "pip install -e ."
-    elif (root / "requirements.txt").is_file():
-        commands["install"] = "pip install -r requirements.txt"
+    if (root / "uv.lock").is_file():
+        commands["install"] = "uv sync"
+    elif (root / "poetry.lock").is_file():
+        commands["install"] = "poetry install"
+    elif runner != "python":
+        if pyproject_path.is_file() and "project" in pyproject:
+            commands["install"] = f"{runner} -m pip install -e ."
+        elif (root / "requirements.txt").is_file():
+            commands["install"] = f"{runner} -m pip install -r requirements.txt"
+    else:
+        if pyproject_path.is_file() and "project" in pyproject:
+            commands["install"] = "pip install -e ."
+        elif (root / "requirements.txt").is_file():
+            commands["install"] = "pip install -r requirements.txt"
     if _has_tool_config(pyproject, "ruff", root / "ruff.toml", root / ".ruff.toml"):
-        commands["lint"] = "python -m ruff check ."
+        commands["lint"] = f"{runner} -m ruff check ."
     if _has_tool_config(pyproject, "mypy", root / "mypy.ini") or (root / "pyrightconfig.json").is_file():
-        commands["typecheck"] = "python -m mypy ." if _has_tool_config(pyproject, "mypy", root / "mypy.ini") else "python -m pyright"
+        commands["typecheck"] = (
+            f"{runner} -m mypy ."
+            if _has_tool_config(pyproject, "mypy", root / "mypy.ini")
+            else f"{runner} -m pyright"
+        )
     if _has_tool_config(pyproject, "pytest", root / "pytest.ini") or (root / "tests").is_dir():
-        commands["test"] = "python -m pytest"
+        commands["test"] = f"{runner} -m pytest"
     manifest = "pyproject.toml" if pyproject_path.is_file() else "requirements.txt"
-    return ProjectRecipe(kind="python", manifest=manifest, commands=commands)
+    return ProjectRecipe(kind="python", manifest=manifest, commands=commands, opt_in_steps=frozenset({"install"}))
 
 
 def detect_recipe(root: Path) -> ProjectRecipe | None:
@@ -155,4 +185,4 @@ def file_diagnostic_command(path: str, *, project_root: Path) -> str | None:
     return None
 
 
-__all__ = ["ProjectRecipe", "STEP_ORDER", "detect_recipe", "file_diagnostic_command"]
+__all__ = ["ProjectRecipe", "STEP_ORDER", "detect_recipe", "file_diagnostic_command", "python_runner"]
