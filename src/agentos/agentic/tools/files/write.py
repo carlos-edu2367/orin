@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
 from agentos.agentic.tools.files import ORIGINAL_FILE_LIMIT
 from agentos.agentic.tools.files.edit import PatchHunk
+from agentos.agentic.tools.files.newlines import dominant_newline, with_newline
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
@@ -33,9 +34,11 @@ class WriteTools:
             body = f"Appended {written} bytes to {path}; it now holds {total} bytes." + (f" {note}" if note else "")
         else:
             old_content, original_sha = self._check_read_file_guard(path)
-            with self._recorded_write(path) as note:
-                written = total = self.workspace.write_text(path, content)
             new_content = content
+            if old_content is not None and dominant_newline(old_content) == "\r\n":
+                new_content = with_newline(content, "\r\n")
+            with self._recorded_write(path) as note:
+                written = total = self.workspace.write_text(path, new_content)
             body = f"Wrote {written} bytes to {path}." + (f" {note}" if note else "")
         updated_sha = self._record_file_read(
             path, offset=1, limit=400, total_lines=len(new_content.splitlines()),

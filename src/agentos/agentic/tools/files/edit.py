@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
 from agentos.agentic.tools.files import ORIGINAL_FILE_LIMIT
+from agentos.agentic.tools.files.newlines import dominant_newline, with_newline
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
@@ -68,12 +69,27 @@ class EditTools:
         # half-edited.
         draft = content
         for index, (current, replacement) in enumerate(operations):
+            current_used, target_newline = current, None
             matches = draft.count(current)
+            if matches == 0 and "\n" in current:
+                for candidate_newline in ("\r\n", "\n"):
+                    candidate = with_newline(current, candidate_newline)
+                    if candidate != current and draft.count(candidate):
+                        current_used, target_newline, matches = candidate, candidate_newline, draft.count(candidate)
+                        break
             if matches == 0:
                 raise AgentToolError(f"edit {index + 1}: old_text was not found; read the file and provide the exact fragment.")
             if matches > 1 and not replace_all:
                 raise AgentToolError(f"edit {index + 1}: old_text occurs {matches} times; add surrounding text or set replace_all=true.")
-            draft = draft.replace(current, replacement) if replace_all else draft.replace(current, replacement, 1)
+            if target_newline is None:
+                if "\r\n" in current_used:
+                    target_newline = "\r\n"
+                elif "\n" not in current_used and dominant_newline(draft) == "\r\n":
+                    target_newline = "\r\n"
+                else:
+                    target_newline = "\n"
+            replacement_used = with_newline(replacement, target_newline)
+            draft = draft.replace(current_used, replacement_used) if replace_all else draft.replace(current_used, replacement_used, 1)
         with self._recorded_write(path) as note:
             written = self.workspace.write_text(path, draft)
         if not self._dedup_after_non_code_edit:
