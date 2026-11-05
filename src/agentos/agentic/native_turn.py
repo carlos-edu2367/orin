@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import threading
@@ -50,6 +51,47 @@ CLI_PARALLEL_MCP: bool = True
 CLI_PARALLEL_NEEDS_READONLY_HINT: bool = True
 SESSION_BRANCH: str = "B"
 NATIVE_CWD: Path = orin_paths().data / "claude-cli" / "workdir"
+
+
+def _resolve_native_cwd() -> Path:
+    return orin_paths().data / "claude-cli" / "workdir"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPlan:
+    session_id: str = ""
+    resume: bool = False
+
+
+def prompt_digest(system_prompt: str) -> str:
+    return hashlib.sha256(str(system_prompt or "").encode("utf-8")).hexdigest()
+
+
+def history_digest(messages: Sequence[Mapping[str, object]]) -> str:
+    hasher = hashlib.sha256()
+    for msg in messages:
+        if not isinstance(msg, Mapping):
+            continue
+        if bool(msg.get("_reminder")):
+            continue
+        role = str(msg.get("role") or "").strip()
+        if role not in {"user", "assistant"}:
+            continue
+        if role == "assistant" and msg.get("tool_calls"):
+            continue
+        raw_content = msg.get("content")
+        if isinstance(raw_content, Sequence) and not isinstance(raw_content, (str, bytes)):
+            blocks = [b for b in raw_content if isinstance(b, Mapping)]
+            if role == "assistant" and any(b.get("type") == "tool_use" for b in blocks):
+                continue
+            if role == "user" and blocks and all(b.get("type") == "tool_result" for b in blocks):
+                continue
+        text, _ = _extract_content_text_and_images(raw_content)
+        if role == "user" and text.strip().startswith("<system-reminder>") and text.strip().endswith("</system-reminder>"):
+            continue
+        entry = json.dumps([role, text], ensure_ascii=False)
+        hasher.update(entry.encode("utf-8") + b"\n")
+    return hasher.hexdigest()
 
 
 def _canonical_json(value: Any) -> str:
@@ -1080,7 +1122,8 @@ class NativeTurnRunner:
         )
         sink = _RunnerSink(self, executor)
 
-        NATIVE_CWD.mkdir(parents=True, exist_ok=True)
+        native_cwd = _resolve_native_cwd()
+        native_cwd.mkdir(parents=True, exist_ok=True)
         max_turns = int(self.runtime.limits.max_iterations or 200)
         autocompact = _resolve_cli_autocompact(self.runtime.autocompact)
         effort = (
@@ -1131,7 +1174,7 @@ class NativeTurnRunner:
                 cancel_check=lambda: self.runtime.cancelled(self.turn),
                 deadline_monotonic=self._remaining_deadline_monotonic(),
                 max_turns=max_turns,
-                cwd=NATIVE_CWD,
+                cwd=native_cwd,
                 effort=effort,
                 fallback_model=fallback_model,
                 max_output_tokens=max_output,
@@ -1450,6 +1493,9 @@ __all__ = [
     "NativeTurnRunner",
     "RuntimeToolExecutor",
     "SESSION_BRANCH",
+    "SessionPlan",
     "TOOL_USE_ID_META_KEY",
     "ToolBatchCollector",
+    "history_digest",
+    "prompt_digest",
 ]
