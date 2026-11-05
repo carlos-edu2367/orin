@@ -80,3 +80,36 @@ def test_attachments_for_turn_is_empty_without_attachments():
     receipt = store.create(user_id="user-1", message="oi", provider="anthropic", model_id="m", idempotency_key="k1")
     turn = store.claim(receipt.turn_id)
     assert store.attachments_for_turn(turn) == []
+
+
+TEXT_ATTACHMENT = {
+    "path": ".orin/uploads/writing-block.md", "original_name": "writing-block.md",
+    "media_type": "text/markdown", "kind": "text", "bytes": 4096,
+}
+
+
+def _history_for(message: str, attachments):
+    store = _store()
+    receipt = store.create(user_id="user-1", message=message, provider="anthropic", model_id="m",
+                           idempotency_key="k1", attachments=attachments)
+    return store.history_for_turn(store.claim(receipt.turn_id))
+
+
+def test_an_attachment_only_message_tells_the_model_the_text_file_is_the_instruction():
+    first_line = _history_for("", [TEXT_ATTACHMENT])[0]["content"].splitlines()[0]
+    assert first_line == (
+        "[mensagem sem texto: a pessoa enviou só anexos. O conteúdo de .orin/uploads/writing-block.md "
+        "é a instrução desta mensagem: leia e siga.]"
+    )
+
+
+def test_an_attachment_only_message_with_visual_files_points_to_them():
+    first_line = _history_for("", [ATTACHMENT])[0]["content"].splitlines()[0]
+    assert first_line == (
+        "[mensagem sem texto: a pessoa enviou só anexos (uploads/nota.pdf). "
+        "Abra-os e trate o que pedem como a instrução desta mensagem.]"
+    )
+
+
+def test_a_message_with_text_keeps_its_text_first():
+    assert _history_for("veja isto", [TEXT_ATTACHMENT])[0]["content"].startswith("veja isto")

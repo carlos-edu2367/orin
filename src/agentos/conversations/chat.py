@@ -82,6 +82,21 @@ def _attachment_marker(records: Sequence[Mapping[str, object]]) -> str:
     )
 
 
+def _attachment_only_instruction(records: Sequence[Mapping[str, object]]) -> str:
+    """The line that makes the attachments the instruction of a message sent without text."""
+    text_paths = [str(record.get("path")) for record in records if record.get("kind") == "text"]
+    if text_paths:
+        return (
+            f"[mensagem sem texto: a pessoa enviou só anexos. O conteúdo de {', '.join(text_paths)} "
+            "é a instrução desta mensagem: leia e siga.]"
+        )
+    paths = ", ".join(str(record.get("path")) for record in records)
+    return (
+        f"[mensagem sem texto: a pessoa enviou só anexos ({paths}). "
+        "Abra-os e trate o que pedem como a instrução desta mensagem.]"
+    )
+
+
 def _chunks(text: str, size: int) -> list[str]:
     """Split a delta so each chunk fits the bounded activity payload limit."""
     return [text[index:index + size] for index in range(0, len(text), size)] or [text]
@@ -2280,6 +2295,8 @@ class PostgresChatStore:
                 )
             records = grouped.get(message_id, [])
             if records:
+                if str(row["role"]) == "user" and not content.strip():
+                    content = _attachment_only_instruction(records)
                 content = f"{content}{_attachment_marker(records)}"
             if (
                 replayed_messages
