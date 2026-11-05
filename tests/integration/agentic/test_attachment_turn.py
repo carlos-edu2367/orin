@@ -140,13 +140,13 @@ def _has_image_block(messages: list[dict]) -> bool:
 def test_a_turn_with_an_image_reaches_a_model_that_sees(tmp_path) -> None:
     """A model whose ``input_modalities`` include ``image`` gets the real picture.
 
-    The promoted file exists under ``uploads/`` in the conversation workspace;
+    The promoted file exists under ``.orin/uploads/`` in the conversation workspace;
     the model calls ``view_file``, the tool result plus the image the runtime
     appends both reach the provider request, and the turn completes.
     """
     workspace, attachment_path = _promoted_image_path(tmp_path)
     assert (workspace.root / attachment_path).is_file()
-    assert attachment_path == "uploads/foto.png"
+    assert attachment_path == ".orin/uploads/foto.png"
 
     requests_seen: list[dict] = []
 

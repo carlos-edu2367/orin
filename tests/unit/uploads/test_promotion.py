@@ -14,10 +14,10 @@ def test_promotion_moves_the_file_into_uploads(tmp_path):
     staged = staging.store("user-1", "foto.png", PNG)
     records = promote_uploads(staging, workspace, "user-1", [staged.upload_id])
     assert records == [{
-        "path": "uploads/foto.png", "original_name": "foto.png",
+        "path": ".orin/uploads/foto.png", "original_name": "foto.png",
         "media_type": "image/png", "kind": "image", "bytes": len(PNG),
     }]
-    assert (workspace.root / "uploads" / "foto.png").read_bytes() == PNG
+    assert (workspace.root / ".orin" / "uploads" / "foto.png").read_bytes() == PNG
     with pytest.raises(LookupError):
         staging.get("user-1", staged.upload_id)
 
@@ -29,7 +29,7 @@ def test_promotion_renames_on_collision(tmp_path):
     second = staging.store("user-1", "foto.png", PNG)
     promote_uploads(staging, workspace, "user-1", [first.upload_id])
     records = promote_uploads(staging, workspace, "user-1", [second.upload_id])
-    assert records[0]["path"] == "uploads/foto (2).png"
+    assert records[0]["path"] == ".orin/uploads/foto (2).png"
 
 
 def test_promotion_refuses_more_files_than_the_limit(tmp_path):
@@ -55,4 +55,13 @@ def test_promotion_rolls_back_what_it_already_moved(tmp_path):
     records = promote_uploads(staging, workspace, "user-1", [staged.upload_id])
     from agentos.uploads.promotion import discard_promoted
     discard_promoted(workspace, records)
-    assert not (workspace.root / "uploads" / "foto.png").exists()
+    assert not (workspace.root / ".orin" / "uploads" / "foto.png").exists()
+
+
+def test_promotion_into_a_repository_excludes_orin_from_git(tmp_path):
+    staging = UploadStaging(tmp_path / "staging")
+    workspace = ConversationWorkspace.at_root(tmp_path / "repo")
+    (workspace.root / ".git" / "info").mkdir(parents=True)
+    staged = staging.store("user-1", "foto.png", PNG)
+    promote_uploads(staging, workspace, "user-1", [staged.upload_id])
+    assert ".orin/" in (workspace.root / ".git" / "info" / "exclude").read_text(encoding="utf-8").splitlines()

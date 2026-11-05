@@ -14,7 +14,7 @@ from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pa
 from agentos.reading.vision import VisionUnavailable
 from agentos.agentic.file_preview import media_type_for
 from agentos.agentic.lifecycle import HookEvent
-from agentos.agentic.workspace import MAX_READ_BYTES
+from agentos.agentic.workspace import MAX_READ_BYTES, is_upload_path
 from agentos.agentic.tools.public_names import public_text
 from agentos.agentic.tools._shared import (
     AgentToolError,
@@ -365,7 +365,7 @@ class ReadTools:
                     }}
                 return result
         norm_check = (self.workspace.key(target) if target.exists() else path).replace("\\", "/").lstrip("/")
-        is_upload_file = norm_check.startswith("uploads/")
+        is_upload_file = is_upload_path(norm_check)
         effective_allow_large = bool(allow_large) or is_upload_file
         norm_offset = max(1, int(offset or 1))
         requested_limit = LARGE_READ_LINES if (is_upload_file and int(limit or 400) == 400) else int(limit or 400)
@@ -725,7 +725,7 @@ SPECS: tuple[ToolSpec, ...] = (
         key="view_file",
         description="Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, or a picture. Use this instead of read_file whenever the file is not plain text.",
         legacy_schema=_schema({
-            "path": {**_TEXT, "description": "Workspace-relative path, e.g. uploads/nota.pdf"},
+            "path": {**_TEXT, "description": "Workspace-relative path, e.g. .orin/uploads/nota.pdf"},
             "question": {**_TEXT, "description": "What you need from the file. Guides the visual reading of an image or a scanned page."},
         }, ("path",)),
         handler="view_file",
@@ -737,7 +737,7 @@ SPECS: tuple[ToolSpec, ...] = (
         key="transcribe_pdf",
         description="Extract the native text layer from a PDF without visual reading. Prefer this for PDFs when ordinary text is enough; use view_file only when layout, images, tables, diagrams, or pages without a text layer matter.",
         legacy_schema=_schema({
-            "path": {**_TEXT, "description": "Workspace-relative PDF path, e.g. uploads/relatorio.pdf"},
+            "path": {**_TEXT, "description": "Workspace-relative PDF path, e.g. .orin/uploads/relatorio.pdf"},
         }, ("path",)),
         handler="transcribe_pdf",
         kind="filesystem",

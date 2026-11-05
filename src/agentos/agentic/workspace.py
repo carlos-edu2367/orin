@@ -28,6 +28,15 @@ MAX_READ_LINES = 800
 MAX_LIST_DEPTH = 5
 MAX_LIST_ENTRIES = 500
 GIT_STATUS_TIMEOUT_SECONDS = 10
+UPLOAD_DIRECTORY = ".orin/uploads"
+LEGACY_UPLOAD_DIRECTORY = "uploads"
+
+
+def is_upload_path(key: str) -> bool:
+    """Return True if the key represents a current or legacy upload path."""
+    norm = key.replace("\\", "/").lstrip("/")
+    return norm.startswith(f"{UPLOAD_DIRECTORY}/") or norm.startswith(f"{LEGACY_UPLOAD_DIRECTORY}/")
+
 _IGNORED_CHANGE_PREFIXES = (
     ".orin/",
     ".git/",
@@ -581,6 +590,7 @@ LocalWorkspace = ConversationWorkspace
 
 __all__ = [
     "ConversationWorkspace",
+    "LEGACY_UPLOAD_DIRECTORY",
     "LocalWorkspace",
     "MAX_LIST_DEPTH",
     "MAX_LIST_ENTRIES",
@@ -591,6 +601,8 @@ __all__ = [
     "MAX_SEARCH_RESULTS",
     "MAX_SNAPSHOT_FILES",
     "MAX_WRITE_BYTES",
+    "UPLOAD_DIRECTORY",
     "WorkspaceError",
+    "is_upload_path",
     "resolve_workspace",
 ]

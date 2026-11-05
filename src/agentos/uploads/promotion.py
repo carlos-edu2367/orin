@@ -10,12 +10,13 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from agentos.agentic.workspace import ConversationWorkspace
+from agentos.agentic.git_exclude import ensure_orin_excluded
+from agentos.agentic.workspace import ConversationWorkspace, UPLOAD_DIRECTORY
 
 from .media import MAX_FILES_PER_MESSAGE, MAX_TURN_BYTES, UploadRejected
 from .staging import UploadStaging
 
-UPLOAD_DIRECTORY = "uploads"
+
 
 
 def _available_name(directory, filename: str) -> str:
@@ -48,6 +49,7 @@ def promote_uploads(
         raise UploadRejected("attachments exceed the per-turn budget")
     directory = workspace.root / UPLOAD_DIRECTORY
     directory.mkdir(parents=True, exist_ok=True)
+    ensure_orin_excluded(workspace.root)
     records: list[dict[str, Any]] = []
     try:
         for item in staged:

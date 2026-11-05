@@ -22,7 +22,7 @@ PROTECTED_FILE_NAMES: frozenset[str] = frozenset({
     ".netrc", ".git-credentials",
 })
 # Inside .orin/ these are working areas the agent may write freely.
-_ORIN_WRITABLE = ("plans", "worktrees", "tool-outputs", "logs")
+_ORIN_WRITABLE = ("plans", "worktrees", "tool-outputs", "logs", "uploads")
 
 _CASE_INSENSITIVE = os.name == "nt"
 

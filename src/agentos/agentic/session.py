@@ -55,6 +55,7 @@ from .reminders import ReminderQueue, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
 from .runtime import CODE_MODE_CORE_TOOLS, AgenticLimits, AgenticTurnRuntime
+from .git_exclude import ensure_orin_excluded
 from .workspace import resolve_workspace
 
 
@@ -1101,6 +1102,10 @@ class TurnSession:
             managed_root=workspace_root or orin_paths().user_workspaces(str(turn.get("user_id") or "")),
             local_root=local_root if isinstance(local_root, str) else None,
         )
+        try:
+            ensure_orin_excluded(self.workspace.root)
+        except Exception:
+            pass
         # Pre-acquired by the caller (typically from a RetrievalRegistry kept
         # for the whole worker process), the same way ``browser`` is: an index
         # is scoped to the project, and every turn about it should share the
