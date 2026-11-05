@@ -1117,7 +1117,6 @@ def test_max_turns_when_process_already_exited_and_caveats_on_closing_gate_failu
         store=store2,
         provider=prov2,
         toolset=toolset2,
-        completion_gate=True,
         limits=AgenticLimits(max_iterations=5, max_actions=10, context_window_tokens=1_000_000),
     )
     out2 = rt2.run("t1", turn=store2.turn)
@@ -1215,3 +1214,74 @@ def test_native_history_avoids_orin_tool_call_and_session_plan_cli_flags_and_fin
     assert "Texto apenas no result packet." in "".join(store.deltas)
 
 
+def _usage_runtime(tmp_path: Path, rounds: list[Callable[..., NativeTurnOutcome]], **kw: Any) -> tuple[AgenticTurnRuntime, FakeStore]:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    prov = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, list(rounds)))
+    limits = kw.pop("limits")
+    rt = AgenticTurnRuntime(store=store, provider=prov, toolset=toolset, limits=limits, **kw)
+    return rt, store
+
+
+def test_native_provider_token_limit_fires_and_repeated_message_usage_counts_once(tmp_path: Path) -> None:
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        # The CLI repeats one message's usage on every content block: it counts once.
+        for _ in range(5):
+            sink.on_assistant_usage("m_same", CliUsage(input_tokens=400, output_tokens=100))
+        return NativeTurnOutcome(result=_make_result(text="Done"), init=init, final_text="Done", exit_code=0)
+
+    rt, _ = _usage_runtime(
+        tmp_path / "a",
+        [_round],
+        limits=AgenticLimits(max_iterations=10, max_actions=10, max_provider_tokens=600, context_window_tokens=1_000_000),
+    )
+    assert rt.run("t1", turn=rt.store.turn).state == "completed"
+
+    rt2, _ = _usage_runtime(
+        tmp_path / "b",
+        [_round],
+        limits=AgenticLimits(max_iterations=10, max_actions=10, max_provider_tokens=499, context_window_tokens=1_000_000),
+    )
+    out = rt2.run("t1", turn=rt2.store.turn)
+    assert out.state == "failed"
+    assert out.error_code == "PROVIDER_TOKEN_LIMIT"
+
+
+def test_native_max_budget_usd_fires_and_charges_the_shared_meter_once(tmp_path: Path) -> None:
+    from decimal import Decimal
+
+    from agentos.agentic.loop_settings import BudgetMeter
+
+    seen: list[tuple[object, object]] = []
+
+    def _estimate(inp: object, out: object) -> Decimal:
+        seen.append((inp, out))
+        return Decimal("0.40")
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_assistant_usage("m1", CliUsage(input_tokens=10, output_tokens=5, cache_read_input_tokens=90))
+        sink.on_assistant_usage("m1", CliUsage(input_tokens=10, output_tokens=5, cache_read_input_tokens=90))
+        sink.on_assistant_usage("m2", CliUsage(input_tokens=10, output_tokens=5))
+        return NativeTurnOutcome(result=_make_result(text="Done"), init=init, final_text="Done", exit_code=0)
+
+    meter = BudgetMeter()
+    rt, _ = _usage_runtime(
+        tmp_path,
+        [_round],
+        cost_estimator=_estimate,
+        budget_meter=meter,
+        limits=AgenticLimits(
+            max_iterations=10, max_actions=10, max_budget_usd=Decimal("0.80"), context_window_tokens=1_000_000
+        ),
+    )
+    out = rt.run("t1", turn=rt.store.turn)
+    assert out.state == "failed"
+    assert out.error_code == "MAX_BUDGET_USD"
+    # Two distinct messages priced once each, with (context input incl. cache, output).
+    assert seen == [(100, 5), (10, 5)]
+    assert meter.total == Decimal("0.80")

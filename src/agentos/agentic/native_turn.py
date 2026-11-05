@@ -1234,40 +1234,36 @@ class _RunnerSink:
                 total_tokens=tot_tok,
             )
 
-        if self._runner.runtime._cost_estimator is not None:
+        runtime = self._runner.runtime
+        if runtime._cost_estimator is not None:
+            # Same contract as the classic loop: (input_tokens, output_tokens).
+            step_cost = Decimal("0")
             try:
-                step_cost = self._runner.runtime._cost_estimator(
-                    str(self._runner.turn.get("model_id") or ""),
-                    used_in,
-                    out_tok,
-                )
-            except Exception:
+                estimated = runtime._cost_estimator(used_in, out_tok)
+                if estimated is not None:
+                    step_cost = Decimal(str(estimated))
+            except Exception:  # noqa: BLE001 - pricing never breaks a turn
                 step_cost = Decimal("0")
-            self.total_cost += step_cost
-            if self._runner.runtime._add_spending is not None and step_cost > 0:
+            if step_cost.is_finite() and step_cost > 0:
+                self.total_cost += step_cost
+                runtime._add_spending(step_cost)
+
+        limits = runtime.limits
+        breach: str | None = None
+        if limits.max_provider_tokens is not None and self.total_tokens > limits.max_provider_tokens:
+            breach = "PROVIDER_TOKEN_LIMIT"
+        elif limits.max_cost is not None and self.total_cost > limits.max_cost:
+            breach = "PROVIDER_COST_LIMIT"
+        elif limits.max_budget_usd is not None and runtime._spent_usd(self.total_cost) >= limits.max_budget_usd:
+            breach = "MAX_BUDGET_USD"
+        if breach is not None and self._executor.abort_code is None:
+            self._executor.abort_code = breach
+            handle = self._executor.handle
+            if handle is not None:
                 try:
-                    self._runner.runtime._add_spending(
-                        str(self._runner.turn.get("user_id") or ""),
-                        step_cost,
-                    )
-                except Exception:
+                    handle.refuse_tools(f"turn stopped: {breach}")
+                except Exception:  # noqa: BLE001 - the abort code is what stops the turn
                     pass
-
-        max_tok = self._runner.runtime.limits.max_tokens
-        if (
-            max_tok is not None
-            and self.total_tokens > max_tok
-            and self._executor.abort_code is None
-        ):
-            self._executor.abort_code = "PROVIDER_TOKEN_LIMIT"
-
-        max_cost = self._runner.runtime.limits.max_cost_usd
-        if (
-            max_cost is not None
-            and self.total_cost > max_cost
-            and self._executor.abort_code is None
-        ):
-            self._executor.abort_code = "PROVIDER_COST_LIMIT"
 
         limit = (
             self._runner.runtime.limits.context_window_tokens
