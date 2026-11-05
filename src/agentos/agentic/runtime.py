@@ -12,7 +12,7 @@ import os
 import re
 import threading
 import time
-from typing import Callable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from agentos.providers.models import ProviderError, ProviderErrorCategory, Retryability
 
@@ -1317,6 +1317,7 @@ class AgenticTurnRuntime:
                 # every iteration is still the cheapest thing to do.
                 if not self._prefix_caching(turn):
                     self._age_tool_results(messages, keep_recent=max(RECENT_UNAGED_TOOL_RESULTS, len(results)))
+                    self._release_read_stubs(messages)
                 # ``ask_user`` deliberately ends this provider run.  A worker
                 # must never stay blocked while a person considers a form, and
                 # the next authenticated chat message starts the follow-up turn.
@@ -1618,12 +1619,14 @@ class AgenticTurnRuntime:
             if bool(message.get("_tool_image_result")):
                 if message.get("content") != "[earlier tool image omitted]":
                     message["content"] = "[earlier tool image omitted]"
+                    message["_content_shrunk"] = True
                     cleared += 1
                 continue
             content = message.get("content")
             if isinstance(content, str):
                 if content != MICROCOMPACT_MARKER and len(content) > floor:
                     message["content"] = MICROCOMPACT_MARKER
+                    message["_content_shrunk"] = True
                     cleared += 1
             elif isinstance(content, list):
                 changed = False
@@ -1637,6 +1640,7 @@ class AgenticTurnRuntime:
                         blocks.append(block)
                 if changed:
                     message["content"] = blocks
+                    message["_content_shrunk"] = True
                     cleared += 1
         return cleared
 
@@ -1651,6 +1655,7 @@ class AgenticTurnRuntime:
         before_len = len(messages)
         self._run_compaction(messages, turn, keep_units=min(2, CONTEXT_COMPACTION_KEEP_UNITS), allow_block=False)
         self._age_tool_results(messages, keep_recent=1)
+        self._release_read_stubs(messages)
         return shrunk > 0 or len(messages) < before_len
 
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
@@ -1662,6 +1667,7 @@ class AgenticTurnRuntime:
         if estimate >= int(limit * MICROCOMPACT_THRESHOLD):
             before = estimate
             if self._microcompact(messages, keep_recent=MICROCOMPACT_KEEP_RECENT):
+                self._release_read_stubs(messages)
                 estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
                 self._persist_compact_boundary(turn, kind="microcompact", trigger="auto", pre_tokens=before, post_tokens=estimate)
                 if self.context_reporting:
@@ -1750,11 +1756,13 @@ class AgenticTurnRuntime:
         original_to_retained = [(index, item) for index, item in enumerate(messages) if index not in compact_indices]
         position = next((offset for offset, (index, _item) in enumerate(original_to_retained) if index > insert_at), len(retained))
         retained.insert(position, replacement)
+        self._release_read_stubs((messages[i] for i in compact_indices), folded=True)
         messages[:] = retained
         # This rewrite already invalidates the cache, so it is the one place
         # where shrinking surviving results is free. Doing it here instead of
         # every iteration is what keeps the prefix append-only in between.
         self._age_tool_results(messages, keep_recent=keep_units)
+        self._release_read_stubs(messages)
         if pinned_item is not None:
             self._pinned_index = next((index for index, item in enumerate(messages) if item is pinned_item), None)
         self._compaction_count += 1
@@ -2138,18 +2146,52 @@ class AgenticTurnRuntime:
         for index in indexes[: max(0, len(indexes) - max(0, int(keep_recent)))]:
             message = messages[index]
             if bool(message.get("_tool_image_result")):
-                message["content"] = "[earlier tool image omitted]"
+                if message.get("content") != "[earlier tool image omitted]":
+                    message["content"] = "[earlier tool image omitted]"
+                    message["_content_shrunk"] = True
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                message["content"] = cls._compress(content)
+                compressed = cls._compress(content)
+                if compressed != content:
+                    message["content"] = compressed
+                    message["_content_shrunk"] = True
             elif isinstance(content, list):
-                message["content"] = [
-                    {**block, "content": cls._compress(str(block.get("content", "")))}
-                    if isinstance(block, Mapping) and block.get("type") == "tool_result" else block
-                    for block in content
-                ]
+                changed = False
+                blocks: list[object] = []
+                for block in content:
+                    if isinstance(block, Mapping) and block.get("type") == "tool_result":
+                        old_text = str(block.get("content", ""))
+                        new_text = cls._compress(old_text)
+                        if new_text != old_text:
+                            blocks.append({**block, "content": new_text})
+                            changed = True
+                        else:
+                            blocks.append(block)
+                    else:
+                        blocks.append(block)
+                if changed:
+                    message["content"] = blocks
+                    message["_content_shrunk"] = True
         return messages
+
+    def _release_read_stubs(self, messages: Iterable[dict[str, object]], *, folded: bool = False) -> int:
+        """Once a read's text is shrunk or folded away, a later Read must return the file again instead of the stub."""
+        forget = getattr(self.toolset, "forget_read_content", None)
+        released = 0
+        for message in messages:
+            if not isinstance(message, dict) or message.get("_read_released"):
+                continue
+            path = message.get("_read_path")
+            if not isinstance(path, str) or not path:
+                continue
+            if not (folded or message.get("_content_shrunk")):
+                continue
+            if callable(forget):
+                forget(path)
+            message["_read_released"] = True
+            released += 1
+        return released
 
     @staticmethod
     def _maximum_plausible_input_tokens(request: Mapping[str, object]) -> int:
@@ -2547,11 +2589,22 @@ class AgenticTurnRuntime:
                 tool_arguments=dict(arguments), tool_content=outcome.content,
             )
             self._hooks(turn, "PostToolUse", tool_name=name, status=outcome.status)
+            outcome_data = getattr(outcome, "data", None)
+            read_path = (
+                str(outcome_data["path"])
+                if name == "read_file"
+                and outcome.status == "succeeded"
+                and isinstance(outcome_data, Mapping)
+                and not outcome_data.get("unchanged")
+                and outcome_data.get("path")
+                else None
+            )
             results.append({
                 "id": call_id, "name": name, "status": outcome.status,
                 "content": outcome.content, "images": list(outcome.images or []),
                 "wait_for_user": bool(outcome.payload.get("wait_for_user")),
                 "error_code": outcome.error_code,
+                "read_path": read_path,
             })
         self._emit(
             HookEvent.POST_TOOL_BATCH,
@@ -3057,6 +3110,8 @@ class AgenticTurnRuntime:
             messages: list[dict[str, object]] = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": str(result.get("id", "")), "content": content}]}]
         else:
             messages = [{"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}]
+        if result.get("read_path"):
+            messages[0]["_read_path"] = str(result["read_path"])
         images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
         if images:
             messages.append({"role": "user", "_tool_image_result": True, "content": [{"type": "text", "text": cls._image_caption(result, content)}, *images]})

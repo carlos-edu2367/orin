@@ -108,6 +108,18 @@ class ReadTools:
         with self._read_file_lock:
             return key in self._read_file_state
 
+    def forget_read_content(self, path: str) -> bool:
+        """Drop the unchanged-stub permission for ``path`` while keeping its edit guard."""
+        key = self.read_key(path)
+        if key is None:
+            return False
+        with self._read_file_lock:
+            record = self._read_file_state.get(key)
+            if record is None or not record.explicit_read:
+                return False
+            record.explicit_read = False
+            return True
+
     def _note_memory_for(self, target: Path) -> None:
         """A read below a directory brings in its instruction files and matching rules (once each)."""
         tracker = self.memory_tracker
