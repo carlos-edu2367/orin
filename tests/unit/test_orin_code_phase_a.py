@@ -5,6 +5,7 @@ from pathlib import Path
 from agentos.agentic.agent_tools import (
     MAX_TOOL_RESULT_CHARS,
     AgentToolset,
+    ToolOutcome,
     coerce_tool_arguments,
     compute_structured_patch,
 )
@@ -175,11 +176,11 @@ def test_compute_structured_patch_and_public_payload_sanitization(tmp_path: Path
 
 def test_truncated_tool_output_persists_full_output_to_disk(tmp_path: Path) -> None:
     workspace = ConversationWorkspace(tmp_path, "chat_trunc_persist")
-    tools = AgentToolset(workspace)
     large_text = "\n".join(f"row-{i:04d}-" + ("x" * 60) for i in range(300)) + "\n"
-    tools.invoke("write_file", {"path": "large.txt", "content": large_text})
+    delegated = ToolOutcome("succeeded", "delegated", large_text)
+    tools = AgentToolset(workspace, delegate=lambda _name, _task: delegated)
 
-    outcome = tools.invoke("read_file", {"path": "large.txt", "limit": 800})
+    outcome = tools.invoke("ask_agent", {"name": "Worker", "task": "do work"})
     assert outcome.status == "succeeded"
     assert outcome.payload["truncated"] is True
     assert len(outcome.content) <= MAX_TOOL_RESULT_CHARS
