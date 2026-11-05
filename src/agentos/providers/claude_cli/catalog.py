@@ -137,7 +137,13 @@ def context_window_for(
     catalog: Iterable[CatalogModel | Mapping[str, Any]] = (),
 ) -> int:
     """Return the input context window for `model` from the catalog or 5.x subscription table."""
-    cleaned = clean_model_id(model) if model else None
+    cleaned: str | None = None
+    if model:
+        raw_tail = str(model).strip().rsplit("/", 1)[-1].strip()
+        try:
+            cleaned = clean_model_id(raw_tail)
+        except ValueError:
+            cleaned = None
     if cleaned:
         lower = cleaned.lower()
         for entry in catalog:

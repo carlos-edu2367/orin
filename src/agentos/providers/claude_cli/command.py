@@ -21,6 +21,7 @@ VALID_EFFORT_LEVELS: frozenset[str] = frozenset(
     {"low", "medium", "high", "xhigh", "max"}
 )
 SAFE_MODEL_RE = re.compile(r"^[A-Za-z0-9._:\-\[\]]{1,128}$")
+_SAFE_MCP_SERVER_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _VERSION_CACHE: dict[str, tuple[int, int, int] | None] = {}
 
@@ -32,6 +33,7 @@ STRIPPED_ENV_EXACT: frozenset[str] = frozenset(
         "ANTHROPIC_CUSTOM_HEADERS",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_CONFIG_DIR",
         "CLAUDE_CODE_SIMPLE",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_CODE_USE_VERTEX",
@@ -39,6 +41,8 @@ STRIPPED_ENV_EXACT: frozenset[str] = frozenset(
         "CLAUDECODE",
         "CLAUDE_CODE_ENTRYPOINT",
         "CLAUDE_CODE_SSE_PORT",
+        "MCP_TOOL_TIMEOUT",
+        "MCP_TIMEOUT",
     }
 )
 STRIPPED_ENV_PREFIXES: tuple[str, ...] = (
@@ -49,6 +53,7 @@ STRIPPED_ENV_PREFIXES: tuple[str, ...] = (
     "ANTHROPIC_BEDROCK_",
     "ANTHROPIC_VERTEX_",
     "ANTHROPIC_FOUNDRY_",
+    "CLAUDE_CODE_",
 )
 
 
@@ -209,13 +214,12 @@ def claude_cli_version(
             check=False,
         )
     except Exception:
-        _VERSION_CACHE[resolved] = None
+        # Transient failures (e.g. TimeoutExpired on cold start) are not cached.
         return None
 
     output = f"{completed.stdout or ''}\n{completed.stderr or ''}".strip()
     match = _VERSION_RE.search(output)
     if not match:
-        _VERSION_CACHE[resolved] = None
         return None
     parsed = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
     _VERSION_CACHE[resolved] = parsed
@@ -346,8 +350,10 @@ def build_claude_command(
     system_prompt_file: str | Path,
     model: str | None = None,
     effort: str | None = None,
+    fallback_model: str | None = None,
     max_turns: int = 1,
     mcp_config_file: str | Path | None = None,
+    mcp_server_name: str = "orin",
     autocompact: str | int | None = None,
     session_id: str | None = None,
     resume_session_id: str | None = None,
@@ -355,8 +361,9 @@ def build_claude_command(
     persist_session: bool = False,
 ) -> list[str]:
     """Construct the isolated `claude -p` argument list (never using `--bare`, `--safe-mode`, `--session-id`, or `--resume`)."""
-    if not isinstance(binary, str) or not binary.strip() or "\x00" in binary:
+    if not isinstance(binary, str):
         raise ValueError("Valid Claude CLI binary path is required")
+    binary_str = _validate_path_arg(binary, "binary")
     if (
         not isinstance(max_turns, int)
         or isinstance(max_turns, bool)
@@ -376,7 +383,7 @@ def build_claude_command(
 
     prompt_str = _validate_path_arg(system_prompt_file, "system_prompt_file")
     cmd: list[str] = [
-        binary.strip(),
+        binary_str,
         "-p",
         *ISOLATION_FLAGS,
         "--disable-slash-commands",
@@ -399,12 +406,15 @@ def build_claude_command(
     ]
 
     if mcp_config_file is not None:
+        srv_name = str(mcp_server_name or "").strip()
+        if not srv_name or not _SAFE_MCP_SERVER_RE.match(srv_name):
+            raise ValueError(f"Invalid mcp_server_name: {mcp_server_name!r}")
         cmd.extend(
             [
                 "--mcp-config",
                 _validate_path_arg(mcp_config_file, "mcp_config_file"),
                 "--allowedTools",
-                "mcp__orin__*",
+                f"mcp__{srv_name}__*",
             ]
         )
 
@@ -429,6 +439,10 @@ def build_claude_command(
         if cleaned_effort not in VALID_EFFORT_LEVELS:
             raise ValueError(f"Invalid effort level for Claude CLI: {effort!r}")
         cmd.extend(["--effort", cleaned_effort])
+
+    cleaned_fallback = clean_model_id(fallback_model)
+    if cleaned_fallback is not None:
+        cmd.extend(["--fallback-model", cleaned_fallback])
 
     if any(flag in FORBIDDEN_FLAGS for flag in cmd):
         raise AssertionError("Forbidden flag leaked into command")

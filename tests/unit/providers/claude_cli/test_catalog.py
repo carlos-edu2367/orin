@@ -86,3 +86,9 @@ def test_catalog_client_falls_back_to_5x_defaults_with_1m_for_opus_55(
         assert model_id in by_id
     assert by_id["claude-opus-5-5"]["context_length"] == 1_000_000
     assert by_id["claude-sonnet-5-5"]["context_length"] == 200_000
+
+
+
+def test_context_window_for_handles_multi_slash_or_malformed_model_id() -> None:
+    assert context_window_for("openrouter/anthropic/claude-opus-5-5") == 1_000_000
+    assert context_window_for("invalid model id; rm -rf /") == 200_000

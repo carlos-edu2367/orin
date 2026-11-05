@@ -119,3 +119,95 @@ def test_result_carries_api_error_status_and_model_usage() -> None:
     assert parser.result.api_error_status == 404
     assert parser.result.is_error is True
     assert "claude-opus-5-5" in parser.result.model_usage
+
+
+
+def test_parser_handles_malformed_block_indices_without_crashing() -> None:
+    parser = StreamJsonParser()
+    for bad_idx in (None, "abc", {}, -1, True):
+        line = json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "index": bad_idx,
+                    "content_block": {"type": "text", "text": "hi"},
+                },
+            }
+        )
+        parser.feed_line(line)
+        delta_line = json.dumps(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": bad_idx,
+                    "delta": {"type": "text_delta", "text": "hi"},
+                },
+            }
+        )
+        parser.feed_line(delta_line)
+        stop_line = json.dumps(
+            {
+                "type": "stream_event",
+                "event": {"type": "content_block_stop", "index": bad_idx},
+            }
+        )
+        parser.feed_line(stop_line)
+
+
+def test_parser_keeps_multiple_text_blocks_in_single_assistant_packet_and_deduplicates_idless_tool() -> None:
+    parser = StreamJsonParser()
+    evs = parser.feed_line(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "m_multi",
+                    "content": [
+                        {"type": "thinking", "thinking": "t1"},
+                        {"type": "thinking", "thinking": "t2"},
+                        {"type": "text", "text": "A"},
+                        {"type": "text", "text": "B"},
+                    ],
+                },
+            }
+        )
+    )
+    assert [e.text for e in evs if e.kind == CliEventKind.THINKING_DELTA] == ["t1", "t2"]
+    assert [e.text for e in evs if e.kind == CliEventKind.TEXT_DELTA] == ["A", "B"]
+
+    # Tool without id in stream_event followed by assistant packet without id
+    p2 = StreamJsonParser()
+    out: list[Any] = []
+    for pkt in (
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m_idless"}}},
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "name": "mcp__orin__Read", "input": {}},
+            },
+        },
+        {
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": '{"path":"a"}'},
+            },
+        },
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m_idless",
+                "content": [{"type": "tool_use", "name": "mcp__orin__Read", "input": {"path": "a"}}],
+            },
+        },
+    ):
+        out.extend(p2.feed_line(json.dumps(pkt)))
+    starts = [e for e in out if e.kind == CliEventKind.TOOL_USE_START]
+    ends = [e for e in out if e.kind == CliEventKind.TOOL_USE_END]
+    assert len(starts) == 1 and len(ends) == 1

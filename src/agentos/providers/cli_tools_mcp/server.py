@@ -23,8 +23,16 @@ from agentos.providers.cli_tools_mcp.types import (
 )
 
 MAX_BODY_BYTES = 4 * 1024 * 1024
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+MAX_BATCH_SIZE = 64
+_BIND_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+_ORIGIN_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _SUPPORTED_MCP_VERSIONS = frozenset({PROTOCOL_VERSION, "2025-03-26", "2024-11-05"})
+
+
+def _is_valid_jsonrpc_id(val: Any) -> bool:
+    return val is None or (
+        isinstance(val, (str, int, float)) and not isinstance(val, bool)
+    )
 
 
 class TurnToolServerHandle:
@@ -98,17 +106,19 @@ class TurnToolServerHandle:
 
         self._uvicorn_server.should_exit = True
         try:
-            await asyncio.wait_for(self._serve_task, timeout=3.0)
-        except Exception:
+            await asyncio.wait_for(self._serve_task, timeout=2.5)
+        except BaseException:
+            self._uvicorn_server.force_exit = True
             self._serve_task.cancel()
             try:
                 await self._serve_task
-            except Exception:
+            except BaseException:
                 pass
-        try:
-            self._sock.close()
-        except Exception:
-            pass
+        finally:
+            try:
+                self._sock.close()
+            except BaseException:
+                pass
 
 
 class TurnToolServer:
@@ -122,15 +132,15 @@ class TurnToolServer:
         host: str = "127.0.0.1",
     ) -> None:
         cleaned_host = str(host or "").strip().lower()
-        if cleaned_host not in _LOOPBACK_HOSTS:
+        if cleaned_host not in _BIND_LOOPBACK_HOSTS:
             raise ValueError(
-                f"TurnToolServer must bind to a loopback address only, got {host!r}"
+                f"TurnToolServer must bind to 127.0.0.1 only, got {host!r}"
             )
         if not isinstance(server_name, str) or not server_name.strip():
             raise ValueError("server_name must be a non-empty string")
         self._executor = executor
         self._server_name = server_name.strip()
-        self._host = "127.0.0.1" if cleaned_host == "localhost" else cleaned_host
+        self._host = "127.0.0.1"
 
     async def start(self, *, port: int = 0) -> TurnToolServerHandle:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -163,15 +173,50 @@ class TurnToolServer:
 
         async def _dispatch_single(
             item: Mapping[str, Any],
-        ) -> tuple[dict[str, Any] | None, dict[str, str]]:
+        ) -> tuple[dict[str, Any] | None, dict[str, str], int]:
             headers_out: dict[str, str] = {}
+            raw_method = item.get("method")
+            if not isinstance(raw_method, str) or not raw_method.strip():
+                return (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    },
+                    headers_out,
+                    400,
+                )
+            method = raw_method.strip()
             has_id = "id" in item
             req_id = item.get("id")
-            method = str(item.get("method") or "")
-            params = item.get("params") if isinstance(item.get("params"), Mapping) else {}
+            if has_id and not _is_valid_jsonrpc_id(req_id):
+                return (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32600, "message": "Invalid Request"},
+                    },
+                    headers_out,
+                    400,
+                )
+
+            raw_params = item.get("params")
+            if raw_params is not None and not isinstance(raw_params, Mapping):
+                if not has_id:
+                    return None, headers_out, 202
+                return (
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32602, "message": "Invalid params"},
+                    },
+                    headers_out,
+                    200,
+                )
+            params: Mapping[str, Any] = raw_params if isinstance(raw_params, Mapping) else {}
 
             if not has_id:
-                return None, headers_out
+                return None, headers_out, 202
 
             if method == "initialize":
                 requested_version = str(params.get("protocolVersion") or "").strip()
@@ -195,10 +240,11 @@ class TurnToolServer:
                         },
                     },
                     headers_out,
+                    200,
                 )
 
             if method == "ping":
-                return ({"jsonrpc": "2.0", "id": req_id, "result": {}}, headers_out)
+                return ({"jsonrpc": "2.0", "id": req_id, "result": {}}, headers_out, 200)
 
             if method == "tools/list":
                 specs = self._executor.list_tools()
@@ -218,11 +264,12 @@ class TurnToolServer:
                         "result": {"tools": tools_payload},
                     },
                     headers_out,
+                    200,
                 )
 
             if method == "tools/call":
                 handle = handle_ref[0] if handle_ref else None
-                refuse_reason = handle._enter_call() if handle is not None else None
+                refuse_reason = handle._enter_call() if handle is not None else "server starting"
                 if refuse_reason is not None:
                     return (
                         {
@@ -239,6 +286,7 @@ class TurnToolServer:
                             },
                         },
                         headers_out,
+                        200,
                     )
 
                 try:
@@ -251,8 +299,9 @@ class TurnToolServer:
                     meta = dict(raw_meta) if isinstance(raw_meta, Mapping) else {}
 
                     known_specs = self._executor.list_tools()
-                    if known_specs and tool_name not in {s.name for s in known_specs}:
-                        valid_list = ", ".join(sorted(s.name for s in known_specs))
+                    known_names = {s.name for s in known_specs}
+                    if not tool_name or tool_name not in known_names:
+                        valid_list = ", ".join(sorted(known_names)) or "(none)"
                         return (
                             {
                                 "jsonrpc": "2.0",
@@ -271,6 +320,7 @@ class TurnToolServer:
                                 },
                             },
                             headers_out,
+                            200,
                         )
 
                     try:
@@ -294,6 +344,7 @@ class TurnToolServer:
                                 },
                             },
                             headers_out,
+                            200,
                         )
 
                     content_blocks: list[dict[str, Any]] = [
@@ -322,6 +373,7 @@ class TurnToolServer:
                             },
                         },
                         headers_out,
+                        200,
                     )
                 finally:
                     if handle is not None:
@@ -337,6 +389,7 @@ class TurnToolServer:
                     },
                 },
                 headers_out,
+                200,
             )
 
         async def _mcp_endpoint(request: Request) -> Response:
@@ -350,7 +403,7 @@ class TurnToolServer:
                 origin_host = (parsed_origin.hostname or "").lower()
                 if (
                     parsed_origin.scheme.lower() not in {"http", "https"}
-                    or origin_host not in _LOOPBACK_HOSTS
+                    or origin_host not in _ORIGIN_LOOPBACK_HOSTS
                 ):
                     return Response("Forbidden Origin", status_code=403)
 
@@ -398,12 +451,12 @@ class TurnToolServer:
                 )
 
             if isinstance(payload, Mapping):
-                resp_obj, extra_headers = await _dispatch_single(payload)
+                resp_obj, extra_headers, status_code = await _dispatch_single(payload)
                 if resp_obj is None:
-                    return Response("", status_code=202, headers=extra_headers)
-                return JSONResponse(resp_obj, status_code=200, headers=extra_headers)
+                    return Response("", status_code=status_code, headers=extra_headers)
+                return JSONResponse(resp_obj, status_code=status_code, headers=extra_headers)
 
-            if isinstance(payload, list) and payload:
+            if isinstance(payload, list) and 0 < len(payload) <= MAX_BATCH_SIZE:
                 responses: list[dict[str, Any]] = []
                 merged_headers: dict[str, str] = {}
                 for entry in payload:
@@ -419,7 +472,7 @@ class TurnToolServer:
                             }
                         )
                         continue
-                    single_resp, extra_headers = await _dispatch_single(entry)
+                    single_resp, extra_headers, _ = await _dispatch_single(entry)
                     merged_headers.update(extra_headers)
                     if single_resp is not None:
                         responses.append(single_resp)
@@ -457,12 +510,6 @@ class TurnToolServer:
         uv_server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
         serve_task = asyncio.create_task(uv_server.serve(sockets=[sock]))
 
-        # Wait until uvicorn marks started or task exits
-        for _ in range(200):
-            if uv_server.started or serve_task.done():
-                break
-            await asyncio.sleep(0.005)
-
         handle = TurnToolServerHandle(
             url=f"http://127.0.0.1:{bound_port}/mcp",
             token=token,
@@ -473,6 +520,18 @@ class TurnToolServer:
             sock=sock,
         )
         handle_ref.append(handle)
+
+        for _ in range(200):
+            if uv_server.started or serve_task.done():
+                break
+            await asyncio.sleep(0.005)
+
+        if serve_task.done():
+            serve_task.result()
+        if not uv_server.started:
+            await handle.close()
+            raise RuntimeError("TurnToolServer failed to start")
+
         return handle
 
 
@@ -546,11 +605,11 @@ class BackgroundTurnToolServer:
                 fut = asyncio.run_coroutine_threadsafe(
                     self.handle.close(), self._loop
                 )
-                fut.result(timeout=max(0.5, timeout))
+                fut.result(timeout=max(3.0, timeout))
             except Exception:
                 pass
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:
                 pass
-        self._thread.join(timeout=max(0.5, timeout))
+        self._thread.join(timeout=max(1.0, timeout))

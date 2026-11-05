@@ -26,6 +26,15 @@ def _int_field(mapping: Mapping[str, Any], *keys: str) -> int:
     return 0
 
 
+def _parse_block_index(event: Mapping[str, Any]) -> int | None:
+    if "index" not in event:
+        return 0
+    raw = event.get("index")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class CliUsage:
     input_tokens: int = 0
@@ -134,6 +143,7 @@ class StreamJsonParser:
         self._seen_usage_message_ids: set[str] = set()
         self._pending_tools: dict[int, dict[str, Any]] = {}
         self._emitted_tool_end_ids: set[str] = set()
+        self._msg_tool_ids_by_seq: dict[str, list[str]] = {}
         self._msg_usage_raw: dict[str, dict[str, Any]] = {}
         self._saw_stream_text_msgs: set[str] = set()
         self._saw_stream_thinking_msgs: set[str] = set()
@@ -267,13 +277,10 @@ class StreamJsonParser:
             if ev_type == "message_start":
                 msg_obj = event.get("message")
                 if isinstance(msg_obj, Mapping):
-                    msg_id = str(msg_obj.get("id") or "")
-                    if msg_id:
-                        self._current_message_id = msg_id
+                    msg_id = str(msg_obj.get("id") or "").strip() or f"msg_{uuid4().hex[:8]}"
+                    self._current_message_id = msg_id
                     if isinstance(msg_obj.get("usage"), Mapping):
-                        bucket = self._msg_usage_raw.setdefault(
-                            self._current_message_id or "_anon", {}
-                        )
+                        bucket = self._msg_usage_raw.setdefault(msg_id, {})
                         bucket.update(msg_obj["usage"])
                 return events
 
@@ -286,13 +293,17 @@ class StreamJsonParser:
                 return events
 
             if ev_type == "content_block_start":
-                idx = int(event.get("index", 0))
+                idx = _parse_block_index(event)
+                if idx is None:
+                    return events
                 block = event.get("content_block")
                 if isinstance(block, Mapping):
                     b_type = str(block.get("type") or "")
                     if b_type == "tool_use":
                         call_id = str(block.get("id") or f"call_{uuid4().hex[:12]}")
                         tool_name = str(block.get("name") or "")
+                        msg_key = self._current_message_id or "_anon"
+                        self._msg_tool_ids_by_seq.setdefault(msg_key, []).append(call_id)
                         self._pending_tools[idx] = {
                             "id": call_id,
                             "name": tool_name,
@@ -331,7 +342,9 @@ class StreamJsonParser:
                 return events
 
             if ev_type == "content_block_delta":
-                idx = int(event.get("index", 0))
+                idx = _parse_block_index(event)
+                if idx is None:
+                    return events
                 delta = event.get("delta")
                 if not isinstance(delta, Mapping):
                     return events
@@ -394,7 +407,9 @@ class StreamJsonParser:
                 return events
 
             if ev_type == "content_block_stop":
-                idx = int(event.get("index", 0))
+                idx = _parse_block_index(event)
+                if idx is None:
+                    return events
                 if idx in self._pending_tools:
                     events.extend(self._flush_pending_tool(idx, packet))
                 return events
@@ -414,16 +429,18 @@ class StreamJsonParser:
                 bucket.update(msg["usage"])
             cli_usage = CliUsage.from_raw(bucket)
 
+            had_stream_thinking = msg_id in self._saw_stream_thinking_msgs
+            had_stream_text = msg_id in self._saw_stream_text_msgs
+            recorded_tool_ids = list(self._msg_tool_ids_by_seq.get(msg_id, ()))
+            tool_seq = 0
+
             content_list = msg.get("content")
             if isinstance(content_list, list):
                 for block in content_list:
                     if not isinstance(block, Mapping):
                         continue
                     b_type = str(block.get("type") or "")
-                    if (
-                        b_type == "thinking"
-                        and msg_id not in self._saw_stream_thinking_msgs
-                    ):
+                    if b_type == "thinking" and not had_stream_thinking:
                         thinking_text = str(block.get("thinking") or "")
                         if thinking_text:
                             self._saw_stream_thinking_msgs.add(msg_id)
@@ -435,7 +452,7 @@ class StreamJsonParser:
                                     raw=packet,
                                 )
                             )
-                    elif b_type == "text" and msg_id not in self._saw_stream_text_msgs:
+                    elif b_type == "text" and not had_stream_text:
                         raw_text = str(block.get("text") or "")
                         if raw_text:
                             self._saw_stream_text_msgs.add(msg_id)
@@ -448,7 +465,13 @@ class StreamJsonParser:
                                 )
                             )
                     elif b_type == "tool_use":
-                        call_id = str(block.get("id") or f"call_{uuid4().hex[:12]}")
+                        fallback_id = (
+                            recorded_tool_ids[tool_seq]
+                            if tool_seq < len(recorded_tool_ids)
+                            else f"call_{uuid4().hex[:12]}"
+                        )
+                        tool_seq += 1
+                        call_id = str(block.get("id") or fallback_id)
                         if call_id not in self._emitted_tool_end_ids:
                             tool_name = str(block.get("name") or "")
                             raw_input = (

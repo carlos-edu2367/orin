@@ -326,3 +326,54 @@ def test_mcp_config_json_is_valid_and_names_server() -> None:
 
 def test_server_package_does_not_import_runtime() -> None:
     assert "agentos.agentic" not in Path(server_mod.__file__).read_text(encoding="utf-8")
+
+
+
+def test_empty_tool_list_rejects_all_tool_calls() -> None:
+    class _EmptyExecutor(_FakeExecutor):
+        def list_tools(self) -> Sequence[McpToolSpec]:
+            return []
+
+    fake = _EmptyExecutor()
+    bg = BackgroundTurnToolServer.start(TurnToolServer(fake))
+    try:
+        resp = httpx.post(
+            bg.handle.url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "Write", "arguments": {"file_path": "pwn.txt"}},
+            },
+            headers=_auth_headers(bg.handle.token),
+            timeout=2.0,
+        )
+        res = resp.json()["result"]
+        assert res["isError"] is True
+        assert fake.calls == []
+    finally:
+        bg.close()
+
+
+def test_rejects_ipv6_or_non_ipv4_loopback_bind_and_invalid_jsonrpc_shapes() -> None:
+    fake = _FakeExecutor()
+    with pytest.raises(ValueError):
+        TurnToolServer(fake, host="::1")
+
+    bg = BackgroundTurnToolServer.start(TurnToolServer(fake))
+    try:
+        headers = _auth_headers(bg.handle.token)
+        # Empty object is not a valid JSON-RPC notification or request
+        r_empty = httpx.post(bg.handle.url, json={}, headers=headers, timeout=2.0)
+        assert r_empty.status_code == 400
+
+        # Oversized batch (> 64 items) is rejected
+        r_batch = httpx.post(
+            bg.handle.url,
+            json=[{"jsonrpc": "2.0", "id": i, "method": "ping"} for i in range(65)],
+            headers=headers,
+            timeout=2.0,
+        )
+        assert r_batch.status_code == 400
+    finally:
+        bg.close()

@@ -203,3 +203,89 @@ def test_resolve_claude_binary_and_status(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr("subprocess.run", lambda *a, **kw: _Completed())
     with pytest.raises(ProviderTransportError):
         check_claude_cli_status(binary=str(exe))
+
+
+
+def test_command_accepts_fallback_model_and_custom_mcp_server_name() -> None:
+    from agentos.providers.claude_cli import (
+        ProviderTransportError as ReexportedError,
+        build_claude_command as reexported_build,
+    )
+
+    assert ReexportedError is ProviderTransportError
+    argv = reexported_build(
+        binary="claude",
+        system_prompt_file="C:/t/s.txt",
+        model="claude-opus-5-5",
+        fallback_model="claude-sonnet-5-5",
+        mcp_config_file="C:/t/m.json",
+        mcp_server_name="custom_srv",
+    )
+    assert argv[argv.index("--fallback-model") + 1] == "claude-sonnet-5-5"
+    assert argv[argv.index("--allowedTools") + 1] == "mcp__custom_srv__*"
+
+    with pytest.raises(ValueError):
+        build_claude_command(
+            binary="claude",
+            system_prompt_file="C:/t/s.txt",
+            fallback_model="-bad",
+        )
+    with pytest.raises(ValueError):
+        build_claude_command(
+            binary="claude",
+            system_prompt_file="C:/t/s.txt",
+            mcp_config_file="C:/t/m.json",
+            mcp_server_name="bad server;rm",
+        )
+
+
+@pytest.mark.parametrize("bad_bin", ["-flag", "--bare", "claude\n.exe", "claude\r.exe"])
+def test_command_rejects_unsafe_binary_path(bad_bin: str) -> None:
+    with pytest.raises(ValueError):
+        build_claude_command(binary=bad_bin, system_prompt_file="C:/t/s.txt")
+
+
+def test_env_strips_claude_code_prefixed_and_config_vars() -> None:
+    env = build_isolated_claude_env(
+        {
+            "CLAUDE_CODE_OAUTH_TOKEN": "token-injetado",
+            "CLAUDE_CONFIG_DIR": "C:/evil",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "50",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "haiku",
+            "MCP_TOOL_TIMEOUT": "10",
+            "MCP_TIMEOUT": "10",
+            "PATH": "p",
+        }
+    )
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in env
+    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
+    assert "MCP_TOOL_TIMEOUT" not in env
+    assert "MCP_TIMEOUT" not in env
+
+
+def test_claude_cli_version_does_not_cache_transient_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as sp
+
+    clear_version_cache()
+    attempts = 0
+
+    class _Completed:
+        returncode = 0
+        stdout = "2.1.309 (Claude Code)\n"
+        stderr = ""
+
+    def flaky_run(cmd: list[str], **kwargs: Any) -> _Completed:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sp.TimeoutExpired(cmd=cmd, timeout=5.0)
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", flaky_run)
+    assert claude_cli_version("C:/fake/claude_flaky.exe") is None
+    assert claude_cli_version("C:/fake/claude_flaky.exe") == (2, 1, 309)
+    assert attempts == 2

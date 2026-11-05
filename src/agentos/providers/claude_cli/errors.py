@@ -49,18 +49,24 @@ class RateLimitState:
             and not isinstance(resets_raw, bool)
             and resets_raw > 0
         ):
-            resets_at = float(resets_raw)
+            val = float(resets_raw)
+            if val > 10_000_000_000:
+                val /= 1000.0
+            resets_at = val
         return cls(status=status, rate_limit_type=rl_type, resets_at=resets_at)
 
 
 def format_reset_local(resets_at: float, *, tz: tzinfo | None = None) -> str:
     """Format an epoch reset timestamp in the local timezone (or `tz`) as `%d/%m às %H:%M`."""
-    dt = (
-        datetime.fromtimestamp(float(resets_at), tz=tz)
-        if tz is not None
-        else datetime.fromtimestamp(float(resets_at)).astimezone()
-    )
-    return dt.strftime("%d/%m às %H:%M")
+    try:
+        dt = (
+            datetime.fromtimestamp(float(resets_at), tz=tz)
+            if tz is not None
+            else datetime.fromtimestamp(float(resets_at)).astimezone()
+        )
+        return dt.strftime("%d/%m às %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return "horário indisponível"
 
 
 def classify_result_error(
@@ -79,16 +85,19 @@ def classify_result_error(
         if match:
             status = int(match.group(1))
 
+    subscription_rejected = (
+        rate_limit is not None and rate_limit.status.lower() == "rejected"
+    )
     is_rate_limited = (
         status == 429
-        or (rate_limit is not None and rate_limit.status.lower() == "rejected")
+        or subscription_rejected
         or (status is None and "rate limit" in raw_text.lower())
     )
 
     if is_rate_limited:
         retry_after_seconds: float | None = None
         message = raw_text
-        if rate_limit is not None and rate_limit.resets_at is not None:
+        if subscription_rejected and rate_limit is not None and rate_limit.resets_at is not None:
             now_ts = time.time() if now is None else float(now)
             if rate_limit.resets_at > 1_000_000_000:
                 retry_after_seconds = max(1.0, rate_limit.resets_at - now_ts)

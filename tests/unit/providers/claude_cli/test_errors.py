@@ -98,3 +98,26 @@ def test_error_class_name_is_kept() -> None:
     err = classify_result_error(_result(api_error_status=500), None, now=T)
     assert type(err).__name__ == "ProviderTransportError"
     assert isinstance(err, ProviderTransportError)
+
+
+
+def test_429_with_allowed_warning_does_not_claim_subscription_exhausted() -> None:
+    rl = RateLimitState.from_info(
+        {"status": "allowed_warning", "rateLimitType": "five_hour", "resetsAt": T + 7200}
+    )
+    err = classify_result_error(
+        _result(api_error_status=429, text="API Error: 429 Too many concurrent requests"),
+        rl,
+        now=T,
+    )
+    assert err.status_code == 429
+    assert err.retry_after_seconds is None
+    assert "Limite de uso da assinatura" not in str(err)
+
+
+def test_rate_limit_handles_millis_and_overflow_timestamps() -> None:
+    rl_ms = RateLimitState.from_info(
+        {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": (T + 600) * 1000}
+    )
+    assert rl_ms.resets_at == pytest.approx(T + 600)
+    assert format_reset_local(1e20) == "horário indisponível"

@@ -19,6 +19,10 @@ _OPEN_TAG_RE = re.compile(
     r"<(?P<tag>orin_tool_call|tool_call)(?:\s+id=(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+)))?\s*>",
     re.IGNORECASE,
 )
+_ESCAPE_TAG_RE = re.compile(r"<(/?)(orin_tool_call|tool_call)", re.IGNORECASE)
+_ESCAPE_BRACKET_RE = re.compile(
+    r"\[(/?)(tool result|user|assistant|system)", re.IGNORECASE
+)
 
 _INTERNAL_BY_PUBLIC = {public: internal for internal, public in PUBLIC_NAMES.items()}
 _INTERNAL_BY_LOWER_PUBLIC = {
@@ -54,23 +58,11 @@ class TextProtocolEvent:
 
 
 def escape_tool_content(text: str) -> str:
-    """Escape protocol delimiters inside tool results and untrusted content to prevent tag/role injection."""
+    """Escape protocol delimiters (case-insensitively) inside tool results and untrusted content."""
     if not text:
         return ""
-    out = str(text)
-    replacements = (
-        ("<orin_tool_call", "&lt;orin_tool_call"),
-        ("</orin_tool_call", "&lt;/orin_tool_call"),
-        ("<tool_call", "&lt;tool_call"),
-        ("</tool_call", "&lt;/tool_call"),
-        ("[Tool Result", "&#91;Tool Result"),
-        ("[/Tool Result]", "&#91;/Tool Result]"),
-        ("[User]", "&#91;User]"),
-        ("[Assistant]", "&#91;Assistant]"),
-        ("[System]", "&#91;System]"),
-    )
-    for src, dst in replacements:
-        out = out.replace(src, dst)
+    out = _ESCAPE_TAG_RE.sub(r"&lt;\1\2", str(text))
+    out = _ESCAPE_BRACKET_RE.sub(r"&#91;\1\2", out)
     return out
 
 
@@ -319,6 +311,13 @@ def _format_tool_batch_group(
     return digest, blocks
 
 
+def _clone_block(block: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(block)
+    if isinstance(out.get("source"), Mapping):
+        out["source"] = dict(out["source"])
+    return out
+
+
 class TranscriptState:
     """Per-turn append-only multi-block transcript builder for `claude -p`."""
 
@@ -375,7 +374,7 @@ class TranscriptState:
             self._group_blocks = [b for _, b in groups]
 
         result_blocks: list[dict[str, Any]] = [
-            dict(block)
+            _clone_block(block)
             for grp in self._group_blocks
             for block in grp
         ]
@@ -425,13 +424,13 @@ def _longest_suffix_prefix(text: str, target: str) -> int:
     return 0
 
 
-def _find_close_tag_outside_json_strings(
-    buf: str, close_tag: str
+def _find_token_outside_json_strings(
+    buf: str, token: str
 ) -> int:
     in_string = False
     escaped = False
-    target_lower = close_tag.lower()
-    target_len = len(close_tag)
+    target_lower = token.lower()
+    target_len = len(token)
     buf_lower = buf.lower()
     i = 0
     limit = len(buf) - target_len
@@ -535,13 +534,8 @@ def _parse_json_objects(inner: str) -> list[Mapping[str, Any]]:
     while idx < length:
         while idx < length and text[idx] in " \t\r\n,":
             idx += 1
-        if idx >= length:
+        if idx >= length or text[idx] != "{":
             break
-        if text[idx] != "{":
-            brace = text.find("{", idx)
-            if brace == -1:
-                break
-            idx = brace
         try:
             obj, end = decoder.raw_decode(text, idx)
         except json.JSONDecodeError:
@@ -563,7 +557,7 @@ class ToolCallStreamParser:
         self.saw_unclosed_tool_call: bool = False
         self._buf: str = ""
         self._active_close_tag: str | None = None
-        self._active_attr_id: str | None = None
+        self._active_call_id: str | None = None
         self._seen_call_ids: set[str] = set()
 
     def _allocate_call_id(self, preferred: str | None) -> str:
@@ -578,7 +572,7 @@ class ToolCallStreamParser:
                 return generated
 
     def _parse_inner_calls(
-        self, inner_xml: str, attr_id: str | None
+        self, inner_xml: str, preallocated_id: str | None
     ) -> list[TextProtocolEvent]:
         objs = _parse_json_objects(inner_xml)
         events: list[TextProtocolEvent] = []
@@ -604,11 +598,11 @@ class ToolCallStreamParser:
                 args_map = {}
 
             normalized_args = _normalize_tool_arguments(resolved, args_map)
-            preferred_id = (
-                str(obj.get("id") or "").strip()
-                or (attr_id if idx == 0 else None)
-            )
-            call_id = self._allocate_call_id(preferred_id)
+            explicit_json_id = str(obj.get("id") or "").strip()
+            if idx == 0 and preallocated_id and not explicit_json_id:
+                call_id = preallocated_id
+            else:
+                call_id = self._allocate_call_id(explicit_json_id or None)
             events.append(
                 TextProtocolEvent(
                     kind="tool_call",
@@ -627,7 +621,9 @@ class ToolCallStreamParser:
 
         while self._buf and not self.stopped:
             if self._active_close_tag is None:
-                hallucinated_pos = self._buf.find(_HALLUCINATED_RESULT_MARKER)
+                hallucinated_pos = self._buf.lower().find(
+                    _HALLUCINATED_RESULT_MARKER.lower()
+                )
                 tag_match = _OPEN_TAG_RE.search(self._buf)
                 tag_pos = tag_match.start() if tag_match is not None else -1
 
@@ -657,24 +653,23 @@ class ToolCallStreamParser:
                         or tag_match.group(3)
                         or tag_match.group(4)
                         or ""
-                    )
-                    self._active_attr_id = attr_id.strip() or None
-                    events.append(
-                        TextProtocolEvent(
-                            kind="tool_call_started",
-                            call_id=self._active_attr_id or "",
+                    ).strip() or None
+                    self._active_call_id = self._allocate_call_id(attr_id)
+                    if self._allowed_names is None or len(self._allowed_names) > 0:
+                        events.append(
+                            TextProtocolEvent(
+                                kind="tool_call_started",
+                                call_id=self._active_call_id,
+                            )
                         )
-                    )
                     self._buf = self._buf[tag_match.end() :]
                     continue
 
-                # Check if the tail of _buf could be an incomplete opening tag or `[Tool Result`
                 hold_len = max(
                     _longest_suffix_prefix(self._buf, TOOL_CALL_OPEN),
                     _longest_suffix_prefix(self._buf, _ALT_CALL_OPEN),
                     _longest_suffix_prefix(self._buf, _HALLUCINATED_RESULT_MARKER),
                 )
-                # Also hold if `<orin_tool_call` or `<tool_call` started with attributes but has no closing `>` yet
                 lower_buf = self._buf.lower()
                 for open_prefix in (TOOL_CALL_OPEN, _ALT_CALL_OPEN):
                     last_open = lower_buf.rfind(open_prefix)
@@ -692,16 +687,32 @@ class ToolCallStreamParser:
                     events.append(TextProtocolEvent(kind="text", text=emit_part))
                 break
             else:
-                close_pos = _find_close_tag_outside_json_strings(
+                close_pos = _find_token_outside_json_strings(
                     self._buf, self._active_close_tag
                 )
+                hallucinated_pos = _find_token_outside_json_strings(
+                    self._buf, _HALLUCINATED_RESULT_MARKER
+                )
+                if hallucinated_pos != -1 and (
+                    close_pos == -1 or hallucinated_pos < close_pos
+                ):
+                    inner_before = self._buf[:hallucinated_pos]
+                    pre_id = self._active_call_id
+                    self._active_close_tag = None
+                    self._active_call_id = None
+                    events.extend(self._parse_inner_calls(inner_before, pre_id))
+                    events.append(TextProtocolEvent(kind="stop"))
+                    self.stopped = True
+                    self._buf = ""
+                    break
+
                 if close_pos != -1:
                     inner_xml = self._buf[:close_pos]
                     after = self._buf[close_pos + len(self._active_close_tag) :]
-                    attr_id = self._active_attr_id
+                    pre_id = self._active_call_id
                     self._active_close_tag = None
-                    self._active_attr_id = None
-                    events.extend(self._parse_inner_calls(inner_xml, attr_id))
+                    self._active_call_id = None
+                    events.extend(self._parse_inner_calls(inner_xml, pre_id))
                     self._buf = after
                     continue
                 break
@@ -712,7 +723,7 @@ class ToolCallStreamParser:
         if self.stopped:
             self._buf = ""
             self._active_close_tag = None
-            self._active_attr_id = None
+            self._active_call_id = None
             return []
 
         events: list[TextProtocolEvent] = []
@@ -720,10 +731,20 @@ class ToolCallStreamParser:
         self._buf = ""
 
         if self._active_close_tag is not None:
-            attr_id = self._active_attr_id
+            pre_id = self._active_call_id
             self._active_close_tag = None
-            self._active_attr_id = None
-            parsed = self._parse_inner_calls(leftover, attr_id)
+            self._active_call_id = None
+            hallucinated_pos = _find_token_outside_json_strings(
+                leftover, _HALLUCINATED_RESULT_MARKER
+            )
+            if hallucinated_pos != -1:
+                events.extend(
+                    self._parse_inner_calls(leftover[:hallucinated_pos], pre_id)
+                )
+                events.append(TextProtocolEvent(kind="stop"))
+                self.stopped = True
+                return events
+            parsed = self._parse_inner_calls(leftover, pre_id)
             if parsed:
                 events.extend(parsed)
             else:
@@ -731,9 +752,11 @@ class ToolCallStreamParser:
             return events
 
         if leftover:
-            if _HALLUCINATED_RESULT_MARKER in leftover:
-                pos = leftover.find(_HALLUCINATED_RESULT_MARKER)
-                before = leftover[:pos].rstrip()
+            hallucinated_pos = leftover.lower().find(
+                _HALLUCINATED_RESULT_MARKER.lower()
+            )
+            if hallucinated_pos != -1:
+                before = leftover[:hallucinated_pos].rstrip()
                 if before:
                     events.append(TextProtocolEvent(kind="text", text=before))
                 events.append(TextProtocolEvent(kind="stop"))
