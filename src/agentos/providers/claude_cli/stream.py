@@ -142,6 +142,9 @@ class StreamJsonParser:
         self.stop_reason: str | None = None
         self._current_message_id: str | None = None
         self._seen_usage_message_ids: set[str] = set()
+        # Messages streamed with --include-partial-messages: their `assistant` packets repeat the message_start
+        # usage (output_tokens ~1); the final output only comes in message_delta, so USAGE waits for it.
+        self._deferred_usage_msgs: set[str] = set()
         self._pending_tools: dict[int, dict[str, Any]] = {}
         self._emitted_tool_end_ids: set[str] = set()
         self._msg_tool_ids_by_seq: dict[str, list[str]] = {}
@@ -159,7 +162,26 @@ class StreamJsonParser:
         events: list[CliEvent] = []
         for pending_idx in list(self._pending_tools.keys()):
             events.extend(self._flush_pending_tool(pending_idx, {}))
+        events.extend(self._drain_deferred_usage())
         return events
+
+    def _usage_event(self, msg_id: str, raw: Mapping[str, Any]) -> CliEvent:
+        self._seen_usage_message_ids.add(msg_id)
+        self._deferred_usage_msgs.discard(msg_id)
+        return CliEvent(
+            kind=CliEventKind.USAGE,
+            message_id=msg_id,
+            usage=CliUsage.from_raw(self._msg_usage_raw.get(msg_id, {})),
+            raw=raw,
+        )
+
+    def _drain_deferred_usage(self, raw: Mapping[str, Any] | None = None) -> list[CliEvent]:
+        """Usage of streamed messages that never got a message_delta (the stream ended early): bill what is known."""
+        return [
+            self._usage_event(msg_id, raw or {})
+            for msg_id in sorted(self._deferred_usage_msgs)
+            if msg_id not in self._seen_usage_message_ids
+        ]
 
     def _flush_pending_tool(self, index: int, raw: Mapping[str, Any]) -> list[CliEvent]:
         entry = self._pending_tools.pop(index, None)
@@ -299,6 +321,8 @@ class StreamJsonParser:
                         bucket = self._msg_usage_raw.setdefault(msg_id, {})
                         bucket.update(msg_obj["usage"])
                         self._latest_usage_raw.update(msg_obj["usage"])
+                    if msg_id not in self._seen_usage_message_ids:
+                        self._deferred_usage_msgs.add(msg_id)
                 return events
 
             if ev_type == "message_delta":
@@ -308,6 +332,9 @@ class StreamJsonParser:
                     )
                     bucket.update(event["usage"])
                     self._latest_usage_raw.update(event["usage"])
+                delta_mid = self._current_message_id or ""
+                if delta_mid in self._deferred_usage_msgs and delta_mid not in self._seen_usage_message_ids:
+                    events.append(self._usage_event(delta_mid, packet))
                 delta_obj = event.get("delta")
                 if isinstance(delta_obj, Mapping) and delta_obj.get("stop_reason"):
                     self.stop_reason = str(delta_obj["stop_reason"])
@@ -526,7 +553,7 @@ class StreamJsonParser:
                                 )
                             )
 
-            if msg_id not in self._seen_usage_message_ids and (
+            if msg_id not in self._seen_usage_message_ids and msg_id not in self._deferred_usage_msgs and (
                 bucket or isinstance(msg.get("usage"), Mapping)
             ):
                 self._seen_usage_message_ids.add(msg_id)
@@ -583,6 +610,7 @@ class StreamJsonParser:
         if pkt_type == "result":
             for pending_idx in list(self._pending_tools.keys()):
                 events.extend(self._flush_pending_tool(pending_idx, packet))
+            events.extend(self._drain_deferred_usage(packet))
             subtype = str(packet.get("subtype") or "")
             is_error = packet.get("is_error") is True or subtype.startswith("error")
             result_text = str(
