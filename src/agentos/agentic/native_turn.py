@@ -114,12 +114,14 @@ def _canonical_json(value: Any) -> str:
         return str(value)
 
 
+_ORIN_MCP_PREFIX = "mcp__orin__"
+
+
 def _strip_mcp_prefix(name: str) -> str:
+    """Drop only the CLI's prefix for Orin's own server; a user MCP tool (mcp__<slug>__<tool>) keeps its name."""
     raw = str(name or "").strip()
-    if raw.startswith("mcp__"):
-        parts = raw.split("__", 2)
-        if len(parts) == 3 and parts[2]:
-            return parts[2]
+    if raw.startswith(_ORIN_MCP_PREFIX) and len(raw) > len(_ORIN_MCP_PREFIX):
+        return raw[len(_ORIN_MCP_PREFIX):]
     return raw
 
 

@@ -984,7 +984,8 @@ def test_deferred_mcp_tool_and_empty_tool_schemas_validation(tmp_path: Path) -> 
     assert "Unknown tool" in denied.text
 
     # 2. Deferred MCP tool activated mid-turn via active_mcp_tool_names passes through TurnToolServer
-    toolset.active_mcp_tool_names = {"Read"}  # simulate dynamic activation
+    # Activation records the toolset's internal name (the property is read-only).
+    toolset._active_mcp_tool_names.add("read_file")
     bg = BackgroundTurnToolServer.start(TurnToolServer(empty_exec))
     try:
         (workspace.root / "dyn.txt").write_text("dynamic_ok\n", encoding="utf-8")
@@ -1001,7 +1002,7 @@ def test_deferred_mcp_tool_and_empty_tool_schemas_validation(tmp_path: Path) -> 
         ).json()
     finally:
         bg.close()
-    assert resp["result"]["isError"] is False
+    assert resp["result"]["isError"] is False, resp
     assert "dynamic_ok" in resp["result"]["content"][0]["text"]
 
 
@@ -1212,6 +1213,39 @@ def test_native_history_avoids_orin_tool_call_and_session_plan_cli_flags_and_fin
     assert "</orin_tool_call>" not in sent_blocks_text
     # 2. final_text fallback was emitted to store.deltas
     assert "Texto apenas no result packet." in "".join(store.deltas)
+
+
+
+
+def test_user_mcp_tool_names_keep_their_own_prefix(tmp_path: Path) -> None:
+    """Only Orin's own server prefix (mcp__orin__) is stripped; a user MCP tool keeps its qualified name."""
+    from agentos.agentic.native_turn import _strip_mcp_prefix
+
+    assert _strip_mcp_prefix("mcp__orin__Read") == "Read"
+    assert _strip_mcp_prefix("mcp__orin__mcp__github__create_issue") == "mcp__github__create_issue"
+    assert _strip_mcp_prefix("mcp__github__create_issue") == "mcp__github__create_issue"
+    assert _strip_mcp_prefix("Read") == "Read"
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schema = {
+        "type": "function",
+        "function": {
+            "name": "mcp__github__create_issue",
+            "description": "Create an issue",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=[schema])
+    assert executor.is_known_tool("mcp__github__create_issue") is True
+    assert executor.is_known_tool("create_issue") is False
 
 
 def _usage_runtime(tmp_path: Path, rounds: list[Callable[..., NativeTurnOutcome]], **kw: Any) -> tuple[AgenticTurnRuntime, FakeStore]:
