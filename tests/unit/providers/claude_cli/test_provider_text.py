@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import json
 import logging
 from typing import Any
@@ -406,7 +408,11 @@ def test_stream_uses_isolated_cwd_and_requires_init_with_strict_api_key_source_n
     try:
         list(provider.stream({"messages": [{"role": "user", "content": "Oi"}]}))
         assert len(captured_cwds) == 1
-        assert "orin-claude-empty-cwd" in captured_cwds[0]
+        from agentos.providers.claude_cli.command import ensure_isolated_cwd
+
+        assert captured_cwds[0] is not None
+        assert Path(captured_cwds[0]).resolve() == ensure_isolated_cwd().resolve()
+        assert Path(captured_cwds[0]).name == "orin-claude-cli-cwd"
     finally:
         provider.close()
 

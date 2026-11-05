@@ -451,7 +451,7 @@ def test_chat_native_turn_allows_report_verification_and_blocks_write_in_verify_
             res_ver = self.req.executor.call_tool(
                 ToolCallRequest(
                     name="report_verification",
-                    arguments={"passed": True, "checked": ["out.txt exists"], "findings": "ok"},
+                    arguments={"passed": True, "findings": "ok"},
                     meta={"claudecode/toolUseId": "call_rv", "message_id": "msg_2"},
                 )
             )
@@ -566,6 +566,10 @@ def test_friend_optimistic_speak_retracted_when_read_succeeds_then_write_fails_i
     )
     res = rt.run("t_friend")
     assert res.state == "completed"
-    # Optimistic lie retraction must have been emitted
-    assert any("Não consegui concluir a ação anterior" in d for d in store.deltas)
+    # Optimistic lie retraction must have been emitted as a spoken chunk
+    assert any(
+        etype == AgentActivityEventType.SPEAK_CHUNK_READY.value
+        and payload.get("optimistic_lie_retraction") is True
+        for etype, _summary, payload in store.speak_records
+    )
 

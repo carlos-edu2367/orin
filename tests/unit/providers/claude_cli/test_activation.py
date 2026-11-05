@@ -296,21 +296,32 @@ def test_child_alias_resolved_by_catalog(
 
 
 def test_cancelled_slot_wait_does_not_trip_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
-    reset_native_breaker()
+    provider_mod.clear_circuit_breaker()
     provider = ClaudeCliProvider(
         base_url=CLAUDE_CODE_LOCAL_BASE_URL,
         model="claude-opus-5-5",
         binary="C:/fake/claude.exe",
     )
-    monkeypatch.setattr(
-        "agentos.providers.claude_cli.provider.start_native_turn_for_provider",
-        lambda *_a, **_kw: (_ for _ in ()).throw(
-            NativeLoopUnavailable("Cancelled while waiting for a Claude CLI process slot.", status_code=499)
-        ),
-    )
-    with pytest.raises(NativeLoopUnavailable) as exc_info:
-        provider.start_native_turn(object())  # type: ignore[arg-type]
-    assert exc_info.value.status_code == 499
-    assert is_native_breaker_open() is False
-    provider.close()
+    breaker_key = provider._resolve_binary() or "C:/fake/claude.exe"
+    failure: list[NativeLoopUnavailable] = [
+        NativeLoopUnavailable("Cancelled while waiting for a Claude CLI process slot.", status_code=499)
+    ]
 
+    def _start(*_a: Any, **_kw: Any) -> Any:
+        raise failure[0]
+
+    monkeypatch.setattr("agentos.providers.claude_cli.native_loop.start_native_turn_for_provider", _start)
+    try:
+        with pytest.raises(NativeLoopUnavailable) as exc_info:
+            provider.start_native_turn(object())  # type: ignore[arg-type]
+        assert exc_info.value.status_code == 499
+        assert provider_mod._is_circuit_open(breaker_key) is False
+
+        # Contrast: a real unavailability does open the breaker for the same binary.
+        failure[0] = NativeLoopUnavailable("MCP server failed to connect", status_code=None)
+        with pytest.raises(NativeLoopUnavailable):
+            provider.start_native_turn(object())  # type: ignore[arg-type]
+        assert provider_mod._is_circuit_open(breaker_key) is True
+    finally:
+        provider_mod.clear_circuit_breaker()
+        provider.close()

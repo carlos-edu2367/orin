@@ -459,7 +459,9 @@ def test_stream_claude_code_bridge_parses_resets_at_into_retry_after_and_isolate
     assert exc_info.value.status_code == 429
     assert exc_info.value.retry_after_seconds is not None
     assert 35.0 <= exc_info.value.retry_after_seconds <= 45.0
-    assert captured_cwds == [tempfile.gettempdir()]
+    from agentos.providers.claude_cli.command import ensure_isolated_cwd
+
+    assert captured_cwds == [str(ensure_isolated_cwd())]
 
     # Verify CliSlots bounds concurrency when ORIN_CLI_MAX_PROCESSES is configured
     monkeypatch.setattr(
