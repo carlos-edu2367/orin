@@ -26,7 +26,7 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
 )
-from agentos.agentic.tools.spec import ToolSpec, ToolInput
+from agentos.agentic.tools.spec import MAX_RESULT_CHARS_DEFAULT, ToolSpec, ToolInput
 
 
 OFFICE_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
@@ -400,10 +400,26 @@ class ReadTools:
             max_lines=LARGE_READ_LINES if effective_allow_large else 800,
             max_bytes=LARGE_READ_BYTES if effective_allow_large else MAX_READ_BYTES,
         )
+        cap = LARGE_READ_RESULT_CHARS if effective_allow_large else MAX_RESULT_CHARS_DEFAULT
+        budget = cap - 400 - len(path)  # headroom for the continuation hints
+        kept: list[str] = []
+        used = 0
+        cut_by_chars = False
+        for index, line in enumerate(lines):
+            numbered_len = len(f"{first + index:6}\t{line}") + 1
+            if used + numbered_len <= budget:
+                kept.append(line)
+                used += numbered_len
+                continue
+            cut_by_chars = True
+            if not kept:
+                kept.append(f"{line[:budget]}\n[line {first} truncated at {budget} characters]")
+            break
+        lines = kept
         sha = self._record_file_read(
             path,
             offset=norm_offset,
-            limit=norm_limit,
+            limit=len(kept) if cut_by_chars else norm_limit,
             total_lines=total,
             explicit_read=True,
         )
@@ -414,7 +430,11 @@ class ReadTools:
         else:
             body = "\n".join(f"{first + index:6}\t{line}" for index, line in enumerate(lines))
         next_line = first + len(lines)
-        if lines and next_line <= total:
+        if cut_by_chars:
+            last_line = next_line - 1
+            call = f'Read(file_path="{path}", offset={next_line})' if self.name_translator is not None else f'read_file(path="{path}", offset={next_line})'
+            body += f"\n\n[stopped at line {last_line} to stay under {cap} characters; {total - last_line} more lines; continue with {call}]"
+        elif lines and next_line <= total:
             if self.name_translator is not None:
                 body += f"\n\n[{total - next_line + 1} more lines; continue with Read(file_path=\"{path}\", offset={next_line})]"
             else:
@@ -434,6 +454,7 @@ class ReadTools:
             "total_lines": total,
             "line_count": total,
             "truncated": truncated,
+            "truncated_by_chars": cut_by_chars,
             "label": path,
         }
         return {
@@ -449,7 +470,7 @@ class ReadTools:
             "payload": payload,
             "tool_output": {"type": "text", "file": {
                 "filePath": str(target), "content": "\n".join(lines), "numLines": len(lines), "startLine": first,
-                "totalLines": total, **({"truncatedByTokenCap": True} if truncated else {}),
+                "totalLines": total, **({"truncatedByTokenCap": True} if truncated or cut_by_chars else {}),
             }},
             **({"max_result_chars": LARGE_READ_RESULT_CHARS} if effective_allow_large else {}),
         }

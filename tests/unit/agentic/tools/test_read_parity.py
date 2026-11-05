@@ -72,10 +72,43 @@ def test_a_broken_notebook_is_an_error_not_a_crash(tmp_path: Path) -> None:
 
 def test_allow_large_reads_past_the_default_caps(tmp_path: Path) -> None:
     toolset = _toolset(tmp_path)
-    body = "".join(f"line {index} {'x' * 50}\n" for index in range(1, 1201))
+    body = "".join(f"l{index}\n" for index in range(1, 1201))
     (toolset.workspace.root / "big.txt").write_text(body, encoding="utf-8")
     normal = toolset.invoke("Read", {"file_path": "big.txt", "limit": 1200})
     assert normal.data["tool_output"]["file"]["numLines"] == 800
     large = toolset.invoke("Read", {"file_path": "big.txt", "limit": 1200, "allow_large": True, "force_reload": True})
     assert large.data["tool_output"]["file"]["numLines"] == 1200
-    assert "line 1200" in large.content  # ~80,000 characters: past the default 12,000, inside the raised budget
+    assert "l1200" in large.content  # ~14,000 characters: past the default 12,000, inside the raised budget
+
+
+def test_a_read_cut_by_the_character_budget_records_only_the_lines_it_returned(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path)
+    (toolset.workspace.root / "wide.txt").write_bytes(b"".join(b"x" * 100 + b"\n" for _ in range(400)))
+    outcome = toolset.invoke("read_file", {"path": "wide.txt"})
+    last = outcome.payload["end_line"]
+    assert 50 < last < 400
+    assert len(outcome.content) <= 12_000
+    assert outcome.payload["truncated"] is False  # cut by read_file itself, not by the generic bound
+    assert outcome.payload["truncated_by_chars"] is True
+    assert f"offset={last + 1}" in outcome.content
+    assert toolset._read_file_state["wide.txt"].limit == last
+    following = toolset.invoke("read_file", {"path": "wide.txt", "offset": last + 1})
+    assert f"{last + 1:6}\t" in following.content
+
+
+def test_a_reread_after_a_cut_returns_content_not_the_unchanged_stub(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path)
+    (toolset.workspace.root / "wide.txt").write_bytes(b"".join(b"x" * 100 + b"\n" for _ in range(400)))
+    toolset.invoke("read_file", {"path": "wide.txt"})
+    again = toolset.invoke("read_file", {"path": "wide.txt"})
+    assert again.data["tool_output"]["type"] == "text"
+
+
+def test_a_single_line_longer_than_the_budget_is_cut_inside_the_line(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path)
+    (toolset.workspace.root / "min.js").write_bytes(b"y" * 50_000 + b"\nz\n")
+    outcome = toolset.invoke("read_file", {"path": "min.js"})
+    assert outcome.status == "succeeded"
+    assert "[line 1 truncated at" in outcome.content
+    assert outcome.payload["end_line"] == 1
+    assert "offset=2" in outcome.content
