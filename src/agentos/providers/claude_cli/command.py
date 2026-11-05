@@ -14,6 +14,7 @@ from agentos.providers.claude_cli.errors import ProviderTransportError
 ISOLATION_FLAGS: tuple[str, ...] = ("--restricted", "--strict-mcp-config")
 IDLE_TIMEOUT_SECONDS: int = 180
 MCP_TOOL_TIMEOUT_ENV = "MCP_TOOL_TIMEOUT"
+TOOL_USE_ID_META_KEY = "claudecode/toolUseId"
 VALIDATED_CLI_RANGE: tuple[str, str] = (">=2.1.309", "<2.2")
 FORBIDDEN_FLAGS: frozenset[str] = frozenset(
     {"--bare", "--safe-mode", "--session-id", "--resume"}

@@ -1,0 +1,882 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from pathlib import Path
+import time
+from typing import Any, Callable, Mapping
+
+import pytest
+
+from agentos.agentic.agent_tools import AgentToolset, ToolOutcome
+from agentos.agentic.lifecycle import HookEvent, LifecycleBus, LifecycleDecision
+from agentos.agentic.native_turn import (
+    BATCH_GATHER_SECONDS,
+    NativeTurnRunner,
+    RuntimeToolExecutor,
+    TOOL_USE_ID_META_KEY,
+    ToolBatchCollector,
+)
+from agentos.agentic.provider_stream import NormalizedStreamItem, StreamKind
+from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+from agentos.agentic.workspace import ConversationWorkspace
+from agentos.providers.claude_cli.errors import (
+    NativeLoopUnavailable,
+    ProviderTransportError,
+)
+from agentos.providers.claude_cli.native_loop import (
+    NativeTurnOutcome,
+    NativeTurnRequest,
+    NativeTurnSink,
+)
+from agentos.providers.claude_cli.stream import CliInit, CliResult, CliUsage
+from agentos.providers.cli_tools_mcp import ToolCallRequest, ToolCallResult, TurnToolServer
+
+
+def _make_init(model: str = "claude-opus-5-5") -> CliInit:
+    return CliInit(
+        session_id="sess_1",
+        model=model,
+        api_key_source="none",
+        mcp_servers={"orin": "connected"},
+        tools=("mcp__orin__Read", "mcp__orin__Edit"),
+    )
+
+
+def _make_result(
+    *,
+    subtype: str = "success",
+    is_error: bool = False,
+    text: str = "Done.",
+    usage: CliUsage | None = None,
+) -> CliResult:
+    u = usage or CliUsage(input_tokens=100, output_tokens=20)
+    return CliResult(
+        subtype=subtype,
+        is_error=is_error,
+        result_text=text,
+        stop_reason="end_turn",
+        num_turns=1,
+        duration_ms=50,
+        session_id="sess_1",
+        api_error_status=None,
+        usage=u,
+        model_usage={"claude-opus-5-5": u},
+    )
+
+
+class FakeStore:
+    def __init__(self, *, model_id: str = "claude-opus-5-5") -> None:
+        self.turn: dict[str, object] = {
+            "turn_id": "t1",
+            "conversation_id": "c1",
+            "user_id": "u1",
+            "execution_id": "e1",
+            "provider": "anthropic",
+            "model_id": model_id,
+            "user_message_id": "um1",
+            "assistant_message_id": "am1",
+            "code_mode": "code",
+            "conversation_mode": "code",
+        }
+        self.states: list[tuple[str, dict[str, Any]]] = []
+        self.deltas: list[str] = []
+        self.effects_started: list[dict[str, Any]] = []
+        self.effects_finished: list[dict[str, Any]] = []
+        self.steps: list[dict[str, Any]] = []
+        self.usages: list[dict[str, Any]] = []
+        self.finished: list[dict[str, Any]] = []
+        self._eff_seq = 0
+
+    def load(self, turn_id: str) -> dict[str, object]:
+        return self.turn
+
+    def history_for_turn(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
+        return [{"role": "user", "content": "Inspect and fix the project"}]
+
+    def lifecycle(self, turn: Mapping[str, object], state: str, **payload: object) -> None:
+        self.states.append((state, dict(payload)))
+
+    def delta(self, turn: Mapping[str, object], text: str) -> None:
+        self.deltas.append(text)
+
+    def effect_started(
+        self,
+        turn: Mapping[str, object],
+        *,
+        kind: str,
+        invocation_ref: str,
+        request_ref: str,
+    ) -> str:
+        self._eff_seq += 1
+        eff_id = f"eff_{self._eff_seq}"
+        self.effects_started.append(
+            {
+                "effect_id": eff_id,
+                "kind": kind,
+                "invocation_ref": invocation_ref,
+                "request_ref": request_ref,
+            }
+        )
+        return eff_id
+
+    def effect_finished(
+        self,
+        turn: Mapping[str, object],
+        *,
+        effect_id: str,
+        state: str,
+        result_ref: str | None = None,
+        error_code: str | None = None,
+        private_result: Mapping[str, object] | None = None,
+    ) -> None:
+        self.effects_finished.append(
+            {
+                "effect_id": effect_id,
+                "state": state,
+                "result_ref": result_ref,
+                "error_code": error_code,
+                "private_result": dict(private_result or {}),
+            }
+        )
+
+    def record_step(
+        self,
+        turn: Mapping[str, object],
+        *,
+        kind: str,
+        payload: Mapping[str, object],
+        **fields: object,
+    ) -> None:
+        self.steps.append({"kind": kind, "payload": dict(payload), **fields})
+
+    def record_usage(
+        self,
+        turn: Mapping[str, object],
+        *,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        total_tokens: int | None = None,
+    ) -> None:
+        self.usages.append(
+            {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+        )
+
+    def finish(
+        self,
+        turn: Mapping[str, object],
+        *,
+        failed: bool = False,
+        code: str | None = None,
+    ) -> None:
+        self.finished.append({"failed": failed, "code": code})
+
+
+class ScriptedHandle:
+    def __init__(
+        self,
+        req: NativeTurnRequest,
+        rounds: list[Callable[[NativeTurnRequest, NativeTurnSink, "ScriptedHandle"], NativeTurnOutcome]],
+    ) -> None:
+        self.req = req
+        self._rounds = list(rounds)
+        self.sent_users: list[list[dict[str, Any]]] = []
+        self.refused_reasons: list[str] = []
+        self.closed = False
+
+    def run_until_result(self, sink: NativeTurnSink) -> NativeTurnOutcome:
+        if not self._rounds:
+            raise AssertionError("No more scripted rounds in ScriptedHandle")
+        fn = self._rounds.pop(0)
+        return fn(self.req, sink, self)
+
+    def send_user(self, content: list[dict[str, Any]]) -> None:
+        self.sent_users.append(list(content))
+
+    def refuse_tools(self, reason: str = "turn ended") -> None:
+        self.refused_reasons.append(reason)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeNativeProvider:
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        raise_on_start: BaseException | None = None,
+        handle_factory: Callable[[NativeTurnRequest], ScriptedHandle] | None = None,
+    ) -> None:
+        self.available = available
+        self.raise_on_start = raise_on_start
+        self._handle_factory = handle_factory
+        self.starts = 0
+        self.stream_calls = 0
+        self.requests: list[NativeTurnRequest] = []
+        self.handles: list[ScriptedHandle] = []
+
+    def native_turn_available(self, turn: Mapping[str, object]) -> bool:
+        return self.available
+
+    def start_native_turn(self, req: NativeTurnRequest) -> ScriptedHandle:
+        self.starts += 1
+        self.requests.append(req)
+        if self.raise_on_start is not None:
+            err = self.raise_on_start
+            self.raise_on_start = None
+            raise err
+        if self._handle_factory is not None:
+            handle = self._handle_factory(req)
+        else:
+            def _default_round(r: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+                init = _make_init(r.model)
+                sink.on_init(init)
+                sink.on_text("Hello from native turn.")
+                sink.on_assistant_usage("msg_1", CliUsage(input_tokens=100, output_tokens=20))
+                return NativeTurnOutcome(
+                    result=_make_result(text="Hello from native turn."),
+                    init=init,
+                    final_text="Hello from native turn.",
+                    exit_code=0,
+                )
+
+            handle = ScriptedHandle(req, [_default_round])
+        self.handles.append(handle)
+        return handle
+
+    def stream(self, request: Mapping[str, object]):
+        self.stream_calls += 1
+        return iter(
+            [
+                NormalizedStreamItem(StreamKind.TEXT, 1, text="Fallback text answer."),
+                NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop"),
+            ]
+        )
+
+
+def _make_toolset(workspace: ConversationWorkspace, **kwargs: Any) -> AgentToolset:
+    kwargs.setdefault("code_mode_active", True)
+    kwargs.setdefault("public_tool_names", True)
+    kwargs.setdefault("code_mode_work_kind", "analysis")
+    return AgentToolset(workspace, **kwargs)
+
+
+def test_runtime_hands_whole_turn_to_native_provider_once(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    fake_provider = FakeNativeProvider()
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    result = runtime.run("t1", turn=store.turn)
+    assert result.state == "completed" and fake_provider.starts == 1 and fake_provider.stream_calls == 0
+    assert fake_provider.handles[0].closed is True
+
+
+def test_mcp_call_goes_through_run_toolset_with_permissions_hooks_and_effects(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "f.py").write_text("x = 1\n", encoding="utf-8")
+
+    bus = LifecycleBus(base={"session_id": "c1"})
+    bus.subscribe(
+        lambda ev: LifecycleDecision(
+            blocked=True,
+            permission_decision="deny",
+            reason="bloqueado pelo teste",
+        )
+        if ev.name is HookEvent.PRE_TOOL_USE and ev.payload.get("tool_name") == "Edit"
+        else None
+    )
+    toolset = _make_toolset(workspace, lifecycle=bus)
+
+    captured_results: list[ToolCallResult] = []
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_tool_use_started("toolu_edit_1", "mcp__orin__Edit")
+        sink.on_tool_use_complete(
+            "toolu_edit_1",
+            "mcp__orin__Edit",
+            {"file_path": "f.py", "old_string": "x = 1", "new_string": "x = 2"},
+        )
+        res = req.executor.call_tool(
+            ToolCallRequest(
+                name="Edit",
+                arguments={"file_path": "f.py", "old_string": "x = 1", "new_string": "x = 2"},
+                meta={TOOL_USE_ID_META_KEY: "toolu_edit_1"},
+            )
+        )
+        captured_results.append(res)
+        sink.on_text("Edit was blocked.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Edit was blocked."),
+            init=init,
+            final_text="Edit was blocked.",
+            exit_code=0,
+        )
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        lifecycle=bus,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    assert len(captured_results) == 1
+    assert captured_results[0].is_error is True
+    assert "Um hook PreToolUse bloqueou" in captured_results[0].text
+
+    tool_effects = [e for e in store.effects_started if e["kind"] == "tool"]
+    assert len(tool_effects) == 1
+    assert tool_effects[0]["invocation_ref"] == "tool:toolu_edit_1"
+
+    started_events = [p for s, p in store.states if s == "tool_started"]
+    finished_events = [p for s, p in store.states if s == "tool_finished"]
+    assert len(started_events) == 1 and started_events[0]["invocation_id"] == "toolu_edit_1"
+    assert len(finished_events) == 1 and finished_events[0]["invocation_id"] == "toolu_edit_1"
+
+
+def test_native_unavailable_falls_back_to_text_loop(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    fake_provider = FakeNativeProvider(raise_on_start=NativeLoopUnavailable("mcp failed"))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    assert runtime.run("t1", turn=store.turn).state == "completed" and fake_provider.stream_calls >= 1
+
+
+def test_cli_reported_model_replaces_turn_model(tmp_path: Path) -> None:
+    store = FakeStore(model_id="claude-opus-5-5")
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    switched_models: list[str] = []
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init("claude-opus-5-5[1m]")
+        sink.on_init(init)
+        sink.on_text("Ok.")
+        return NativeTurnOutcome(result=_make_result(text="Ok."), init=init, final_text="Ok.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        model_switched=switched_models.append,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    res = runtime.run("t1", turn=store.turn)
+    assert res.state == "completed"
+    assert store.turn["model_id"] == "claude-opus-5-5[1m]"
+    assert switched_models == ["claude-opus-5-5[1m]"]
+    model_switch_events = [p for s, p in store.states if s == "model_switched"]
+    assert len(model_switch_events) == 1
+    assert model_switch_events[0]["from_model"] == "claude-opus-5-5"
+    assert model_switch_events[0]["to_model"] == "claude-opus-5-5[1m]"
+    assert model_switch_events[0]["reason"] == "cli_reported"
+
+
+def test_context_meter_uses_cli_usage_and_catalog_window(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+
+    usage = CliUsage(
+        input_tokens=1000,
+        output_tokens=200,
+        cache_read_input_tokens=50000,
+        cache_creation_input_tokens=2000,
+    )
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_text("Measured.")
+        sink.on_assistant_usage("msg_ctx_1", usage)
+        return NativeTurnOutcome(
+            result=_make_result(text="Measured.", usage=usage),
+            init=init,
+            final_text="Measured.",
+            exit_code=0,
+        )
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        context_reporting=True,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    assert runtime.run("t1", turn=store.turn).state == "completed"
+    ctx_events = [p for s, p in store.states if s == "context_updated"]
+    assert len(ctx_events) >= 2
+    last_ctx = ctx_events[-1]
+    assert last_ctx["used_tokens"] == 53000
+    assert last_ctx["limit_tokens"] == 1_000_000
+
+
+def test_usage_recorded_once_per_assistant_message(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    usage = CliUsage(input_tokens=500, output_tokens=100, cache_read_input_tokens=1000)
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_assistant_usage("msg_dup", usage)
+        sink.on_assistant_usage("msg_dup", usage)
+        sink.on_text("Done.")
+        return NativeTurnOutcome(result=_make_result(text="Done.", usage=usage), init=init, final_text="Done.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    assert runtime.run("t1", turn=store.turn).state == "completed"
+    assert len(store.usages) == 1
+    assert store.usages[0]["input_tokens"] == 1500
+    assert store.usages[0]["output_tokens"] == 100
+    assert runtime.counters.input_tokens == 1500
+
+
+def test_stop_hook_block_sends_follow_up_on_same_handle(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    bus = LifecycleBus(base={"session_id": "c1"})
+    stop_calls = 0
+
+    def _on_stop(ev) -> LifecycleDecision | None:
+        nonlocal stop_calls
+        if ev.name is HookEvent.STOP:
+            stop_calls += 1
+            if stop_calls == 1:
+                return LifecycleDecision(blocked=True, reason="Run tests before stopping")
+        return None
+
+    bus.subscribe(_on_stop)
+    toolset = _make_toolset(workspace, lifecycle=bus)
+
+    def _round_1(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_text("First attempt.")
+        return NativeTurnOutcome(result=_make_result(text="First attempt."), init=init, final_text="First attempt.", exit_code=0)
+
+    def _round_2(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        sink.on_text("Second attempt after hook.")
+        return NativeTurnOutcome(result=_make_result(text="Second attempt after hook."), init=_make_init(req.model), final_text="Second attempt after hook.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round_1, _round_2]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        lifecycle=bus,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    assert fake_provider.starts == 1
+    handle = fake_provider.handles[0]
+    assert len(handle.sent_users) == 1
+    assert "Run tests before stopping" in str(handle.sent_users[0])
+
+
+def test_max_turns_gets_one_closing_follow_up_then_iteration_limit(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+
+    def _round_max_turns(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        return NativeTurnOutcome(
+            result=_make_result(subtype="error_max_turns", is_error=True, text=""),
+            init=init,
+            final_text="",
+            exit_code=0,
+        )
+
+    fake_provider = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round_max_turns, _round_max_turns])
+    )
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=5, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "failed"
+    assert out.error_code == "ITERATION_LIMIT"
+    handle = fake_provider.handles[0]
+    assert len(handle.refused_reasons) >= 1
+    assert len(handle.sent_users) == 1
+
+
+def test_repeated_tool_failure_aborts_native_turn(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        for i in range(1, 4):
+            cid = f"toolu_fail_{i}"
+            sink.on_tool_use_started(cid, "mcp__orin__Read")
+            sink.on_tool_use_complete(cid, "mcp__orin__Read", {"file_path": "missing.txt"})
+            res = req.executor.call_tool(
+                ToolCallRequest(
+                    name="Read",
+                    arguments={"file_path": "missing.txt"},
+                    meta={TOOL_USE_ID_META_KEY: cid, "message_id": f"msg_{i}"},
+                )
+            )
+            if i == 3:
+                assert res.is_error is True
+                assert "turn stopped" in res.text
+        return NativeTurnOutcome(result=_make_result(text="Stopped."), init=init, final_text="Stopped.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "failed"
+    assert out.error_code == "REPEATED_TOOL_FAILURE"
+
+
+def test_cancel_returns_cancelled_and_closes_handle(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    is_cancelled = False
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        nonlocal is_cancelled
+        init = _make_init(req.model)
+        sink.on_init(init)
+        is_cancelled = True
+        return NativeTurnOutcome(
+            result=_make_result(subtype="cancelled", is_error=False, text=""),
+            init=init,
+            final_text="",
+            exit_code=-15,
+        )
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        cancelled=lambda _t: is_cancelled,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "cancelled"
+    assert fake_provider.handles[0].closed is True
+
+
+def test_404_switches_to_fallback_model_without_retry(tmp_path: Path) -> None:
+    store = FakeStore(model_id="claude-opus-5-5")
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+
+    fallback_provider = FakeNativeProvider()
+    err_404 = ProviderTransportError("Model not found", status_code=404, exhausted=False)
+    primary_provider = FakeNativeProvider(raise_on_start=err_404)
+
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=primary_provider,
+        toolset=toolset,
+        fallback_models=("claude-sonnet-5-5",),
+        fallback_provider_factory=lambda model: fallback_provider,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=2,
+            context_window_tokens=1_000_000,
+        ),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    assert primary_provider.starts == 1
+    assert fallback_provider.starts == 1
+    assert fallback_provider.requests[0].model == "claude-sonnet-5-5"
+    retrying_events = [p for s, p in store.states if s == "retrying"]
+    assert retrying_events == []
+    switched_events = [p for s, p in store.states if s == "model_switched"]
+    assert len(switched_events) == 1
+    assert switched_events[0]["to_model"] == "claude-sonnet-5-5"
+
+
+def test_history_written_for_next_turn(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "hello.txt").write_text("world\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_tool_use_started("toolu_read_99", "mcp__orin__Read")
+        sink.on_tool_use_complete("toolu_read_99", "mcp__orin__Read", {"file_path": "hello.txt"})
+        res = req.executor.call_tool(
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": "hello.txt"},
+                meta={TOOL_USE_ID_META_KEY: "toolu_read_99"},
+            )
+        )
+        assert not res.is_error
+        sink.on_text("Read world.")
+        return NativeTurnOutcome(result=_make_result(text="Read world."), init=init, final_text="Read world.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    call_steps = [s for s in store.steps if s["kind"] == "assistant_tool_call"]
+    result_steps = [s for s in store.steps if s["kind"] == "tool_result"]
+    assert len(call_steps) == 1
+    assert len(result_steps) == 1
+    assert call_steps[0]["payload"]["calls"][0]["id"] == "toolu_read_99"
+    assert result_steps[0]["payload"]["id"] == "toolu_read_99"
+    assert result_steps[0]["tool_call_id"] == "toolu_read_99"
+
+
+def test_parallel_calls_of_one_message_run_as_one_batch(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    for idx in range(1, 4):
+        (workspace.root / f"f{idx}.txt").write_text(f"content_{idx}\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+
+    orig_invoke = toolset.invoke
+
+    def _slow_invoke(name: str, arguments: Mapping[str, Any], **kwargs: Any) -> ToolOutcome:
+        time.sleep(0.25)
+        return orig_invoke(name, arguments, **kwargs)
+
+    toolset.invoke = _slow_invoke  # type: ignore[method-assign]
+
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    run_toolset_batches: list[list[dict[str, str]]] = []
+    orig_run_toolset = runtime._run_toolset
+
+    def _spy_run_toolset(turn: dict[str, object], calls: list[dict[str, str]]) -> list[dict[str, object]]:
+        run_toolset_batches.append(list(calls))
+        return orig_run_toolset(turn, calls)
+
+    runtime._run_toolset = _spy_run_toolset  # type: ignore[method-assign]
+
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas)
+
+    t0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futs = [
+            pool.submit(
+                executor.call_tool,
+                ToolCallRequest(
+                    name="Read",
+                    arguments={"file_path": f"f{idx}.txt"},
+                    meta={TOOL_USE_ID_META_KEY: f"toolu_r{idx}", "message_id": "msg_batch_1"},
+                ),
+            )
+            for idx in range(1, 4)
+        ]
+        results = [f.result(timeout=5.0) for f in futs]
+    elapsed = time.monotonic() - t0
+
+    assert len(run_toolset_batches) == 1
+    assert len(run_toolset_batches[0]) == 3
+    for idx, res in enumerate(results, start=1):
+        assert res.is_error is False
+        assert f"content_{idx}" in res.text
+    # 3 reads of 0.25s each + 0.1s gather window should finish well under 2 * 0.25 + 0.15 = 0.65s
+    assert elapsed < 0.65
+
+
+def test_a_write_call_runs_immediately_without_waiting_for_a_window(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "edit_me.txt").write_text("before\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    # Read first so Phase 1 read-before-edit is satisfied
+    toolset.invoke("read_file", {"path": "edit_me.txt"})
+
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    run_toolset_batches: list[list[dict[str, str]]] = []
+    orig_run_toolset = runtime._run_toolset
+
+    def _spy_run_toolset(turn: dict[str, object], calls: list[dict[str, str]]) -> list[dict[str, object]]:
+        run_toolset_batches.append(list(calls))
+        return orig_run_toolset(turn, calls)
+
+    runtime._run_toolset = _spy_run_toolset  # type: ignore[method-assign]
+
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(
+        runtime,
+        store.turn,
+        tool_schemas=schemas,
+        gather_seconds=2.0,  # large gather window to prove write does not wait for it
+    )
+
+    t0 = time.monotonic()
+    res = executor.call_tool(
+        ToolCallRequest(
+            name="Edit",
+            arguments={"file_path": "edit_me.txt", "old_string": "before", "new_string": "after"},
+            meta={TOOL_USE_ID_META_KEY: "toolu_w1", "message_id": "msg_w1"},
+        )
+    )
+    elapsed = time.monotonic() - t0
+
+    assert res.is_error is False
+    assert len(run_toolset_batches) == 1
+    assert len(run_toolset_batches[0]) == 1
+    assert elapsed < 0.5
+
+
+def test_reads_arriving_after_the_window_form_a_new_batch(tmp_path: Path) -> None:
+    batches: list[list[str]] = []
+
+    def _run_batch(entries, message_id: str) -> list[ToolCallResult]:
+        batches.append([e.call_id for e in entries])
+        return [ToolCallResult(text=f"ok:{e.call_id}") for e in entries]
+
+    collector = ToolBatchCollector(_run_batch, gather_seconds=0.05)
+    r1 = collector.submit("c1", "read_file", {"path": "a.txt"}, message_id="m1", read_only=True)
+    time.sleep(0.08)
+    r2 = collector.submit("c2", "read_file", {"path": "b.txt"}, message_id="m1", read_only=True)
+
+    assert r1.text == "ok:c1"
+    assert r2.text == "ok:c2"
+    assert batches == [["c1"], ["c2"]]
+
+
+def test_batches_of_different_messages_never_mix() -> None:
+    batches: list[tuple[str, list[str]]] = []
+
+    def _run_batch(entries, message_id: str) -> list[ToolCallResult]:
+        batches.append((message_id, [e.call_id for e in entries]))
+        return [ToolCallResult(text=f"{message_id}:{e.call_id}") for e in entries]
+
+    collector = ToolBatchCollector(_run_batch, gather_seconds=0.1)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(collector.submit, "c_m1", "read_file", {"path": "a.txt"}, message_id="m1", read_only=True)
+        f2 = pool.submit(collector.submit, "c_m2", "read_file", {"path": "b.txt"}, message_id="m2", read_only=True)
+        res1 = f1.result(timeout=2.0)
+        res2 = f2.result(timeout=2.0)
+
+    assert res1.text == "m1:c_m1"
+    assert res2.text == "m2:c_m2"
+    assert len(batches) == 2
+    seen_msgs = {m: ids for m, ids in batches}
+    assert seen_msgs["m1"] == ["c_m1"]
+    assert seen_msgs["m2"] == ["c_m2"]
+
+
+def test_tools_list_marks_read_only_tools_with_read_only_hint(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas)
+
+    specs = executor.list_tools()
+    assert len(specs) > 0
+    for spec in specs:
+        assert spec.read_only == toolset.is_read_only(spec.name), f"Mismatch on {spec.name}"
+
+    import httpx
+    from agentos.providers.cli_tools_mcp import BackgroundTurnToolServer
+
+    bg = BackgroundTurnToolServer.start(TurnToolServer(executor))
+    handle = bg.handle
+    try:
+        http_resp = httpx.post(
+            handle.url,
+            headers={"Authorization": f"Bearer {handle.token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list",
+                "params": {},
+            },
+            timeout=5.0,
+        )
+        assert http_resp.status_code == 200
+        resp = http_resp.json()
+    finally:
+        bg.close()
+    listed = resp["result"]["tools"]
+    by_name = {item["name"]: item for item in listed}
+    for item in listed:
+        assert item["annotations"]["readOnlyHint"] == toolset.is_read_only(item["name"])
+    assert by_name["Read"]["annotations"]["readOnlyHint"] is True
+    assert by_name["Edit"]["annotations"]["readOnlyHint"] is False

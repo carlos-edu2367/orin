@@ -796,6 +796,22 @@ class AgenticTurnRuntime:
                 {"optimistic_lie_retraction": True},
             )
 
+        native = self._native_provider(turn)
+        if native is not None:
+            from .native_turn import NativeTurnRunner
+
+            outcome = NativeTurnRunner(
+                self,
+                native,
+                turn,
+                turn_id=turn_id,
+                messages=messages,
+                deadline=deadline,
+            ).run()
+            if outcome is not None:
+                return outcome
+            # indisponível antes de qualquer saída: o laço clássico abaixo usa provider.stream (texto)
+
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
             self.counters.note_iteration()
@@ -1463,6 +1479,25 @@ class AgenticTurnRuntime:
         # model's requested tools are discarded rather than silently reported
         # as a completed turn.
         return self._fail(turn, "ITERATION_LIMIT", self.limits.max_iterations or 0, action_count)
+
+    def _native_provider(self, turn: Mapping[str, object]) -> object | None:
+        if (
+            self.toolset is None
+            or self.compact_request is not None
+            or self.shell_command is not None
+        ):
+            return None
+        provider = self.provider
+        avail = getattr(provider, "native_turn_available", None)
+        starter = getattr(provider, "start_native_turn", None)
+        if not (callable(avail) and callable(starter)):
+            return None
+        try:
+            if not avail(turn):
+                return None
+        except Exception:
+            return None
+        return provider
 
     def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
         if self.toolset is None:
