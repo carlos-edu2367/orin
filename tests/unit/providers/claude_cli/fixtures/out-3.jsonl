@@ -1,0 +1,14 @@
+{"type":"system","subtype":"init","session_id":"sess-3","model":"claude-haiku-5-5","apiKeySource":"none","tools":["mcp__orin__echo"],"mcp_servers":[{"name":"orin","status":"connected"}]}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_t1","model":"claude-haiku-5-5","usage":{"input_tokens":120,"output_tokens":1,"cache_read_input_tokens":400,"cache_creation_input_tokens":30}}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"mcp__orin__echo","input":{}}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"text\":"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"A\"}"}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","message":{"id":"msg_t1","model":"claude-haiku-5-5","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_01ABC","name":"mcp__orin__echo","input":{"text":"A"}}],"usage":{"input_tokens":120,"output_tokens":22,"cache_read_input_tokens":400,"cache_creation_input_tokens":30}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01ABC","content":[{"type":"text","text":"echo:A"}]}]}}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_t2","model":"claude-haiku-5-5","usage":{"input_tokens":80,"output_tokens":1,"cache_read_input_tokens":542,"cache_creation_input_tokens":20}}}}
+{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Pronto: echo:A"}}}
+{"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+{"type":"assistant","message":{"id":"msg_t2","model":"claude-haiku-5-5","stop_reason":"end_turn","content":[{"type":"text","text":"Pronto: echo:A"}],"usage":{"input_tokens":80,"output_tokens":10,"cache_read_input_tokens":542,"cache_creation_input_tokens":20}}}
+{"type":"result","subtype":"success","is_error":false,"result":"Pronto: echo:A","stop_reason":"end_turn","num_turns":2,"duration_ms":1450,"session_id":"sess-3","api_error_status":null,"usage":{"input_tokens":200,"output_tokens":32,"cache_read_input_tokens":942,"cache_creation_input_tokens":50},"modelUsage":{"claude-haiku-5-5":{"inputTokens":200,"outputTokens":32,"cacheReadInputTokens":942,"cacheCreationInputTokens":50}}}
