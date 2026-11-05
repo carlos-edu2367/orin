@@ -80,3 +80,61 @@ def _isolated_settings_dirs(
     finally:
         reset_cached_paths()
         clear_fetch_cache()
+
+
+def _real_claude_binaries() -> frozenset[str]:
+    import shutil
+
+    found: set[str] = set()
+    for name in ("claude", "claude.exe", "claude.cmd"):
+        hit = shutil.which(name)
+        if hit:
+            found.add(os.path.normcase(os.path.realpath(hit)))
+    return frozenset(found)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _never_spawn_the_real_claude_cli() -> Iterator[None]:
+    """Tests never run the real `claude` CLI: a spawn of the installed binary fails the test instead.
+
+    Fakes (scripts in tmp_path, `C:/fake/claude.exe`, monkeypatched resolvers) stay allowed;
+    only the binary found on PATH when the session starts is refused.
+    """
+    import shlex
+    import shutil
+    import subprocess
+
+    real = _real_claude_binaries()
+    if not real:
+        yield
+        return
+    original = subprocess.Popen
+
+    def _first_arg(args: object) -> str:
+        if isinstance(args, (str, bytes, os.PathLike)):
+            text = os.fsdecode(args)
+            try:
+                parts = shlex.split(text, posix=os.name != "nt")
+            except ValueError:
+                parts = text.split()
+            return parts[0] if parts else ""
+        try:
+            seq = list(args)  # type: ignore[call-overload]
+        except TypeError:
+            return ""
+        return os.fsdecode(seq[0]) if seq else ""
+
+    class _GuardedPopen(original):  # type: ignore[misc, valid-type]
+        def __init__(self, args: object, *a: object, **kw: object) -> None:
+            first = _first_arg(kw.get("executable") or args)
+            if first:
+                located = first if os.path.isabs(first) else (shutil.which(first) or first)
+                if os.path.normcase(os.path.realpath(located)) in real:
+                    raise RuntimeError(f"tests must never run the real Claude CLI: {first!r}")
+            super().__init__(args, *a, **kw)  # type: ignore[arg-type]
+
+    subprocess.Popen = _GuardedPopen  # type: ignore[misc]
+    try:
+        yield
+    finally:
+        subprocess.Popen = original  # type: ignore[misc]

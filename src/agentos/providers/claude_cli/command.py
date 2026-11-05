@@ -253,12 +253,16 @@ def is_version_validated(version: tuple[int, int, int] | None) -> bool:
     return (2, 1, 309) <= version < (2, 2, 0)
 
 
+# Identity before any patching: a facade attribute still equal to it is not an override.
+_CANONICAL_RESOLVE_BINARY = resolve_claude_binary
+
+
 def _resolve_binary_compat(env: Mapping[str, str] | None = None) -> str | None:
     import sys
 
     facade = sys.modules.get("agentos.provider_catalog.claude_code")
     patched = getattr(facade, "_resolve_claude_binary", None) if facade is not None else None
-    if callable(patched) and patched is not resolve_claude_binary:
+    if callable(patched) and patched is not _CANONICAL_RESOLVE_BINARY:
         return patched(env)
     return resolve_claude_binary(env)
 

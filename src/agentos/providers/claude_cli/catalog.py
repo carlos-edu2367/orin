@@ -14,6 +14,10 @@ from agentos.providers.claude_cli.command import (
     clean_model_id,
 )
 
+# The function as imported, before any test patches this module or the facade:
+# a facade attribute that is still this object is not an override.
+_CANONICAL_CHECK_STATUS = check_claude_cli_status
+
 PUBLISHED_CLAUDE_MODEL_CATALOG_URL = (
     "https://downloads.claude.ai/model-catalog/v1/catalog.json"
 )
@@ -349,7 +353,7 @@ class ClaudeCliModelCatalogClient:
         )
         status_fn = (
             patched_status
-            if callable(patched_status) and patched_status is not check_claude_cli_status
+            if callable(patched_status) and patched_status is not _CANONICAL_CHECK_STATUS
             else check_claude_cli_status
         )
         status = status_fn(timeout=self._timeout)
