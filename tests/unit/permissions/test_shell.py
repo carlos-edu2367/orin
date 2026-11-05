@@ -13,10 +13,12 @@ def is_complex(command: str, shell: str = "posix") -> bool:
     return analyze_command(command, shell=shell).complex
 
 
-def test_default_shell_matches_platform() -> None:
-    import os
+def test_default_shell_matches_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos import host_shell
 
-    assert default_shell() == ("cmd" if os.name == "nt" else "posix")
+    monkeypatch.setattr(host_shell, "_is_windows", lambda: False)
+
+    assert default_shell() == "posix"
 
 
 @pytest.mark.parametrize("shell", ["posix", "cmd"])

@@ -446,7 +446,11 @@ def test_stdout_and_stderr_are_not_redacted_while_secrets_remain_redacted() -> N
     assert sanitized["private_key"] == "[REDACTED]"
 
 
-def test_subagent_isolates_read_file_state_when_inherit_context_false_and_warns_windows_shell(tmp_path: Path) -> None:
+def test_subagent_isolates_read_file_state_when_inherit_context_false_and_warns_windows_shell(tmp_path: Path, monkeypatch) -> None:
+    from agentos import host_shell
+
+    monkeypatch.setattr(host_shell, "_is_windows", lambda: True)
+    monkeypatch.setattr(host_shell, "find_git_bash", lambda: None)
     workspace_dir = tmp_path / "workspaces"
     conv_ws = ConversationWorkspace(workspace_dir, "conv-sub-iso")
     conv_ws.write_text("shared.py", "x = 42\n")

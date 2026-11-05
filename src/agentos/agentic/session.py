@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import shutil
+import sys
 import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
@@ -24,6 +25,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from agentos.host_shell import current_host_shell
 from agentos.installation import orin_paths
 from agentos.agentic.tools.public_names import public_subagent_type
 from agentos.code_mode.file_history import FileHistory
@@ -268,18 +270,18 @@ class _LazyVisionReader:
 def environment_facts() -> dict[str, str]:
     """Describe the machine the agent's commands actually run on.
 
-    ``run_command`` uses ``shell=True``, so the interpreter is the platform's
-    default. Telling the model which one it is removes a whole class of retries
-    caused by guessing cmd vs PowerShell vs sh syntax.
+    ``run_command`` uses the detected host shell, so telling the model which one
+    it is removes a whole class of retries caused by guessing cmd vs PowerShell
+    vs sh syntax.
     """
-    if os.name == "nt":
-        shell = os.environ.get("COMSPEC") or "cmd.exe"
-    else:
-        shell = "/bin/sh"
+    shell = current_host_shell()
     tooling = ", ".join(name for name in ("git", "node", "npm", "uv", "docker") if shutil.which(name))
     return {
         "os": f"{platform.system()} {platform.release()}".strip(),
-        "shell": Path(shell).name,
+        "os_version": platform.version(),
+        "platform": sys.platform,
+        "shell": shell.label,
+        "shell_dialect": shell.dialect,
         "python": platform.python_version(),
         "available": tooling or "none detected",
     }
@@ -3021,15 +3023,23 @@ class TurnSession:
             # A prompt enrichment must never be the reason a delegation cannot start.
             environment = {
                 "os": "unavailable",
+                "os_version": "unavailable",
+                "platform": "unavailable",
                 "shell": "unavailable",
+                "shell_dialect": "posix",
                 "python": "unavailable",
                 "available": "unavailable",
             }
+        shell_syntax_hint = (
+            "(on Windows cmd.exe, never run Unix commands like cat, ls, grep, head, or tail)"
+            if environment.get("shell_dialect") == "cmd"
+            else "(Unix syntax: forward slashes, /dev/null, $VAR)"
+        )
         prompt += (
             "\n\n## Workspace and environment\n"
             "- You share one working directory with the main agent. All paths are relative to it; do not use absolute paths.\n"
             f"- Operating system: {environment['os']}.\n"
-            f"- run_command executes through: {environment['shell']} — use that shell's syntax (on Windows cmd.exe, never run Unix commands like cat, ls, grep, head, or tail).\n"
+            f"- run_command executes through: {environment['shell']} — use that shell's syntax {shell_syntax_hint}.\n"
             "- Always prefer dedicated tools (`read_file`, `list_files`, `search_files`, `write_file`, `edit_file`) over shell commands (`run_command`).\n"
             "- When calling `write_file` or `edit_file`, always provide the `'path'` argument first before `'content'`.\n"
             f"- Python: {environment['python']}. Also on PATH: {environment['available']}."

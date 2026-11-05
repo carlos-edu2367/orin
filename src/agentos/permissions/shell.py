@@ -33,7 +33,9 @@ class ShellAnalysis:
 
 
 def default_shell() -> str:
-    return "cmd" if os.name == "nt" else "posix"
+    from agentos.host_shell import current_host_shell
+
+    return current_host_shell().dialect
 
 
 def analyze_command(command: str, *, shell: str | None = None) -> ShellAnalysis:

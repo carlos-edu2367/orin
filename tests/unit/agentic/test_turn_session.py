@@ -1081,8 +1081,10 @@ def test_environment_facts_name_the_shell_and_the_operating_system() -> None:
 
 
 def test_environment_facts_report_bin_sh_on_posix_regardless_of_preferred_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentos import host_shell
     import agentos.agentic.session as session_module
 
+    monkeypatch.setattr(host_shell, "_is_windows", lambda: False)
     monkeypatch.setattr(session_module.os, "name", "posix")
     monkeypatch.setenv("SHELL", "/usr/bin/fish")
     monkeypatch.setattr(session_module.shutil, "which", lambda _name: None)

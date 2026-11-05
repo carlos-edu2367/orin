@@ -18,6 +18,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import WorkspaceError
+from agentos.host_shell import _is_windows, current_host_shell, posix_to_windows_path, shell_argv
 from agentos.process_identity import process_created
 from agentos.agentic.reminders import system_reminder
 from agentos.agentic.tools._shared import (
@@ -74,14 +75,36 @@ def _bash_output(
     return output
 
 
+_CD_SEPARATORS: dict[str, re.Pattern[str]] = {
+    "posix": re.compile(r"\s*(?:&&|\|\||;|\r?\n)\s*"),
+    "cmd": re.compile(r"\s*(?:&&|\|\||&)\s*"),
+    "powershell": re.compile(r"\s*(?:&&|\|\||;|\r?\n)\s*"),
+}
+_CD_PATTERNS: dict[str, re.Pattern[str]] = {
+    "posix": re.compile(r"^cd\s+(.+)$"),
+    "cmd": re.compile(r"(?i)^cd(?:\s+/d)?\s+(.+)$"),
+    "powershell": re.compile(r"(?i)^cd(?:\s+/d)?\s+(.+)$"),
+}
+
+
 class BashTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
-    def _resolve_cwd_after_command(self, command: str, starting_cwd: Path, *, precheck: bool) -> Path:
+    def _resolve_cwd_after_command(
+        self,
+        command: str,
+        starting_cwd: Path,
+        *,
+        precheck: bool,
+        dialect: str | None = None,
+    ) -> Path:
+        effective_dialect = dialect or current_host_shell().dialect
+        separator = _CD_SEPARATORS.get(effective_dialect, _CD_SEPARATORS["posix"])
+        cd_pattern = _CD_PATTERNS.get(effective_dialect, _CD_PATTERNS["posix"])
         root_resolved = self.workspace.root.resolve()
         current = starting_cwd.resolve()
-        for segment in re.split(r"\s*(?:&&|;)\s*", command.strip()):
-            match = re.match(r"(?i)^cd(?:\s+/d)?\s+(.+)$", segment.strip())
+        for segment in separator.split(command.strip()):
+            match = cd_pattern.match(segment.strip())
             if not match:
                 continue
             raw_target = match.group(1).strip()
@@ -89,13 +112,18 @@ class BashTools:
                 raw_target = raw_target[1:-1].strip()
             if not raw_target:
                 continue
-            candidate = (current / raw_target).resolve()
+            target_text = (
+                posix_to_windows_path(raw_target)
+                if effective_dialect == "posix" and _is_windows()
+                else raw_target
+            )
+            candidate = (current / target_text).resolve()
             # The workspace and every additional working directory are roots: a cd may stay in any of them (W4-R6).
             if not getattr(self.workspace, "unrestricted", False) and not any(
                 candidate.is_relative_to(root) for root in (root_resolved, *self.workspace.additional_roots)
             ):
                 raise AgentToolError("Directory outside workspace is not allowed.")
-            if precheck and re.match(r"(?i)^cd(?:\s+/d)?\s+(.+)$", command.strip()):
+            if precheck and cd_pattern.match(command.strip()):
                 if not candidate.is_dir():
                     raise AgentToolError(f"'{raw_target}' is not a directory in this workspace")
             current = candidate
@@ -134,7 +162,17 @@ class BashTools:
         cwd: str = "",
         description: str = "",
     ) -> dict[str, Any]:
-        return self._run_shell(command, background, timeout_seconds, cwd, description)
+        shell = current_host_shell()
+        argv = shell_argv(command, shell) if isinstance(command, str) and command.strip() else None
+        return self._run_shell(
+            command,
+            background,
+            timeout_seconds,
+            cwd,
+            description,
+            argv=argv,
+            dialect=shell.dialect,
+        )
 
     def _run_shell(
         self,
@@ -147,6 +185,7 @@ class BashTools:
         argv: list[str] | None = None,
         tool_name: str = "run_command",
         stderr_filter: Callable[[str], str] | None = None,
+        dialect: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
@@ -165,7 +204,10 @@ class BashTools:
                 raise AgentToolError(f"'{cwd}' is not a directory in this workspace")
             self._current_cwd = working_directory
             self._remember_session_cwd()
-        self._resolve_cwd_after_command(command, working_directory, precheck=True)
+        effective_dialect = dialect or (
+            "powershell" if tool_name == "powershell" else ("cmd" if os.name == "nt" else "posix")
+        )
+        self._resolve_cwd_after_command(command, working_directory, precheck=True, dialect=effective_dialect)
         change_baseline = self.workspace.begin_change_tracking()
         environment = {
             **os.environ,
@@ -575,7 +617,7 @@ class BashTools:
         fg_tail = "\n".join(p for p in (stdout, stderr) if p)[-2000:]
         succeeded = process.returncode == 0
         if succeeded:
-            next_cwd = self._resolve_cwd_after_command(command, working_directory, precheck=False)
+            next_cwd = self._resolve_cwd_after_command(command, working_directory, precheck=False, dialect=effective_dialect)
             if next_cwd.is_dir():
                 self._current_cwd = next_cwd
                 self._remember_session_cwd()
