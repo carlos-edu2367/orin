@@ -41,7 +41,9 @@ from .runtime import (
     MAX_STOP_CONTINUATIONS,
     VERIFY_REQUIRED_MESSAGE,
     AgenticRunResult,
+    _SpeakState,
 )
+from .speak_stream import SpeakStreamParser
 
 if TYPE_CHECKING:
     from .runtime import AgenticTurnRuntime
@@ -298,6 +300,8 @@ class RuntimeToolExecutor(ToolExecutor):
         self.action_count: int = 0
         self.tool_rounds: int = 0
         self.handle: NativeTurnHandle | Any | None = None
+        self.speak_state: _SpeakState | None = None
+        self.on_batch_finished: Callable[[list[dict[str, object]]], None] | None = None
 
         self._corr_lock = threading.Lock()
         self._pending_tool_uses: list[tuple[str, str, str, str]] = []
@@ -586,6 +590,11 @@ class RuntimeToolExecutor(ToolExecutor):
         reminder_body = render_reminders(pending)
         queued_texts = self._claim_queued_texts() if claim_queue else []
         parts: list[str] = []
+        phase_note = getattr(self.runtime, "_phase_transition_note", None)
+        if phase_note:
+            self.runtime._phase_transition_note = None
+            self.messages.append({"role": "user", "content": phase_note})
+            parts.append(str(phase_note))
         if reminder_body:
             parts.append(reminder_body)
         if queued_texts:
@@ -700,6 +709,12 @@ class RuntimeToolExecutor(ToolExecutor):
             )
             self.messages.extend(self.runtime._tool_result_messages(self.turn, res))
 
+        if self.on_batch_finished is not None:
+            try:
+                self.on_batch_finished(results)
+            except Exception:
+                pass
+
         stop_reason = getattr(self.runtime.toolset, "stop_requested", None)
         if ask_user_cancelled:
             self.abort_code = "TURN_CANCELLED"
@@ -791,9 +806,91 @@ class _RunnerSink:
         self._last_text_ended_with_newline = True
         self._message_wrote_text = False
         self.text_parts: list[str] = []
+        self._is_live_or_friend = bool(
+            runner.runtime._is_live_or_friend(runner.turn)
+        )
+        self._live_fallback_enabled = bool(runner.turn.get("live_mode")) or (
+            self._is_live_or_friend and runner.turn.get("live_mode") is not False
+        )
+        self.speak_state = _SpeakState()
+        self._speak_parser: SpeakStreamParser | None = (
+            SpeakStreamParser(live_voice_enabled=self._live_fallback_enabled)
+            if self._is_live_or_friend
+            else None
+        )
+        executor.speak_state = self.speak_state
+        executor.on_batch_finished = self._on_tool_batch_finished
+
+    def _emit_visual_delta(self, chunk_text: str) -> None:
+        if not chunk_text:
+            return
+        if (
+            not self._message_wrote_text
+            and self._emitted_text_in_turn
+            and not self._last_text_ended_with_newline
+            and not chunk_text.startswith("\n")
+        ):
+            chunk_text = "\n\n" + chunk_text
+        self._message_wrote_text = True
+        self.text_parts.append(chunk_text)
+        self._runner.runtime.store.delta(self._runner.turn, chunk_text)
+        self._emitted_text_in_turn = True
+        self._last_text_ended_with_newline = chunk_text.endswith("\n")
+
+    def _on_tool_batch_finished(self, results: list[dict[str, object]]) -> None:
+        if self._speak_parser is not None:
+            fin_res = self._speak_parser.finish(live_voice_enabled=False)
+            fin_tail = self._runner.runtime._emit_speak_events(
+                self._runner.turn,
+                self._speak_parser,
+                fin_res,
+                iteration=self._runner.iteration,
+                state=self.speak_state,
+            )
+            if fin_tail:
+                self._emit_visual_delta(fin_tail)
+            if self.speak_state.iteration_had_speak:
+                if any(
+                    str(res.get("status") or "").lower() == "failed"
+                    and self._runner.runtime._is_mutating_tool_name(
+                        str(res.get("name") or "")
+                    )
+                    for res in results
+                ):
+                    self.speak_state.pending_retraction = True
+            self.speak_state.iteration_had_speak = False
+            self._speak_parser = SpeakStreamParser(
+                live_voice_enabled=self._live_fallback_enabled
+                and not self.speak_state.pending_retraction
+            )
+        self._runner.iteration += 1
+
+    def finish_speak(self) -> None:
+        if self._speak_parser is None:
+            return
+        allow_fallback = (
+            self._live_fallback_enabled
+            and not self.speak_state.pending_retraction
+        )
+        fin_res = self._speak_parser.finish(live_voice_enabled=allow_fallback)
+        fin_tail = self._runner.runtime._emit_speak_events(
+            self._runner.turn,
+            self._speak_parser,
+            fin_res,
+            iteration=self._runner.iteration,
+            state=self.speak_state,
+        )
+        if fin_tail:
+            self._emit_visual_delta(fin_tail)
 
     def reset_for_new_message(self) -> None:
         self._message_wrote_text = False
+        if self._is_live_or_friend:
+            self.speak_state.iteration_had_speak = False
+            self._speak_parser = SpeakStreamParser(
+                live_voice_enabled=self._live_fallback_enabled
+                and not self.speak_state.pending_retraction
+            )
 
     def flush_thinking_buffer(self) -> None:
         if not self._thinking_buffer:
@@ -832,18 +929,16 @@ class _RunnerSink:
         self.had_visible_output = True
         self.flush_thinking_buffer()
         chunk_text = text
-        if (
-            not self._message_wrote_text
-            and self._emitted_text_in_turn
-            and not self._last_text_ended_with_newline
-            and not chunk_text.startswith("\n")
-        ):
-            chunk_text = "\n\n" + chunk_text
-        self._message_wrote_text = True
-        self.text_parts.append(chunk_text)
-        self._runner.runtime.store.delta(self._runner.turn, chunk_text)
-        self._emitted_text_in_turn = True
-        self._last_text_ended_with_newline = chunk_text.endswith("\n")
+        if self._speak_parser is not None:
+            chunk_text = self._runner.runtime._emit_speak_events(
+                self._runner.turn,
+                self._speak_parser,
+                self._speak_parser.feed(chunk_text),
+                iteration=self._runner.iteration,
+                state=self.speak_state,
+            )
+        if chunk_text:
+            self._emit_visual_delta(chunk_text)
 
     def on_thinking(self, text: str) -> None:
         self.had_visible_output = True
@@ -877,6 +972,16 @@ class _RunnerSink:
     ) -> None:
         self.had_visible_output = True
         self.flush_thinking_buffer()
+        if self._speak_parser is not None:
+            tail_text = self._runner.runtime._emit_speak_events(
+                self._runner.turn,
+                self._speak_parser,
+                self._speak_parser.on_non_text_boundary("tool_call"),
+                iteration=self._runner.iteration,
+                state=self.speak_state,
+            )
+            if tail_text:
+                self._emit_visual_delta(tail_text)
         self._message_wrote_text = False
         self._executor.register_tool_use_started(
             tool_use_id, tool_name, message_id=message_id
@@ -1189,6 +1294,7 @@ class NativeTurnRunner:
                 while True:
                     outcome: NativeTurnOutcome = handle.run_until_result(sink)
                     sink.flush_thinking_buffer()
+                    sink.finish_speak()
 
                     if (
                         outcome.result.subtype == "cancelled"
@@ -1367,6 +1473,9 @@ class NativeTurnRunner:
                         state="APPLIED",
                         result_ref=f"conversation-message:{self.turn.get('assistant_message_id', '')}",
                         private_result={"outcome": "final"},
+                    )
+                    self.runtime._emit_optimistic_lie_retraction(
+                        self.turn, sink.speak_state
                     )
                     self.runtime._settle_remaining_todos(
                         self.turn, str(self.turn_id)

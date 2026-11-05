@@ -172,6 +172,12 @@ def _elastic_execute_budget(contract: TaskContract, base: PhaseBudget) -> PhaseB
     return PhaseBudget(iterations=iterations, actions=actions)
 
 
+@dataclass(slots=True)
+class _SpeakState:
+    iteration_had_speak: bool = False
+    pending_retraction: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class AgenticLimits:
     max_actions: int | None = 8
@@ -381,6 +387,7 @@ class AgenticTurnRuntime:
         # that has not opted in (and every contract test) relies on.
         self.phases = phase_controller
         self.phase_controller = phase_controller
+        self._phase_transition_note: str | None = None
         self._first_request_text = ""
         # Per-turn tool bookkeeping. ``run`` resets these; they are also
         # initialised here so ``_run_toolset`` can be exercised on its own.
@@ -763,38 +770,7 @@ class AgenticTurnRuntime:
         continuing_text = False
         is_live_or_friend = self._is_live_or_friend(turn)
         self._active_turn_live_or_friend = is_live_or_friend
-        pending_optimistic_lie_retraction = False
-
-        def emit_optimistic_lie_retraction() -> None:
-            nonlocal pending_optimistic_lie_retraction
-            if not pending_optimistic_lie_retraction:
-                return
-            pending_optimistic_lie_retraction = False
-            retraction_text = "Atenção: houve uma falha ao executar a ação. Veja o detalhe na tela."
-            self._record_speak_event(
-                turn,
-                AgentActivityEventType.SPEAK_CHUNK_READY,
-                retraction_text,
-                {
-                    "chunk_index": 0,
-                    "block_index": 999,
-                    "clean_text": retraction_text,
-                    "tts_text": retraction_text,
-                    "raw_tts_text": retraction_text,
-                    "normalized_text": retraction_text,
-                    "boundary_kind": "retraction",
-                    "is_first_in_block": True,
-                    "is_last_in_block": True,
-                    "inline_markers": [],
-                    "optimistic_lie_retraction": True,
-                },
-            )
-            self._record_speak_event(
-                turn,
-                AgentActivityEventType.SPEAK_FINISHED,
-                "Retratação de falha concluída",
-                {"optimistic_lie_retraction": True},
-            )
+        speak_state = _SpeakState()
 
         native = self._native_provider(turn)
         if native is not None:
@@ -924,71 +900,20 @@ class AgenticTurnRuntime:
                 is_live_or_friend and turn.get("live_mode") is not False
             )
             speak_parser = (
-                SpeakStreamParser(live_voice_enabled=live_fallback_enabled and not pending_optimistic_lie_retraction)
+                SpeakStreamParser(live_voice_enabled=live_fallback_enabled and not speak_state.pending_retraction)
                 if is_live_or_friend
                 else None
             )
-            iteration_had_speak = False
+            speak_state.iteration_had_speak = False
 
             def emit_speak_parse_result(parse_result: SpeakParseResult) -> str:
-                nonlocal iteration_had_speak, pending_optimistic_lie_retraction
-                if parse_result.speak_opened:
-                    iteration_had_speak = True
-                    pending_optimistic_lie_retraction = False
-                    self._record_speak_event(
-                        turn,
-                        AgentActivityEventType.SPEAK_BLOCK_STARTED,
-                        "Iniciando fala em voz alta",
-                        {
-                            "iteration": iteration,
-                            "block_index": max(0, (speak_parser.speak_blocks_count - 1) if speak_parser else 0),
-                        },
-                    )
-                if parse_result.speak_delta:
-                    iteration_had_speak = True
-                    self._record_speak_event(
-                        turn,
-                        AgentActivityEventType.SPEAK_DELTA,
-                        "Delta de fala",
-                        {"delta": parse_result.speak_delta, "iteration": iteration},
-                    )
-                for chunk in parse_result.chunks:
-                    iteration_had_speak = True
-                    if not parse_result.used_zero_speak_fallback:
-                        pending_optimistic_lie_retraction = False
-                    self._record_speak_event(
-                        turn,
-                        AgentActivityEventType.SPEAK_CHUNK_READY,
-                        chunk.clean_text[:120] or "Chunk de fala pronta",
-                        {
-                            "chunk_index": chunk.chunk_index,
-                            "block_index": chunk.block_index,
-                            "text": chunk.clean_text,
-                            "raw_text": chunk.raw_tts_text,
-                            "clean_text": chunk.clean_text,
-                            "tts_text": chunk.tts_text,
-                            "raw_tts_text": chunk.raw_tts_text,
-                            "normalized_text": chunk.normalized_text,
-                            "boundary_kind": chunk.boundary_kind,
-                            "is_first_in_block": chunk.is_first_in_block,
-                            "is_last_in_block": chunk.is_last_in_block,
-                            "inline_markers": list(chunk.inline_markers),
-                            "used_zero_speak_fallback": parse_result.used_zero_speak_fallback,
-                            "iteration": iteration,
-                        },
-                    )
-                if parse_result.speak_closed:
-                    self._record_speak_event(
-                        turn,
-                        AgentActivityEventType.SPEAK_FINISHED,
-                        "Fala concluída",
-                        {
-                            "iteration": iteration,
-                            "blocks_count": speak_parser.speak_blocks_count if speak_parser else 0,
-                            "used_zero_speak_fallback": parse_result.used_zero_speak_fallback,
-                        },
-                    )
-                return parse_result.visual_delta
+                return self._emit_speak_events(
+                    turn,
+                    speak_parser,
+                    parse_result,
+                    iteration=iteration,
+                    state=speak_state,
+                )
 
             def flush_thinking_buffer() -> None:
                 nonlocal last_thinking_flush
@@ -1145,7 +1070,7 @@ class AgenticTurnRuntime:
                         retryable_error = event.error.retryability.value == "SAFE"
                 flush_thinking_buffer()
                 if speak_parser is not None:
-                    allow_fallback = live_fallback_enabled and not calls and not pending_optimistic_lie_retraction
+                    allow_fallback = live_fallback_enabled and not calls and not speak_state.pending_retraction
                     fin_res = speak_parser.finish(live_voice_enabled=allow_fallback)
                     fin_tail = emit_speak_parse_result(fin_res)
                     if fin_tail:
@@ -1315,13 +1240,13 @@ class AgenticTurnRuntime:
                         tool_name=str(result.get("name") or ""), tool_call_id=str(result.get("id") or ""),
                     )
                     messages.extend(self._tool_result_messages(turn, result))
-                if is_live_or_friend and iteration_had_speak:
+                if is_live_or_friend and speak_state.iteration_had_speak:
                     if any(
                         str(res.get("status") or "").lower() == "failed"
                         and self._is_mutating_tool_name(str(res.get("name") or ""))
                         for res in results
                     ):
-                        pending_optimistic_lie_retraction = True
+                        speak_state.pending_retraction = True
                 if self.cancelled(turn):
                     return self._cancel(turn, iteration, action_count)
                 stop_reason = getattr(self.toolset, "stop_requested", None)
@@ -1465,7 +1390,7 @@ class AgenticTurnRuntime:
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",
                     private_result={"outcome": "final"},
                 )
-                emit_optimistic_lie_retraction()
+                self._emit_optimistic_lie_retraction(turn, speak_state)
                 self._settle_remaining_todos(turn, str(turn_id))
                 self._life(turn, "completed")
                 self.store.finish(turn)
@@ -2753,6 +2678,107 @@ class AgenticTurnRuntime:
             tail = "\n\n".join(remainder_paras)
             rehydrated = f"{rehydrated}\n\n{tail}"
         return {**message, "content": rehydrated}
+
+    def _emit_speak_events(
+        self,
+        turn: dict[str, object],
+        parser: SpeakStreamParser | None,
+        result: SpeakParseResult,
+        *,
+        iteration: int,
+        state: _SpeakState,
+    ) -> str:
+        if result.speak_opened:
+            state.iteration_had_speak = True
+            state.pending_retraction = False
+            self._record_speak_event(
+                turn,
+                AgentActivityEventType.SPEAK_BLOCK_STARTED,
+                "Iniciando fala em voz alta",
+                {
+                    "iteration": iteration,
+                    "block_index": max(0, (parser.speak_blocks_count - 1) if parser else 0),
+                },
+            )
+        if result.speak_delta:
+            state.iteration_had_speak = True
+            self._record_speak_event(
+                turn,
+                AgentActivityEventType.SPEAK_DELTA,
+                "Delta de fala",
+                {"delta": result.speak_delta, "iteration": iteration},
+            )
+        for chunk in result.chunks:
+            state.iteration_had_speak = True
+            if not result.used_zero_speak_fallback:
+                state.pending_retraction = False
+            self._record_speak_event(
+                turn,
+                AgentActivityEventType.SPEAK_CHUNK_READY,
+                chunk.clean_text[:120] or "Chunk de fala pronta",
+                {
+                    "chunk_index": chunk.chunk_index,
+                    "block_index": chunk.block_index,
+                    "text": chunk.clean_text,
+                    "raw_text": chunk.raw_tts_text,
+                    "clean_text": chunk.clean_text,
+                    "tts_text": chunk.tts_text,
+                    "raw_tts_text": chunk.raw_tts_text,
+                    "normalized_text": chunk.normalized_text,
+                    "boundary_kind": chunk.boundary_kind,
+                    "is_first_in_block": chunk.is_first_in_block,
+                    "is_last_in_block": chunk.is_last_in_block,
+                    "inline_markers": list(chunk.inline_markers),
+                    "used_zero_speak_fallback": result.used_zero_speak_fallback,
+                    "iteration": iteration,
+                },
+            )
+        if result.speak_closed:
+            self._record_speak_event(
+                turn,
+                AgentActivityEventType.SPEAK_FINISHED,
+                "Fala concluída",
+                {
+                    "iteration": iteration,
+                    "blocks_count": parser.speak_blocks_count if parser else 0,
+                    "used_zero_speak_fallback": result.used_zero_speak_fallback,
+                },
+            )
+        return result.visual_delta
+
+    def _emit_optimistic_lie_retraction(
+        self,
+        turn: dict[str, object],
+        state: _SpeakState,
+    ) -> None:
+        if not state.pending_retraction:
+            return
+        state.pending_retraction = False
+        retraction_text = "Atenção: houve uma falha ao executar a ação. Veja o detalhe na tela."
+        self._record_speak_event(
+            turn,
+            AgentActivityEventType.SPEAK_CHUNK_READY,
+            retraction_text,
+            {
+                "chunk_index": 0,
+                "block_index": 999,
+                "clean_text": retraction_text,
+                "tts_text": retraction_text,
+                "raw_tts_text": retraction_text,
+                "normalized_text": retraction_text,
+                "boundary_kind": "retraction",
+                "is_first_in_block": True,
+                "is_last_in_block": True,
+                "inline_markers": [],
+                "optimistic_lie_retraction": True,
+            },
+        )
+        self._record_speak_event(
+            turn,
+            AgentActivityEventType.SPEAK_FINISHED,
+            "Retratação de falha concluída",
+            {"optimistic_lie_retraction": True},
+        )
 
     def _record_speak_event(
         self,

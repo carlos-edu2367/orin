@@ -62,7 +62,7 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 TEXT_CACHE_OK: bool = True
 NATIVE_LOOP_VALIDATED: bool = True
-NATIVE_MODES: frozenset[str] = frozenset({"code"})
+NATIVE_MODES: frozenset[str] = frozenset({"code", "chat", "friend"})
 _FALLBACK_TEXT_BUDGET = 200_000
 _MIN_TEXT_BUDGET = 50_000
 _CIRCUIT_BREAKER_SECONDS: float = 600.0
