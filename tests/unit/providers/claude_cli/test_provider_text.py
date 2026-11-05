@@ -412,7 +412,7 @@ def test_stream_uses_isolated_cwd_and_requires_init_with_strict_api_key_source_n
 
         assert captured_cwds[0] is not None
         assert Path(captured_cwds[0]).resolve() == ensure_isolated_cwd().resolve()
-        assert Path(captured_cwds[0]).name == "orin-claude-cli-cwd"
+        assert Path(captured_cwds[0]).name.startswith("orin-claude-cli-cwd")
     finally:
         provider.close()
 

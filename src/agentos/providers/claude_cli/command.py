@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from typing import Mapping, Sequence
 
-from agentos.providers.claude_cli.errors import ProviderTransportError
+from agentos.providers.claude_cli.errors import CliSecurityAbort, ProviderTransportError
 
 ISOLATION_FLAGS: tuple[str, ...] = ("--restricted", "--strict-mcp-config")
 IDLE_TIMEOUT_SECONDS: int = 180
@@ -362,16 +362,56 @@ def write_owner_only_temp(
     return path
 
 
+# Entries the CLI would read as project configuration from its cwd.
+_RESERVED_CWD_ENTRIES = frozenset({".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"})
+
+
+def default_isolated_cwd() -> Path:
+    """The per-user empty folder `claude -p` runs in. On a shared POSIX /tmp the name carries the uid."""
+    tmp = Path(tempfile.gettempdir())
+    getuid = getattr(os, "getuid", None)
+    if os.name == "nt" or getuid is None:
+        return tmp / "orin-claude-cli-cwd"
+    return tmp / f"orin-claude-cli-cwd-{getuid()}"
+
+
 def ensure_isolated_cwd(base: Path | None = None) -> Path:
-    """Create or return an empty directory outside any project repository for `claude -p`."""
-    root = base if base is not None else (Path(tempfile.gettempdir()) / "orin-claude-cli-cwd")
-    root.mkdir(parents=True, exist_ok=True)
-    for child in root.iterdir():
-        if child.name in {".claude", "CLAUDE.md"}:
-            if child.is_dir():
-                shutil.rmtree(child, ignore_errors=True)
-            else:
-                child.unlink(missing_ok=True)
+    """Create or return an empty directory outside any project repository for `claude -p`.
+
+    Fails closed (CliSecurityAbort) instead of running the CLI where someone else could have planted a
+    configuration: a symlinked root, a root owned by another user (POSIX), or a reserved entry it cannot remove.
+    Symlinks inside are unlinked, never followed.
+    """
+    root = base if base is not None else default_isolated_cwd()
+    if root.is_symlink():
+        raise CliSecurityAbort(f"Refusing a symlinked Claude CLI working directory: {root}")
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise CliSecurityAbort(f"Cannot create the Claude CLI working directory {root}: {exc}") from exc
+    info = root.lstat()
+    getuid = getattr(os, "getuid", None)
+    if os.name != "nt" and getuid is not None:
+        if info.st_uid != getuid():
+            raise CliSecurityAbort(f"The Claude CLI working directory {root} belongs to another user")
+        if info.st_mode & 0o077:
+            try:
+                root.chmod(0o700)
+            except OSError as exc:
+                raise CliSecurityAbort(f"Cannot make {root} private: {exc}") from exc
+    for name in _RESERVED_CWD_ENTRIES:
+        child = root / name
+        try:
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            elif child.is_dir():
+                shutil.rmtree(child)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise CliSecurityAbort(f"Cannot remove {child} from the Claude CLI working directory: {exc}") from exc
+        if child.is_symlink() or child.exists():
+            raise CliSecurityAbort(f"{child} is still in the Claude CLI working directory")
     return root
 
 

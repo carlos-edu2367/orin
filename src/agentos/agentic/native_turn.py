@@ -14,6 +14,7 @@ from uuid import uuid4
 from agentos.installation.paths import orin_paths
 from agentos.providers.claude_cli.command import (
     TOOL_USE_ID_META_KEY,
+    default_isolated_cwd,
     ensure_isolated_cwd,
 )
 from agentos.providers.claude_cli.errors import (
@@ -64,7 +65,16 @@ NATIVE_CWD: Path = orin_paths().data / "claude-cli" / "workdir"
 
 
 def _resolve_native_cwd() -> Path:
-    return orin_paths().data / "claude-cli" / "workdir"
+    """Orin's own workdir, unless it sits inside a git checkout (the development layout): then the CLI
+    would walk up into the repository (CLAUDE.md, git), so it gets the per-user isolated folder instead."""
+    workdir = orin_paths().data / "claude-cli" / "workdir"
+    try:
+        resolved = workdir.resolve()
+    except OSError:
+        resolved = workdir
+    if any((ancestor / ".git").exists() for ancestor in (resolved, *resolved.parents)):
+        return default_isolated_cwd().with_name(default_isolated_cwd().name + "-native")
+    return workdir
 
 
 @dataclass(frozen=True, slots=True)
