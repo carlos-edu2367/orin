@@ -192,12 +192,16 @@ class McpToolSearchDocument:
         descriptor: McpToolDescriptor,
     ) -> "McpToolSearchDocument":
         param_names, schema_text = _extract_schema_fields(descriptor.input_schema)
-        q_name = qualified_tool_name(server_slug, descriptor.name)
-        name_tokens = _expand_tokens(_tokenize(f"{descriptor.name} {q_name}"))
+        q_name = qualified_tool_name(server_slug, descriptor.name) if server_slug else descriptor.name
+        name_tokens = _expand_tokens(_tokenize(f"{descriptor.name} {q_name}" if server_slug else descriptor.name))
         param_tokens = _expand_tokens(_tokenize(" ".join(param_names)))
         desc_tokens = _expand_tokens(_tokenize(descriptor.description))
         schema_tokens = _expand_tokens(_tokenize(schema_text))
-        server_tokens = _expand_tokens(_tokenize(f"{server_slug} {server_name}"))
+        server_tokens = (
+            _expand_tokens(_tokenize(f"{server_slug} {server_name}"))
+            if (server_slug or server_name)
+            else frozenset()
+        )
         return cls(
             server_slug=server_slug,
             server_name=server_name,

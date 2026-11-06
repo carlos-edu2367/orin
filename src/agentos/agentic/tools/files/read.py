@@ -41,10 +41,27 @@ LARGE_READ_BYTES = 2_000_000
 LARGE_READ_RESULT_CHARS = MAX_READ_TOKENS * 4
 
 
+_LINE_TRUNCATED_SUFFIX = " … [line truncated]"
+
+
 def _truncate_line(line: str) -> str:
-    if len(line) <= MAX_READ_LINE_CHARS:
+    if len(line) <= MAX_READ_LINE_CHARS or line.endswith(_LINE_TRUNCATED_SUFFIX):
         return line
-    return line[:MAX_READ_LINE_CHARS] + " ? [line truncated]"
+    return line[:MAX_READ_LINE_CHARS] + _LINE_TRUNCATED_SUFFIX
+
+
+def _merge_ranges(ranges: Sequence[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    valid = sorted((max(1, int(s)), max(1, int(e))) for s, e in ranges if int(e) >= int(s) >= 1)
+    if not valid:
+        return ()
+    merged: list[tuple[int, int]] = [valid[0]]
+    for start, end in valid[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end + 1:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
 
 
 def _fit_lines_to_token_budget(
@@ -99,6 +116,7 @@ class ReadTools:
         limit: int = DEFAULT_READ_LINES,
         total_lines: int = 0,
         explicit_read: bool = False,
+        read_ranges: Sequence[tuple[int, int]] | None = None,
     ) -> str:
         try:
             target = self.workspace.resolve(path)
@@ -109,6 +127,15 @@ class ReadTools:
             stat = target.stat()
             sha = hashlib.sha256(raw_bytes).hexdigest()
             with self._read_file_lock:
+                prev = self._read_file_state.get(norm)
+                if read_ranges is not None:
+                    merged_ranges = _merge_ranges(read_ranges)
+                elif total_lines > 0:
+                    new_range = (max(1, offset), min(total_lines, max(1, offset) + max(1, limit) - 1))
+                    prior = prev.read_ranges if (prev is not None and prev.sha256 == sha) else ()
+                    merged_ranges = _merge_ranges([*prior, new_range])
+                else:
+                    merged_ranges = ()
                 self._read_file_state[norm] = ReadFileRecord(
                     mtime_ns=stat.st_mtime_ns,
                     sha256=sha,
@@ -117,6 +144,7 @@ class ReadTools:
                     total_lines=total_lines,
                     explicit_read=explicit_read,
                     read_seq=next(_READ_ORDER),
+                    read_ranges=merged_ranges,
                 )
             return sha
         except Exception:
@@ -458,13 +486,16 @@ class ReadTools:
         cut_by_chars = fit_count < len(lines)
         kept = lines[:fit_count]
         lines = kept
-        sha = self._record_file_read(
-            path,
-            offset=norm_offset,
-            limit=len(kept) if cut_by_chars else norm_limit,
-            total_lines=total,
-            explicit_read=True,
-        )
+        if lines or (total == 0 and norm_offset == 1):
+            sha = self._record_file_read(
+                path,
+                offset=norm_offset,
+                limit=len(kept) if cut_by_chars else norm_limit,
+                total_lines=total,
+                explicit_read=True,
+            )
+        else:
+            sha = hashlib.sha256(target.read_bytes()).hexdigest() if target.is_file() else ""
         self._note_memory_for(target)
         norm = self.workspace.key(target) if target.exists() else path
         if not lines:
@@ -730,6 +761,7 @@ SPECS: tuple[ToolSpec, ...] = (
         output_model=ReadOutput,
         public_description="Read a file from the workspace. Text comes back line-numbered and returns up to 2000 lines by default, bounded by a token budget; use offset and limit to page through a long file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
         read_only=True,
+        max_result_chars=LARGE_READ_RESULT_CHARS,
         order=10,
     ),
     ToolSpec(

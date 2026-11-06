@@ -372,11 +372,16 @@ class RuntimeToolExecutor(ToolExecutor):
         if not raw_name:
             return False
         internal_name = self._resolve_internal_name(raw_name)
-        active_mcp = set(getattr(self.runtime.toolset, "active_mcp_tool_names", ()) or ())
+        toolset = self.runtime.toolset
+        active_mcp = set(getattr(toolset, "active_mcp_tool_names", ()) or ())
+        deferred = set(getattr(toolset, "deferred_tool_names", ()) or ())
+        discovered = set(getattr(toolset, "discovered_tool_names", ()) or ())
         return (
             raw_name in self._valid_public_names
             or internal_name in self._valid_internal_names
             or internal_name in active_mcp
+            or internal_name in deferred
+            or internal_name in discovered
         )
 
     def _resolve_internal_name(self, name: str) -> str:
@@ -533,12 +538,17 @@ class RuntimeToolExecutor(ToolExecutor):
 
         raw_name = _strip_mcp_prefix(request.name)
         internal_name = self._resolve_internal_name(raw_name)
-        active_mcp = set(getattr(self.runtime.toolset, "active_mcp_tool_names", ()) or ())
+        toolset = self.runtime.toolset
+        active_mcp = set(getattr(toolset, "active_mcp_tool_names", ()) or ())
+        deferred = set(getattr(toolset, "deferred_tool_names", ()) or ())
+        discovered = set(getattr(toolset, "discovered_tool_names", ()) or ())
 
         if (
             internal_name not in self._valid_internal_names
             and raw_name not in self._valid_public_names
             and internal_name not in active_mcp
+            and internal_name not in deferred
+            and internal_name not in discovered
         ):
             valid_list = ", ".join(sorted(self._valid_public_names))
             return ToolCallResult(

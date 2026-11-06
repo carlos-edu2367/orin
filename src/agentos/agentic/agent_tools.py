@@ -715,6 +715,13 @@ class AgentToolset(
         outcome = self._invoke_unobserved(
             internal, arguments, call_id=call_id, invocation_id=invocation_id, hook_permission=hook_permission,
         )
+        try:
+            defn = self.resolve(internal)
+            base_limit = max(int(getattr(defn, "max_result_size_chars", 0) or 0), int(getattr(defn, "max_result_chars", 0) or 0))
+        except Exception:
+            base_limit = 0
+        data_limit = int((outcome.data or {}).get("max_result_chars") or 0) if isinstance(outcome.data, Mapping) else 0
+        result_char_limit = max(MAX_TOOL_RESULT_CHARS, base_limit, data_limit, len(outcome.content))
         common = {"tool_name": tool_name, "tool_input": tool_input, "tool_use_id": tool_use_id}
         if outcome.error_code in PERMISSION_DENIAL_CODES:
             self._emit_lifecycle(bus, HookEvent.PERMISSION_DENIED, **common, reason=outcome.content[:2000])
@@ -736,11 +743,11 @@ class AgentToolset(
                             replaced = json.dumps(replaced, ensure_ascii=False, default=str)
                         except (TypeError, ValueError):
                             replaced = str(replaced)
-                    outcome.content = replaced[:MAX_TOOL_RESULT_CHARS]
+                    outcome.content = replaced[:result_char_limit]
                 reminders.extend(post.additional_context)
                 if post.blocked:
                     reminders.append(f"PostToolUse hook: {post.reason or 'feedback from hook'}")
-            _append_reminder(outcome, reminders, MAX_TOOL_RESULT_CHARS)
+            _append_reminder(outcome, reminders, result_char_limit)
             self._emit_tool_side_events(bus, internal, dict(arguments or {}), outcome, cwd_before)
         else:
             failure = self._emit_lifecycle(
@@ -752,7 +759,7 @@ class AgentToolset(
             )
             if failure is not None:
                 reminders.extend(failure.additional_context)
-            _append_reminder(outcome, reminders, MAX_TOOL_RESULT_CHARS)
+            _append_reminder(outcome, reminders, result_char_limit)
         return self._speak_public(outcome)
 
     def _tool_kind_for_hooks(self, internal: str) -> str:

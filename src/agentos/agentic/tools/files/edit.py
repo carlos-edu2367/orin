@@ -64,6 +64,21 @@ class EditTools:
         content, truncated = self.workspace.read_text(path)
         if truncated:
             raise AgentToolError("file is too large to edit safely; split the edit into a smaller file or rewrite it deliberately.")
+        partial_ranges: tuple[tuple[int, int], ...] | None = None
+        if self._code_mode_active:
+            try:
+                norm_key = self.workspace.key(self.workspace.resolve(path))
+            except Exception:
+                norm_key = ""
+            if norm_key and not norm_key.startswith(".orin/"):
+                with self._read_file_lock:
+                    rec = self._read_file_state.get(norm_key)
+                if rec is not None and rec.total_lines > 0:
+                    eff_ranges = rec.read_ranges or (
+                        (max(1, rec.offset), min(rec.total_lines, max(1, rec.offset) + max(1, rec.limit) - 1)),
+                    )
+                    if not any(s <= 1 and e >= rec.total_lines for s, e in eff_ranges):
+                        partial_ranges = eff_ranges
         # Every edit is validated against the running draft before anything is
         # written, so a bad fragment late in the batch cannot leave the file
         # half-edited.
@@ -81,6 +96,30 @@ class EditTools:
                 raise AgentToolError(f"edit {index + 1}: old_text was not found; read the file and provide the exact fragment.")
             if matches > 1 and not replace_all:
                 raise AgentToolError(f"edit {index + 1}: old_text occurs {matches} times; add surrounding text or set replace_all=true.")
+            if partial_ranges is not None:
+                source_text = content if content.find(current_used) != -1 else draft
+                search_start = 0
+                while True:
+                    pos = source_text.find(current_used, search_start)
+                    if pos == -1:
+                        break
+                    match_start_line = source_text.count("\n", 0, pos) + 1
+                    trimmed = (
+                        current_used[:-2]
+                        if current_used.endswith("\r\n")
+                        else (current_used[:-1] if current_used.endswith("\n") else current_used)
+                    )
+                    match_end_line = match_start_line + trimmed.count("\n")
+                    for ln in range(match_start_line, match_end_line + 1):
+                        if not any(r_start <= ln <= r_end for r_start, r_end in partial_ranges):
+                            raise AgentToolError(
+                                f"File was only partially read and line {ln} has not been read yet. "
+                                f"Read that section with read_file (e.g. offset={ln}) before editing it.",
+                                error_code="FILE_NOT_READ",
+                            )
+                    if not replace_all:
+                        break
+                    search_start = pos + max(1, len(current_used))
             if target_newline is None:
                 if "\r\n" in current_used:
                     target_newline = "\r\n"
@@ -97,9 +136,24 @@ class EditTools:
                 self._non_code_edited_paths.add(self.workspace.key(self.workspace.resolve(path)))
             except Exception:
                 pass
-        updated_sha = self._record_file_read(
-            path, offset=1, limit=400, total_lines=len(draft.splitlines()),
-        )
+        new_total_lines = len(draft.splitlines())
+        if partial_ranges is not None:
+            line_delta = new_total_lines - len(content.splitlines())
+            adjusted_ranges = [
+                (s, max(s, min(new_total_lines, e + (line_delta if line_delta > 0 else 0))))
+                for s, e in partial_ranges
+            ]
+            updated_sha = self._record_file_read(
+                path,
+                offset=partial_ranges[0][0],
+                limit=max(1, partial_ranges[0][1] - partial_ranges[0][0] + 1),
+                total_lines=new_total_lines,
+                read_ranges=adjusted_ranges,
+            )
+        else:
+            updated_sha = self._record_file_read(
+                path, offset=1, limit=max(400, new_total_lines), total_lines=new_total_lines,
+            )
         hunks, added_lines, removed_lines = compute_structured_patch(content, draft)
         artifact = dict(self.workspace.file_metadata(path))
         artifact["structured_patch"] = hunks

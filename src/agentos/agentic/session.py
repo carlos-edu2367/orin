@@ -4163,6 +4163,7 @@ class TurnSession:
             "memory_sha": _text_digest(memory.render() if memory is not None else ""),
             "version": PROMPT_VERSION,
             "tools": sorted(options.tool_names) if options is not None else [],
+            "deferred_tools": sorted(options.deferred_tool_names) if options is not None else [],
             "public": bool(options is not None and options.public_names),
             "subagents": bool(options is not None and options.subagents_enabled),
             "style": options.output_style_name if options is not None else "",

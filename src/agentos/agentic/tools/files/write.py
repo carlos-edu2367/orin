@@ -40,8 +40,9 @@ class WriteTools:
             with self._recorded_write(path) as note:
                 written = total = self.workspace.write_text(path, new_content)
             body = f"Wrote {written} bytes to {path}." + (f" {note}" if note else "")
+        new_total_lines = len(new_content.splitlines())
         updated_sha = self._record_file_read(
-            path, offset=1, limit=400, total_lines=len(new_content.splitlines()),
+            path, offset=1, limit=max(400, new_total_lines), total_lines=new_total_lines,
         )
         hunks, added_lines, removed_lines = compute_structured_patch(old_content or "", new_content)
         artifact = dict(self.workspace.file_metadata(path))

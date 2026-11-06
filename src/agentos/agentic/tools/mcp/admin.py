@@ -131,8 +131,8 @@ class McpTools(McpResourceTools):
             desc = str(fn.get("description") or definition.description or "")
             params = dict(fn.get("parameters") or definition.parameters or {"type": "object"})
             doc = McpToolSearchDocument.from_descriptor(
-                server_slug="orin",
-                server_name="Orin",
+                server_slug="",
+                server_name="",
                 descriptor=McpToolDescriptor(
                     name=model_name,
                     description=desc,
@@ -150,6 +150,8 @@ class McpTools(McpResourceTools):
         limit: int = 10,
         activate: bool = True,
     ) -> dict[str, Any]:
+        from dataclasses import replace
+        from agentos.agentic.tool_deferral import ALWAYS_LOADED_CODE_TOOLS, CODE_MODE_CORE_TOOLS
         from agentos.mcp.search import McpToolSearchEngine
 
         if self._mcp_provider is None and not self._code_mode_active:
@@ -174,6 +176,7 @@ class McpTools(McpResourceTools):
             for item in mcp_engine.listing(server=server):  # every tool, not only the first 200 (W4-R18)
                 mcp_index.setdefault(item.qualified_name.lower(), item)
                 mcp_index.setdefault(item.tool_name.lower(), item)
+            available_defs = {d.name for d in self.definitions()}
             native_matches: list[Any] = []
             mcp_matches: list[Any] = []
             for name in wanted:
@@ -188,8 +191,22 @@ class McpTools(McpResourceTools):
                     if mcp_item not in mcp_matches:
                         mcp_matches.append(mcp_item)
                     continue
-                definition = self._by_name.get(internal_key)
-                if definition is not None and definition.kind != "mcp":
+                is_already_available = (
+                    internal_key in available_defs
+                    and not internal_key.startswith("mcp__")
+                    and (
+                        not self._code_mode_active
+                        or (
+                            internal_key in CODE_MODE_CORE_TOOLS
+                            and (
+                                internal_key in ALWAYS_LOADED_CODE_TOOLS
+                                or internal_key in self.discovered_tool_names
+                                or not self.deferred_tool_names
+                            )
+                        )
+                    )
+                )
+                if is_already_available:
                     already_available.append(name)
                 else:
                     not_found.append(name)
@@ -203,13 +220,28 @@ class McpTools(McpResourceTools):
                     return []
                 if required:
                     # The +terms filter the whole catalogue before the limit, so a tool past the first 200 is found (W4-R18).
-                    ranked = {item.qualified_name: rank for rank, item in enumerate(eng.search(keywords, server=server, limit=200))} if keywords else {}
-                    found = [item for item in eng.listing(server=server) if all(term in item.qualified_name.lower() for term in required)]
+                    scored_hits = eng.search(keywords, server=server, limit=200) if keywords else []
+                    ranked = {item.qualified_name: rank for rank, item in enumerate(scored_hits)}
+                    scores = {item.qualified_name: item.score for item in scored_hits}
+                    found = [
+                        replace(item, score=scores.get(item.qualified_name, 1.0))
+                        for item in eng.listing(server=server)
+                        if all(term in item.qualified_name.lower() for term in required)
+                    ]
                     found.sort(key=lambda item: (ranked.get(item.qualified_name, len(ranked)), item.qualified_name))
                     return found[:safe_limit]
                 return list(eng.search(keywords, server=server, limit=safe_limit))
 
-            matches = (_run_engine(native_engine) + _run_engine(mcp_engine))[:safe_limit]
+            combined = _run_engine(native_engine) + _run_engine(mcp_engine)
+            combined.sort(
+                key=lambda item: (
+                    -item.score,
+                    0 if item.qualified_name in native_by_qname else 1,
+                    item.server_slug,
+                    item.tool_name,
+                )
+            )
+            matches = combined[:safe_limit]
         tools_payload: list[dict[str, Any]] = []
         match_names: list[str] = []
         activated: list[str] = []

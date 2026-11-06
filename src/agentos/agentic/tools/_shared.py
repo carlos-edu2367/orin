@@ -91,6 +91,7 @@ class ReadFileRecord:
     total_lines: int = 0
     explicit_read: bool = False
     read_seq: int = 0
+    read_ranges: tuple[tuple[int, int], ...] = ()
 
 
 from agentos.agentic.contract import TOOLKITS, VERIFICATION_MODES, ContractError, parse as parse_contract
