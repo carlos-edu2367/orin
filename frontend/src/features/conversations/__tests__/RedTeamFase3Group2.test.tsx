@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { parseConversationActivityEvent } from '../../../api/conversations'
 import { CodeModeCard } from '../CodeModeCard'
+import { TurnTimeline } from '../TurnTimeline'
 import {
   activityReducer,
   createActivityState,
@@ -250,6 +251,14 @@ describe('RedTeam Fase 3 Group 2 — Completion, Unverified Notice & Todos', () 
       // When code_mode.unverified is the only code_mode.* event (emitted at turn completion),
       // the notice should appear AFTER the tool edits, not hoisted before them at index 0!
       expect(codeIdx).toBeGreaterThan(toolIdx)
+
+      render(<TurnTimeline items={items} mode="code" turnCompleted={true} />)
+      const toolBlock = screen.getByTestId('code-tool-call-block')
+      const unverifiedNotice = screen.getByTestId('code-unverified')
+      expect(unverifiedNotice).toHaveTextContent('Não verificado')
+      expect(
+        Boolean(toolBlock.compareDocumentPosition(unverifiedNotice) & Node.DOCUMENT_POSITION_FOLLOWING),
+      ).toBe(true)
     })
   })
 })
