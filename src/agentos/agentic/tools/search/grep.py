@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.ripgrep import event_path, event_text, ripgrep_binary, run_ripgrep
-from agentos.agentic.workspace import MAX_SEARCH_RESULTS
+from agentos.agentic.workspace import MAX_SEARCH_RESULTS, WorkspaceError
 from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema, linked_or_outside
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 from agentos.ignore import DENIED_SEGMENTS
@@ -84,7 +84,10 @@ class GrepTools:
         eff_glob = file_pattern.strip() if (isinstance(file_pattern, str) and file_pattern.strip()) else (glob or "**/*")
         clean_type = str(type or "").strip().lstrip(".").lower()
 
-        search_target = self.workspace.resolve(path) if (isinstance(path, str) and path.strip()) else self.workspace.root
+        try:
+            search_target = self.workspace.resolve(path) if (isinstance(path, str) and path.strip()) else self.workspace.root
+        except WorkspaceError as exc:
+            raise AgentToolError(str(exc)) from exc
         if not search_target.exists():
             raise AgentToolError(f"Path not found: '{path}'.")
 

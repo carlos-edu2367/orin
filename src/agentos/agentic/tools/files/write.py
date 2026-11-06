@@ -19,21 +19,28 @@ class WriteTools:
     def write_file(self, path: str, content: str, mode: str = "overwrite") -> dict[str, Any]:
         if mode not in {"overwrite", "append"}:
             raise AgentToolError("mode must be 'overwrite' or 'append'.")
-        if mode == "append":
+        old_content, original_sha = self._check_read_file_guard(path)
+        prior_partial_ranges: tuple[tuple[int, int], ...] | None = None
+        if mode == "append" and old_content is not None:
             target = self.workspace.resolve(path)
-            if target.exists() and target.is_file():
-                raw_bytes = target.read_bytes()
-                original_sha = hashlib.sha256(raw_bytes).hexdigest()
-                old_content = raw_bytes.decode("utf-8", errors="replace")
-            else:
-                original_sha = ""
-                old_content = None
+            norm = self.workspace.key(target)
+            with self._read_file_lock:
+                rec = self._read_file_state.get(norm)
+            old_total = len(old_content.splitlines())
+            if (
+                rec is not None
+                and rec.sha256 == original_sha
+                and rec.read_ranges
+                and old_total > 0
+                and not any(s <= 1 and e >= old_total for s, e in rec.read_ranges)
+            ):
+                prior_partial_ranges = rec.read_ranges
+        if mode == "append":
             with self._recorded_write(path) as note:
                 written, total = self.workspace.append_text(path, content)
             new_content = (old_content or "") + content
             body = f"Appended {written} bytes to {path}; it now holds {total} bytes." + (f" {note}" if note else "")
         else:
-            old_content, original_sha = self._check_read_file_guard(path)
             new_content = content
             if old_content is not None and dominant_newline(old_content) == "\r\n":
                 new_content = with_newline(content, "\r\n")
@@ -41,9 +48,24 @@ class WriteTools:
                 written = total = self.workspace.write_text(path, new_content)
             body = f"Wrote {written} bytes to {path}." + (f" {note}" if note else "")
         new_total_lines = len(new_content.splitlines())
-        updated_sha = self._record_file_read(
-            path, offset=1, limit=max(400, new_total_lines), total_lines=new_total_lines,
-        )
+        if prior_partial_ranges is not None:
+            old_total = len((old_content or "").splitlines())
+            appended_range = (
+                [(max(1, old_total), max(1, new_total_lines))]
+                if new_total_lines >= max(1, old_total) and content
+                else []
+            )
+            updated_sha = self._record_file_read(
+                path,
+                offset=prior_partial_ranges[0][0],
+                limit=max(1, prior_partial_ranges[0][1] - prior_partial_ranges[0][0] + 1),
+                total_lines=new_total_lines,
+                read_ranges=[*prior_partial_ranges, *appended_range],
+            )
+        else:
+            updated_sha = self._record_file_read(
+                path, offset=1, limit=max(400, new_total_lines), total_lines=new_total_lines,
+            )
         hunks, added_lines, removed_lines = compute_structured_patch(old_content or "", new_content)
         artifact = dict(self.workspace.file_metadata(path))
         artifact["structured_patch"] = hunks

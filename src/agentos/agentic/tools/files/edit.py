@@ -140,7 +140,7 @@ class EditTools:
         if partial_ranges is not None:
             line_delta = new_total_lines - len(content.splitlines())
             adjusted_ranges = [
-                (s, max(s, min(new_total_lines, e + (line_delta if line_delta > 0 else 0))))
+                (s, max(s, min(new_total_lines, e + line_delta)))
                 for s, e in partial_ranges
             ]
             updated_sha = self._record_file_read(
