@@ -404,23 +404,16 @@ def test_validation_gate_does_not_reset_assistant_message_and_adds_paragraph_bre
         read_only_names={"read_file"},
     )
 
-    def code_completion_gate() -> tuple[bool, str | None]:
-        nonlocal gate_checks
-        gate_checks += 1
-        if gate_checks == 1:
-            return False, "Execute a verificação antes de concluir."
-        return True, None
-
-    toolset.code_completion_gate = code_completion_gate  # type: ignore[attr-defined]
+    toolset.code_verification_status = lambda: "unverified"  # type: ignore[attr-defined]
     runtime = AgenticTurnRuntime(store=store, provider=_FuncProvider(stream_fn), toolset=toolset)
     result = runtime.run("turn-v076")
 
     assert result.state == "completed"
+    assert result.verification == "unverified"
     assert store.reset_called == 0
     combined_streamed = "".join(store.deltas)
     assert "Primeira entrega detalhada sem quebra final." in combined_streamed
-    assert "Segunda entrega complementar verificada." in combined_streamed
-    assert "Primeira entrega detalhada sem quebra final.\n\nSegunda entrega complementar verificada." in combined_streamed
+    assert "Ressalva de verificação" not in combined_streamed
 
 
 def test_estimated_tokens_for_base64_image_is_realistic_and_aged() -> None:

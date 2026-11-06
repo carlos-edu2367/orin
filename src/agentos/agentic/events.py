@@ -49,6 +49,7 @@ class AgentActivityEventType(StrEnum):
     CODE_MODE_VALIDATION_FINISHED = "code_mode.validation_finished"
     CODE_MODE_COMPLETED = "code_mode.completed"
     CODE_MODE_COMPLETED_WITH_CAVEATS = "code_mode.completed_with_caveats"
+    CODE_MODE_UNVERIFIED = "code_mode.unverified"
     CODE_MODE_DECISION_REQUIRED = "code_mode.decision_required"
     WORKSPACE_TRUST_REQUIRED = "workspace.trust_required"
     CODE_MODE_BLOCKED = "code_mode.blocked"

@@ -20,11 +20,9 @@ from tests.unit.agentic.test_native_turn import (
 )
 
 
-def _rt(tmp_path: Path, rounds: list[Any], *, gate: Any = None, **kw: Any) -> tuple[AgenticTurnRuntime, FakeStore, FakeNativeProvider]:
+def _rt(tmp_path: Path, rounds: list[Any], **kw: Any) -> tuple[AgenticTurnRuntime, FakeStore, FakeNativeProvider]:
     store = FakeStore()
     toolset = _make_toolset(ConversationWorkspace(tmp_path, "c1"))
-    if gate is not None:
-        toolset.code_completion_gate = gate  # type: ignore[method-assign]
     prov = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, list(rounds)))
     rt = AgenticTurnRuntime(store=store, provider=prov, toolset=toolset, **kw)
     return rt, store, prov
@@ -56,16 +54,15 @@ def test_max_turns_is_a_cap_for_the_whole_turn_not_per_follow_up_message(tmp_pat
         _calls(1, sink, h)
         return NativeTurnOutcome(result=_make_result(text="resumo"), init=None, final_text="resumo", exit_code=0)
 
-    gate_calls = {"n": 0}
-
-    def _gate() -> tuple[bool, str | None]:
-        gate_calls["n"] += 1
-        return (gate_calls["n"] > 1, "Faltou rodar os testes")
+    from agentos.agentic.phases import PhaseController
 
     rt, store, prov = _rt(
-        tmp_path, [_r1, _r2, _r3], gate=_gate,
+        tmp_path, [_r1, _r2, _r3],
+        phase_controller=PhaseController(),
         limits=AgenticLimits(max_iterations=None, max_actions=None, max_turns=3, context_window_tokens=1_000_000),
     )
+    rt.toolset._changed_paths.add("a.py")  # type: ignore[union-attr]
+    rt.toolset._change_events = 1  # type: ignore[union-attr]
     out = rt.run("t1", turn=store.turn)
     assert prov.requests[0].max_turns == 3
     assert len(store.usages) <= 4, f"{len(store.usages)} model calls for max_turns=3 (result {out})"

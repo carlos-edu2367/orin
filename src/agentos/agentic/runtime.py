@@ -216,6 +216,7 @@ class AgenticRunResult:
     budget_exhausted: bool = False
     # How many queued messages from the person reached the model during this turn.
     queued_turn_count: int = 0
+    verification: str | None = None
 
 
 def _exists_in_workspace(toolset: object, path: str) -> bool:
@@ -236,10 +237,9 @@ def _accepts_call_id(invoke: Callable[..., object]) -> bool:
 
 class AgenticTurnRuntime:
     # W6, set by the session for an `orin code` turn: the core tools offered (None: all) and those withheld (--tools,
-    # --disallowedTools), and whether Code mode's "verify before you answer" second pass runs (off for a headless run).
+    # --disallowedTools).
     offered_tools: frozenset[str] | None = None
     withheld_tools: frozenset[str] = frozenset()
-    completion_gate: bool = True
     provider_timeout_seconds: float | None = None
 
     def __init__(
@@ -742,7 +742,6 @@ class AgenticTurnRuntime:
         self._first_request_text = str((pinned_message or {}).get("content") or "")[:2_000]
         provider_retries = 0
         reactive_compacted = False
-        code_gate_rejections = 0
         empty_response_retries = 0
         total_tokens = 0
         total_cost = Decimal("0")
@@ -1292,44 +1291,6 @@ class AgenticTurnRuntime:
                     self._life(turn, "running")
                 continue
             if (finish is not None or has_text) and not (final_iteration and not has_text):
-                completion_gate = getattr(self.toolset, "code_completion_gate", None)
-                gate_ok, gate_reason = (True, None)
-                if callable(completion_gate) and self.completion_gate and not turn.get("is_subagent") and (final_iteration or code_gate_rejections < 1):
-                    try:
-                        gate_ok, gate_reason = completion_gate()
-                    except Exception:
-                        # A quality ledger may improve a run, but an adapter
-                        # fault must never make an otherwise valid turn hang.
-                        gate_ok, gate_reason = True, None
-                if not gate_ok:
-                    self._life(turn, "code_validation_required", reason=gate_reason)
-                    self._effect_finished(
-                        turn, provider_effect_id, state="APPLIED",
-                        result_ref=f"conversation-turn:{turn_id}:quality-gate:{iteration}",
-                        private_result={"outcome": "code_validation_required"},
-                    )
-                    if final_iteration:
-                        # The final provider response has already been streamed.
-                        # Do not turn an otherwise deliverable answer into an
-                        # opaque runtime error; attach the missing evidence as
-                        # an explicit caveat and preserve it durably instead.
-                        caveat = f"\n\nRessalva de verificação: {gate_reason}"
-                        self.store.delta(turn, caveat)
-                        self._settle_remaining_todos(turn, str(turn_id))
-                        self._life(turn, "completed_with_caveats", reason=gate_reason)
-                        self._emit(HookEvent.STOP, stop_hook_active=False, stop_reason="completed_with_caveats", last_assistant_message="".join(text_parts)[:4000])
-                        self.store.finish(turn, code="CODE_VALIDATION_REQUIRED")
-                        self._settle_quality(turn, "completed_with_caveats", "CODE_VALIDATION_REQUIRED")
-                        return AgenticRunResult("completed_with_caveats", iteration, action_count, "CODE_VALIDATION_REQUIRED", budget_exhausted=True)
-                    code_gate_rejections += 1
-                    if has_text:
-                        messages.append({"role": "assistant", "content": "".join(text_parts)})
-                    messages.append({
-                        "role": "user",
-                        "content": f"[Sistema do Modo Code] {gate_reason} Continue a tarefa usando ferramentas; não responda como concluída.",
-                    })
-                    self._life(turn, "running")
-                    continue
                 if self._needs_verification() and not final_iteration:
                     # Independent of Code mode's stricter gate above: any turn
                     # that changed the workspace owes one look at what it did
@@ -1375,10 +1336,13 @@ class AgenticTurnRuntime:
                 )
                 self._emit_optimistic_lie_retraction(turn, speak_state)
                 self._settle_remaining_todos(turn, str(turn_id))
+                verification = self._code_verification(turn)
+                if verification is not None:
+                    self._life(turn, "code_verification", status=verification)
                 self._life(turn, "completed")
                 self.store.finish(turn)
                 self._settle_quality(turn, "completed")
-                return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration and (iteration > 1 or bool(calls)))
+                return AgenticRunResult("completed", iteration, action_count, budget_exhausted=final_iteration and (iteration > 1 or bool(calls)), verification=verification)
             self._effect_finished(turn, provider_effect_id, state="APPLIED", private_result={"outcome": "empty"})
         # Reaching this point means the loop ended without any provider answer
         # that carried text; a turn that produced text has already returned
@@ -1415,6 +1379,8 @@ class AgenticTurnRuntime:
                 if allow_deferral and tool_search_enabled() and self.offered_tools is None:
                     discovered = set(getattr(self.toolset, "discovered_tool_names", ()))
                     allowed = set(CODE_MODE_CORE_TOOLS) & (ALWAYS_LOADED_CODE_TOOLS | discovered)
+                    if getattr(self.toolset, "_plan_mode_active", False):
+                        allowed.add("exit_plan_mode")
                 else:
                     allowed = set(CODE_MODE_CORE_TOOLS)
                 if self.offered_tools is not None:
@@ -2906,6 +2872,19 @@ class AgenticTurnRuntime:
     def _toolset_change_events(self) -> int:
         getter = getattr(self.toolset, "change_events", None)
         return getter() if callable(getter) else 0
+
+    def _code_verification(self, turn: Mapping[str, object]) -> str | None:
+        if turn.get("is_subagent"):
+            return None
+        if not (getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code"):
+            return None
+        status_fn = getattr(self.toolset, "code_verification_status", None)
+        if not callable(status_fn):
+            return None
+        try:
+            return status_fn()
+        except Exception:
+            return None
 
     def _needs_verification(self) -> bool:
         """Whether the turn owes a VERIFY pass before it may answer.

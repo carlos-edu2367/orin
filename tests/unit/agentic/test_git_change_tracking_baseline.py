@@ -105,9 +105,7 @@ def test_agent_tools_record_changed_paths_ignores_uploads_and_does_not_block_com
     assert outcome.status == "succeeded"
     assert tools._changed_paths == set()
     assert tools.change_events() == 0
-    ok, msg = tools.code_completion_gate()
-    assert ok is True
-    assert msg is None
+    assert tools.code_verification_status() == "not_applicable"
 
 
 def test_change_tracking_across_git_init_and_deleted_file_recreation(tmp_path: Path) -> None:

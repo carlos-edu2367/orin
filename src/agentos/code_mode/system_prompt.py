@@ -59,8 +59,9 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
         ]
         if has("todo_write"):
             doing.append(f"- When a task has several steps, track them with {t('todo_write')} and keep exactly one item in progress.")
+        verify_clause = f", or {t('verify_project')} when present" if has("verify_project") else ""
         doing += [
-            "- Verify your work. Run the project's tests, type checks or build when they exist, and fix failures your change caused. Never say a check passed if you did not run it.",
+            f"- Verify your work before you say it is done: run the checks that cover your change (the project's tests, type checks or build{verify_clause}). If you could not verify, say so plainly; the interface marks the turn as not verified. Never say a check passed if you did not run it.",
             "- If something blocks you (a failing test outside your change, a missing credential, an ambiguous requirement), stop and explain it with evidence instead of guessing.",
         ]
         sections.append("\n".join(doing))

@@ -21,11 +21,9 @@ from tests.unit.agentic.test_native_turn import (
 )
 
 
-def _rt(tmp_path: Path, factory: Any, *, gate: Any = None, **kw: Any) -> tuple[AgenticTurnRuntime, FakeStore, FakeNativeProvider]:
+def _rt(tmp_path: Path, factory: Any, **kw: Any) -> tuple[AgenticTurnRuntime, FakeStore, FakeNativeProvider]:
     store = FakeStore()
     toolset = _make_toolset(ConversationWorkspace(tmp_path, "c1"))
-    if gate is not None:
-        toolset.code_completion_gate = gate  # type: ignore[method-assign]
     prov = FakeNativeProvider(handle_factory=factory)
     rt = AgenticTurnRuntime(store=store, provider=prov, toolset=toolset, **kw)
     return rt, store, prov
@@ -123,11 +121,16 @@ def test_no_follow_up_is_sent_once_max_turns_is_spent_and_gate_failure_is_a_cave
         handles.append(h)
         return h
 
-    rt, store, _ = _rt(tmp_path, _factory, gate=lambda: (False, "Faltou rodar os testes"),
+    from agentos.agentic.phases import PhaseController
+
+    rt, store, _ = _rt(tmp_path, _factory,
+                       phase_controller=PhaseController(),
                        limits=AgenticLimits(max_iterations=None, max_actions=None, max_turns=2, context_window_tokens=1_000_000))
+    rt.toolset._changed_paths.add("a.py")  # type: ignore[union-attr]
+    rt.toolset._change_events = 1  # type: ignore[union-attr]
     out = rt.run("t1", turn=store.turn)
     assert handles and handles[0].sent_users == []
-    assert out.state == "completed_with_caveats", out
+    assert out.state == "completed" and out.verification == "unverified", out
 
 
 def test_subagent_native_turn_uses_its_own_max_turns(tmp_path: Path) -> None:

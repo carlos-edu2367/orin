@@ -334,8 +334,10 @@ def test_verify_project_and_verify_frontend_are_published_during_verification() 
 
 def test_final_code_gate_failure_completes_with_an_explicit_caveat() -> None:
     class _UnverifiedToolset(_Toolset):
-        def code_completion_gate(self):
-            return False, "faltou verify_project"
+        _code_mode_active = True
+
+        def code_verification_status(self):
+            return "unverified"
 
     provider = _ScriptedProvider([_ANSWER])
     store = _Store()
@@ -346,9 +348,9 @@ def test_final_code_gate_failure_completes_with_an_explicit_caveat() -> None:
 
     result = runtime.run("turn-1")
 
-    assert result.state == "completed_with_caveats"
-    assert result.error_code == "CODE_VALIDATION_REQUIRED"
-    assert any("Ressalva de verificação" in text for text in store.text)
+    assert result.state == "completed"
+    assert result.verification == "unverified"
+    assert not any("Ressalva de verificação" in text for text in store.text)
 
 
 # -- elastic EXECUTE budget --------------------------------------------------

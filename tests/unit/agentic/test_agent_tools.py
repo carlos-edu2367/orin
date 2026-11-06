@@ -32,19 +32,19 @@ def test_code_mode_requires_structured_project_evidence_after_it_changes_code(tm
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_code_gate"), code_mode_active=True)
 
     tools.invoke("write_file", {"path": "src/app.py", "content": "print('ok')\n"})
-    assert tools.code_completion_gate()[0] is False
+    assert tools.code_verification_status() == "unverified"
 
     # Regex used to accept this as a verification because its text contains
     # "test". A command string is not evidence of a successful check.
     tools.invoke("run_command", {"command": "echo test"})
-    assert tools.code_completion_gate()[0] is False
+    assert tools.code_verification_status() == "unverified"
 
     tools.invoke("write_file", {"path": "pyproject.toml", "content": "[project]\nname = 'demo'\n\n[tool.ruff]\n"})
     from agentos.agentic.tools.orin import verify as verify_module
 
     monkeypatch.setattr(verify_module, "_run_verification_step", lambda *a, **k: (True, "ok"))
     tools.invoke("verify_project", {"steps": ["lint"]})
-    assert tools.code_completion_gate()[0] is True
+    assert tools.code_verification_status() == "verified"
 
 
 def test_scaffold_is_a_mode_of_verify_project_and_uses_curated_commands(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1155,17 +1155,17 @@ def test_code_completion_gate_accepts_direct_test_run_command_and_no_recipe_veri
 
     tools = AgentToolset(ConversationWorkspace(tmp_path, "chat_gate_cmd"), code_mode_active=True)
     tools.invoke("write_file", {"path": "script.py", "content": "x = 1\n"})
-    assert tools.code_completion_gate()[0] is False
+    assert tools.code_verification_status() == "unverified"
 
     outcome = tools.invoke("run_command", {"command": f'"{sys.executable}" -m py_compile script.py'})
     assert outcome.status == "succeeded"
-    assert tools.code_completion_gate()[0] is True
+    assert tools.code_verification_status() == "verified"
 
-    # Mutate again in a directory without a project recipe; verify_project(recipe=None) satisfies the gate.
+    # Mutate again in a directory without a project recipe; verify_project(recipe=None) satisfies the check.
     tools.invoke("write_file", {"path": "script.py", "content": "x = 2\n"})
-    assert tools.code_completion_gate()[0] is False
+    assert tools.code_verification_status() == "unverified"
     tools.invoke("verify_project", {})
-    assert tools.code_completion_gate()[0] is True
+    assert tools.code_verification_status() == "verified"
 
 
 def test_complete_remaining_todos_marks_pending_and_in_progress_items_completed(toolset: AgentToolset) -> None:

@@ -1096,12 +1096,12 @@ def test_max_turns_when_process_already_exited_and_caveats_on_closing_gate_failu
     assert out1.state == "failed"
     assert out1.error_code == "ITERATION_LIMIT"
 
-    # 2. Closing summary after error_max_turns with failing code_completion_gate -> completed_with_caveats
+    # 2. Closing summary after error_max_turns with unverified changes -> completed with verification="unverified"
     store2 = FakeStore()
     workspace2 = ConversationWorkspace(tmp_path / "w2", "c2")
     workspace2.root.mkdir(parents=True, exist_ok=True)
     toolset2 = _make_toolset(workspace2)
-    toolset2.code_completion_gate = lambda: (False, "Faltou rodar pytest")  # type: ignore[method-assign]
+    toolset2._changed_paths.add("a.py")
 
     def _round_closing(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
         return NativeTurnOutcome(
@@ -1121,10 +1121,10 @@ def test_max_turns_when_process_already_exited_and_caveats_on_closing_gate_failu
         limits=AgenticLimits(max_iterations=5, max_actions=10, context_window_tokens=1_000_000),
     )
     out2 = rt2.run("t1", turn=store2.turn)
-    assert out2.state == "completed_with_caveats"
-    assert out2.error_code == "CODE_VALIDATION_REQUIRED"
+    assert out2.state == "completed"
+    assert out2.verification == "unverified"
     assert out2.budget_exhausted is True
-    assert any("Ressalva de verificação: Faltou rodar pytest" in d for d in store2.deltas)
+    assert not any("Ressalva de verificação" in d for d in store2.deltas)
 
 
 def test_token_and_cost_limits_enforced_in_native_turn(tmp_path: Path) -> None:

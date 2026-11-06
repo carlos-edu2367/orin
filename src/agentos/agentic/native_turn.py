@@ -1570,7 +1570,6 @@ class NativeTurnRunner:
 
         provider_retries = 0
         process_count = 0
-        code_gate_rejections = 0
         verify_gate_attempts = 0
         closing_sent = False
 
@@ -1771,79 +1770,11 @@ class NativeTurnRunner:
                             executor.action_count,
                         )
 
-                    # Normal completion: check completion gate, verification gate, and Stop hooks
-                    completion_gate = getattr(
-                        self.runtime.toolset, "code_completion_gate", None
-                    )
-                    gate_ok, gate_reason = (True, None)
-                    if (
-                        callable(completion_gate)
-                        and self.runtime.completion_gate
-                        and not self.turn.get("is_subagent")
-                        and (code_gate_rejections < 1 or closing_sent)
-                    ):
-                        try:
-                            gate_ok, gate_reason = completion_gate()
-                        except Exception:
-                            gate_ok, gate_reason = True, None
+                    # Normal completion: check verification gate and Stop hooks
                     turns_used = (
                         self.runtime.limits.max_turns is not None
                         and sink.model_calls >= self.runtime.limits.max_turns
                     )
-                    if not gate_ok:
-                        if closing_sent or turns_used:
-                            self.runtime.store.delta(
-                                self.turn,
-                                f"\n\nRessalva de verificação: {gate_reason}",
-                            )
-                            self.runtime._effect_finished(
-                                self.turn,
-                                provider_effect_id,
-                                state="APPLIED",
-                                result_ref=f"conversation-message:{self.turn.get('assistant_message_id', '')}",
-                                private_result={"outcome": "completed_with_caveats"},
-                            )
-                            self.runtime._emit_optimistic_lie_retraction(
-                                self.turn, sink.speak_state
-                            )
-                            self.runtime._settle_remaining_todos(
-                                self.turn, str(self.turn_id)
-                            )
-                            self.runtime._life(
-                                self.turn,
-                                "completed_with_caveats",
-                                reason=gate_reason,
-                            )
-                            self.runtime.store.finish(
-                                self.turn, code="CODE_VALIDATION_REQUIRED"
-                            )
-                            self.runtime._settle_quality(
-                                self.turn,
-                                "completed_with_caveats",
-                                "CODE_VALIDATION_REQUIRED",
-                            )
-                            return AgenticRunResult(
-                                "completed_with_caveats",
-                                process_count,
-                                executor.action_count,
-                                "CODE_VALIDATION_REQUIRED",
-                                budget_exhausted=True,
-                            )
-                        code_gate_rejections += 1
-                        self.runtime._life(
-                            self.turn,
-                            "code_validation_required",
-                            reason=gate_reason,
-                        )
-                        follow_up = (
-                            f"[Sistema do Modo Code] {gate_reason} "
-                            "Continue a tarefa usando ferramentas; não responda como concluída."
-                        )
-                        if PERSISTENT_STDIN_OK:
-                            handle.send_user([{"type": "text", "text": follow_up}])
-                            sink.reset_for_new_message()
-                            self.runtime._life(self.turn, "running")
-                            continue
 
                     if (
                         not closing_sent
@@ -1905,6 +1836,11 @@ class NativeTurnRunner:
                     self.runtime._settle_remaining_todos(
                         self.turn, str(self.turn_id)
                     )
+                    verification = self.runtime._code_verification(self.turn)
+                    if verification is not None:
+                        self.runtime._life(
+                            self.turn, "code_verification", status=verification
+                        )
                     self.runtime._life(self.turn, "completed")
                     self.runtime.store.finish(self.turn)
                     self.runtime._settle_quality(self.turn, "completed")
@@ -1913,6 +1849,7 @@ class NativeTurnRunner:
                         process_count,
                         executor.action_count,
                         budget_exhausted=closing_sent,
+                        verification=verification,
                     )
 
             except NativeLoopUnavailable as exc:

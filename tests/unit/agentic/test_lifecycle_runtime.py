@@ -107,8 +107,7 @@ class TextOnly:
 
 
 class CaveatToolset(Toolset):
-    def code_completion_gate(self):
-        return False, "run the tests first"
+    pass
 
 
 class WaitingToolset(Toolset):
@@ -140,9 +139,9 @@ def test_completed_with_caveats_emits_exactly_one_stop() -> None:
         limits=AgenticLimits(max_iterations=1),
     )
     result = runtime.run("turn-1")
-    assert result.state == "completed_with_caveats"
+    assert result.state == "completed"
     assert _terminal_events(events) == [HookEvent.STOP]
-    assert dict(events[-1].payload)["stop_reason"] == "completed_with_caveats"
+    assert dict(events[-1].payload)["stop_reason"] == "completed"
 
 
 def test_waiting_user_emits_exactly_one_stop() -> None:

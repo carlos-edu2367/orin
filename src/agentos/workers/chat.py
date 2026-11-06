@@ -387,11 +387,13 @@ class _ConversationProviderPort:
         self.completed_with_caveats = False
         self.error_code: str | None = None
         self.queued_turn_count = 0
+        self.verification: str | None = None
 
     def generate(self, request):
         result = self._runtime.run(str(self._turn["turn_id"]))
         self.error_code = result.error_code
         self.queued_turn_count = int(getattr(result, "queued_turn_count", 0) or 0)
+        self.verification = getattr(result, "verification", None)
         if result.state == "completed":
             return ProviderFinal(f"conversation-message:{self._turn['assistant_message_id']}")
         if result.state == "completed_with_caveats":
@@ -554,6 +556,7 @@ class ChatWorker:
                         "completed_with_caveats" if provider_port.completed_with_caveats else "completed",
                         error_code=provider_port.error_code,
                         queued_turn_count=provider_port.queued_turn_count,
+                        verification=provider_port.verification,
                     )
                 elif isinstance(outcome, WaitingOutcome):
                     result = AgenticRunResult(
@@ -629,10 +632,17 @@ class ChatWorker:
                 elif result_state != "reconciliation_required":
                     self.store.finish(turn, failed=True, code=error_code or "agentic_runtime_failed")
         finally:
-            self._settle_code_mode(turn, result_state, error_code=error_code)
+            self._settle_code_mode(turn, result_state, error_code=error_code, verification=getattr(result, "verification", None))
         self._promote_queued_inputs(turn, result_state)
 
-    def _settle_code_mode(self, turn: dict[str, object], result_state: str, *, error_code: str | None) -> None:
+    def _settle_code_mode(
+        self,
+        turn: dict[str, object],
+        result_state: str,
+        *,
+        error_code: str | None,
+        verification: str | None = None,
+    ) -> None:
         if turn.get("code_mode") != "code":
             return
         target = {
@@ -657,7 +667,15 @@ class ChatWorker:
                             code_mode_runs.c.execution_id == turn["execution_id"],
                         ).values(
                             stage=target.value,
-                            completion_kind=("verified" if target is CodeStage.COMPLETED else "with_caveats" if target is CodeStage.COMPLETED_WITH_CAVEATS else None),
+                            completion_kind=(
+                                "unverified"
+                                if verification == "unverified"
+                                else "verified"
+                                if target is CodeStage.COMPLETED
+                                else "with_caveats"
+                                if target is CodeStage.COMPLETED_WITH_CAVEATS
+                                else None
+                            ),
                             caveats=error_code if target in {CodeStage.BLOCKED, CodeStage.COMPLETED_WITH_CAVEATS} and error_code else None,
                             updated_at=datetime.now(UTC),
                         ))

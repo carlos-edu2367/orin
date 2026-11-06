@@ -205,7 +205,7 @@ def test_modular_code_mode_prompt_includes_claude_code_sections() -> None:
     assert "produção" in prompt and "sempre exige" in prompt
 
 
-def test_code_completion_gate_rejects_zero_tool_implementation_turn(tmp_path: Path) -> None:
+def test_code_verification_status_is_not_applicable_without_changes(tmp_path: Path) -> None:
     workspace = ConversationWorkspace(tmp_path, "chat_zero_tool_gate")
     tools = AgentToolset(
         workspace,
@@ -214,16 +214,11 @@ def test_code_completion_gate_rejects_zero_tool_implementation_turn(tmp_path: Pa
         code_mode_work_kind="implementation",
     )
 
-    ok, msg = tools.code_completion_gate()
-    assert ok is False
-    assert msg is not None and "ainda não executou nenhuma ferramenta" in msg
+    assert tools.code_verification_status() == "not_applicable"
 
-    # After an exploratory read-only tool call, if no files were modified (e.g. answering after inspection), gate allows
     res = tools.invoke("list_files", {})
     assert res.status == "succeeded"
-    ok_after_read, msg_after_read = tools.code_completion_gate()
-    assert ok_after_read is True
-    assert msg_after_read is None
+    assert tools.code_verification_status() == "not_applicable"
 
 
 def test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas(tmp_path: Path) -> None:

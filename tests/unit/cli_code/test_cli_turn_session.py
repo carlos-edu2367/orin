@@ -121,11 +121,6 @@ def test_the_system_prompt_flags(tmp_path: Path) -> None:
     assert "# Using tools" in kept.system_prompt  # an SDK host's empty --system-prompt keeps Orin's prompt
 
 
-def test_a_headless_turn_skips_the_verification_second_pass(tmp_path: Path) -> None:
-    assert _session(tmp_path / "a", CliTurnOptions()).build_runtime().completion_gate is False
-    assert _session(tmp_path / "b").build_runtime().completion_gate is True
-
-
 def test_setting_sources_limit_the_file_layers(tmp_path: Path) -> None:
     path = orin_user_dir() / "settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)

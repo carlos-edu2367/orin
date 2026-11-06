@@ -483,7 +483,7 @@ def test_chat_worker_handles_application_conflict_error_when_cancelled_concurren
             raise ApplicationConflictError("Illegal execution state transition from CANCELLED to FAILED.", current_state_version=2)
 
     worker._project = conflict_project
-    worker._settle_code_mode = lambda turn, state, *, error_code=None: settled.append((state, error_code))
+    worker._settle_code_mode = lambda turn, state, *, error_code=None, verification=None: settled.append((state, error_code))
 
     # Must not raise ApplicationConflictError and must settle code mode as cancelled
     worker.run("turn-1")

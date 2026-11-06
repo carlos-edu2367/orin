@@ -1565,13 +1565,25 @@ class TurnSession:
                 agent_id=actor,
             )
             return
-        if state == "code_validation_required":
-            self._record(
-                AgentActivityEventType.CODE_MODE_VALIDATION_STARTED,
-                "Validação obrigatória pendente",
-                {**base, "stage": "validating", "reason": payload.get("reason")},
-                agent_id=actor,
+        if state == "code_verification":
+            status_val = payload.get("status") or (
+                payload.get("extra", {}).get("status")
+                if isinstance(payload.get("extra"), Mapping)
+                else None
             )
+            if status_val == "unverified":
+                active_toolset = getattr(self, "toolset", None)
+                changed_count = (
+                    len(getattr(active_toolset, "_changed_paths", ()))
+                    if active_toolset is not None
+                    else int(payload.get("changed_paths") or 0)
+                )
+                self._record(
+                    AgentActivityEventType.CODE_MODE_UNVERIFIED,
+                    "Entrega não verificada",
+                    {"verification": "unverified", "changed_paths": changed_count},
+                    agent_id=actor,
+                )
             return
         if state == "retrying":
             if is_subagent:
@@ -4590,6 +4602,7 @@ class TurnSession:
             reminders=self._reminders,
         )
         # This turn's reminders now receive the conversation's running monitors' output (W4).
+        self.toolset = toolset
         toolset._attach_monitors()
         agents = self.agents_store.list() if self.agents_store is not None else []
         reader = getattr(self.store, "tool_ledger", None)
@@ -4808,7 +4821,6 @@ class TurnSession:
             from .cli_turn import tool_selection
 
             runtime.offered_tools, runtime.withheld_tools = tool_selection(self.cli_options, CODE_MODE_CORE_TOOLS)
-            runtime.completion_gate = not self.cli_options.headless
         if resumed is not None:
             runtime.contract = resumed
         return runtime

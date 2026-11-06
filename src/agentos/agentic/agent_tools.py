@@ -34,7 +34,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Collection, Iterable, Iterator, Mapping
+from typing import Any, Callable, Collection, Iterable, Iterator, Literal, Mapping
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -385,7 +385,6 @@ class AgentToolset(
         # "test" is not evidence (``echo test`` used to satisfy this gate).
         self._code_mode_verified = False
         self._code_mode_visual_check = False
-        self._code_completion_gate_rejections: int = 0
         self._frontend_verify_attempts: int = 0
         self._frontend_verify_infra_failed: bool = False
         self._diagnosed_at: dict[str, float] = {}
@@ -1164,9 +1163,8 @@ class AgentToolset(
         Change tracking runs unconditionally: a plain chat turn that edits a
         file is subject to the same verify-before-responding gate the runtime
         enforces for every turn (see ``change_events``/``has_unverified_changes``
-        in the runtime), not only Code mode. Code mode's stricter "you must
-        have run a real check" gate (``code_completion_gate``) stays layered on
-        top, active only when Code mode is active.
+        in the runtime), not only Code mode. Code mode's verification status
+        (``code_verification_status``) is reported at the end of the turn.
         """
         if outcome.status != "succeeded":
             return
@@ -1215,28 +1213,11 @@ class AgentToolset(
         """
         return self._change_events
 
-    def code_completion_gate(self) -> tuple[bool, str | None]:
-        """Require actual checks after implementation changes before delivery."""
-        if not self._code_mode_active:
-            return True, None
-        if not self._changed_paths:
-            if (
-                self._tool_calls_count == 0
-                and not self._code_mode_requires_approval
-                and not self._plan_mode_active
-                and self._code_mode_work_kind in {"implementation", "bugfix", "refactor"}
-            ):
-                self._code_completion_gate_rejections += 1
-                return (
-                    False,
-                    "Você está no Modo Code e ainda não executou nenhuma ferramenta para inspecionar ou alterar o workspace. "
-                    "Use as ferramentas disponíveis (como `list_files`, `read_file`, `write_file`, `edit_file`, `verify_project`, `run_command`) antes de concluir.",
-                )
-            return True, None
-        if not self._code_mode_verified:
-            self._code_completion_gate_rejections += 1
-            return False, "Você alterou código, mas ainda não há evidência estruturada de `verify_project` com etapas executadas e aprovadas. Rode `verify_project` antes de concluir."
-        return True, None
+    def code_verification_status(self) -> Literal["verified", "unverified", "not_applicable"]:
+        """Report whether workspace changes in Code mode have been verified this turn."""
+        if not self._code_mode_active or not self._changed_paths:
+            return "not_applicable"
+        return "verified" if self._code_mode_verified else "unverified"
 
     def _finalize_outcome(self, outcome: ToolOutcome, kind: str, *, limit: int = MAX_TOOL_RESULT_CHARS, tool_name: str = "tool") -> ToolOutcome:
         payload = dict(outcome.payload or {})
