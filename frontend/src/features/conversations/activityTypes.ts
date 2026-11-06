@@ -144,6 +144,7 @@ export type AgentActivityEventType =
   | 'code_mode.validation_started'
   | 'code_mode.completed'
   | 'code_mode.completed_with_caveats'
+  | 'code_mode.unverified'
   | 'code_mode.blocked'
   | 'code_mode.file_edited'
   | 'code_mode.command_batch'
@@ -205,6 +206,7 @@ export type ConversationActivityEvent = {
   questionsAnswered?: boolean
   contextUsage?: ContextUsage
   codeStage?: string
+  verification?: 'unverified'
   codeApproval?: boolean
   /** Set only on `memory.learned`: what the agent stored, and where. */
   memoryId?: string

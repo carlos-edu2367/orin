@@ -584,6 +584,7 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (payload.unchanged === true) event.unchanged = true
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('codeStage', optionalText(payload.stage, 64))
+  if (payload.verification === 'unverified') event.verification = 'unverified'
   if (payload.code_approval === true) event.codeApproval = true
   assign('memoryId', optionalText(payload.memory_id, 255))
   assign('memoryProjectId', optionalText(payload.project_id, 255))

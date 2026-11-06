@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import { MarkdownMessage } from './MarkdownMessage'
 import { renderActivityGroup } from './ActivityStream'
 import { CodeToolCallBlock, formatToolSignature, resolveVisualStatus } from './CodeToolCallBlock'
+import { UnverifiedNotice } from './CodeModeCard'
 import { PlanApprovalCard } from './PlanApprovalCard'
 import type { ApiClient } from '../../api/client'
 import type { CodePermissionMode } from '../../api/codeMode'
@@ -1019,6 +1020,9 @@ export function TurnTimeline({
           renderedNodes.push(renderToolPermissionTimelineNode(event, group))
         } else if (isCodeToolEvent(event, mode, permissionMode)) {
           pendingCodeToolBatch.push(event)
+        } else if (event.type === 'code_mode.unverified') {
+          flushCodeToolBatch()
+          renderedNodes.push(<UnverifiedNotice key={event.eventId} />)
         } else if (
           event.mcpApproval ||
           event.pluginApproval ||

@@ -145,7 +145,7 @@ function asProviderName(value: string): ProviderName | null {
 }
 
 function codeModeNotification(type: string): { title: string; body: string } | null {
-  if (type === 'code_mode.completed') return { title: 'Modo Code concluído', body: 'A entrega foi validada e está pronta para sua revisão.' }
+  if (type === 'code_mode.completed') return { title: 'Modo Code concluído', body: 'A entrega está pronta para sua revisão.' }
   if (type === 'code_mode.completed_with_caveats') return { title: 'Modo Code concluído com ressalvas', body: 'A entrega está pronta, mas há uma limitação documentada.' }
   if (type === 'code_mode.blocked') return { title: 'Modo Code bloqueado', body: 'O Orin encontrou um bloqueio que precisa da sua decisão.' }
   if (type === 'code_mode.decision_required') return { title: 'Decisão necessária no Modo Code', body: 'O Orin precisa da sua confirmação para continuar.' }

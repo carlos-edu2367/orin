@@ -6,6 +6,10 @@ const STAGES = [
 
 const PROVIDER_FAILURES = new Set(['PROVIDER_STREAM_FAILED', 'PROVIDER_STREAM_NOT_STARTED', 'PROVIDER_RETRY_EXHAUSTED'])
 
+export function UnverifiedNotice() {
+  return <p className="code-mode-card__notice" data-testid="code-unverified">Não verificado — nenhuma verificação rodou depois das alterações.</p>
+}
+
 export function CodeModeCard({ group }: { group: ActivityGroup }) {
   const latest = group.events[group.events.length - 1]
   const stageEvent = [...group.events].reverse().find((event) => Boolean(event.codeStage))
@@ -13,10 +17,11 @@ export function CodeModeCard({ group }: { group: ActivityGroup }) {
   const todos = [...group.events].reverse().find((event) => Boolean(event.todos && event.todos.length > 0))?.todos
   const activeTodo = todos?.find((todo) => todo.status === 'in_progress')
   const terminal = stage === 'completed' || stage === 'completed_with_caveats'
+  const unverified = group.events.some((e) => e.type === 'code_mode.unverified')
   const cancelled = group.state === 'cancelled' || latest.errorCode === 'TURN_CANCELLED'
   const index = terminal ? STAGES.length - 1 : Math.max(0, STAGES.findIndex(([id]) => id === stage))
   const providerFailure = stage === 'blocked' && PROVIDER_FAILURES.has(latest.errorCode ?? '')
-  const stateLabel = terminal ? 'Concluído'
+  const stateLabel = terminal ? (unverified ? 'Concluído · não verificado' : 'Concluído')
     : cancelled ? 'Cancelada'
     : stage === 'waiting_decision' || stage === 'waiting_approval'
       ? 'Aguardando você'
@@ -43,6 +48,7 @@ export function CodeModeCard({ group }: { group: ActivityGroup }) {
         ))}
       </ul>
     )}
+    {terminal && unverified && <UnverifiedNotice />}
     {stage === 'waiting_decision' && <p className="code-mode-card__notice">O Orin precisa de uma decisão para seguir com segurança.</p>}
     {providerFailure && <p className="code-mode-card__notice">Não foi possível alcançar o provedor depois de uma nova tentativa. Revise e reenvie a solicitação abaixo.</p>}
     {stage === 'blocked' && !providerFailure && <p className="code-mode-card__notice">A execução está bloqueada; consulte a atividade para ver a evidência.</p>}
