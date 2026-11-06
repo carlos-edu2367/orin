@@ -133,4 +133,18 @@ describe('UpdateBanner', () => {
     await waitFor(() => expect(calls.length).toBeGreaterThan(0))
     expect(container).toBeEmptyDOMElement()
   })
+
+  it('não mostra falha nem anúncio para a versão que já está rodando', async () => {
+    jobState = {
+      state: 'ready',
+      current_version: '0.12.1',
+      version: '0.12.1',
+      last_attempt: { status: 'failed', version: '0.12.1', message: 'X' },
+    }
+    const { container } = render(<UpdateBanner />)
+
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0))
+    act(() => listener?.({ currentVersion: '0.12.1', latestVersion: '0.12.1' }))
+    expect(container).toBeEmptyDOMElement()
+  })
 })

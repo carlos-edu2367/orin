@@ -23,7 +23,7 @@ function attemptNotice(status: UpdateJobStatus | null, dismissed: string | null)
   if (!attempt) return null
   const key = attempt.at ?? `${attempt.status}:${attempt.version}`
   if (key === dismissed) return null
-  if (attempt.status === 'rolled_back' || attempt.status === 'failed') return { key, attempt }
+  if ((attempt.status === 'rolled_back' || attempt.status === 'failed') && attempt.version !== status?.current_version) return { key, attempt }
   if (attempt.status === 'updated' && attempt.version === status?.current_version) return { key, attempt }
   return null
 }
@@ -118,7 +118,7 @@ export function UpdateBanner() {
         action={<button className="button button--quiet" type="button" onClick={() => { rememberDismissed(notice.key); setDismissed(notice.key) }}>Entendi</button>} />
     )
   }
-  if (announced && (state === 'idle' || state === 'up_to_date')) {
+  if (announced && announced.latestVersion !== status?.current_version && (state === 'idle' || state === 'up_to_date')) {
     return (
       <Banner eyebrow="Atualização disponível" title={`Versão atual ${announced.currentVersion} - Versão mais recente ${announced.latestVersion}`}
         hint={requestFailed ? 'Não foi possível iniciar o download. Tente novamente.' : 'O download acontece em segundo plano, sem interromper seu trabalho.'}
