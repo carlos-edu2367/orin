@@ -483,7 +483,10 @@ class StreamJsonParser:
                 self._invented_start_id = None
                 moved = self._msg_usage_raw.pop(invented, {})
                 self._msg_usage_raw.setdefault(msg_id, {}).update({k: v for k, v in moved.items() if k not in self._msg_usage_raw.get(msg_id, {})})
-                if invented in self._deferred_usage_msgs:
+                if invented in self._seen_usage_message_ids:
+                    # Already billed under the invented id (message_delta came first): never bill it again.
+                    self._seen_usage_message_ids.add(msg_id)
+                elif invented in self._deferred_usage_msgs:
                     self._deferred_usage_msgs.discard(invented)
                     if msg_id not in self._seen_usage_message_ids:
                         self._deferred_usage_msgs.add(msg_id)

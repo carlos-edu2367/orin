@@ -1728,7 +1728,8 @@ export function ChatPage() {
     const turnBusy = !afterStop && (running || stopping)
     // W7 `!command`: a shell turn in the session's folder (Code conversations only).
     if (conversationMode === 'code' && text.startsWith('!') && text.length > 1 && readyUploads.length === 0) {
-      if (turnBusy) { setCommandNotice('Espere o turno atual terminar para rodar um comando.'); return }
+      // A live turn waiting for an ask_user answer would hold the shell turn behind it.
+      if (turnBusy || liveTurnAwaitingAnswer) { setCommandNotice('Espere o turno atual terminar para rodar um comando.'); return }
       setMessage('')
       setError(null)
       try {

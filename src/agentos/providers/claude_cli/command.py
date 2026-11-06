@@ -386,10 +386,13 @@ def _refuse_planted_parent_memory(root: Path) -> None:
     except OSError:
         temp_root = Path(tempfile.gettempdir())
     getuid = getattr(os, "getuid", None)
-    try:
-        ancestors = list(root.absolute().parents)
-    except OSError:
-        return
+    # The CLI reads the parents of its real cwd: check them as well as the path as given.
+    ancestors: list[Path] = []
+    for view in (root.absolute, root.resolve):
+        try:
+            ancestors.extend(p for p in view().parents if p not in ancestors)
+        except OSError:
+            continue
     for ancestor in ancestors:
         try:
             resolved_ancestor = ancestor.resolve()
