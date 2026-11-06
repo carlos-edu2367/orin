@@ -14,7 +14,7 @@ import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 
 from agentos.installation import OrinPaths, RuntimeProfile, orin_paths, runtime_profile
 
@@ -136,6 +136,18 @@ def configure_logging(paths: OrinPaths, verbose: bool) -> logging.Logger:
         logger.addHandler(stderr)
     logger.propagate = False
     return logger.getChild("launcher")
+
+
+def configure_update_logging(paths: OrinPaths) -> logging.Handler:
+    """Attach the ``<logs>/update.log`` file handler to ``orin.update``."""
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("orin.update")
+    logger.setLevel(logging.DEBUG)
+    handler = RotatingFileHandler(paths.logs / "update.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s %(message)s"))
+    handler.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    return handler
 
 
 # -- commands -----------------------------------------------------------
@@ -321,45 +333,67 @@ def command_update(
     root = installation_root(profile)
     if root is None:
         return refuse("Este Orin não foi instalado pelo instalador oficial, então não sei atualizá-lo daqui. Reinstale pelo instalador.")
-    if detach and apply and os.name == "nt":
-        _spawn_detached_apply(_detached_apply_argv(profile, options), **({"popen": popen} if popen is not None else {}))
-        return 0
-
-    def stop_before_switching() -> None:
-        if running_instance(paths) is None:
-            return
-        if command_stop(paths, Console(console.stream, quiet=True)) != 0:
-            raise UpdateError("Não consegui encerrar o Orin que está rodando.", step="activate", hint="Feche o Orin e tente de novo.")
-
-    updater = Updater(
-        versions_root=root, current_version=profile.version,
-        emit=json_out if json_out is not None else renderer, before_activate=stop_before_switching,
-        **({"opener": opener} if opener is not None else {}),
-    )
-    if renderer is not None:
-        renderer.header()
+    log_handler = configure_update_logging(paths) if apply else None
     try:
-        result = updater.rollback() if rollback else updater.apply_prepared() if apply else updater.run(
-            getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
+        if detach and apply and os.name == "nt":
+            _spawn_detached_apply(_detached_apply_argv(profile, options), **({"popen": popen} if popen is not None else {}))
+            return 0
+
+        def stop_before_switching() -> None:
+            if running_instance(paths) is None:
+                return
+            if command_stop(paths, Console(console.stream, quiet=True)) != 0:
+                raise UpdateError("Não consegui encerrar o Orin que está rodando.", step="activate", hint="Feche o Orin e tente de novo.")
+
+        updater = Updater(
+            versions_root=root, current_version=profile.version,
+            emit=json_out if json_out is not None else renderer, before_activate=stop_before_switching,
+            **({"opener": opener} if opener is not None else {}),
         )
-    except UpdateError as error:
-        if json_out is not None:
-            json_out.failed(error)
-        elif renderer is not None:
-            renderer.failed(error)
-        # The person pressed "restart to update": whatever happened, Orin was
-        # closed for it, so reopen the version that is active now (the old one
-        # after a rollback) instead of leaving them with no window at all.
-        if restart and running_instance(paths) is None:
+        if renderer is not None:
+            renderer.header()
+        prepared = updater.prepared_release() if apply else None
+        target_version = (prepared.version if prepared is not None else None) or getattr(options, "target", None) or profile.version
+        try:
+            result = updater.rollback() if rollback else updater.apply_prepared() if apply else updater.run(
+                getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
+            )
+        except UpdateError as error:
+            if apply and not error.rolled_back:
+                updater.record_failure(target_version, error.message)
+            if json_out is not None:
+                json_out.failed(error)
+            elif renderer is not None:
+                renderer.failed(error)
+            # The person pressed "restart to update": whatever happened, Orin was
+            # closed for it, so reopen the version that is active now (the old one
+            # after a rollback) instead of leaving them with no window at all.
+            if restart and running_instance(paths) is None:
+                _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
+            return 1
+        except Exception as error:  # noqa: BLE001 - unexpected apply errors must be recorded and still reopen Orin
+            logging.getLogger("orin.update").exception("update failed with unexpected exception")
+            message = f"Erro inesperado durante a atualização ({type(error).__name__})."
+            updater.record_failure(target_version, message)
+            wrapped = UpdateError(message, step="activate", hint="Tente de novo.")
+            if json_out is not None:
+                json_out.failed(wrapped)
+            elif renderer is not None:
+                renderer.failed(wrapped)
+            if restart and running_instance(paths) is None:
+                _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
+            return 1
+        if restart:
             _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
-        return 1
-    if restart:
-        _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
-    if json_out is not None:
-        json_out.result(result)
-    elif renderer is not None:
-        {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
-    return 0
+        if json_out is not None:
+            json_out.result(result)
+        elif renderer is not None:
+            {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
+        return 0
+    finally:
+        if log_handler is not None:
+            logging.getLogger("orin.update").removeHandler(log_handler)
+            log_handler.close()
 
 
 RESTART_GRACE_SECONDS = 3.0
@@ -409,16 +443,21 @@ def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> boo
     """
     from agentos.installation.updater import runtime_relative_path
 
+    started = monotonic()
+    log = logging.getLogger("orin.update")
     runtime = root / "current" / runtime_relative_path("windows-x64" if os.name == "nt" else "linux-x64")
     if not runtime.is_file():
+        log.error("step=relaunch outcome=failed duration=%.3fs error=runtime missing at %s", monotonic() - started, runtime)
         return False
     sleep(RESTART_GRACE_SECONDS)
     flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
     try:
         popen([str(runtime), "--desktop"], cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
               close_fds=True, start_new_session=os.name != "nt", creationflags=flags)
-    except OSError:
+    except OSError as error:
+        log.error("step=relaunch outcome=failed duration=%.3fs error=%s", monotonic() - started, error)
         return False
+    log.info("step=relaunch outcome=ok duration=%.3fs", monotonic() - started)
     return True
 
 
