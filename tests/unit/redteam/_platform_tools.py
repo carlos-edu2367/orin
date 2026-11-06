@@ -16,9 +16,13 @@ DEFERRED_MUTATION_TOOL: str = "powershell" if os.name == "nt" else "notebook_edi
 DEFERRED_MUTATION_PUBLIC_NAME: str = public_name(DEFERRED_MUTATION_TOOL)
 
 
-def deferred_mutation_arguments(workspace_root: Path | None = None) -> dict[str, Any]:
-    """Return valid invocation arguments for ``DEFERRED_MUTATION_TOOL``."""
-    if DEFERRED_MUTATION_TOOL == "powershell":
+def deferred_mutation_arguments(
+    workspace_root: Path | None = None,
+    *,
+    tool_name: str = DEFERRED_MUTATION_TOOL,
+) -> dict[str, Any]:
+    """Return valid invocation arguments for ``tool_name`` (defaults to ``DEFERRED_MUTATION_TOOL``)."""
+    if tool_name == "powershell":
         return {"command": "echo test"}
     if workspace_root is not None:
         nb_path = workspace_root / "demo.ipynb"

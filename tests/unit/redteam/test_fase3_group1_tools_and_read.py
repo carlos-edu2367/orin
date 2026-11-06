@@ -287,6 +287,30 @@ def test_deferred_and_discovered_tools_cannot_bypass_permissions_plan_mode_reado
         deferred_mutation_arguments(ts_ro.workspace.root),
     )
     assert out_ro.status == "failed"
+    assert out_ro.error_code == "READ_ONLY_SUBAGENT"
+
+    # Cross-platform deferred file mutation tool (notebook_edit) must also be refused on every OS
+    # across dont_ask, plan_mode, and read_only_mode without mutating demo.ipynb on disk.
+    nb_args_perm = deferred_mutation_arguments(ts_perm.workspace.root, tool_name="notebook_edit")
+    ts_perm.discover(["notebook_edit"])
+    out_nb_perm = ts_perm.invoke("notebook_edit", nb_args_perm)
+    assert out_nb_perm.status == "failed"
+    assert out_nb_perm.error_code == "CODE_PERMISSION_DENIED"
+    assert "x = 2" not in (ts_perm.workspace.root / "demo.ipynb").read_text(encoding="utf-8")
+
+    nb_args_plan = deferred_mutation_arguments(ts_plan.workspace.root, tool_name="notebook_edit")
+    ts_plan.discover(["notebook_edit"])
+    out_nb_plan = ts_plan.invoke("notebook_edit", nb_args_plan)
+    assert out_nb_plan.status == "failed"
+    assert out_nb_plan.error_code == "CODE_PLAN_MODE_READONLY"
+    assert "x = 2" not in (ts_plan.workspace.root / "demo.ipynb").read_text(encoding="utf-8")
+
+    nb_args_ro = deferred_mutation_arguments(ts_ro.workspace.root, tool_name="notebook_edit")
+    assert "notebook_edit" not in ts_ro.deferred_tool_names
+    out_nb_ro = ts_ro.invoke("notebook_edit", nb_args_ro)
+    assert out_nb_ro.status == "failed"
+    assert out_nb_ro.error_code == "READ_ONLY_SUBAGENT"
+    assert "x = 2" not in (ts_ro.workspace.root / "demo.ipynb").read_text(encoding="utf-8")
 
     # 4. PreToolUse hook blocking a deferred tool (called directly without ToolSearch)
     bus = LifecycleBus()
@@ -334,6 +358,7 @@ def test_powershell_specific_barriers_on_windows(tmp_path: Path) -> None:
     assert "powershell" not in ts_ro.deferred_tool_names
     out_ro = ts_ro.invoke("powershell", {"command": "Write-Output mutate"})
     assert out_ro.status == "failed"
+    assert out_ro.error_code == "READ_ONLY_SUBAGENT"
 
 
 def test_native_turn_runtime_tool_executor_allows_deferred_and_discovered_tools(
