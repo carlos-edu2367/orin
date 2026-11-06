@@ -132,6 +132,7 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
     """Adversarial check: running pytest on a script outside `tests/` still loads
     `tests.conftest` via pyproject.toml `addopts = ["-p", "tests.conftest"]`.
     """
+    raw_tmp_path = tmp_path
     tmp_path = tmp_path.resolve()
     repo_root = Path(__file__).resolve().parents[3]
     standalone = tmp_path / "test_standalone_outside_tests.py"
@@ -146,6 +147,8 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
         encoding="utf-8",
     )
     env = os.environ.copy()
+    env["TEMP"] = str(raw_tmp_path)
+    env["TMP"] = str(raw_tmp_path)
     for key in (
         "ORIN_USER_DIR",
         "ORIN_CLAUDE_HOME",
@@ -198,7 +201,36 @@ def _short_8dot3_path(path: Path) -> Path:
 
 @pytest.mark.skipif(os.name != "nt", reason="Nomes curtos 8.3 só existem no Windows")
 def test_standalone_pytest_survives_short_8dot3_tmp_path(tmp_path: Path) -> None:
-    short_tmp = _short_8dot3_path(tmp_path)
-    if str(short_tmp) == str(tmp_path):
+    long_dir = tmp_path.resolve() / "long_runner_name_dir"
+    long_dir.mkdir(parents=True, exist_ok=True)
+    short_tmp = _short_8dot3_path(long_dir)
+    if str(short_tmp) == str(long_dir):
         pytest.skip("volume sem nomes 8.3")
+    assert str(short_tmp) != str(short_tmp.resolve())
     test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(short_tmp)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Nomes curtos 8.3 só existem no Windows")
+def test_short_8dot3_test_does_not_falsely_skip_when_tmp_path_already_short_or_short_leaf(
+    tmp_path: Path,
+) -> None:
+    """When pytest's basetemp is already an 8.3 short path (like C:\\Users\\RUNNER~1\\...)
+    and the leaf directory name has <= 8 chars, GetShortPathNameW(tmp_path) returns tmp_path
+    unchanged even though tmp_path != tmp_path.resolve(). The 8.3 test must still exercise
+    the short path instead of falsely skipping with 'volume sem nomes 8.3'.
+    """
+    parent_long = tmp_path.resolve() / "runneradmin_parent"
+    parent_long.mkdir(parents=True, exist_ok=True)
+    parent_short = _short_8dot3_path(parent_long)
+    if str(parent_short) == str(parent_long):
+        pytest.skip("volume sem nomes 8.3")
+    already_short_with_short_leaf = parent_short / "t0"
+    already_short_with_short_leaf.mkdir(exist_ok=True)
+    assert str(already_short_with_short_leaf) != str(already_short_with_short_leaf.resolve())
+    try:
+        test_standalone_pytest_survives_short_8dot3_tmp_path(already_short_with_short_leaf)
+    except BaseException as exc:
+        if exc.__class__.__name__ == "Skipped":
+            pytest.fail(f"test_standalone_pytest_survives_short_8dot3_tmp_path falsely skipped on 8.3 volume: {exc}")
+        raise
+
