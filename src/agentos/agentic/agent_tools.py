@@ -43,7 +43,14 @@ import httpx
 from agentos.reading.extract import extract_text
 from agentos.reading.render import ImageTooLarge, normalize_image, render_pdf_pages
 from agentos.reading.vision import VisionUnavailable
-from .diagnostics import STEP_ORDER, detect_recipe, file_diagnostic_command
+from .diagnostics import (
+    STEP_ORDER,
+    changed_line_ranges,
+    detect_recipe,
+    file_diagnostic_command,
+    parse_file_diagnostics,
+    summarize_diagnostics,
+)
 from .call_context import ActiveInvocation
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
@@ -1103,33 +1110,35 @@ class AgentToolset(
         path = str(outcome.payload.get("path") or arguments.get("path") or "")
         if not path:
             return outcome
-        command = file_diagnostic_command(path, project_root=self.workspace.root)
-        if command is None:
+        spec = file_diagnostic_command(path, project_root=self.workspace.root)
+        if spec is None:
             return outcome
         now = time.monotonic()
         last = self._diagnosed_at.get(path)
         if last is not None and now - last < DIAGNOSTIC_DEBOUNCE_SECONDS:
             return outcome
         self._diagnosed_at[path] = now
+        cmd_str = spec.command if hasattr(spec, "command") else str(spec)
+        fmt = getattr(spec, "format", "ruff_json")
         try:
             completed = subprocess.run(
-                command, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
+                cmd_str, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
                 timeout=DIAGNOSTIC_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
         except (OSError, subprocess.SubprocessError):
             return outcome
-        body = (completed.stdout or "") + (completed.stderr or "")
-        if not body.strip():
-            if completed.returncode == 0:
-                addition = f"\n\n[diagnóstico automático — {command}: nenhum problema encontrado]"
-            else:
-                return outcome
-        else:
-            trimmed, _ = _bounded_output(body.strip(), MAX_FILE_DIAGNOSTIC_CHARS)
-            status = "sem problemas" if completed.returncode == 0 else "encontrou problemas"
-            addition = f"\n\n[diagnóstico automático — {command} ({status})]\n{trimmed}"
-        return ToolOutcome(outcome.status, outcome.summary, outcome.content + addition, outcome.payload, outcome.error_code, outcome.images, outcome.data)
+        diags = parse_file_diagnostics(fmt, completed.stdout or "")
+        if diags is None:
+            return outcome
+        summary = summarize_diagnostics(diags, changed_line_ranges(outcome.payload))
+        if summary is None:
+            return outcome
+        return ToolOutcome(
+            outcome.status, outcome.summary,
+            f"{outcome.content}\n\n{summary[:MAX_FILE_DIAGNOSTIC_CHARS]}",
+            outcome.payload, outcome.error_code, outcome.images, outcome.data,
+        )
 
     @staticmethod
     def _is_verification_command(command_str: str) -> bool:

@@ -138,25 +138,32 @@ def test_verify_project_stops_after_a_failing_install_step(toolset: AgentToolset
     assert "não foram executadas" in outcome.content
 
 
-def test_write_file_appends_an_automatic_lint_diagnostic_for_python_files(toolset: AgentToolset) -> None:
+def test_write_file_appends_an_automatic_lint_diagnostic_for_python_files(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    ruff_json = '[{"code": "F401", "message": "`os` imported but unused", "location": {"row": 1, "column": 8}}]'
+    monkeypatch.setattr(
+        agent_tools.subprocess, "run",
+        lambda *args, **kwargs: type("R", (), {"returncode": 1, "stdout": ruff_json, "stderr": ""})(),
+    )
     outcome = toolset.invoke("write_file", {"path": "app.py", "content": "import os\n"})
 
     assert outcome.status == "succeeded"
-    assert "diagnóstico automático" in outcome.content
+    assert "[lint —" in outcome.content
+    assert "1:8 F401" in outcome.content
 
 
 def test_the_automatic_diagnostic_is_debounced_for_the_same_path(toolset: AgentToolset, monkeypatch: pytest.MonkeyPatch) -> None:
+    ruff_json = '[{"code": "F401", "message": "`os` imported but unused", "location": {"row": 1, "column": 8}}]'
     calls = []
     monkeypatch.setattr(
         agent_tools.subprocess, "run",
-        lambda *args, **kwargs: calls.append(args) or type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        lambda *args, **kwargs: calls.append(args) or type("R", (), {"returncode": 1, "stdout": ruff_json, "stderr": ""})(),
     )
 
     first = toolset.invoke("write_file", {"path": "app.py", "content": "import os\n"})
     second = toolset.invoke("edit_file", {"path": "app.py", "old_text": "import os", "new_text": "import sys"})
 
-    assert "diagnóstico automático" in first.content
-    assert "diagnóstico automático" not in second.content
+    assert "[lint —" in first.content
+    assert "lint" not in second.content
     assert len(calls) == 1
 
 

@@ -10,11 +10,13 @@ process itself, which is what keeps it trivially testable.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import tomllib
+from typing import Literal
 
 
 # Canonical order: cheap static checks before anything that has to actually
@@ -165,14 +167,31 @@ def detect_recipe(root: Path) -> ProjectRecipe | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class FileDiagnosticCommand:
+    command: str
+    format: Literal["ruff_json", "eslint_json"]
+
+
+@dataclass(frozen=True, slots=True)
+class FileDiagnostic:
+    line: int
+    column: int
+    code: str
+    message: str
+
+
 # Single-file checks run automatically after a write/edit, kept intentionally
 # narrow: fast enough to run on every save, and only for a stack whose config
 # is already visible so a bare-metal script directory does not get commands
 # it never asked for.
-def file_diagnostic_command(path: str, *, project_root: Path) -> str | None:
+def file_diagnostic_command(path: str, *, project_root: Path) -> FileDiagnosticCommand | None:
     lowered = path.lower()
     if lowered.endswith(".py"):
-        return f'python -m ruff check "{path}"'
+        return FileDiagnosticCommand(
+            command=f'python -m ruff check --output-format=json "{path}"',
+            format="ruff_json",
+        )
     if (
         lowered.endswith((".ts", ".tsx", ".js", ".jsx"))
         and (project_root / "package.json").is_file()
@@ -181,8 +200,120 @@ def file_diagnostic_command(path: str, *, project_root: Path) -> str | None:
             or (project_root / "node_modules" / ".bin" / "eslint.cmd").exists()
         )
     ):
-        return f'npx --no-install eslint "{path}"'
+        return FileDiagnosticCommand(
+            command=f'npx --no-install eslint --format json "{path}"',
+            format="eslint_json",
+        )
     return None
 
 
-__all__ = ["ProjectRecipe", "STEP_ORDER", "detect_recipe", "file_diagnostic_command", "python_runner"]
+def parse_file_diagnostics(fmt: str, stdout: str) -> list[FileDiagnostic] | None:
+    if not isinstance(stdout, str) or not stdout.strip():
+        return None
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, list):
+        return None
+    out: list[FileDiagnostic] = []
+    if fmt == "ruff_json":
+        for item in data:
+            if not isinstance(item, Mapping):
+                return None
+            loc = item.get("location")
+            if not isinstance(loc, Mapping):
+                return None
+            try:
+                line = int(loc["row"])
+                column = int(loc.get("column", 1))
+            except (KeyError, TypeError, ValueError):
+                return None
+            code = str(item.get("code") or "")
+            message = str(item.get("message") or "")
+            out.append(FileDiagnostic(line=line, column=column, code=code, message=message))
+        return out
+    if fmt == "eslint_json":
+        for file_item in data:
+            if not isinstance(file_item, Mapping):
+                return None
+            messages = file_item.get("messages")
+            if not isinstance(messages, list):
+                return None
+            for msg in messages:
+                if not isinstance(msg, Mapping):
+                    return None
+                try:
+                    line = int(msg.get("line") or 1)
+                    column = int(msg.get("column") or 1)
+                except (TypeError, ValueError):
+                    return None
+                code = str(msg.get("ruleId") or "")
+                message = str(msg.get("message") or "")
+                out.append(FileDiagnostic(line=line, column=column, code=code, message=message))
+        return out
+    return None
+
+
+def changed_line_ranges(payload: Mapping[str, object] | None) -> list[tuple[int, int]] | None:
+    if not isinstance(payload, Mapping):
+        return None
+    if "original_sha256" in payload and not payload.get("original_sha256"):
+        return None
+    patch = payload.get("structured_patch")
+    if not isinstance(patch, list) or not patch:
+        return None
+    ranges: list[tuple[int, int]] = []
+    for hunk in patch:
+        if not isinstance(hunk, Mapping):
+            continue
+        try:
+            start = int(hunk["newStart"])
+            count = int(hunk.get("newLines", 1))
+        except (KeyError, TypeError, ValueError):
+            continue
+        end = max(start, start + count - 1)
+        ranges.append((start, end))
+    return ranges if ranges else None
+
+
+def summarize_diagnostics(
+    diagnostics: Sequence[FileDiagnostic],
+    ranges: Sequence[tuple[int, int]] | None,
+    *,
+    margin: int = 2,
+    max_items: int = 5,
+) -> str | None:
+    if not diagnostics:
+        return None
+    if ranges is None:
+        in_range = list(diagnostics)
+        fora = 0
+    else:
+        in_range = [
+            d
+            for d in diagnostics
+            if any((start - margin) <= d.line <= (end + margin) for start, end in ranges)
+        ]
+        fora = len(diagnostics) - len(in_range)
+    if not in_range:
+        return None
+    k = len(in_range)
+    header = f"[lint — {k} problema(s) nas linhas alteradas{', +' + str(fora) + ' fora delas' if fora else ''}]"
+    lines = [f"{d.line}:{d.column} {d.code} {d.message}".strip() for d in in_range[:max_items]]
+    summary = "\n".join([header, *lines])
+    return summary[:600]
+
+
+__all__ = [
+    "FileDiagnostic",
+    "FileDiagnosticCommand",
+    "ProjectRecipe",
+    "STEP_ORDER",
+    "changed_line_ranges",
+    "detect_recipe",
+    "file_diagnostic_command",
+    "parse_file_diagnostics",
+    "python_runner",
+    "summarize_diagnostics",
+]

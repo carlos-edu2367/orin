@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from agentos.agentic.diagnostics import detect_recipe, file_diagnostic_command
+from agentos.agentic.diagnostics import FileDiagnosticCommand, detect_recipe, file_diagnostic_command
 
 
 def test_detects_a_node_project_and_maps_its_scripts(tmp_path: Path) -> None:
@@ -91,7 +91,10 @@ def test_an_unrecognized_directory_has_no_recipe(tmp_path: Path) -> None:
 
 
 def test_file_diagnostic_picks_ruff_for_python_files(tmp_path: Path) -> None:
-    assert file_diagnostic_command("src/app.py", project_root=tmp_path) == 'python -m ruff check "src/app.py"'
+    assert file_diagnostic_command("src/app.py", project_root=tmp_path) == FileDiagnosticCommand(
+        command='python -m ruff check --output-format=json "src/app.py"',
+        format="ruff_json",
+    )
 
 
 def test_file_diagnostic_only_lints_typescript_when_a_node_project_and_local_eslint_are_present(tmp_path: Path) -> None:
@@ -104,7 +107,10 @@ def test_file_diagnostic_only_lints_typescript_when_a_node_project_and_local_esl
     eslint_bin.mkdir(parents=True)
     (eslint_bin / "eslint").write_text("", encoding="utf-8")
 
-    assert file_diagnostic_command("src/App.tsx", project_root=tmp_path) == 'npx --no-install eslint "src/App.tsx"'
+    assert file_diagnostic_command("src/App.tsx", project_root=tmp_path) == FileDiagnosticCommand(
+        command='npx --no-install eslint --format json "src/App.tsx"',
+        format="eslint_json",
+    )
 
 
 def test_file_diagnostic_has_nothing_to_say_about_an_unrecognized_extension(tmp_path: Path) -> None:

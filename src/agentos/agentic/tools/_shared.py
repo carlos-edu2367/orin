@@ -138,7 +138,7 @@ MAX_TRACKED_PROCESSES = 50
 # path is checked again when a long file is written across several calls.
 DIAGNOSTIC_TIMEOUT_SECONDS = 20
 DIAGNOSTIC_DEBOUNCE_SECONDS = 3.0
-MAX_FILE_DIAGNOSTIC_CHARS = 2_000
+MAX_FILE_DIAGNOSTIC_CHARS = 600
 VERIFY_STEP_TIMEOUT_SECONDS = 300
 MAX_VERIFY_STEP_CHARS = 3_000
 # Scaffold recipes deliberately live beside the single tool that executes
