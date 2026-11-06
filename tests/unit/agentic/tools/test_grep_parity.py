@@ -98,3 +98,13 @@ class TestWithRipgrep:
         (toolset.workspace.root / "flags.txt").write_bytes(b"--version\n")
         outcome = toolset.invoke("Grep", {"pattern": "--version", "output_mode": "content"})
         assert "flags.txt:1: --version" in outcome.content
+
+def test_default_mode_lists_files_only(tmp_path: Path) -> None:
+    output = _toolset(tmp_path).invoke("Grep", {"pattern": "alpha"}).data["tool_output"]
+    assert output["mode"] == "files_with_matches" and "content" not in output
+
+
+def test_search_is_case_sensitive_by_default(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path)
+    assert toolset.invoke("Grep", {"pattern": "ALPHA"}).data["tool_output"]["numFiles"] == 0
+    assert toolset.invoke("Grep", {"pattern": "ALPHA", "-i": True}).data["tool_output"]["numFiles"] == 2

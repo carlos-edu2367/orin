@@ -134,7 +134,7 @@ def test_agent_toolset_full_autonomy_allows_files_search_and_shell_outside_works
     # 6. search_files outside workspace
     grep_res = full_tools.invoke(
         "search_files",
-        {"pattern": "hello unrestricted", "path": str(ext_dir)},
+        {"pattern": "hello unrestricted", "path": str(ext_dir), "output_mode": "content"},
     )
     assert grep_res.status == "succeeded", grep_res.content
     assert "hello unrestricted" in grep_res.content

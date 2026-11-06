@@ -186,6 +186,7 @@ def test_search_files_grep_modes_context_lines_and_multiline(tmp_path: Path) -> 
         {
             "pattern": r"def target_func\(\):\s+# TARGET_MARKER one",
             "multiline": True,
+            "output_mode": "content",
         },
     )
     assert multi_out.status == "succeeded"

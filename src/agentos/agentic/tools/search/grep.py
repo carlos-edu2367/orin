@@ -40,14 +40,14 @@ class GrepTools:
         pattern: str | None = None,
         glob: str = "**/*",
         max_results: int = 50,
-        ignore_case: bool = True,
+        ignore_case: bool = False,
         *,
         query: str | None = None,
         path: str | None = None,
         file_pattern: str | None = None,
         is_regex: bool = True,
         case_sensitive: bool | None = None,
-        output_mode: str = "content",
+        output_mode: str = "files_with_matches",
         before_context: int = 0,
         after_context: int = 0,
         context_lines: int = 0,
@@ -61,7 +61,7 @@ class GrepTools:
         raw_pattern = pattern if (isinstance(pattern, str) and pattern.strip()) else (query if isinstance(query, str) else "")
         if not isinstance(raw_pattern, str) or not raw_pattern.strip() or len(raw_pattern) > 500:
             raise AgentToolError("pattern must be a non-blank string of at most 500 characters")
-        mode = str(output_mode or "content").strip().lower()
+        mode = str(output_mode or "files_with_matches").strip().lower()
         if mode not in {"content", "files_with_matches", "count"}:
             raise AgentToolError("output_mode must be 'content', 'files_with_matches', or 'count'.")
         eff_ignore_case = (not bool(case_sensitive)) if case_sensitive is not None else bool(ignore_case)
@@ -461,7 +461,7 @@ SPECS: tuple[ToolSpec, ...] = (
             "output_mode": {
                 "type": "string",
                 "enum": ["content", "files_with_matches", "count"],
-                "description": "Output mode: 'content' (matching lines), 'files_with_matches' (file paths only), or 'count' (match counts per file).",
+                "description": "Output mode: 'files_with_matches' (file paths only, default), 'content' (matching lines), or 'count' (match counts per file).",
             },
             "before_context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show before each match (-B)."},
             "after_context": {"type": "integer", "minimum": 0, "maximum": 50, "description": "Number of lines to show after each match (-A)."},
