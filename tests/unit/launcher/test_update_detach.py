@@ -84,8 +84,9 @@ def test_detach_falls_back_when_breakaway_denied(
             raise PermissionError(5, "Access is denied")
         return object()
 
+    paths = _paths(tmp_path)
     code = cli.command_update(
-        _paths(tmp_path),
+        paths,
         _installed_profile(tmp_path),
         Console(io.StringIO(), colour=False),
         argparse.Namespace(apply=True, restart=True, detach=True),
@@ -102,6 +103,7 @@ def test_detach_falls_back_when_breakaway_denied(
     assert not (second_kwargs["creationflags"] & CREATE_BREAKAWAY_FROM_JOB)
     assert second_kwargs["creationflags"] & CREATE_NEW_PROCESS_GROUP
     assert second_kwargs["creationflags"] & CREATE_NO_WINDOW
+    assert "breakaway=denied" in (paths.logs / "update.log").read_text(encoding="utf-8")
 
 
 def test_electron_update_command_passes_detach_and_supervised_children_never_breakaway(
@@ -211,5 +213,118 @@ def test_apply_replaces_stale_lock_from_dead_or_expired_pid_and_cleans_up(
     assert code_reused == 0
     assert seen_lock_pids == [str(os.getpid())]
     assert not lock_file.exists()
+
+
+def test_detach_hands_off_lock_to_child_closing_double_click_race_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    from agentos.installation.updater import UpdateResult, Updater
+
+    monkeypatch.setattr(cli.os, "name", "nt")
+    paths = _paths(tmp_path)
+    profile = _installed_profile(tmp_path)
+    lock_file = paths.run / "update-apply.lock"
+    child_pid = os.getpid()
+    spawn_calls: list[list[str]] = []
+
+    class _ChildProc:
+        pid = child_pid
+
+    def fake_popen(command: list[str], **kwargs: Any) -> object:
+        spawn_calls.append(list(command))
+        return _ChildProc()
+
+    # 1st click (--detach) acquires lock, spawns child, and leaves handoff lock on disk.
+    code_first = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=True, detach=True),
+        popen=fake_popen,
+    )
+    assert code_first == 0
+    assert len(spawn_calls) == 1
+    assert lock_file.is_file()
+    assert lock_file.read_text(encoding="utf-8").split() == [str(child_pid), "handoff"]
+
+    # 2nd click arriving 1ms later (before child runs) sees live handoff lock and exits without spawning.
+    monkeypatch.setattr(cli.os, "getpid", lambda: child_pid + 1)
+    code_second = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=True, detach=True),
+        popen=fake_popen,
+    )
+    assert code_second == 0
+    assert len(spawn_calls) == 1
+
+    # Now the spawned child (os.getpid() == child_pid) runs without --detach, claims the handoff lock, and cleans up.
+    monkeypatch.setattr(cli.os, "getpid", lambda: child_pid)
+    seen_lock_pids: list[str] = []
+
+    def fake_apply(self: Updater) -> UpdateResult:
+        seen_lock_pids.append(lock_file.read_text(encoding="utf-8").strip())
+        return UpdateResult("updated", "0.4.0", "0.5.0")
+
+    monkeypatch.setattr(Updater, "apply_prepared", fake_apply)
+    code_child = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=False, detach=False),
+    )
+    assert code_child == 0
+    assert seen_lock_pids == [str(child_pid)]
+    assert not lock_file.exists()
+
+
+def test_apply_replaces_lock_when_live_pid_was_created_after_lock_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import subprocess
+    import sys
+    import time
+    from agentos.installation.updater import UpdateResult, Updater
+
+    paths = _paths(tmp_path)
+    profile = _installed_profile(tmp_path)
+    lock_file = paths.run / "update-apply.lock"
+
+    reused_proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        # Lock file was written 10 seconds BEFORE reused_proc was spawned (still well within 600s max age).
+        lock_file.write_text(str(reused_proc.pid), encoding="utf-8")
+        before_spawn = time.time() - 10.0
+        os.utime(lock_file, (before_spawn, before_spawn))
+
+        seen_lock_pids: list[str] = []
+
+        def fake_apply(self: Updater) -> UpdateResult:
+            seen_lock_pids.append(lock_file.read_text(encoding="utf-8").strip())
+            return UpdateResult("updated", "0.4.0", "0.5.0")
+
+        monkeypatch.setattr(Updater, "apply_prepared", fake_apply)
+        code = cli.command_update(
+            paths,
+            profile,
+            Console(io.StringIO(), colour=False),
+            argparse.Namespace(apply=True, restart=False),
+        )
+
+        assert code == 0
+        assert seen_lock_pids == [str(os.getpid())]
+        assert not lock_file.exists()
+    finally:
+        reused_proc.kill()
+        reused_proc.wait(timeout=5)
+
 
 

@@ -340,14 +340,20 @@ def command_update(
         if apply and _apply_lock_held_by_live_pid(lock_path):
             logging.getLogger("orin.update").info("update apply: skipped because lock %s is held by a live pid", lock_path)
             return 0
-        if detach and apply and os.name == "nt":
-            _spawn_detached_apply(_detached_apply_argv(profile, options), **({"popen": popen} if popen is not None else {}))
-            return 0
         if apply:
             if not _acquire_apply_lock(lock_path):
                 logging.getLogger("orin.update").info("update apply: skipped because lock %s is held by a live pid", lock_path)
                 return 0
             lock_acquired = True
+        if detach and apply and os.name == "nt":
+            _spawn_detached_apply(
+                _detached_apply_argv(profile, options),
+                lock_path=lock_path,
+                **({"popen": popen} if popen is not None else {}),
+            )
+            if _lock_handed_off(lock_path):
+                lock_acquired = False
+            return 0
 
         def stop_before_switching() -> None:
             if running_instance(paths) is None:
@@ -413,6 +419,59 @@ UPDATE_APPLY_LOCK = "update-apply.lock"
 APPLY_LOCK_MAX_AGE_SECONDS = 600.0
 
 
+def _process_creation_time(pid: int) -> float | None:
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _FileTime(ctypes.Structure):
+                _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.GetProcessTimes.restype = wintypes.BOOL
+            kernel32.GetProcessTimes.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            try:
+                created, exited, kernel, user = _FileTime(), _FileTime(), _FileTime(), _FileTime()
+                if not kernel32.GetProcessTimes(
+                    handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)
+                ):
+                    return None
+                ticks = (int(created.high) << 32) | int(created.low)
+                return (ticks - 116_444_736_000_000_000) / 10_000_000.0
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        raw_stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        after_comm = raw_stat.rsplit(")", 1)[1].split()
+        start_ticks = int(after_comm[19])
+        clk_tck = float(os.sysconf("SC_CLK_TCK"))
+        for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1]) + (start_ticks / clk_tck)
+    except Exception:
+        return None
+    return None
+
+
 def _apply_lock_held_by_live_pid(lock_path: Path) -> bool:
     try:
         stat = lock_path.stat()
@@ -421,12 +480,29 @@ def _apply_lock_held_by_live_pid(lock_path: Path) -> bool:
         return False
     if time() - stat.st_mtime > APPLY_LOCK_MAX_AGE_SECONDS:
         return False
-    first_token = raw.split()[0] if raw else ""
+    tokens = raw.split()
+    if not tokens:
+        return False
     try:
-        pid = int(first_token)
+        pid = int(tokens[0])
     except ValueError:
         return False
-    return process_is_alive(pid)
+    if len(tokens) >= 2 and tokens[1] == "handoff" and pid == os.getpid():
+        return False
+    if not process_is_alive(pid):
+        return False
+    created_at = _process_creation_time(pid)
+    if created_at is not None and created_at > stat.st_mtime + 1.0:
+        return False
+    return True
+
+
+def _lock_handed_off(lock_path: Path) -> bool:
+    try:
+        tokens = lock_path.read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+    return len(tokens) >= 2 and tokens[1] == "handoff"
 
 
 def _acquire_apply_lock(lock_path: Path) -> bool:
@@ -472,7 +548,7 @@ def _detached_apply_argv(profile: RuntimeProfile, options: argparse.Namespace) -
     return command
 
 
-def _spawn_detached_apply(argv: list[str], *, popen=subprocess.Popen) -> bool:
+def _spawn_detached_apply(argv: list[str], *, popen=subprocess.Popen, lock_path: Path | None = None) -> bool:
     """Respawn ``orin update --apply`` outside the launcher's Job Object on Windows."""
     command = [arg for arg in argv if arg != "--detach"]
     kwargs: dict[str, object] = {
@@ -485,15 +561,22 @@ def _spawn_detached_apply(argv: list[str], *, popen=subprocess.Popen) -> bool:
         subprocess, "CREATE_NO_WINDOW", 0x08000000
     )
     breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    used_breakaway = True
     try:
-        popen(command, creationflags=base | breakaway, **kwargs)
-        return True
+        proc = popen(command, creationflags=base | breakaway, **kwargs)
     except OSError as error:
         logging.getLogger("orin.update").warning(
             "update apply: breakaway=denied (%s); falling back to in-job spawn", error
         )
-        popen(command, creationflags=base, **kwargs)
-        return False
+        proc = popen(command, creationflags=base, **kwargs)
+        used_breakaway = False
+    child_pid = getattr(proc, "pid", None)
+    if lock_path is not None and isinstance(child_pid, int) and child_pid > 0:
+        try:
+            lock_path.write_text(f"{child_pid} handoff\n", encoding="utf-8")
+        except OSError:
+            pass
+    return used_breakaway
 
 
 def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> bool:
