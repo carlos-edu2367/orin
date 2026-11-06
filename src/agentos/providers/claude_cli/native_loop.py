@@ -395,7 +395,7 @@ class NativeTurnHandle:
             return None
 
         if ev.kind == CliEventKind.RESULT:
-            res = self._parser.result
+            res = ev.result if ev.result is not None else self._parser.result
             if res is not None:
                 self.refuse_tools("turn round completed")
                 if res.is_error and res.subtype != "error_max_turns":
@@ -415,7 +415,14 @@ class NativeTurnHandle:
         return None
 
     def run_until_result(self, sink: NativeTurnSink) -> NativeTurnOutcome:
-        self._parser.result = None
+        reset_fn = getattr(self._parser, "reset_result", None)
+        if callable(reset_fn):
+            reset_fn()
+        else:
+            try:
+                self._parser.result = None  # type: ignore[misc]
+            except AttributeError:
+                pass
         text_parts: list[str] = []
         idle_deadline = self._clock() + float(IDLE_TIMEOUT_SECONDS)
 

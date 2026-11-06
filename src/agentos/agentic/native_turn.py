@@ -457,6 +457,36 @@ class RuntimeToolExecutor(ToolExecutor):
         raw_schemas = self.runtime._tool_schemas(
             self.turn, allow_deferral=self._allow_deferral
         )
+        if self.runtime.phases is not None:
+            try:
+                all_raw = list(self.runtime.toolset.schemas())
+            except Exception:
+                all_raw = list(raw_schemas)
+            seen_names = {
+                str(
+                    (s.get("function") if isinstance(s.get("function"), Mapping) else s).get(
+                        "name", ""
+                    )
+                )
+                for s in all_raw
+                if isinstance(s, Mapping)
+            }
+            for s in raw_schemas:
+                if isinstance(s, Mapping):
+                    fn = s.get("function") if isinstance(s.get("function"), Mapping) else s
+                    nm = str(fn.get("name", ""))
+                    if nm and nm not in seen_names:
+                        all_raw.append(s)
+                        seen_names.add(nm)
+            if self._explicit_tool_schemas is not None:
+                for s in self._explicit_tool_schemas:
+                    if isinstance(s, Mapping):
+                        fn = s.get("function") if isinstance(s.get("function"), Mapping) else s
+                        nm = str(fn.get("name", ""))
+                        if nm and nm not in seen_names:
+                            all_raw.append(s)
+                            seen_names.add(nm)
+            raw_schemas = all_raw
         return (
             self.runtime._names.schemas_out(raw_schemas)
             if self.runtime._names is not None
@@ -466,9 +496,8 @@ class RuntimeToolExecutor(ToolExecutor):
     def list_tools(self) -> Sequence[McpToolSpec]:
         if (
             getattr(self.runtime, "toolset", None) is not None
-            and self.runtime.phases is None
             and (
-                self._explicit_tool_schemas is None
+                (self._explicit_tool_schemas is None and self.runtime.phases is None)
                 or self._snapshot_discovered() != self._last_discovered_snapshot
             )
         ):
@@ -822,7 +851,7 @@ class RuntimeToolExecutor(ToolExecutor):
             self.runtime._native_message_first_read_keys = None
         after_discovered = self._snapshot_discovered()
         tools_changed = after_discovered != before_discovered
-        if tools_changed and self.runtime.phases is None:
+        if tools_changed:
             self._tool_schemas = self._compute_live_schemas()
             self._last_discovered_snapshot = after_discovered
             self._build_specs()

@@ -137,45 +137,87 @@ def classify_result_error_info(
     tz: tzinfo | None = None,
 ) -> CliErrorInfo:
     transport_err = classify_result_error(result, rate_limit, now=now, tz=tz)
-    status = transport_err.status_code
-    raw_lower = (result.result_text or "").lower()
+    raw_text = (result.result_text or "").strip()
+    raw_lower = raw_text.lower()
 
-    if status in (401, 403):
+    raw_status = result.api_error_status
+    if raw_status is None:
+        match = _API_ERROR_STATUS_RE.search(raw_text)
+        if match:
+            raw_status = int(match.group(1))
+
+    subscription_rejected = (
+        rate_limit is not None and rate_limit.status.lower() == "rejected"
+    )
+    is_rate_limited = (
+        raw_status == 429
+        or subscription_rejected
+        or (raw_status is None and "rate limit" in raw_lower)
+    )
+
+    if raw_status in (401, 403):
         kind = CliErrorKind.AUTH
         retryable = False
-    elif status == 404:
+    elif raw_status == 404:
         kind = CliErrorKind.MODEL_NOT_FOUND
         retryable = False
-    elif status == 429 or (rate_limit is not None and rate_limit.status.lower() == "rejected"):
+    elif is_rate_limited:
         kind = CliErrorKind.RATE_LIMITED
         retryable = False
-    elif status == 529 or (status is not None and 500 <= status <= 599):
-        kind = CliErrorKind.TRANSIENT
-        retryable = True
     elif (
         "prompt is too long" in raw_lower
         or "context_length_exceeded" in raw_lower
+        or "context length" in raw_lower
         or "too many tokens" in raw_lower
     ):
         kind = CliErrorKind.CONTEXT_OVERFLOW
         retryable = False
+    elif (
+        raw_status == 529
+        or (raw_status is not None and 500 <= raw_status <= 599)
+        or "overloaded" in raw_lower
+    ):
+        kind = CliErrorKind.TRANSIENT
+        retryable = True
     else:
         kind = CliErrorKind.FATAL
         retryable = False
 
+    retry_after_seconds = transport_err.retry_after_seconds
+    if (
+        retry_after_seconds is None
+        and kind == CliErrorKind.RATE_LIMITED
+        and rate_limit is not None
+        and rate_limit.resets_at is not None
+    ):
+        now_ts = time.time() if now is None else float(now)
+        if rate_limit.resets_at > 1_000_000_000:
+            retry_after_seconds = max(1.0, rate_limit.resets_at - now_ts)
+        else:
+            retry_after_seconds = max(1.0, rate_limit.resets_at)
+
+    status_out = (
+        raw_status
+        if raw_status is not None
+        else (429 if is_rate_limited else transport_err.status_code)
+    )
+
     return CliErrorInfo(
         kind=kind,
-        status_code=status,
+        status_code=status_out,
         user_message=str(transport_err),
         retryable=retryable,
-        retry_after_seconds=transport_err.retry_after_seconds,
+        retry_after_seconds=retry_after_seconds,
+        exception=transport_err,
     )
 
 
 def error_info_to_transport_error(info: CliErrorInfo) -> ProviderTransportError:
+    if isinstance(info.exception, ProviderTransportError):
+        return info.exception
     return ProviderTransportError(
         info.user_message,
-        status_code=info.status_code,
+        status_code=401 if info.kind == CliErrorKind.AUTH else info.status_code,
         retry_after_seconds=info.retry_after_seconds,
         exhausted=(info.kind == CliErrorKind.AUTH),
     )

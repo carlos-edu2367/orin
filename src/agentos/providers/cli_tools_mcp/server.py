@@ -489,6 +489,7 @@ class TurnToolServer:
             if isinstance(payload, list) and 0 < len(payload) <= MAX_BATCH_SIZE:
                 responses: list[dict[str, Any]] = []
                 merged_headers: dict[str, str] = {}
+                batch_tools_changed = False
                 for entry in payload:
                     if not isinstance(entry, Mapping):
                         responses.append(
@@ -503,12 +504,29 @@ class TurnToolServer:
                         )
                         continue
                     single_resp, extra_headers, _ = await _dispatch_single(entry)
-                    extra_headers.pop("X-Orin-Tools-Changed", None)
+                    if extra_headers.pop("X-Orin-Tools-Changed", None) == "1":
+                        batch_tools_changed = True
                     merged_headers.update(extra_headers)
                     if single_resp is not None:
                         responses.append(single_resp)
                 if not responses:
                     return Response("", status_code=202, headers=merged_headers)
+                accept_hdr = (request.headers.get("accept") or "").lower()
+                if batch_tools_changed and "text/event-stream" in accept_hdr:
+                    notif = {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed",
+                    }
+                    sse_body = (
+                        f"event: message\ndata: {json.dumps(notif, ensure_ascii=False)}\n\n"
+                        f"event: message\ndata: {json.dumps(responses, ensure_ascii=False)}\n\n"
+                    )
+                    return Response(
+                        sse_body,
+                        status_code=200,
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", **merged_headers},
+                    )
                 return JSONResponse(responses, status_code=200, headers=merged_headers)
 
             return JSONResponse(

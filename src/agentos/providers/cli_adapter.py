@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class StreamUsage(ProviderUsage):
-    """Extended usage snapshot preserving Anthropic prompt cache creation and read metrics."""
+    """Extended usage snapshot preserving prompt cache creation and read metrics."""
 
     cache_read_input_tokens: int | None = None
     cache_creation_input_tokens: int | None = None
@@ -183,6 +183,15 @@ class CliErrorInfo:
     user_message: str
     retryable: bool = False
     retry_after_seconds: float | None = None
+    exception: Exception | None = None
+
+    def __post_init__(self) -> None:
+        if self.exception is None:
+            object.__setattr__(self, "exception", RuntimeError(self.user_message))
+
+    @property
+    def http_status(self) -> int | None:
+        return self.status_code
 
 
 @dataclass(frozen=True, slots=True)

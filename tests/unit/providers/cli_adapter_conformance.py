@@ -110,6 +110,8 @@ class CliAdapterConformance:
         assert "TOP_SECRET_SYSTEM_PROMPT" not in " ".join(argv)
         assert FakeToolServerHandle.token not in " ".join(argv)
         logged = fx.adapter.loggable_command(argv)
+        assert "TOP_SECRET_SYSTEM_PROMPT" not in " ".join(logged)
+        assert FakeToolServerHandle.token not in " ".join(logged)
         assert str(sys_file) not in " ".join(logged)
         assert str(cfg) not in " ".join(logged)
 
@@ -124,6 +126,8 @@ class CliAdapterConformance:
         clean = fx.adapter.environment(
             dirty, max_output_tokens=4096, tool_timeout_ms=60_000
         )
+        assert clean is not dirty
+        assert "ANTHROPIC_API_KEY" in dirty
         for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY"):
             assert key not in clean
 
@@ -160,9 +164,14 @@ class CliAdapterConformance:
     def test_stream_ignores_malformed_lines(self) -> None:
         fx = self.get_fixtures()
         tr = fx.adapter.stream_translator()
-        assert tr.feed_line("") == []
-        assert tr.feed_line("not-json {{{") == []
-        assert tr.feed_line("42") == []
+        for bad_line in ("", "not-json {{{", "42"):
+            try:
+                events = tr.feed_line(bad_line)
+            except Exception as exc:
+                raise AssertionError(
+                    f"feed_line raised on malformed input {bad_line!r}: {exc}"
+                ) from exc
+            assert events == []
 
     def test_error_classification_matches_scenarios(self) -> None:
         fx = self.get_fixtures()
@@ -174,6 +183,7 @@ class CliAdapterConformance:
             assert info.kind == scenario.expected_kind
             assert info.retryable is scenario.expected_retryable
             assert info.user_message
+            assert isinstance(info.exception, Exception)
 
     def test_context_window_known_and_unknown_models(self) -> None:
         fx = self.get_fixtures()
