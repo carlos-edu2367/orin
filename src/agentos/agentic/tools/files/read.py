@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
@@ -33,9 +33,38 @@ OFFICE_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
 NOTEBOOK_SUFFIX = ".ipynb"
 MAX_NOTEBOOK_CELL_CHARS = 4_000
 MAX_NOTEBOOK_OUTPUT_CHARS = 2_000
-LARGE_READ_LINES = 2_000
+DEFAULT_READ_LINES = 2_000
+MAX_READ_TOKENS = 25_000
+MAX_READ_LINE_CHARS = 2_000
+LARGE_READ_LINES = DEFAULT_READ_LINES
 LARGE_READ_BYTES = 2_000_000
-LARGE_READ_RESULT_CHARS = 100_000
+LARGE_READ_RESULT_CHARS = MAX_READ_TOKENS * 4
+
+
+def _truncate_line(line: str) -> str:
+    if len(line) <= MAX_READ_LINE_CHARS:
+        return line
+    return line[:MAX_READ_LINE_CHARS] + " ? [line truncated]"
+
+
+def _fit_lines_to_token_budget(
+    lines: Sequence[str],
+    first: int,
+    budget_tokens: int = MAX_READ_TOKENS,
+) -> int:
+    if not lines:
+        return 0
+    usable_tokens = max(1, int(budget_tokens) - 200)
+    used_chars = 0
+    count = 0
+    for index, raw_line in enumerate(lines):
+        line = _truncate_line(raw_line)
+        rendered_len = len(f"{first + index:6}	{line}") + (1 if index > 0 else 0)
+        if (used_chars + rendered_len) // 4 > usable_tokens:
+            break
+        used_chars += rendered_len
+        count += 1
+    return max(1, count)
 
 
 def _notebook_output_text(outputs: Any) -> str:
@@ -67,7 +96,7 @@ class ReadTools:
         path: str,
         *,
         offset: int = 1,
-        limit: int = 400,
+        limit: int = DEFAULT_READ_LINES,
         total_lines: int = 0,
         explicit_read: bool = False,
     ) -> str:
@@ -334,7 +363,7 @@ class ReadTools:
         self,
         path: str,
         offset: int = 1,
-        limit: int = 400,
+        limit: int = DEFAULT_READ_LINES,
         pages: str | None = None,
         force_reload: bool = False,
         allow_large: bool = False,
@@ -364,12 +393,9 @@ class ReadTools:
                         **info, "content": text, "numLines": count, "startLine": 1, "totalLines": count,
                     }}
                 return result
-        norm_check = (self.workspace.key(target) if target.exists() else path).replace("\\", "/").lstrip("/")
-        is_upload_file = is_upload_path(norm_check)
-        effective_allow_large = bool(allow_large) or is_upload_file
+        _ = allow_large
         norm_offset = max(1, int(offset or 1))
-        requested_limit = LARGE_READ_LINES if (is_upload_file and int(limit or 400) == 400) else int(limit or 400)
-        norm_limit = max(1, min(requested_limit, LARGE_READ_LINES if effective_allow_large else 800))
+        norm_limit = max(1, min(int(limit or DEFAULT_READ_LINES), DEFAULT_READ_LINES))
         if target.is_file() and not force_reload:
             norm = self.workspace.key(target)
             with self._read_file_lock:
@@ -424,24 +450,13 @@ class ReadTools:
                     }
         lines, first, total, truncated = self.workspace.read_lines(
             path, offset=norm_offset, limit=norm_limit,
-            max_lines=LARGE_READ_LINES if effective_allow_large else 800,
-            max_bytes=LARGE_READ_BYTES if effective_allow_large else MAX_READ_BYTES,
+            max_lines=DEFAULT_READ_LINES,
+            max_bytes=LARGE_READ_BYTES,
         )
-        cap = LARGE_READ_RESULT_CHARS if effective_allow_large else MAX_RESULT_CHARS_DEFAULT
-        budget = cap - 400 - len(path)  # headroom for the continuation hints
-        kept: list[str] = []
-        used = 0
-        cut_by_chars = False
-        for index, line in enumerate(lines):
-            numbered_len = len(f"{first + index:6}\t{line}") + 1
-            if used + numbered_len <= budget:
-                kept.append(line)
-                used += numbered_len
-                continue
-            cut_by_chars = True
-            if not kept:
-                kept.append(f"{line[:budget]}\n[line {first} truncated at {budget} characters]")
-            break
+        lines = [_truncate_line(line) for line in lines]
+        fit_count = _fit_lines_to_token_budget(lines, first, MAX_READ_TOKENS)
+        cut_by_chars = fit_count < len(lines)
+        kept = lines[:fit_count]
         lines = kept
         sha = self._record_file_read(
             path,
@@ -457,11 +472,7 @@ class ReadTools:
         else:
             body = "\n".join(f"{first + index:6}\t{line}" for index, line in enumerate(lines))
         next_line = first + len(lines)
-        if cut_by_chars:
-            last_line = next_line - 1
-            call = f'Read(file_path="{path}", offset={next_line})' if self.name_translator is not None else f'read_file(path="{path}", offset={next_line})'
-            body += f"\n\n[stopped at line {last_line} to stay under {cap} characters; {total - last_line} more lines; continue with {call}]"
-        elif lines and next_line <= total:
+        if lines and next_line <= total:
             if self.name_translator is not None:
                 body += f"\n\n[{total - next_line + 1} more lines; continue with Read(file_path=\"{path}\", offset={next_line})]"
             else:
@@ -499,7 +510,7 @@ class ReadTools:
                 "filePath": str(target), "content": "\n".join(lines), "numLines": len(lines), "startLine": first,
                 "totalLines": total, **({"truncatedByTokenCap": True} if truncated or cut_by_chars else {}),
             }},
-            **({"max_result_chars": LARGE_READ_RESULT_CHARS} if effective_allow_large else {}),
+            "max_result_chars": MAX_READ_TOKENS * 4,
         }
 
     def view_file(self, path: str, question: str = "") -> dict[str, Any]:
@@ -636,7 +647,7 @@ class ReadTools:
 class ReadInput(ToolInput):
     file_path: str = Field(description="Path of the file, relative to the workspace or absolute inside it.")
     offset: int | None = Field(None, ge=1, description="First line to read (1-based).")
-    limit: int | None = Field(None, ge=1, le=2000, description="How many lines to read (above 800 needs allow_large).")
+    limit: int | None = Field(None, ge=1, le=2000, description="How many lines to read (default 2000).")
     allow_large: bool | None = Field(
         None, description="Read past the usual size limits (up to 2,000 lines and 2 MB) when you need the whole thing.",
     )
@@ -709,7 +720,7 @@ SPECS: tuple[ToolSpec, ...] = (
         legacy_schema=_schema({
             "path": {**_TEXT, "description": "Workspace-relative path, e.g. notes/plan.md"},
             "offset": {"type": "integer", "minimum": 1, "description": "First line to return (1-based). Defaults to 1."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 800, "description": "How many lines to return. Defaults to 400."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "How many lines to return. Defaults to 2000."},
             "pages": {**_TEXT, "description": "Optional page range for PDF files (e.g. '1-5' or '3', max 20 pages)."},
             "force_reload": {"type": "boolean", "description": "Force re-reading full content even if unchanged since last read."},
         }, ("path",)),
@@ -717,7 +728,7 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="filesystem",
         input_model=ReadInput,
         output_model=ReadOutput,
-        public_description="Read a file from the workspace. Text comes back line-numbered; use offset and limit to page through a long file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
+        public_description="Read a file from the workspace. Text comes back line-numbered and returns up to 2000 lines by default, bounded by a token budget; use offset and limit to page through a long file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
         read_only=True,
         order=10,
     ),
