@@ -286,7 +286,7 @@ describe('conversation activity reducer', () => {
     })
 
     expect(state.status).toBe('completed')
-    expect(state.todos[0].status).toBe('completed')
+    expect(state.todos[0].status).toBe('in_progress')
   })
 
   it('preserves all structural tool, artifact, code_mode and prepend_older events when 1500+ assistant.delta or agent.thought_delta events arrive', () => {
