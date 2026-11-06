@@ -2,7 +2,6 @@ import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { parseConversationActivityEvent } from '../../../api/conversations'
 import { CodeModeCard } from '../CodeModeCard'
-import { TurnTimeline } from '../TurnTimeline'
 import {
   activityReducer,
   createActivityState,

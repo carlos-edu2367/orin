@@ -41,10 +41,6 @@ const Q1 = questionPayload('q1', 'Qual banco de dados usar?', [
   { id: 'sqlite', label: 'SQLite' },
   { id: 'postgres', label: 'Postgres' },
 ])
-const Q2 = questionPayload('q2', 'Qual cache usar?', [
-  { id: 'redis', label: 'Redis' },
-  { id: 'memcached', label: 'Memcached' },
-])
 
 /** How the back-end tells the turn read a queued input (the answer). */
 type QueuedInputShape = 'turn.queued_input' | 'turn.started'
@@ -244,6 +240,7 @@ describe('Red team round 5: native ask_user in a live turn', () => {
     await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
     await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'false'), { timeout: 3000 })
     await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(userBubbles()).toHaveLength(2)
     expect(userBubbleTexts().filter((text) => text.includes('Configure o banco'))).toHaveLength(2)
   })
 
@@ -269,6 +266,7 @@ describe('Red team round 5: native ask_user in a live turn', () => {
     await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(cards()[0]).toHaveAttribute('data-active', 'true')
+    expect(userBubbles()).toHaveLength(1)
   })
 
   it('after a reload mid-wait the card is active and the composer queues', async () => {
