@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--rollback", action="store_true", help="go back to the version this one replaced")
     update.add_argument("--apply", action="store_true", help="activate the update the app already downloaded (stops Orin first)")
     update.add_argument("--restart", action="store_true", help="with --apply: reopen Orin Desktop afterwards, on the new version (or the old one if the update was undone)")
+    update.add_argument("--detach", action="store_true", help="with --apply on Windows: respawn outside the launcher job object and exit")
     update.add_argument("--json", action="store_true", help="print machine-readable progress, one JSON object per line")
     commands.add_parser("status", help="show whether Orin is running, and where")
     autostart = commands.add_parser("autostart", help="start Orin in the background when you sign in to the computer")
@@ -304,6 +305,7 @@ def command_update(
     rollback = bool(getattr(options, "rollback", False))
     apply = bool(getattr(options, "apply", False))
     restart = bool(getattr(options, "restart", False))
+    detach = bool(getattr(options, "detach", False))
     json_out = JsonRenderer() if as_json else None
     renderer = None if as_json else UpdateRenderer(console, current_version=profile.version)
 
@@ -319,6 +321,9 @@ def command_update(
     root = installation_root(profile)
     if root is None:
         return refuse("Este Orin não foi instalado pelo instalador oficial, então não sei atualizá-lo daqui. Reinstale pelo instalador.")
+    if detach and apply and os.name == "nt":
+        _spawn_detached_apply(_detached_apply_argv(profile, options), **({"popen": popen} if popen is not None else {}))
+        return 0
 
     def stop_before_switching() -> None:
         if running_instance(paths) is None:
@@ -358,6 +363,41 @@ def command_update(
 
 
 RESTART_GRACE_SECONDS = 3.0
+
+
+def _detached_apply_argv(profile: RuntimeProfile, options: argparse.Namespace) -> list[str]:
+    command = [*profile.launcher_command(), "update", "--apply"]
+    if getattr(options, "restart", False):
+        command.append("--restart")
+    if getattr(options, "json", False):
+        command.append("--json")
+    if getattr(options, "detach", False):
+        command.append("--detach")
+    return command
+
+
+def _spawn_detached_apply(argv: list[str], *, popen=subprocess.Popen) -> bool:
+    """Respawn ``orin update --apply`` outside the launcher's Job Object on Windows."""
+    command = [arg for arg in argv if arg != "--detach"]
+    kwargs: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    base = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000
+    )
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    try:
+        popen(command, creationflags=base | breakaway, **kwargs)
+        return True
+    except OSError as error:
+        logging.getLogger("orin.update").warning(
+            "update apply: breakaway=denied (%s); falling back to in-job spawn", error
+        )
+        popen(command, creationflags=base, **kwargs)
+        return False
 
 
 def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> bool:

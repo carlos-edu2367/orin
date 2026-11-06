@@ -6,9 +6,9 @@ Two independent mechanisms, because on Windows one is not enough:
   sent a console break and shut itself down properly while the launcher's own
   Ctrl+C stays under the launcher's control.
 * **Guaranteed** — every child is assigned to a job object created with
-  ``KILL_ON_JOB_CLOSE``. The kernel closes that handle when the launcher exits,
+  ``KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK``. The kernel closes that handle when the launcher exits,
   by any route including a hard kill, and everything inside the job dies with
-  it. Grandchildren count: a process spawned by a child inherits the job, which
+  it. Grandchildren count: a process spawned by a child inherits the job unless its creator explicitly passes ``CREATE_BREAKAWAY_FROM_JOB`` (used only by ``orin update --apply --detach``), which
   is what stops an npm shim or a gateway from surviving its parent.
 """
 
@@ -76,7 +76,7 @@ class ProcessGroup:
             if not job:
                 return None
             information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-            information.BasicLimitInformation.LimitFlags = 0x2000  # KILL_ON_JOB_CLOSE
+            information.BasicLimitInformation.LimitFlags = 0x2000 | 0x800  # KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
             if not kernel32.SetInformationJobObject(
                 job, 9, ctypes.byref(information), ctypes.sizeof(information)
             ):

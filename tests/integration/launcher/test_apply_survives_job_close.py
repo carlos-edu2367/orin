@@ -103,7 +103,6 @@ def test_child_of_adopted_process_dies_when_job_closes(tmp_path: Path) -> None:
         _terminate_pid(grandchild_pid)
 
 
-@pytest.mark.xfail(strict=True, reason="ProcessGroup job does not yet set JOB_OBJECT_LIMIT_BREAKAWAY_OK")
 def test_breakaway_grandchild_survives_job_close(tmp_path: Path) -> None:
     sentinel = tmp_path / "sentinel_breakaway.txt"
     group = ProcessGroup()
