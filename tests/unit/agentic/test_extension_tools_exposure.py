@@ -213,7 +213,7 @@ def test_turn_session_code_mode_runtime_publishes_extension_schemas_and_rejects_
     published = {
         str(item["function"]["name"])
         for item in runtime._tool_schemas(turn_code)
-    }
+    } | runtime.toolset.deferred_tool_names
     assert SKILL_TOOLS <= published
     assert MCP_TOOLS <= published
     assert PLUGIN_TOOLS <= published

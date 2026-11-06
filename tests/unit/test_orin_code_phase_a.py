@@ -329,9 +329,10 @@ def test_runtime_recovers_from_thinking_only_turn_and_filters_code_mode_schemas(
     schema_names = {s["function"]["name"] for s in runtime._tool_schemas(turn)}
     assert "write_contract" not in schema_names
     assert "report_verification" not in schema_names
-    assert {"list_files", "read_file", "write_file", "edit_file", "run_command", "verify_project"}.issubset(
+    assert {"read_file", "write_file", "edit_file", "run_command", "verify_project"}.issubset(
         schema_names
     )
+    assert "list_files" in runtime.toolset.deferred_tool_names
 
     result = runtime.run("turn-thinking-recovery", turn=turn)
     assert result.state == "completed"

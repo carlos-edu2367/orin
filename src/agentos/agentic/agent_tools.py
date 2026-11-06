@@ -34,7 +34,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Collection, Iterator, Mapping
+from typing import Any, Callable, Collection, Iterable, Iterator, Mapping
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -50,6 +50,7 @@ from .models import MAX_USER_QUESTION_ITEMS
 from .file_preview import media_type_for
 from .lifecycle import HookEvent, LifecycleBus, LifecycleDecision
 from .reminders import system_reminder
+from .tool_deferral import ALWAYS_LOADED_CODE_TOOLS, CODE_MODE_CORE_TOOLS, FOLLOW_UP_TOOLS
 from .tools.public_names import (
     PublicToolNames,
     arguments_in as _public_arguments_in,
@@ -95,72 +96,21 @@ from agentos.agentic.tools.scheduling.wakeup import WakeupTools
 from agentos.agentic.tools.scheduling.monitor import MonitorTools
 from agentos.agentic.tools.interaction.notify import NotificationBudget, NotifyTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
-    _SENSITIVE_NAME,
-    _PRIVATE_KEY_BLOCK,
-    _AUTHORIZATION_VALUE,
-    _SENSITIVE_ASSIGNMENT,
-    _JWT_VALUE,
-    _netloc,
-    _safe_display_url,
-    sanitize_page_text,
-    _READ_ORDER,
-    ReadFileRecord,
-    TOOLKITS,
-    VERIFICATION_MODES,
-    ContractError,
-    parse_contract,
-    image_block,
-    logger,
-    MAX_TOOL_RESULT_CHARS,
-    EXTERNAL_CHANGE_HASH_LIMIT_BYTES,
-    PERMISSION_DENIAL_CODES,
-    _ORIN_AUTHORED_CODES,
-    DEFAULT_COMMAND_TIMEOUT_SECONDS,
-    CANCEL_CHECK_SECONDS,
-    MAX_COMMAND_TIMEOUT_SECONDS,
-    MAX_COMMAND_OUTPUT_CHARS,
-    FETCH_TIMEOUT_SECONDS,
-    MAX_FETCH_REDIRECTS,
-    _PROCESS_LOG_DIR,
-    _PROCESS_MANIFEST_PATH,
-    MAX_PROCESS_LOG_TAIL_CHARS,
-    MAX_TRACKED_PROCESSES,
-    DIAGNOSTIC_TIMEOUT_SECONDS,
-    DIAGNOSTIC_DEBOUNCE_SECONDS,
-    MAX_FILE_DIAGNOSTIC_CHARS,
-    VERIFY_STEP_TIMEOUT_SECONDS,
-    MAX_VERIFY_STEP_CHARS,
-    SCAFFOLD_RECIPES,
-    _BLOCKED_COMMAND,
-    _VERIFICATION_CMD_RE,
-    is_verification_command,
-    _DEV_SERVER_CMD_RE,
-    _SERVER_READY_RE,
-    _URL_EXTRACT_RE,
-    _GLOB_IGNORED_DIRS,
-    AgentToolError,
-    _HUNK_HEADER_RE,
-    _MAX_PATCH_HUNKS,
-    _MAX_PATCH_LINES,
-    _MAX_PATCH_LINE_CHARS,
-    compute_structured_patch,
-    _PARAM_ALIASES,
-    _broker_arguments,
-    coerce_tool_arguments,
-    ToolDefinition,
-    _safe_public_input,
-    ToolOutcome,
-    _schema,
-    _TEXT,
-    _QUESTION_ID,
-    _TextExtractor,
-    _bounded,
-    _bounded_output,
-    _public_url,
-    _terminate_pid,
-    _terminate_process_tree,
-    _process_is_running,
-    _append_reminder,
+    _SENSITIVE_NAME, _PRIVATE_KEY_BLOCK, _AUTHORIZATION_VALUE, _SENSITIVE_ASSIGNMENT, _JWT_VALUE,
+    _netloc, _safe_display_url, sanitize_page_text, _READ_ORDER, ReadFileRecord, TOOLKITS,
+    VERIFICATION_MODES, ContractError, parse_contract, image_block, logger, MAX_TOOL_RESULT_CHARS,
+    EXTERNAL_CHANGE_HASH_LIMIT_BYTES, PERMISSION_DENIAL_CODES, _ORIN_AUTHORED_CODES,
+    DEFAULT_COMMAND_TIMEOUT_SECONDS, CANCEL_CHECK_SECONDS, MAX_COMMAND_TIMEOUT_SECONDS,
+    MAX_COMMAND_OUTPUT_CHARS, FETCH_TIMEOUT_SECONDS, MAX_FETCH_REDIRECTS, _PROCESS_LOG_DIR,
+    _PROCESS_MANIFEST_PATH, MAX_PROCESS_LOG_TAIL_CHARS, MAX_TRACKED_PROCESSES,
+    DIAGNOSTIC_TIMEOUT_SECONDS, DIAGNOSTIC_DEBOUNCE_SECONDS, MAX_FILE_DIAGNOSTIC_CHARS,
+    VERIFY_STEP_TIMEOUT_SECONDS, MAX_VERIFY_STEP_CHARS, SCAFFOLD_RECIPES, _BLOCKED_COMMAND,
+    _VERIFICATION_CMD_RE, is_verification_command, _DEV_SERVER_CMD_RE, _SERVER_READY_RE,
+    _URL_EXTRACT_RE, _GLOB_IGNORED_DIRS, AgentToolError, _HUNK_HEADER_RE, _MAX_PATCH_HUNKS,
+    _MAX_PATCH_LINES, _MAX_PATCH_LINE_CHARS, compute_structured_patch, _PARAM_ALIASES,
+    _broker_arguments, coerce_tool_arguments, ToolDefinition, _safe_public_input, ToolOutcome,
+    _schema, _TEXT, _QUESTION_ID, _TextExtractor, _bounded, _bounded_output, _public_url,
+    _terminate_pid, _terminate_process_tree, _process_is_running, _append_reminder,
 )
 
 # The most any single tool result may return when its handler asks for more (Read with allow_large).
@@ -443,6 +393,7 @@ class AgentToolset(
         self._by_name: dict[str, ToolDefinition] = {}
         self._spellings: dict[str, str] = {}
         self._active_mcp_tool_names: set[str] = set()
+        self._discovered_tool_names: set[str] = set()
         # Claude Code-compatible names/arguments at the model boundary (experimental.claudeToolNames).
         self.name_translator: PublicToolNames | None = PublicToolNames() if public_tool_names else None
         self._lifecycle: LifecycleBus | None = lifecycle
@@ -461,6 +412,28 @@ class AgentToolset(
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
         return frozenset(self._active_mcp_tool_names)
+
+    @property
+    def discovered_tool_names(self) -> frozenset[str]:
+        return frozenset(self._discovered_tool_names)
+
+    @property
+    def deferred_tool_names(self) -> frozenset[str]:
+        if not self._code_mode_active:
+            return frozenset()
+        defined = {item.name for item in self.definitions()}
+        return frozenset((defined & CODE_MODE_CORE_TOOLS) - ALWAYS_LOADED_CODE_TOOLS - self._discovered_tool_names)
+
+    def discover(self, names: Iterable[str]) -> list[str]:
+        defined = {item.name for item in self.definitions()}
+        eligible = (defined & CODE_MODE_CORE_TOOLS) - ALWAYS_LOADED_CODE_TOOLS
+        added: list[str] = []
+        for raw in names:
+            key = self.key_for(raw)
+            if key in eligible and key not in self._discovered_tool_names:
+                self._discovered_tool_names.add(key)
+                added.append(key)
+        return added
 
     def mcp_server_summaries(self) -> tuple[dict[str, Any], ...]:
         if self._mcp_provider is None:
@@ -685,10 +658,15 @@ class AgentToolset(
         call_id: str | None = None,
         invocation_id: str | None = None,
     ) -> ToolOutcome:
+        internal = self.key_for(name)
+        if internal in self.deferred_tool_names:
+            self.discover([internal])
         bus = self._lifecycle
         if bus is None:
-            return self._speak_public(self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id))
-        internal = self.key_for(name)
+            outcome = self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id)
+            if outcome.status == "succeeded":
+                self.discover(FOLLOW_UP_TOOLS.get(internal, ()))
+            return self._speak_public(outcome)
         try:
             # Idempotent: an Orin-shaped call passes through, a Claude Code-shaped one is mapped, in every mode.
             arguments = _public_arguments_in(internal, dict(arguments or {}))
@@ -735,6 +713,7 @@ class AgentToolset(
         if outcome.error_code in PERMISSION_DENIAL_CODES:
             self._emit_lifecycle(bus, HookEvent.PERMISSION_DENIED, **common, reason=outcome.content[:2000])
         elif outcome.status == "succeeded":
+            self.discover(FOLLOW_UP_TOOLS.get(internal, ()))
             post = self._emit_lifecycle(
                 bus,
                 HookEvent.POST_TOOL_USE,

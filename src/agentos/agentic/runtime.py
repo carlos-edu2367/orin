@@ -76,24 +76,7 @@ PLAN_MODE_REMINDER = (
     "(exit_plan_mode) when it is ready."
 )
 BROWSER_TOOL_NAMES: frozenset[str] = frozenset()
-CODE_MODE_CORE_TOOLS = frozenset({
-    "read_file", "view_file", "transcribe_pdf", "write_file", "edit_file", "notebook_edit",
-    "glob_files", "list_files", "search_files", "search_code", "project_map",
-    "run_command", "powershell", "read_process_output", "stop_process", "verify_project",
-    "enter_worktree", "exit_worktree", "preview_start", "preview_stop", "preview_logs",
-    "enter_plan_mode", "exit_plan_mode",
-    "todo_write", "task_create", "task_update", "task_get", "task_list",
-    "ask_user", "run_subagent", "check_subagent", "fetch_url", "web_search",
-    "remember", "recall",
-    "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",
-    "list_mcp_catalog", "list_mcp_servers", "configure_mcp", "test_mcp_server",
-    "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool",
-    "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
-    "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
-    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
-    "generate_image", "generate_audio", "generate_video",
-    "cron_create", "cron_delete", "cron_list", "schedule_wakeup", "monitor", "push_notification", "send_message",
-})
+from .tool_deferral import ALWAYS_LOADED_CODE_TOOLS, CODE_MODE_CORE_TOOLS, tool_search_enabled
 
 # Sentinel distinguishing "no pin resolved yet" from "resolved, and there is
 # no user message to pin." Used only as the default for the ``_pinned_index``
@@ -1424,12 +1407,16 @@ class AgenticTurnRuntime:
             return None
         return provider
 
-    def _tool_schemas(self, turn: Mapping[str, object]) -> list[dict[str, object]]:
+    def _tool_schemas(self, turn: Mapping[str, object], *, allow_deferral: bool = True) -> list[dict[str, object]]:
         if self.toolset is None:
             return self.actions.tool_schemas(turn)
         if self.phases is None:
             if getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code":
-                allowed = set(CODE_MODE_CORE_TOOLS)
+                if allow_deferral and tool_search_enabled() and self.offered_tools is None:
+                    discovered = set(getattr(self.toolset, "discovered_tool_names", ()))
+                    allowed = set(CODE_MODE_CORE_TOOLS) & (ALWAYS_LOADED_CODE_TOOLS | discovered)
+                else:
+                    allowed = set(CODE_MODE_CORE_TOOLS)
                 if self.offered_tools is not None:
                     allowed &= self.offered_tools
                 allowed -= self.withheld_tools
