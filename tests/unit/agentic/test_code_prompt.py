@@ -204,3 +204,11 @@ def test_context_handles_sparse_environment_without_trailing_spaces() -> None:
     assert "- OS Version: Windows 10\n" in text or "- OS Version: Windows 10\r\n" in text
     assert "- OS Version: Windows 10 " not in text
     assert "Is a git repository: no" in text
+
+def test_prompt_lists_deferred_tools_and_how_to_load_them() -> None:
+    text = render_code_system_prompt(CodePromptOptions(
+        tool_names=frozenset({"read_file", "search_mcp_tools", "fetch_url"}), public_names=True,
+        deferred_tool_names=frozenset({"fetch_url", "web_search"}),
+    ))
+    assert "`ToolSearch`" in text and "select:" in text
+    assert "WebFetch, WebSearch" in text

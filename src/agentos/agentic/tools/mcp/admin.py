@@ -112,6 +112,37 @@ class McpTools(McpResourceTools):
                     )
         return tuple(docs)
 
+    def _native_search_documents(self) -> tuple[tuple[Any, ...], dict[str, str]]:
+        from agentos.mcp.models import McpToolDescriptor
+        from agentos.mcp.search import McpToolSearchDocument
+
+        self.definitions()
+        docs: list[McpToolSearchDocument] = []
+        by_qualified: dict[str, str] = {}
+        for internal in sorted(self.deferred_tool_names):
+            definition = self._by_name.get(internal)
+            if definition is None:
+                continue
+            schema = definition.schema()
+            if self.name_translator is not None:
+                schema = self.name_translator.schemas_out([schema])[0]
+            fn = schema.get("function") or {}
+            model_name = str(fn.get("name") or internal)
+            desc = str(fn.get("description") or definition.description or "")
+            params = dict(fn.get("parameters") or definition.parameters or {"type": "object"})
+            doc = McpToolSearchDocument.from_descriptor(
+                server_slug="orin",
+                server_name="Orin",
+                descriptor=McpToolDescriptor(
+                    name=model_name,
+                    description=desc,
+                    input_schema=params,
+                ),
+            )
+            docs.append(doc)
+            by_qualified[doc.qualified_name] = internal
+        return tuple(docs), by_qualified
+
     def search_mcp_tools(
         self,
         query: str = "",
@@ -121,10 +152,12 @@ class McpTools(McpResourceTools):
     ) -> dict[str, Any]:
         from agentos.mcp.search import McpToolSearchEngine
 
-        if self._mcp_provider is None:
+        if self._mcp_provider is None and not self._code_mode_active:
             raise AgentToolError("No active MCP servers are connected in this conversation.")
         safe_limit = max(1, min(int(limit or 10), 50))
-        engine = McpToolSearchEngine(self._mcp_search_documents())
+        native_docs, native_by_qname = self._native_search_documents()
+        native_engine = McpToolSearchEngine(native_docs)
+        mcp_engine = McpToolSearchEngine(self._mcp_search_documents())
         text = str(query or "").strip()
         already_available: list[str] = []
         not_found: list[str] = []
@@ -132,39 +165,73 @@ class McpTools(McpResourceTools):
             names = [name.strip() for name in text[len("select:"):].split(",") if name.strip()]
             wanted = names[:50]
             not_found.extend(f"{name} (select takes at most 50 names)" for name in names[50:])
-            index: dict[str, Any] = {}
-            for item in engine.listing(server=server):  # every tool, not only the first 200 (W4-R18)
-                index.setdefault(item.qualified_name.lower(), item)
-                index.setdefault(item.tool_name.lower(), item)
-            matches = []
+            native_by_internal: dict[str, Any] = {}
+            for item in native_engine.listing(server=server):
+                internal_key = native_by_qname.get(item.qualified_name)
+                if internal_key:
+                    native_by_internal[internal_key] = item
+            mcp_index: dict[str, Any] = {}
+            for item in mcp_engine.listing(server=server):  # every tool, not only the first 200 (W4-R18)
+                mcp_index.setdefault(item.qualified_name.lower(), item)
+                mcp_index.setdefault(item.tool_name.lower(), item)
+            native_matches: list[Any] = []
+            mcp_matches: list[Any] = []
             for name in wanted:
-                item = index.get(name.lower())
-                if item is not None:
-                    if item not in matches:
-                        matches.append(item)
+                internal_key = self.key_for(name)
+                native_item = native_by_internal.get(internal_key)
+                if native_item is not None:
+                    if native_item not in native_matches:
+                        native_matches.append(native_item)
                     continue
-                definition = self._by_name.get(self.key_for(name))
+                mcp_item = mcp_index.get(name.lower())
+                if mcp_item is not None:
+                    if mcp_item not in mcp_matches:
+                        mcp_matches.append(mcp_item)
+                    continue
+                definition = self._by_name.get(internal_key)
                 if definition is not None and definition.kind != "mcp":
-                    already_available.append(name)  # built-in tools are never deferred; an MCP tool is only reported found
+                    already_available.append(name)
                 else:
                     not_found.append(name)
+            matches = native_matches + mcp_matches
         else:
             required = [word[1:].lower() for word in text.split() if word.startswith("+") and len(word) > 1]
             keywords = " ".join(word for word in text.split() if not word.startswith("+")) or " ".join(required)
-            if required:
-                # The +terms filter the whole catalogue before the limit, so a tool past the first 200 is found (W4-R18).
-                ranked = {item.qualified_name: rank for rank, item in enumerate(engine.search(keywords, server=server, limit=200))} if keywords else {}
-                found = [item for item in engine.listing(server=server) if all(term in item.qualified_name.lower() for term in required)]
-                found.sort(key=lambda item: (ranked.get(item.qualified_name, len(ranked)), item.qualified_name))
-                matches = found[:safe_limit]
-            else:
-                matches = engine.search(keywords, server=server, limit=safe_limit)
-        tools_payload = [item.to_dict(include_schema=True) for item in matches]
+
+            def _run_engine(eng: McpToolSearchEngine) -> list[Any]:
+                if not eng.documents:
+                    return []
+                if required:
+                    # The +terms filter the whole catalogue before the limit, so a tool past the first 200 is found (W4-R18).
+                    ranked = {item.qualified_name: rank for rank, item in enumerate(eng.search(keywords, server=server, limit=200))} if keywords else {}
+                    found = [item for item in eng.listing(server=server) if all(term in item.qualified_name.lower() for term in required)]
+                    found.sort(key=lambda item: (ranked.get(item.qualified_name, len(ranked)), item.qualified_name))
+                    return found[:safe_limit]
+                return list(eng.search(keywords, server=server, limit=safe_limit))
+
+            matches = (_run_engine(native_engine) + _run_engine(mcp_engine))[:safe_limit]
+        tools_payload: list[dict[str, Any]] = []
+        match_names: list[str] = []
         activated: list[str] = []
-        if activate and not self._read_only_mode:
-            for item in matches:
-                self._active_mcp_tool_names.add(item.qualified_name)
-                activated.append(item.qualified_name)
+        for item in matches:
+            internal_key = native_by_qname.get(item.qualified_name)
+            if internal_key is not None:
+                tools_payload.append({
+                    "name": item.tool_name,
+                    "description": item.description,
+                    "input_schema": dict(item.input_schema),
+                    "tool_kind": "native",
+                })
+                match_names.append(item.tool_name)
+                if activate:
+                    self.discover([internal_key])
+                    activated.append(item.tool_name)
+            else:
+                tools_payload.append(item.to_dict(include_schema=True))
+                match_names.append(item.qualified_name)
+                if activate and not self._read_only_mode:
+                    self._active_mcp_tool_names.add(item.qualified_name)
+                    activated.append(item.qualified_name)
         payload = {
             "query": str(query or ""),
             "server": server,
@@ -180,7 +247,7 @@ class McpTools(McpResourceTools):
             "content": json.dumps(payload, ensure_ascii=False),
             "payload": payload,
             "tool_output": {
-                "query": text, "matches": [item.qualified_name for item in matches],
+                "query": text, "matches": match_names,
                 "already_available": already_available, "not_found": not_found,
             },
         }
@@ -427,11 +494,11 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="mcp",
         input_model=ToolSearchInput,
         output_model=ToolSearchOutput,
-        public_description='Find deferred MCP tools by keyword and load their schemas so they can be called.',
+        public_description="Find deferred tools (Orin's own and connected MCP servers') by keyword, or load them by name with 'select:Name1,Name2', and get their schemas so they can be called.",
         read_only=True,
         policy_tags=("mcp",),
         max_result_chars=100_000,
-        available=lambda self: (self._mcp_provider is not None),
+        available=lambda self: (self._mcp_provider is not None or self._code_mode_active),
         order=630,
     ),
     ToolSpec(

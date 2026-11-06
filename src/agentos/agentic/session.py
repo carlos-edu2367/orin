@@ -4217,6 +4217,7 @@ class TurnSession:
 
         from agentos.agentic.git_exclude import find_git_dir
         from agentos.agentic.runtime import CODE_MODE_CORE_TOOLS
+        from agentos.agentic.tool_deferral import tool_search_enabled
         from agentos.code_mode import git_context
         from agentos.code_mode.system_prompt import CodePromptOptions, render_code_turn_context
         from agentos.host_shell import windows_to_posix_path
@@ -4239,6 +4240,11 @@ class TurnSession:
             output_style_name=style.name if style is not None else "",
             output_style_instructions=style.instructions if style is not None else "",
             keep_coding_instructions=style.keep_coding_instructions if style is not None else True,
+            deferred_tool_names=(
+                toolset.deferred_tool_names
+                if tool_search_enabled() and (self.cli_options is None or self.cli_options.tools is None)
+                else frozenset()
+            ),
         )
         self._code_prompt_options = options
         stable = self._code_stable_prompt()
