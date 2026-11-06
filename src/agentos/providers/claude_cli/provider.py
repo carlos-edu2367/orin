@@ -357,14 +357,14 @@ def _extract_stable_system_text(messages: Sequence[Mapping[str, Any]]) -> str:
 
 
 class ClaudeCliProvider:
-    """First-class Orin provider for the local `claude -p` subscription."""
+    """First-class Orin provider for local subscription CLI adapters."""
 
     provider = "anthropic"
 
     def __init__(
         self,
         *,
-        base_url: str = DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+        base_url: str | None = DEFAULT_CLAUDE_CLI_BRIDGE_URL,
         model: str = "",
         binary: str | None = None,
         popen_factory: Callable[..., Any] | None = None,
@@ -437,9 +437,13 @@ class ClaudeCliProvider:
     def native_turn_available(self, turn: Mapping[str, object]) -> bool:
         if not self.adapter.capabilities.native_tool_loop:
             return False
+        is_claude = getattr(self.adapter, "name", "claude") == "claude"
         if self._binary:
             binary: str | None = self._binary
-            version = claude_cli_version(binary, env=self._env)
+            if is_claude:
+                version: Any = claude_cli_version(binary, env=self._env)
+            else:
+                _, version = self.adapter.resolve_binary(self._env)
         else:
             binary, version = self.adapter.resolve_binary(self._env)
         if not binary:
@@ -448,6 +452,12 @@ class ClaudeCliProvider:
             return False
         if not self.adapter.version_supported(version):
             return False
+        if not is_claude:
+            if is_code_mode_value(turn.get("code_mode")):
+                effective_mode = "code"
+            else:
+                effective_mode = str(turn.get("conversation_mode") or "").strip().lower()
+            return bool(NATIVE_LOOP_VALIDATED and effective_mode in NATIVE_MODES)
         return native_tools_enabled(
             conversation_mode=str(turn.get("conversation_mode") or ""),
             code_mode=is_code_mode_value(turn.get("code_mode")),
@@ -639,6 +649,7 @@ class ClaudeCliProvider:
                         model=req_model or None,
                         effort=effort,
                         max_turns=1,
+                        capabilities=self.adapter.capabilities,
                     )
                 )
             isolated_env = self.adapter.environment(
@@ -717,18 +728,21 @@ class ClaudeCliProvider:
             stdout_thread.start()
             stderr_thread.start()
 
-            user_envelope = {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": content_blocks,
-                },
-            }
+            encode_fn = getattr(self.adapter, "encode_user_turn", None)
+            if callable(encode_fn):
+                encoded_turn = encode_fn(content_blocks).decode("utf-8")
+            else:
+                user_envelope = {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": content_blocks,
+                    },
+                }
+                encoded_turn = json.dumps(user_envelope, ensure_ascii=False) + "\n"
             if getattr(proc, "stdin", None) is not None:
                 try:
-                    proc.stdin.write(
-                        json.dumps(user_envelope, ensure_ascii=False) + "\n"
-                    )
+                    proc.stdin.write(encoded_turn)
                     proc.stdin.flush()
                 except Exception:
                     pass

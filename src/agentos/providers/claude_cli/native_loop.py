@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from agentos.installation.paths import orin_paths
 from agentos.providers.claude_cli.command import (
     IDLE_TIMEOUT_SECONDS,
     VALIDATED_CLI_RANGE,
@@ -45,6 +46,7 @@ from agentos.providers.cli_adapter import (
     CliAgentAdapter,
     CliStreamTranslator,
     CliTurnRequest,
+    ToolServerWiring,
 )
 from agentos.providers.cli_queue import CliSlotTicket, acquire_cli_slot
 from agentos.providers.cli_tools_mcp import (
@@ -58,6 +60,11 @@ from agentos.providers.cli_tools_mcp import (
 
 PERSISTENT_STDIN_OK: bool = True
 NATIVE_LOOP_VALIDATED: bool = True
+
+
+def native_workdir(adapter_name: str = "claude") -> Path:
+    slug = str(adapter_name or "claude").strip() or "claude"
+    return orin_paths().data / f"{slug}-cli" / "workdir"
 
 
 @dataclass(slots=True)
@@ -75,6 +82,7 @@ class NativeTurnRequest:
     max_output_tokens: int | None = None
     autocompact: str | int | None = None
     session: Any | None = None
+    resume_session_id: str | None = None
     server_name: str = "orin"
     conversation_id: str = ""
     on_waiting_slot: Callable[..., None] | None = None
@@ -132,7 +140,7 @@ class _SlotReleasingExecutor:
 
 
 class NativeTurnHandle:
-    """Manages one active `claude -p` process and its loopback MCP server for a turn."""
+    """Manages one active CLI subprocess and its loopback MCP server for a turn."""
 
     def __init__(
         self,
@@ -281,8 +289,8 @@ class NativeTurnHandle:
         self._bg_server.handle.refuse_calls(reason)
 
     def send_user(self, content: list[dict[str, Any]]) -> None:
-        if not PERSISTENT_STDIN_OK:
-            raise RuntimeError("follow-up requires a new process")
+        if not (PERSISTENT_STDIN_OK and self._adapter.capabilities.persistent_stdin):
+            raise NativeLoopUnavailable("one-shot", status_code=503, exhausted=False)
         with self._close_lock:
             if self._closed or self._proc.poll() is not None:
                 raise RuntimeError("Claude CLI process is already closed")
@@ -290,7 +298,11 @@ class NativeTurnHandle:
             if stdin is None or getattr(stdin, "closed", False):
                 raise RuntimeError("Claude CLI stdin is closed")
             self._bg_server.handle.allow_calls()
-            line = user_event_line(content)
+            encode_fn = getattr(self._adapter, "encode_user_turn", None)
+            if callable(encode_fn):
+                line = encode_fn(content).decode("utf-8")
+            else:
+                line = user_event_line(content)
             stdin.write(line)
             stdin.flush()
 
@@ -300,6 +312,24 @@ class NativeTurnHandle:
         sink: NativeTurnSink,
         text_parts: list[str],
     ) -> NativeTurnOutcome | None:
+        forbidden = self._adapter.capabilities.forbidden_item_kinds
+        if forbidden and isinstance(ev.raw, Mapping):
+            item_obj = ev.raw.get("item")
+            candidates = (
+                item_obj.get("type") if isinstance(item_obj, Mapping) else None,
+                item_obj.get("kind") if isinstance(item_obj, Mapping) else None,
+                ev.raw.get("type"),
+                ev.raw.get("kind"),
+                ev.tool_name,
+            )
+            for cand in candidates:
+                if isinstance(cand, str) and cand in forbidden:
+                    self.refuse_tools(f"forbidden item: {cand}")
+                    self.close()
+                    raise CliSecurityAbort(
+                        f"CLI emitted forbidden item kind '{cand}' (native tools must remain disabled)."
+                    )
+
         if ev.kind == CliEventKind.INIT:
             init = self._parser.init
             if init is not None:
@@ -310,7 +340,13 @@ class NativeTurnHandle:
                         "Refusing to consume API credits."
                     )
                 mcp_status = init.mcp_servers.get(self._server_name)
-                if mcp_status != "connected":
+                if (
+                    mcp_status != "connected"
+                    and (
+                        self._adapter.capabilities.reports_tool_inventory
+                        or self._server_name in init.mcp_servers
+                    )
+                ):
                     self.close()
                     raise NativeLoopUnavailable(
                         f"Claude CLI MCP server '{self._server_name}' status is '{mcp_status}' (expected 'connected').",
@@ -629,7 +665,7 @@ def start_native_turn_for_provider(
     provider: Any,
     request: NativeTurnRequest,
 ) -> NativeTurnHandle:
-    """Spawn a `claude -p` native MCP turn for `ClaudeCliProvider`."""
+    """Spawn a CLI native MCP turn for `ClaudeCliProvider`."""
     now_pre = provider._clock()
     if request.deadline_monotonic <= now_pre:
         raise ProviderTransportError(
@@ -650,7 +686,10 @@ def start_native_turn_for_provider(
     effective_base_env = merge_with_system_env(provider._env)
 
     if provider._popen_factory is None:
-        ver = claude_cli_version(resolved_binary, env=effective_base_env)
+        if getattr(adapter, "name", "claude") == "claude":
+            ver: Any = claude_cli_version(resolved_binary, env=effective_base_env)
+        else:
+            _, ver = adapter.resolve_binary(effective_base_env)
         if ver is not None and not adapter.version_supported(ver):
             raise NativeLoopUnavailable(
                 f"Claude CLI version {ver} is outside validated range {VALIDATED_CLI_RANGE}",
@@ -666,6 +705,7 @@ def start_native_turn_for_provider(
         if request.deadline_monotonic is not None and provider._clock() >= request.deadline_monotonic:
             return True
         return False
+
     ticket = acquire_cli_slot(
         request.conversation_id,
         cancel_check=_slot_cancel_check,
@@ -706,11 +746,24 @@ def start_native_turn_for_provider(
         bg_server = BackgroundTurnToolServer.start(
             TurnToolServer(wrapped_executor, server_name=request.server_name)
         )
-        mcp_config_path = adapter.write_tool_server_config(
-            bg_server.handle,
-            Path(tempfile.gettempdir()),
-        )
-        temp_files.append(mcp_config_path)
+        wire_fn = getattr(adapter, "wire_tool_server", None)
+        if callable(wire_fn):
+            wiring = wire_fn(
+                bg_server.handle,
+                Path(tempfile.gettempdir()),
+            )
+        else:
+            mcp_cfg = adapter.write_tool_server_config(
+                bg_server.handle,
+                Path(tempfile.gettempdir()),
+            )
+            wiring = ToolServerWiring(
+                argv=("--mcp-config", str(mcp_cfg)),
+                env={},
+                files=(mcp_cfg,),
+            )
+        temp_files.extend(wiring.files)
+        mcp_config_path = wiring.files[0] if wiring.files else None
 
         prompt_path = write_owner_only_temp(
             request.system_prompt or "You are a helpful assistant.",
@@ -723,17 +776,31 @@ def start_native_turn_for_provider(
         remaining_s = max(1.0, request.deadline_monotonic - now)
         mcp_tool_timeout_ms = max(1_000, int(remaining_s * 1000))
 
-        isolated_env = adapter.environment(
-            effective_base_env,
-            max_output_tokens=request.max_output_tokens,
-            tool_timeout_ms=mcp_tool_timeout_ms,
+        isolated_env = dict(
+            adapter.environment(
+                effective_base_env,
+                max_output_tokens=request.max_output_tokens,
+                tool_timeout_ms=mcp_tool_timeout_ms,
+            )
         )
+        if wiring.env:
+            isolated_env.update(wiring.env)
 
         session_kwargs: dict[str, Any] = {}
         if request.session is not None and hasattr(request.session, "cli_flags"):
             flags = request.session.cli_flags()
             if isinstance(flags, Mapping):
                 session_kwargs.update(flags)
+        resume_session_id = (
+            request.resume_session_id
+            or session_kwargs.get("resume_session_id")
+            or session_kwargs.get("resume")
+            or (
+                getattr(request.session, "session_id", None)
+                if getattr(request.session, "resume", False)
+                else None
+            )
+        )
 
         cmd = adapter.build_command(
             CliTurnRequest(
@@ -745,10 +812,11 @@ def start_native_turn_for_provider(
                 max_turns=max(1, int(request.max_turns)),
                 tool_server_config_file=mcp_config_path,
                 tool_server_name=request.server_name,
+                tool_server_wiring=wiring,
+                capabilities=adapter.capabilities,
                 autocompact=request.autocompact,
                 session_id=session_kwargs.get("session_id"),
-                resume_session_id=session_kwargs.get("resume_session_id")
-                or session_kwargs.get("resume"),
+                resume_session_id=resume_session_id,
                 persist_session=bool(session_kwargs.get("persist_session", False)),
             )
         )
@@ -807,9 +875,14 @@ def start_native_turn_for_provider(
         stderr_thread.start()
 
         if proc.stdin is not None:
-            proc.stdin.write(user_event_line(request.user_content))
+            encode_fn = getattr(adapter, "encode_user_turn", None)
+            if callable(encode_fn):
+                initial_payload = encode_fn(request.user_content).decode("utf-8")
+            else:
+                initial_payload = user_event_line(request.user_content)
+            proc.stdin.write(initial_payload)
             proc.stdin.flush()
-            if not PERSISTENT_STDIN_OK:
+            if not (PERSISTENT_STDIN_OK and adapter.capabilities.persistent_stdin):
                 proc.stdin.close()
 
         from agentos.providers.claude_cli.provider import kill_process_tree, log_cli_run
