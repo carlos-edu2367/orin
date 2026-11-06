@@ -132,6 +132,7 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
     """Adversarial check: running pytest on a script outside `tests/` still loads
     `tests.conftest` via pyproject.toml `addopts = ["-p", "tests.conftest"]`.
     """
+    tmp_path = tmp_path.resolve()
     repo_root = Path(__file__).resolve().parents[3]
     standalone = tmp_path / "test_standalone_outside_tests.py"
     standalone.write_text(
@@ -169,6 +170,7 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
             "pytest",
             "-c",
             str(repo_root / "pyproject.toml"),
+            f"--confcutdir={tmp_path}",
             f"--rootdir={tmp_path}",
             str(standalone),
         ],
@@ -179,3 +181,24 @@ def test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(
         check=False,
     )
     assert result.returncode == 0, f"Standalone pytest failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    assert "test_standalone_outside_tests.py ." in result.stdout, (
+        f"Standalone pytest collected outside tmp_path:\nSTDOUT:\n{result.stdout}"
+    )
+
+
+def _short_8dot3_path(path: Path) -> Path:
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(1024)
+    rc = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, len(buf))
+    if rc == 0 or not buf.value:
+        return path
+    return Path(buf.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Nomes curtos 8.3 só existem no Windows")
+def test_standalone_pytest_survives_short_8dot3_tmp_path(tmp_path: Path) -> None:
+    short_tmp = _short_8dot3_path(tmp_path)
+    if str(short_tmp) == str(tmp_path):
+        pytest.skip("volume sem nomes 8.3")
+    test_standalone_pytest_outside_tests_dir_loads_conftest_and_isolates_dirs(short_tmp)
