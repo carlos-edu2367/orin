@@ -48,7 +48,11 @@ from agentos.api.contracts import ApplicationNotFoundError, ProviderCredentialRe
 from .schema import provider_configurations
 from .provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.persistence.provider_secrets import ProviderSecretCipher
-from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
+from agentos.provider_catalog.models import (
+    PROVIDERS_WITH_BASE_URL,
+    PROVIDERS_WITH_OPTIONAL_KEY,
+    SUBSCRIPTION_CLI_PROVIDERS,
+)
 from agentos.provider_catalog.nvidia import (
     DEFAULT_NVIDIA_BASE_URL,
     NvidiaAuthenticationError,
@@ -160,15 +164,10 @@ class PostgresProviderConfigurationAdapter:
             else:
                 risk_acknowledged_at = existing_ack
 
-            if provider == "google-antigravity":
-                from agentos.providers.cli_registry import set_antigravity_risk_acknowledged
-
-                if enabled and risk_acknowledged_at is None:
-                    set_antigravity_risk_acknowledged(None)
-                    raise ValueError(
-                        "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
-                    )
-                set_antigravity_risk_acknowledged(risk_acknowledged_at if enabled else None)
+            if provider == "google-antigravity" and enabled and risk_acknowledged_at is None:
+                raise ValueError(
+                    "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
+                )
 
             if existing is None:
                 secret_ref = f"provider-secret:{uuid4().hex}"
@@ -253,12 +252,6 @@ class PostgresProviderConfigurationAdapter:
             ).mappings().first()
         if row is None:
             raise ApplicationNotFoundError(provider)
-        if provider == "google-antigravity":
-            from agentos.providers.cli_registry import set_antigravity_risk_acknowledged
-
-            set_antigravity_risk_acknowledged(
-                _utc_datetime(row.get("risk_acknowledged_at")) if row.get("enabled") else None
-            )
         has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
         return _public({**row, "has_secret": has_secret})
 
@@ -279,10 +272,6 @@ class PostgresProviderConfigurationAdapter:
                     enabled=False, updated_at=datetime.now(UTC),
                 )
             )
-        if provider == "google-antigravity":
-            from agentos.providers.cli_registry import set_antigravity_risk_acknowledged
-
-            set_antigravity_risk_acknowledged(None)
         has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
         return _public({**existing, "has_secret": has_secret, "enabled": False})
 
@@ -384,7 +373,7 @@ def _api_key(provider: str, value: object, base_url: str | None = None, *, has_e
     api_key = str(value or "").strip()
     if api_key and len(api_key) < 4:
         raise ValueError("provider API key is required")
-    optional = provider in PROVIDERS_WITH_OPTIONAL_KEY
+    optional = provider in PROVIDERS_WITH_OPTIONAL_KEY or provider in SUBSCRIPTION_CLI_PROVIDERS
     # Local Ollama, Local OpenCode Bridge, and Self-Hosted NVIDIA NIM need no
     # credential; their hosted cloud services always do.
     if provider == "ollama" and base_url is not None and is_ollama_cloud(base_url):

@@ -1462,14 +1462,20 @@ class ChatWorker:
         try:
             with self.store._engine.connect() as connection:
                 enabled_rows = connection.execute(
-                    select(provider_configurations.c.provider).where(
+                    select(
+                        provider_configurations.c.provider,
+                        provider_configurations.c.risk_acknowledged_at,
+                    ).where(
                         provider_configurations.c.user_id == user_id,
                         provider_configurations.c.enabled.is_(True),
                     )
                 ).all()
                 for erow in enabled_rows:
                     if erow.provider:
-                        enabled_providers.add(str(erow.provider).strip().lower())
+                        prov = str(erow.provider).strip().lower()
+                        if prov == "google-antigravity" and getattr(erow, "risk_acknowledged_at", None) is None:
+                            continue
+                        enabled_providers.add(prov)
 
                 try:
                     default_rows = connection.execute(

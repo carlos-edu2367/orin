@@ -9,7 +9,14 @@ import httpx
 
 from .context_reference import ContextWindowLookup, context_window_from_id
 from .modalities import VALID_OUTPUT_MODALITIES, infer_output_modalities
-from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
+from .models import (
+    PROVIDERS_WITH_OPTIONAL_KEY,
+    SUBSCRIPTION_CLI_PROVIDERS,
+    PricingSummary,
+    ProviderCatalogContext,
+    ProviderModelRecord,
+    RefreshReceipt,
+)
 from .nvidia import (
     DEFAULT_NVIDIA_BASE_URL,
     NvidiaAuthenticationError,
@@ -112,6 +119,8 @@ class ProviderModelCatalogService:
         api_key: str,
         base_url_raw: object,
         refreshed_at: datetime,
+        *,
+        risk_acknowledged_at: object = None,
     ) -> list[ProviderModelRecord]:
         if normalized_provider == "nvidia":
             base_url = normalize_nvidia_base_url(str(base_url_raw or DEFAULT_NVIDIA_BASE_URL))
@@ -132,7 +141,7 @@ class ProviderModelCatalogService:
             adapter = cli_adapter_for(
                 normalized_provider,
                 str(base_url_raw or "") or None,
-                risk_acknowledged_at=True if normalized_provider == "google-antigravity" else None,
+                risk_acknowledged_at=risk_acknowledged_at if normalized_provider == "google-antigravity" else None,
             )
             if adapter is None:
                 raise ProviderCatalogUnavailable("provider catalog is not supported")
@@ -181,7 +190,11 @@ class ProviderModelCatalogService:
                 "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
             )
         api_key = credential.get("api_key")
-        if not isinstance(api_key, str) or (not api_key and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY):
+        if not isinstance(api_key, str) or (
+            not api_key
+            and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY
+            and normalized_provider not in SUBSCRIPTION_CLI_PROVIDERS
+        ):
             raise ProviderCatalogUnavailable("provider credential is unavailable")
 
         base_url_raw = credential.get("base_url")
@@ -209,6 +222,7 @@ class ProviderModelCatalogService:
                         current_key.plaintext,
                         base_url_raw,
                         refreshed_at,
+                        risk_acknowledged_at=credential.get("risk_acknowledged_at"),
                     )
                     mark_active_fn = getattr(self._repository, "mark_active", None)
                     if callable(mark_active_fn):
@@ -237,7 +251,13 @@ class ProviderModelCatalogService:
                     current_key = next_key
         else:
             try:
-                records = self._fetch_provider_records(normalized_provider, api_key, base_url_raw, refreshed_at)
+                records = self._fetch_provider_records(
+                    normalized_provider,
+                    api_key,
+                    base_url_raw,
+                    refreshed_at,
+                    risk_acknowledged_at=credential.get("risk_acknowledged_at"),
+                )
             except ProviderCatalogUnavailable:
                 raise
             except Exception as error:

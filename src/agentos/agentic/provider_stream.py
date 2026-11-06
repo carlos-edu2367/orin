@@ -666,10 +666,11 @@ def normalize_ndjson(lines: Iterable[str | bytes]) -> Iterator[NormalizedStreamI
 
 class HTTPProviderStreamTransport:
     """Small, injectable HTTP transport used only by the worker/runtime edge."""
-    def __init__(self, base_url: str = "", api_key: str = "", model: str = "", *, provider: str = "openai", client: httpx.Client | None = None, num_ctx: int | None = None) -> None:
+    def __init__(self, base_url: str = "", api_key: str = "", model: str = "", *, provider: str = "openai", client: httpx.Client | None = None, num_ctx: int | None = None, risk_acknowledged_at: object = None) -> None:
         self.provider, self.base_url, self.model = provider, base_url.rstrip("/"), model
         self._api_key = api_key
         self._num_ctx = num_ctx
+        self._risk_acknowledged_at = risk_acknowledged_at
         self._client = client or httpx.Client(timeout=60)
         self._owns_client = client is None
         self._claude_cli_provider: Any = None
@@ -886,7 +887,22 @@ class HTTPProviderStreamTransport:
     def stream(self, request: Mapping[str, object], *, cancel_check: Any = None) -> Iterator[NormalizedStreamItem]:
         from agentos.providers.cli_registry import cli_adapter_for
 
-        cli_adapter = cli_adapter_for(self.provider, self.base_url)
+        request_ack = (
+            request.get("risk_acknowledged_at")
+            if isinstance(request, Mapping) and "risk_acknowledged_at" in request
+            else self._risk_acknowledged_at
+        )
+        cli_adapter = cli_adapter_for(
+            self.provider,
+            self.base_url,
+            risk_acknowledged_at=request_ack,
+        )
+        if self.provider in {"openai-codex", "google-antigravity"} and cli_adapter is None:
+            raise ValueError(
+                "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
+                if self.provider == "google-antigravity"
+                else f"Provider '{self.provider}' is not available."
+            )
         if cli_adapter is not None:
             from agentos.provider_catalog.claude_code import (
                 stream_claude_code_bridge as _facade_stream_claude_code_bridge,
