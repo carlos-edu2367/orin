@@ -207,6 +207,8 @@ export type ConversationActivityEvent = {
   contextUsage?: ContextUsage
   codeStage?: string
   verification?: 'unverified'
+  waitingForSlot?: boolean
+  queuePosition?: number
   codeApproval?: boolean
   /** Set only on `memory.learned`: what the agent stored, and where. */
   memoryId?: string
@@ -409,7 +411,9 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   // pass through.
   if (type === 'artifact.created') return 'completed'
   if (type === 'memory.learned' || type === 'todo.updated' || type === 'TODO_UPDATED') return 'completed'
-  if (type === 'turn.started' || type === 'TURN_STARTED') return 'working'
+  if (type === 'turn.started' || type === 'TURN_STARTED') {
+    return status === 'queued' ? 'queued' : 'working'
+  }
   return 'working'
 }
 

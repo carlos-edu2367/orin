@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { motion, useReducedMotion } from 'motion/react'
-import type { ActivityState } from './activityTypes'
+import type { ActivityState, ConversationActivityEvent } from './activityTypes'
 import { activityStateLabel } from './activitySummary'
 
 export type AgentActivityMode =
@@ -78,6 +78,14 @@ const TERMINAL_CANCELLED_EVENT_TYPES = new Set([
 ])
 
 export const STALE_RESPONDING_THRESHOLD_MS = 2500
+
+export function pulseDetailFromEvents(
+  events: ConversationActivityEvent[],
+): string | undefined {
+  const last = events.at(-1)
+  if (!last || !last.waitingForSlot) return undefined
+  return last.summary || undefined
+}
 
 export function formatElapsed(elapsedSec: number): string {
   const total = Math.max(0, Math.floor(elapsedSec))

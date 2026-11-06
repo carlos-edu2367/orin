@@ -45,7 +45,7 @@ import { OverviewPanel } from '../overview/OverviewPanel'
 import { WorkspaceNavigation } from '../projects/WorkspaceNavigation'
 import { PreferencesModal } from '../settings/PreferencesModal'
 import { ActivityStream } from './ActivityStream'
-import { AgentPulse, modeFromEvents } from './AgentPulse'
+import { AgentPulse, modeFromEvents, pulseDetailFromEvents } from './AgentPulse'
 import { attachmentNotice } from './attachmentNotice'
 import {
   CodePermissionDock,
@@ -2921,6 +2921,7 @@ export function ChatPage() {
                   <AgentPulse
                     mode={mode}
                     state={activity.events.at(-1)?.state ?? 'working'}
+                    detail={pulseDetailFromEvents(activity.events)}
                     activeTurnId={activeTurn?.turn_id ?? null}
                   />
                 </motion.div>

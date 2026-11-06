@@ -585,6 +585,10 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('codeStage', optionalText(payload.stage, 64))
   if (payload.verification === 'unverified') event.verification = 'unverified'
+  if (payload.waiting_for_slot === true) event.waitingForSlot = true
+  if (typeof payload.queue_position === 'number' && Number.isFinite(payload.queue_position)) {
+    event.queuePosition = Math.max(1, Math.floor(payload.queue_position))
+  }
   if (payload.code_approval === true) event.codeApproval = true
   assign('memoryId', optionalText(payload.memory_id, 255))
   assign('memoryProjectId', optionalText(payload.project_id, 255))

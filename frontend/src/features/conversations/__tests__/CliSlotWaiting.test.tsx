@@ -1,0 +1,74 @@
+import { render, screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
+import { parseConversationActivityEvent } from '../../../api/conversations'
+import { AgentPulse, pulseDetailFromEvents } from '../AgentPulse'
+import { stateFor, type ConversationActivityEvent } from '../activityTypes'
+
+const waiting: ConversationActivityEvent = {
+  eventId: 'w1',
+  cursor: '1',
+  turnId: 't1',
+  type: 'turn.started',
+  kind: 'lifecycle',
+  state: 'queued',
+  agentId: 'agent:main',
+  summary: 'Aguardando vaga na CLI (2º na fila, limite de 3)',
+  status: 'queued',
+  waitingForSlot: true,
+  queuePosition: 2,
+}
+
+describe('CliSlotWaiting UI (R3.6)', () => {
+  it('maps a queued turn.started to the queued state', () => {
+    expect(stateFor('turn.started', 'queued')).toBe('queued')
+    expect(stateFor('TURN_STARTED', 'queued')).toBe('queued')
+  })
+
+  it('parses waiting_for_slot and queue_position from activity payload', () => {
+    const parsed = parseConversationActivityEvent(
+      {
+        event_id: 'w-raw',
+        event_type: 'turn.started',
+        turn_id: 't1',
+        agent_id: 'agent:main',
+        summary: 'Aguardando vaga na CLI (2º na fila, limite de 3)',
+        payload: {
+          status: 'queued',
+          waiting_for_slot: true,
+          queue_position: 2,
+        },
+      },
+      '1',
+    )
+    expect(parsed.state).toBe('queued')
+    expect(parsed.waitingForSlot).toBe(true)
+    expect(parsed.queuePosition).toBe(2)
+  })
+
+  it('shows the waiting summary while the last event is waiting for a slot', () => {
+    expect(pulseDetailFromEvents([waiting])).toBe(
+      'Aguardando vaga na CLI (2º na fila, limite de 3)',
+    )
+    expect(
+      pulseDetailFromEvents([
+        waiting,
+        {
+          ...waiting,
+          eventId: 'w2',
+          waitingForSlot: undefined,
+          summary: 'Pensando',
+        },
+      ]),
+    ).toBeUndefined()
+    render(
+      <AgentPulse
+        mode="thinking"
+        state="queued"
+        detail={pulseDetailFromEvents([waiting])}
+      />,
+    )
+    expect(
+      screen.getByText('Aguardando vaga na CLI (2º na fila, limite de 3)'),
+    ).toBeInTheDocument()
+  })
+})
