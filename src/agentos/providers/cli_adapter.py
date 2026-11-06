@@ -5,12 +5,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 from agentos.providers.models import Measurement, ProviderUsage
-
-if TYPE_CHECKING:
-    from agentos.providers.cli_tools_mcp.server import TurnToolServerHandle
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,7 +258,7 @@ class CliAgentAdapter(Protocol):
     def build_command(self, request: CliTurnRequest) -> list[str]: ...
 
     def write_tool_server_config(
-        self, handle: TurnToolServerHandle, directory: Path
+        self, handle: Any, directory: Path
     ) -> Path: ...
 
     def loggable_command(self, argv: Sequence[str]) -> list[str]: ...

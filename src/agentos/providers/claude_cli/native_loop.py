@@ -204,7 +204,7 @@ class NativeTurnHandle:
     @property
     def in_flight(self) -> int:
         with self._slot_lock:
-            active = self._active_tool_calls
+            active = self._active_tool_calls + (1 if self._reacquiring_slot else 0)
         return max(active, self._bg_server.handle.in_flight)
 
     def is_process_alive(self) -> bool:
