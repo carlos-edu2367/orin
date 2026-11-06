@@ -109,3 +109,36 @@ Carlos, com o Orin desta branch (`uv run orin`), modo código, modelo `claude-op
 **Resultado:** anotar aqui, por tarefa e critério, passou/falhou com o trecho de log. Se o modo código passar, o
 loop nativo de chat/friend (Tarefa 13) fica liberado; se falhar, abrir a pendência aqui com a evidência e usar
 `ORIN_CLAUDE_CLI_NATIVE_TOOLS=off` até corrigir.
+
+## Red team — rodadas 4 a 6 (correção do Grupo 3 e do branch inteiro)
+
+Revisor adversarial separado de quem corrigiu; os testes de ataque ficam em `tests/unit/redteam/` e
+`frontend/src/features/conversations/__tests__/RedTeamRound*`. Rodada 6: zero Críticos e Importantes.
+
+**Menores registrados, sem correção:**
+
+- **M4** — `CLAUDE.md` em `/tmp` (pai do cwd do caminho de texto): a checagem roda antes do spawn (corrida possível) e
+  um usuário local pode criar o arquivo e bloquear o caminho de texto de todos (falha fechado). Só importa se
+  `--restricted` não desliga a memória das pastas-pai, o que o spike não testou. Saída: cwd do texto numa pasta
+  privada fora do temp do sistema.
+- **M5** — `max_turns` dispara no uso da chamada `max_turns + 1`, que já foi paga e mostrada (no máximo uma chamada a
+  mais; só com follow-up enviado ou `max_iterations < max_turns`). Saída: contar no `message_start`.
+- **M6** — Windows: `Path.is_symlink()` é falso para junction e a checagem de dono não roda. Uma raiz que é junction
+  é seguida. Saída: checar também `is_junction()`.
+- **F18** — `_strip_mcp_prefix` usa `mcp__orin__` fixo; o runner nunca muda `server_name`.
+- **F19** — no POSIX, `kill_process_tree` só mata o filho direto (o Windows usa `taskkill /T`).
+- Lint: `react-hooks/purity` (`Date.now()` em `runSubmit`, anterior a esta fase) e variáveis sem uso em dois
+  arquivos de ataque do front-end.
+
+**Decisões desta rodada:**
+
+1. Abort de `apiKeySource` é `CliSecurityAbort` (401, nunca retry, nunca fallback de caminho ou modelo). Init sem
+   `apiKeySource` falha fechado — o spike mostra a CLI real mandando `"none"`.
+2. cwd do texto: `<temp>/orin-claude-cli-cwd-<uid>` (POSIX, 0700, dono conferido); cwd nativo continua em
+   `data/claude-cli/workdir`, salvo dentro de um checkout git (layout de desenvolvimento).
+3. `CLAUDE.md` do próprio usuário fora do temp (ex.: `~/CLAUDE.md`) é aceito, para não bloquear quem tem um.
+4. O uso de uma mensagem transmitida é cobrado no `message_delta` (saída final), não no primeiro pacote `assistant`.
+5. Num turno nativo vivo, a resposta do `ask_user` aparece como bolha derivada da entrega da fila (o back-end
+   emite `turn.started` com `queue_id`, não `turn.queued_input`); anexos ficam no compositor e nada abre turno novo.
+6. `test_kernel_boundaries`: `claude_cli/` e `cli_tools_mcp/` são bordas de composição de `providers/`, como
+   `http.py` e `compat.py`, e o núcleo não pode importá-las.
