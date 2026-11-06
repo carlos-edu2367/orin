@@ -104,4 +104,33 @@ describe('UpdateBanner', () => {
     expect(container).toBeEmptyDOMElement()
     expect(calls).toEqual([])
   })
+
+  it('mostra o motivo quando a última tentativa falhou e a mesma versão ainda está pronta', async () => {
+    jobState = {
+      state: 'ready',
+      current_version: '0.11.6',
+      version: '0.12.1',
+      last_attempt: { status: 'failed', version: '0.12.1', message: 'X' },
+    }
+    render(<UpdateBanner />)
+
+    expect(await screen.findByText('Atualização não concluída')).toBeInTheDocument()
+    expect(screen.getByText(/0\.12\.1/)).toBeInTheDocument()
+    expect(screen.getByText(/X/)).toBeInTheDocument()
+    const retryButton = screen.getByRole('button', { name: 'Tentar de novo' })
+    fireEvent.click(retryButton)
+    await waitFor(() => expect(applyUpdate).toHaveBeenCalledOnce())
+  })
+
+  it("não mostra 'pronta' para a versão que já está rodando", async () => {
+    jobState = {
+      state: 'ready',
+      current_version: '0.12.1',
+      version: '0.12.1',
+    }
+    const { container } = render(<UpdateBanner />)
+
+    await waitFor(() => expect(calls.length).toBeGreaterThan(0))
+    expect(container).toBeEmptyDOMElement()
+  })
 })

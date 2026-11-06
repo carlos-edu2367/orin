@@ -5,7 +5,7 @@ export type UpdateJobState =
   | 'idle' | 'checking' | 'downloading' | 'verifying' | 'extracting' | 'validating'
   | 'ready' | 'up_to_date' | 'failed' | 'unsupported'
 
-export type UpdateAttempt = { status: 'updated' | 'rolled_back'; version: string; at?: string; message?: string; restored?: string }
+export type UpdateAttempt = { status: 'updated' | 'rolled_back' | 'failed'; version: string; at?: string; message?: string; restored?: string }
 
 export type UpdateJobStatus = {
   state: UpdateJobState
@@ -40,7 +40,7 @@ function parseStatus(value: unknown): UpdateJobStatus {
   let attempt: UpdateAttempt | null = null
   if (data.last_attempt && typeof data.last_attempt === 'object') {
     const raw = data.last_attempt as Record<string, unknown>
-    if ((raw.status === 'updated' || raw.status === 'rolled_back') && typeof raw.version === 'string') {
+    if ((raw.status === 'updated' || raw.status === 'rolled_back' || raw.status === 'failed') && typeof raw.version === 'string') {
       attempt = { status: raw.status, version: raw.version, ...(text(raw.at) ? { at: text(raw.at) as string } : {}), ...(text(raw.message) ? { message: text(raw.message) as string } : {}), ...(text(raw.restored) ? { restored: text(raw.restored) as string } : {}) }
     }
   }

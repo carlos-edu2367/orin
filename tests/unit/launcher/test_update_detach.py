@@ -134,3 +134,80 @@ def test_electron_update_command_passes_detach_and_supervised_children_never_bre
     assert len(spawned_flags) == 1
     assert not (spawned_flags[0] & CREATE_BREAKAWAY_FROM_JOB)
 
+
+def test_second_apply_exits_when_lock_held_by_live_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    from agentos.installation.updater import Updater
+
+    paths = _paths(tmp_path)
+    profile = _installed_profile(tmp_path)
+    lock_file = paths.run / "update-apply.lock"
+    lock_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    apply_called: list[bool] = []
+    monkeypatch.setattr(Updater, "apply_prepared", lambda self: apply_called.append(True))
+
+    code = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=False),
+    )
+
+    assert code == 0
+    assert apply_called == []
+    assert lock_file.is_file()
+    assert lock_file.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+
+def test_apply_replaces_stale_lock_from_dead_or_expired_pid_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time
+    from agentos.installation.updater import UpdateResult, Updater
+
+    paths = _paths(tmp_path)
+    profile = _installed_profile(tmp_path)
+    lock_file = paths.run / "update-apply.lock"
+
+    # Case 1: dead PID is replaced and removed in finally.
+    lock_file.write_text("99999999", encoding="utf-8")
+    seen_lock_pids: list[str] = []
+
+    def fake_apply(self: Updater) -> UpdateResult:
+        seen_lock_pids.append(lock_file.read_text(encoding="utf-8").strip())
+        return UpdateResult("updated", "0.4.0", "0.5.0")
+
+    monkeypatch.setattr(Updater, "apply_prepared", fake_apply)
+    code = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=False),
+    )
+
+    assert code == 0
+    assert seen_lock_pids == [str(os.getpid())]
+    assert not lock_file.exists()
+
+    # Case 2: reused live PID on an expired lock file (> max age) is also replaced.
+    lock_file.write_text(str(os.getpid()), encoding="utf-8")
+    expired = time.time() - 3600
+    os.utime(lock_file, (expired, expired))
+    seen_lock_pids.clear()
+
+    code_reused = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=False),
+    )
+
+    assert code_reused == 0
+    assert seen_lock_pids == [str(os.getpid())]
+    assert not lock_file.exists()
+
+

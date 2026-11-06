@@ -14,7 +14,7 @@ import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from time import monotonic, sleep
+from time import monotonic, sleep, time
 
 from agentos.installation import OrinPaths, RuntimeProfile, orin_paths, runtime_profile
 
@@ -334,10 +334,20 @@ def command_update(
     if root is None:
         return refuse("Este Orin não foi instalado pelo instalador oficial, então não sei atualizá-lo daqui. Reinstale pelo instalador.")
     log_handler = configure_update_logging(paths) if apply else None
+    lock_path = paths.run / UPDATE_APPLY_LOCK
+    lock_acquired = False
     try:
+        if apply and _apply_lock_held_by_live_pid(lock_path):
+            logging.getLogger("orin.update").info("update apply: skipped because lock %s is held by a live pid", lock_path)
+            return 0
         if detach and apply and os.name == "nt":
             _spawn_detached_apply(_detached_apply_argv(profile, options), **({"popen": popen} if popen is not None else {}))
             return 0
+        if apply:
+            if not _acquire_apply_lock(lock_path):
+                logging.getLogger("orin.update").info("update apply: skipped because lock %s is held by a live pid", lock_path)
+                return 0
+            lock_acquired = True
 
         def stop_before_switching() -> None:
             if running_instance(paths) is None:
@@ -391,12 +401,64 @@ def command_update(
             {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
         return 0
     finally:
+        if lock_acquired:
+            _release_apply_lock(lock_path)
         if log_handler is not None:
             logging.getLogger("orin.update").removeHandler(log_handler)
             log_handler.close()
 
 
 RESTART_GRACE_SECONDS = 3.0
+UPDATE_APPLY_LOCK = "update-apply.lock"
+APPLY_LOCK_MAX_AGE_SECONDS = 600.0
+
+
+def _apply_lock_held_by_live_pid(lock_path: Path) -> bool:
+    try:
+        stat = lock_path.stat()
+        raw = lock_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if time() - stat.st_mtime > APPLY_LOCK_MAX_AGE_SECONDS:
+        return False
+    first_token = raw.split()[0] if raw else ""
+    try:
+        pid = int(first_token)
+    except ValueError:
+        return False
+    return process_is_alive(pid)
+
+
+def _acquire_apply_lock(lock_path: Path) -> bool:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if _apply_lock_held_by_live_pid(lock_path):
+                return False
+            try:
+                lock_path.unlink()
+            except OSError:
+                return False
+            continue
+        except OSError:
+            return False
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    return False
+
+
+def _release_apply_lock(lock_path: Path) -> None:
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        if raw.split()[:1] == [str(os.getpid())]:
+            lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _detached_apply_argv(profile: RuntimeProfile, options: argparse.Namespace) -> list[str]:
