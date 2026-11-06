@@ -114,6 +114,8 @@ def test_electron_update_command_passes_detach_and_supervised_children_never_bre
     from agentos.launcher import processes
 
     monkeypatch.setattr(processes, "_WINDOWS", True)
+    monkeypatch.setattr(processes.subprocess, "CREATE_NEW_PROCESS_GROUP", CREATE_NEW_PROCESS_GROUP, raising=False)
+    monkeypatch.setattr(processes.subprocess, "CREATE_NO_WINDOW", CREATE_NO_WINDOW, raising=False)
     spawned_flags: list[int] = []
 
     class _FakePopen:
