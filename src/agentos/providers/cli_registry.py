@@ -16,13 +16,30 @@ CLI_PROVIDERS: dict[str, Callable[[], CliAgentAdapter]] = {
 _ANTIGRAVITY_RISK_ACKNOWLEDGED_AT: datetime | str | None = None
 
 
+def _is_valid_risk_acknowledgement(value: object) -> bool:
+    if value is None or value is False:
+        return False
+    if value is True:
+        return True
+    if isinstance(value, datetime):
+        return True
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned.lower() in {"false", "0", "no", "none", "null"}:
+            return False
+        return True
+    return False
+
+
 def set_antigravity_risk_acknowledged(acknowledged_at: datetime | str | bool | None) -> None:
     """Update the in-process cache of Antigravity ToS risk acknowledgement."""
     global _ANTIGRAVITY_RISK_ACKNOWLEDGED_AT
-    if not acknowledged_at:
+    if not _is_valid_risk_acknowledgement(acknowledged_at):
         _ANTIGRAVITY_RISK_ACKNOWLEDGED_AT = None
-    elif isinstance(acknowledged_at, (datetime, str)):
+    elif isinstance(acknowledged_at, datetime):
         _ANTIGRAVITY_RISK_ACKNOWLEDGED_AT = acknowledged_at
+    elif isinstance(acknowledged_at, str):
+        _ANTIGRAVITY_RISK_ACKNOWLEDGED_AT = acknowledged_at.strip()
     else:
         _ANTIGRAVITY_RISK_ACKNOWLEDGED_AT = "acknowledged"
 
@@ -57,7 +74,7 @@ def cli_adapter_for(
             if risk_acknowledged_at is None
             else risk_acknowledged_at
         )
-        if not effective_ack:
+        if not _is_valid_risk_acknowledgement(effective_ack):
             return None
         factory = CLI_PROVIDERS.get("google-antigravity")
         return factory() if callable(factory) else None

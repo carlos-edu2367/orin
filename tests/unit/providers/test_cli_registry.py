@@ -245,3 +245,119 @@ def test_gateway_provider_name_and_setup_request_for_cli_providers() -> None:
     assert public["risk_acknowledged_at"] == now.isoformat()
     assert "secret_ref" not in public
 
+
+def test_antigravity_opt_in_bypass_vectors_and_chat_worker_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import insert
+    from agentos.persistence.postgres.schema import provider_configurations
+    from agentos.providers.claude_cli.provider import ClaudeCliProvider
+    from agentos.workers.chat import ChatWorker
+
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", "0" * 32)
+    codex_stub = _StubSubscriptionAdapter("codex", "gpt-5.4")
+    agy_stub = _StubSubscriptionAdapter("antigravity", "gemini-2.5-pro")
+    monkeypatch.setitem(CLI_PROVIDERS, "openai-codex", lambda: codex_stub)
+    monkeypatch.setitem(CLI_PROVIDERS, "google-antigravity", lambda: agy_stub)
+    set_antigravity_risk_acknowledged(None)
+
+    # 1. Whitespace or "false"/"0" strings must NOT satisfy risk_acknowledged_at
+    assert cli_adapter_for("google-antigravity", None, risk_acknowledged_at="   ") is None
+    assert cli_adapter_for("google-antigravity", None, risk_acknowledged_at="false") is None
+    assert cli_adapter_for("google-antigravity", None, risk_acknowledged_at="0") is None
+    set_antigravity_risk_acknowledged("   ")
+    assert cli_adapter_for("google-antigravity", None) is None
+    set_antigravity_risk_acknowledged("false")
+    assert cli_adapter_for("google-antigravity", None) is None
+
+    # 2. Explicit risk_acknowledged=False must override a stale risk_acknowledged_at timestamp
+    engine = _sqlite_engine()
+    cipher = _cipher()
+    config_adapter = PostgresProviderConfigurationAdapter(engine, cipher=cipher)
+    with pytest.raises(ValueError, match=r"(?i)(aceit|risco|termos|risk|acknowledge)"):
+        config_adapter.configure(
+            {
+                "provider": "google-antigravity",
+                "user_id": "user_1",
+                "enabled": True,
+                "api_key": "",
+                "base_url": None,
+                "risk_acknowledged": False,
+                "risk_acknowledged_at": "2026-11-06T12:00:00Z",
+            }
+        )
+
+    # 3. ChatWorker._provider_transport and _transport_for route openai-codex directly to ClaudeCliProvider
+    config_adapter.configure(
+        {
+            "provider": "openai-codex",
+            "user_id": "user_1",
+            "enabled": True,
+            "api_key": "",
+            "base_url": None,
+        }
+    )
+    worker = ChatWorker.__new__(ChatWorker)
+    worker.store = type("S", (), {"_engine": engine})()
+
+    codex_transport = worker._provider_transport(
+        {"provider": "openai-codex", "user_id": "user_1", "model_id": "gpt-5.4"}
+    )
+    assert isinstance(codex_transport, ClaudeCliProvider)
+    assert codex_transport.adapter is codex_stub
+    codex_transport.close()
+
+    codex_sub = worker._transport_for("user_1", "openai-codex", "gpt-5.4")
+    assert isinstance(codex_sub, ClaudeCliProvider)
+    assert codex_sub.adapter is codex_stub
+    codex_sub.close()
+
+    # 4. If a DB row has enabled=True for google-antigravity WITHOUT risk_acknowledged_at,
+    # ChatWorker refuses it even if in-memory cache was set by another user!
+    now = datetime.now(UTC)
+    with engine.begin() as conn:
+        conn.execute(
+            insert(provider_configurations).values(
+                user_id="user_unacked",
+                provider="google-antigravity",
+                enabled=True,
+                base_url=None,
+                secret_ref="ref-unacked",
+                key_cooldown_seconds=60,
+                catalog_refreshed_at=None,
+                risk_acknowledged_at=None,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    set_antigravity_risk_acknowledged(now)
+    with pytest.raises(ValueError, match="provider unavailable"):
+        worker._provider_transport(
+            {"provider": "google-antigravity", "user_id": "user_unacked", "model_id": "gemini-2.5-pro"}
+        )
+    with pytest.raises(ValueError, match="provider unavailable"):
+        worker._transport_for("user_unacked", "google-antigravity", "gemini-2.5-pro")
+
+    # 5. Conversely, in a cold worker process (in-memory cache is None), if the DB row HAS risk_acknowledged_at,
+    # ChatWorker resolves the Antigravity adapter from the DB row!
+    config_adapter.configure(
+        {
+            "provider": "google-antigravity",
+            "user_id": "user_1",
+            "enabled": True,
+            "api_key": "",
+            "base_url": None,
+            "risk_acknowledged": True,
+        }
+    )
+    set_antigravity_risk_acknowledged(None)
+    agy_transport = worker._provider_transport(
+        {"provider": "google-antigravity", "user_id": "user_1", "model_id": "gemini-2.5-pro"}
+    )
+    assert isinstance(agy_transport, ClaudeCliProvider)
+    assert agy_transport.adapter is agy_stub
+    agy_transport.close()
+
+    set_antigravity_risk_acknowledged(None)
+
+

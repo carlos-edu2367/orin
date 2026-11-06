@@ -149,8 +149,10 @@ class PostgresProviderConfigurationAdapter:
             ).mappings().first()
             existing_ack = _utc_datetime(existing.get("risk_acknowledged_at")) if existing else None
             raw_ack_at = _utc_datetime(command.get("risk_acknowledged_at"))
-            if raw_ack_at is not None:
-                risk_acknowledged_at: datetime | None = raw_ack_at
+            if "risk_acknowledged" in command and command.get("risk_acknowledged") is False:
+                risk_acknowledged_at: datetime | None = None
+            elif raw_ack_at is not None:
+                risk_acknowledged_at = raw_ack_at
             elif command.get("risk_acknowledged") is True:
                 risk_acknowledged_at = existing_ack or now
             elif "risk_acknowledged" in command and not command.get("risk_acknowledged"):
@@ -251,6 +253,12 @@ class PostgresProviderConfigurationAdapter:
             ).mappings().first()
         if row is None:
             raise ApplicationNotFoundError(provider)
+        if provider == "google-antigravity":
+            from agentos.providers.cli_registry import set_antigravity_risk_acknowledged
+
+            set_antigravity_risk_acknowledged(
+                _utc_datetime(row.get("risk_acknowledged_at")) if row.get("enabled") else None
+            )
         has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
         return _public({**row, "has_secret": has_secret})
 

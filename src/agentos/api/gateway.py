@@ -2160,8 +2160,17 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ValueError("API key is required for this provider")
         if provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)) and payload.api_key is None:
             raise ValueError("API key is required for this provider")
-        if provider_name == "google-antigravity" and payload.enabled and not payload.risk_acknowledged and not payload.risk_acknowledged_at:
-            raise ValueError("É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity.")
+        if provider_name == "google-antigravity" and payload.enabled:
+            has_valid_ack_at = (
+                isinstance(payload.risk_acknowledged_at, datetime)
+                or (
+                    isinstance(payload.risk_acknowledged_at, str)
+                    and bool(payload.risk_acknowledged_at.strip())
+                    and payload.risk_acknowledged_at.strip().lower() not in {"false", "0", "no", "none", "null"}
+                )
+            )
+            if payload.risk_acknowledged is False or (not payload.risk_acknowledged and not has_valid_ack_at):
+                raise ValueError("É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity.")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.configure", resource_id=provider_name, purpose=payload.purpose)
