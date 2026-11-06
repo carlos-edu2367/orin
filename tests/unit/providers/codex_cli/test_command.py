@@ -1,0 +1,479 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import time
+
+import pytest
+
+from agentos.providers.cli_adapter import CliTurnRequest, ToolServerWiring
+from agentos.providers.codex_cli.command import (
+    DEFAULT_CODEX_MODEL,
+    MAX_CODEX_MAJOR,
+    MIN_CODEX_VERSION,
+    ORIN_MCP_TOKEN_ENV,
+    VALID_EFFORT_LEVELS,
+    build_codex_command,
+    build_isolated_codex_env,
+    clean_codex_model_id,
+    codex_version,
+    encode_codex_user_turn,
+    is_codex_version_supported,
+    redact_codex_argv,
+    resolve_codex_binary,
+    wire_codex_tool_server,
+)
+
+
+class _FakeMcpHandle:
+    url = "http://127.0.0.1:54321/mcp"
+    token = "super-secret-orin-mcp-token-999"
+
+
+def test_build_codex_command_new_ephemeral_turn(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "system_prompt.md"
+    prompt_file.write_text("System instructions", encoding="utf-8")
+    wiring = wire_codex_tool_server(_FakeMcpHandle(), server_name="orin")
+
+    req = CliTurnRequest(
+        binary="C:/codex/codex.exe",
+        system_prompt_file=prompt_file,
+        model="openai-codex/gpt-6.1-sol",
+        effort="xhigh",
+        persist_session=False,
+        tool_server_wiring=wiring,
+    )
+
+    argv = build_codex_command(
+        req,
+        supported_efforts=("low", "medium", "high", "xhigh", "max", "ultra"),
+    )
+
+    import json
+
+    expected = [
+        "C:/codex/codex.exe",
+        "exec",
+        "--json",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "-m",
+        "gpt-6.1-sol",
+        "-c",
+        f"model_instructions_file={json.dumps(str(prompt_file))}",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        'web_search="disabled"',
+        "-c",
+        "features.view_image=false",
+        "-c",
+        'sandbox_mode="read-only"',
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'model_reasoning_effort="xhigh"',
+        "-c",
+        'mcp_servers.orin.url="http://127.0.0.1:54321/mcp"',
+        "-c",
+        f'mcp_servers.orin.bearer_token_env_var="{ORIN_MCP_TOKEN_ENV}"',
+        "-c",
+        "mcp_servers.orin.required=true",
+        "-",
+    ]
+    assert argv == expected
+
+
+def test_build_codex_command_resume_persistent_turn(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "system_prompt.md"
+    prompt_file.write_text("System instructions", encoding="utf-8")
+    wiring = wire_codex_tool_server(_FakeMcpHandle(), server_name="orin")
+
+    req = CliTurnRequest(
+        binary="/usr/local/bin/codex",
+        system_prompt_file=prompt_file,
+        model=None,
+        resume_session_id="019cfe2a-1111-7222-8333-444455556666",
+        persist_session=True,
+    )
+
+    argv = build_codex_command(req, wiring=wiring)
+
+    assert argv[:7] == [
+        "/usr/local/bin/codex",
+        "exec",
+        "resume",
+        "019cfe2a-1111-7222-8333-444455556666",
+        "--json",
+        "--ignore-user-config",
+        "--ignore-rules",
+    ]
+    assert "--skip-git-repo-check" in argv
+    assert "--ephemeral" not in argv
+    m_idx = argv.index("-m")
+    assert argv[m_idx + 1] == DEFAULT_CODEX_MODEL
+    assert argv[-1] == "-"
+
+
+def test_effort_omitted_when_unsupported_by_model(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("Prompt", encoding="utf-8")
+
+    req = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6-luna",
+        effort="ultra",
+        persist_session=False,
+    )
+    # gpt-6-luna does not support 'ultra'
+    argv = build_codex_command(
+        req,
+        supported_efforts=("low", "medium", "high", "xhigh", "max"),
+    )
+    assert not any("model_reasoning_effort" in item for item in argv)
+
+
+def test_mcp_token_only_in_env_never_in_argv_or_logs(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "secret_prompt.txt"
+    prompt_file.write_text("TOP_SECRET_PROMPT_BODY", encoding="utf-8")
+    handle = _FakeMcpHandle()
+
+    wiring = wire_codex_tool_server(handle, server_name="orin")
+    assert isinstance(wiring, ToolServerWiring)
+    assert wiring.env == {ORIN_MCP_TOKEN_ENV: handle.token}
+    assert wiring.files == ()
+    assert handle.token not in " ".join(wiring.argv)
+
+    req = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        tool_server_wiring=wiring,
+    )
+    argv = build_codex_command(req)
+    assert handle.token not in " ".join(argv)
+
+    logged = redact_codex_argv(argv)
+    assert handle.token not in " ".join(logged)
+    assert str(prompt_file) not in " ".join(logged)
+    assert 'mcp_servers.orin.url="http://127.0.0.1:54321/mcp"' in logged
+    assert "mcp_servers.orin.bearer_token_env_var" not in " ".join(logged)
+
+
+def test_build_isolated_codex_env_strips_api_keys_and_allowlists() -> None:
+    dirty_env = {
+        "PATH": "/usr/bin:/bin",
+        "SYSTEMROOT": "C:\\Windows",
+        "USERPROFILE": "C:\\Users\\test",
+        "CODEX_HOME": "C:\\Users\\test\\.codex",
+        "OPENAI_API_KEY": "sk-proj-secret-openai",
+        "CODEX_API_KEY": "sk-codex-secret",
+        "ANTHROPIC_API_KEY": "sk-ant-secret",
+        "CLAUDE_API_KEY": "sk-claude-secret",
+        "GEMINI_API_KEY": "AIza-secret",
+        "GOOGLE_API_KEY": "AIza-google-secret",
+        "UNRELATED_SECRET_VAR": "should-not-copy",
+    }
+
+    isolated = build_isolated_codex_env(dirty_env, mcp_token="mcp-tok-123")
+
+    assert isolated["PATH"] == "/usr/bin:/bin"
+    assert isolated["SYSTEMROOT"] == "C:\\Windows"
+    assert isolated["USERPROFILE"] == "C:\\Users\\test"
+    assert isolated["CODEX_HOME"] == "C:\\Users\\test\\.codex"
+    assert isolated["PYTHONIOENCODING"] == "utf-8"
+    assert isolated[ORIN_MCP_TOKEN_ENV] == "mcp-tok-123"
+
+    for forbidden in (
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "UNRELATED_SECRET_VAR",
+    ):
+        assert forbidden not in isolated
+
+
+def test_resolve_codex_binary_prefers_path_and_npm_vendor_exe(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "npm_bin"
+    bin_dir.mkdir()
+    shim = bin_dir / ("codex.cmd" if os.name == "nt" else "codex")
+    shim.write_text("@echo off\r\n", encoding="utf-8")
+    shim.chmod(0o755)
+
+    env = {"PATH": str(bin_dir), "PATHEXT": ".COM;.EXE;.BAT;.CMD"}
+    resolved_shim = resolve_codex_binary(env, windows_apps_dirs=())
+    assert resolved_shim is not None
+    assert Path(resolved_shim) == shim
+
+    # Now create the sibling npm native vendor PE binary next to the .cmd shim
+    if os.name == "nt":
+        vendor_exe = (
+            bin_dir
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe"
+        )
+        vendor_exe.parent.mkdir(parents=True)
+        vendor_exe.write_bytes(b"MZ-fake-pe")
+
+        resolved_vendor = resolve_codex_binary(env, windows_apps_dirs=())
+        assert resolved_vendor == str(vendor_exe)
+
+
+def test_resolve_codex_binary_windows_apps_dynamic_without_cache(
+    tmp_path: Path,
+) -> None:
+    empty_path_dir = tmp_path / "empty_path"
+    empty_path_dir.mkdir()
+    win_apps = tmp_path / "WindowsApps"
+    win_apps.mkdir()
+
+    v165 = (
+        win_apps
+        / "OpenAI.Codex_0.165.0.0_x64__2p2nqsd0c76g0"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    v165.parent.mkdir(parents=True)
+    v165.write_bytes(b"MZ-165")
+
+    v167 = (
+        win_apps
+        / "OpenAI.Codex_0.167.0.0_x64__2p2nqsd0c76g0"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    v167.parent.mkdir(parents=True)
+    v167.write_bytes(b"MZ-167")
+
+    env = {"PATH": str(empty_path_dir)}
+    first = resolve_codex_binary(env, windows_apps_dirs=[win_apps])
+    assert first == str(v167)
+
+    # Dynamically add 0.170.0.0 in the same test without clearing any cache
+    v170 = (
+        win_apps
+        / "OpenAI.Codex_0.170.0.0_x64__2p2nqsd0c76g0"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    v170.parent.mkdir(parents=True)
+    v170.write_bytes(b"MZ-170")
+
+    second = resolve_codex_binary(env, windows_apps_dirs=[win_apps])
+    assert second == str(v170)
+
+
+def test_version_gate_and_codex_version_script(tmp_path: Path) -> None:
+    assert MIN_CODEX_VERSION == (0, 167, 0)
+    assert MAX_CODEX_MAJOR == 1
+    assert is_codex_version_supported(None) is False
+    assert is_codex_version_supported((0, 166, 9)) is False
+    assert is_codex_version_supported((0, 167, 0)) is True
+    assert is_codex_version_supported((0, 199, 5)) is True
+    assert is_codex_version_supported((1, 0, 0)) is False
+
+    fake_cli = tmp_path / "fake_codex.py"
+    fake_cli.write_text(
+        'import sys\nprint("codex-cli 0.167.0")\nsys.exit(0)\n',
+        encoding="utf-8",
+    )
+    ver = codex_version(str(fake_cli))
+    assert ver == (0, 167, 0)
+    assert is_codex_version_supported(ver) is True
+
+
+def test_encode_codex_user_turn_single_line_utf8() -> None:
+    encoded = encode_codex_user_turn(
+        [
+            {"type": "text", "text": "olá\nmundo"},
+            {"type": "text", "text": "segunda linha\r\nfinal"},
+        ]
+    )
+    assert isinstance(encoded, bytes)
+    decoded = encoded.decode("utf-8")
+    assert decoded.endswith("\n")
+    assert "\n" not in decoded[:-1]
+    assert "\r" not in decoded[:-1]
+    assert "olá" in decoded and "mundo" in decoded
+
+
+@pytest.mark.parametrize(
+    "bad_model",
+    [
+        "-m",
+        "--exec",
+        "gpt-6.1-sol\n--evil",
+        "gpt-6.1-sol\r--evil",
+        "gpt-6.1-sol\x00evil",
+        "gpt-6.1-sol --flag",
+        "openai-codex/-flag",
+        "openai-codex/gpt 6",
+        "openai-codex/ gpt-6",
+        "model;rm -rf",
+        "a" * 129,
+    ],
+)
+def test_clean_codex_model_id_rejects_adversarial_inputs(bad_model: str) -> None:
+    with pytest.raises(ValueError):
+        clean_codex_model_id(bad_model)
+
+
+def test_resolve_codex_binary_windows_apps_numeric_version_order_and_skips_broken(
+    tmp_path: Path,
+) -> None:
+    empty_path = tmp_path / "empty_bin"
+    empty_path.mkdir()
+    win_apps = tmp_path / "WindowsApps"
+    win_apps.mkdir()
+
+    # 0.9.0.0 vs 0.167.0.0: string sort would pick 0.9.0.0, numeric sort must pick 0.167.0.0
+    v9 = (
+        win_apps
+        / "OpenAI.Codex_0.9.0.0_x64__2p2nqsd0c76g0"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    v9.parent.mkdir(parents=True)
+    v9.write_bytes(b"MZ-9")
+
+    v167 = (
+        win_apps
+        / "OpenAI.Codex_0.167.0.0_x64__2p2nqsd0c76g0"
+        / "app"
+        / "resources"
+        / "codex.exe"
+    )
+    v167.parent.mkdir(parents=True)
+    v167.write_bytes(b"MZ-167")
+
+    # Broken 0.999.0.0 folder without codex.exe
+    broken = (
+        win_apps
+        / "OpenAI.Codex_0.999.0.0_x64__2p2nqsd0c76g0"
+        / "app"
+        / "resources"
+    )
+    broken.mkdir(parents=True)
+
+    env = {
+        "PATH": str(empty_path),
+        "ORIN_WINDOWS_APPS_DIR": str(win_apps),
+    }
+    assert resolve_codex_binary(env) == str(v167)
+
+
+@pytest.mark.parametrize(
+    "bad_resume",
+    [
+        "",
+        "   ",
+        "-flag",
+        "--ephemeral",
+        "session id with spaces",
+        "session\nid",
+        "session\rid",
+        "session\x00id",
+        "session;evil",
+    ],
+)
+def test_build_codex_command_rejects_invalid_resume_session_id(
+    tmp_path: Path, bad_resume: str
+) -> None:
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("prompt", encoding="utf-8")
+    req = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        resume_session_id=bad_resume,
+    )
+    with pytest.raises(ValueError):
+        build_codex_command(req)
+
+
+@pytest.mark.parametrize(
+    "bad_url,bad_token,bad_server",
+    [
+        ("", "tok", "orin"),
+        ("http://127.0.0.1/mcp\nevil", "tok", "orin"),
+        ("http://127.0.0.1/mcp\x00", "tok", "orin"),
+        ("http://127.0.0.1/mcp", "", "orin"),
+        ("http://127.0.0.1/mcp", "tok\nevil", "orin"),
+        ("http://127.0.0.1/mcp", "tok", "orin.bad"),
+        ("http://127.0.0.1/mcp", "tok", "orin space"),
+        ("http://127.0.0.1/mcp", "tok", ""),
+    ],
+)
+def test_wire_codex_tool_server_rejects_adversarial_inputs(
+    bad_url: str, bad_token: str, bad_server: str
+) -> None:
+    class _BadHandle:
+        url = bad_url
+        token = bad_token
+
+    with pytest.raises(ValueError):
+        wire_codex_tool_server(_BadHandle(), server_name=bad_server)
+
+
+def test_redact_codex_argv_redacts_all_sensitive_variants() -> None:
+    raw = [
+        "codex",
+        "exec",
+        "-c",
+        'model_instructions_file="C:/tmp/secret_prompt.md"',
+        "-c",
+        'mcp_servers.orin.bearer_token_env_var="ORIN_MCP_TOKEN"',
+        "-c",
+        "mcp_servers.orin.api_key=sk-12345",
+        "--config",
+        "auth.password=hunter2",
+        "-c=my_secret_value=abc",
+        "--config=authorization_header=Bearer xyz",
+        "-c",
+        'mcp_servers.orin.url="http://127.0.0.1:43123/mcp"',
+        "-c",
+        "features.shell_tool=false",
+    ]
+    redacted = redact_codex_argv(raw)
+    assert redacted == [
+        "codex",
+        "exec",
+        "-c",
+        "<redacted>",
+        "-c",
+        "<redacted>",
+        "-c",
+        "<redacted>",
+        "--config",
+        "<redacted>",
+        "-c=<redacted>",
+        "--config=<redacted>",
+        "-c",
+        'mcp_servers.orin.url="http://127.0.0.1:43123/mcp"',
+        "-c",
+        "features.shell_tool=false",
+    ]
+
+
+def test_build_isolated_codex_env_rejects_control_chars_in_mcp_token() -> None:
+    with pytest.raises(ValueError):
+        build_isolated_codex_env({"PATH": "/bin"}, mcp_token="bad\ntoken")
+
