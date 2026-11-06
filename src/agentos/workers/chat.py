@@ -669,9 +669,9 @@ class ChatWorker:
                             stage=target.value,
                             completion_kind=(
                                 "unverified"
-                                if verification == "unverified"
+                                if target is CodeStage.COMPLETED and verification == "unverified"
                                 else "verified"
-                                if target is CodeStage.COMPLETED
+                                if target is CodeStage.COMPLETED and verification in {None, "verified"}
                                 else "with_caveats"
                                 if target is CodeStage.COMPLETED_WITH_CAVEATS
                                 else None

@@ -1125,11 +1125,16 @@ class AgentToolset(
         if last is not None and now - last < DIAGNOSTIC_DEBOUNCE_SECONDS:
             return outcome
         self._diagnosed_at[path] = now
-        cmd_str = spec.command if hasattr(spec, "command") else str(spec)
+        argv = getattr(spec, "argv", ())
+        if argv:
+            cmd_arg: list[str] = list(argv)
+        else:
+            cmd_str = spec.command if hasattr(spec, "command") else str(spec)
+            cmd_arg = shlex.split(cmd_str, posix=(os.name != "nt"))
         fmt = getattr(spec, "format", "ruff_json")
         try:
             completed = subprocess.run(
-                cmd_str, shell=True, cwd=str(self.workspace.root), capture_output=True, text=True,
+                cmd_arg, shell=False, cwd=str(self.workspace.root), capture_output=True, text=True,
                 timeout=DIAGNOSTIC_TIMEOUT_SECONDS, encoding="utf-8", errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
@@ -1200,7 +1205,7 @@ class AgentToolset(
                     payload.get("all_passed") is True
                     and isinstance(steps, list)
                     and any(item.get("ran") for item in steps if isinstance(item, Mapping))
-                ) or payload.get("recipe") is None:
+                ):
                     self._code_mode_verified = True
             # A scaffold can create files but is not a verification result.
             artifacts = payload.get("artifacts")
@@ -1208,12 +1213,17 @@ class AgentToolset(
                 self._change_events += 1
                 self._code_mode_verified = False
             return
-        if name not in {"run_command", "powershell"} or bool(payload.get("failed")):
+        if name not in {"run_command", "powershell"}:
+            return
+        artifacts = payload.get("artifacts")
+        changed_any = self._record_changed_paths(artifacts)
+        if bool(payload.get("failed")) or payload.get("exit_code") != 0:
+            if changed_any:
+                self._change_events += 1
+                self._code_mode_verified = False
             return
         command_str = str(arguments.get("command") or payload.get("command") or "").strip()
         is_verif = self._is_verification_command(command_str)
-        artifacts = payload.get("artifacts")
-        changed_any = self._record_changed_paths(artifacts)
         if is_verif and payload.get("exit_code") == 0:
             self._code_mode_verified = True
         elif changed_any:

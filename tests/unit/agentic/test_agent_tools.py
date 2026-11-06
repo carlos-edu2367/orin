@@ -1168,11 +1168,11 @@ def test_code_completion_gate_accepts_direct_test_run_command_and_no_recipe_veri
     assert outcome.status == "succeeded"
     assert tools.code_verification_status() == "verified"
 
-    # Mutate again in a directory without a project recipe; verify_project(recipe=None) satisfies the check.
+    # Mutate again in a directory without a project recipe; verify_project(recipe=None) runs no checks so status stays unverified.
     tools.invoke("write_file", {"path": "script.py", "content": "x = 2\n"})
     assert tools.code_verification_status() == "unverified"
     tools.invoke("verify_project", {})
-    assert tools.code_verification_status() == "verified"
+    assert tools.code_verification_status() == "unverified"
 
 
 def test_read_process_output_and_stop_process_integrate_with_preview_servers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

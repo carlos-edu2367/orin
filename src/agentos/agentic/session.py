@@ -2370,6 +2370,7 @@ class TurnSession:
             self.agents_store.set_state(agent_id, "working")
         final_agent_state = "failed"
         delegation_settled = False
+        subagent_tools: AgentToolset | None = None
         try:
             read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
             definition = builtin_spec.get("definition") if builtin_spec is not None else None
@@ -2562,6 +2563,20 @@ class TurnSession:
                 content = f"{clean} reported:\n\n{answer}"
             return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
         finally:
+            if subagent_tools is not None and getattr(subagent_tools, "_changed_paths", None):
+                parent_tools = getattr(self, "toolset", None)
+                if parent_tools is not None and hasattr(parent_tools, "_changed_paths"):
+                    had_unverified_parent_changes = bool(
+                        parent_tools._changed_paths and not getattr(parent_tools, "_code_mode_verified", False)
+                    )
+                    parent_tools._changed_paths.update(subagent_tools._changed_paths)
+                    parent_tools._change_events = getattr(parent_tools, "_change_events", 0) + getattr(
+                        subagent_tools, "_change_events", 0
+                    )
+                    if not getattr(subagent_tools, "_code_mode_verified", False):
+                        parent_tools._code_mode_verified = False
+                    elif not had_unverified_parent_changes:
+                        parent_tools._code_mode_verified = True
             if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
                 try:
                     self.agents_store.set_state(agent_id, final_agent_state)

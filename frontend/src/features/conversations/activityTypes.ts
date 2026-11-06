@@ -376,7 +376,13 @@ export function kindFor(type: string, toolKind?: string): ActivityKind {
 }
 
 export function stateFor(type: string, status?: string, errorCode?: string | null): ActivityState {
-  if (type === 'code_mode.completed_with_caveats') return 'completed'
+  if (
+    type === 'code_mode.completed' ||
+    type === 'code_mode.completed_with_caveats' ||
+    type === 'code_mode.unverified'
+  ) {
+    return 'completed'
+  }
   if (type === 'code_mode.blocked') return 'failed'
   if (type === 'turn.completed' || type === 'TURN_COMPLETED') return 'completed'
   if (

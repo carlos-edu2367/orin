@@ -305,7 +305,7 @@ export function buildTurnTimeline(
     : events
   const turnEvents = enrichEventsWithStartedMetadata(rawTurnEvents)
   const settled = computeSettledEventIds(turnEvents)
-  const firstCodeEvent = turnEvents.find((event) => isCodeModeEvent(event))
+  const firstCodeEvent = turnEvents.find((event) => isCodeModeEvent(event) && event.type !== 'code_mode.unverified')
   const hasTerminalTurnEvent = turnEvents.some(
     (event) => !event.parentAgentId && TERMINAL_TURN_EVENT_TYPES.has(event.type),
   )

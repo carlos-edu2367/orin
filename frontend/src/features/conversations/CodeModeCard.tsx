@@ -16,8 +16,8 @@ export function CodeModeCard({ group }: { group: ActivityGroup }) {
   const stage = stageEvent?.codeStage ?? latest.codeStage ?? 'planning'
   const todos = [...group.events].reverse().find((event) => Boolean(event.todos && event.todos.length > 0))?.todos
   const activeTodo = todos?.find((todo) => todo.status === 'in_progress')
-  const terminal = stage === 'completed' || stage === 'completed_with_caveats'
   const unverified = group.events.some((e) => e.type === 'code_mode.unverified')
+  const terminal = group.state === 'completed' || stage === 'completed' || stage === 'completed_with_caveats' || unverified
   const cancelled = group.state === 'cancelled' || latest.errorCode === 'TURN_CANCELLED'
   const index = terminal ? STAGES.length - 1 : Math.max(0, STAGES.findIndex(([id]) => id === stage))
   const providerFailure = stage === 'blocked' && PROVIDER_FAILURES.has(latest.errorCode ?? '')

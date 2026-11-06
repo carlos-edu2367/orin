@@ -35,7 +35,9 @@ export const EVENT_LIMIT = 1500
 const TERMINAL_COMPLETED_TYPES = new Set([
   'turn.completed',
   'TURN_COMPLETED',
+  'code_mode.completed',
   'code_mode.completed_with_caveats',
+  'code_mode.unverified',
 ])
 
 const TERMINAL_FAILED_TYPES = new Set([

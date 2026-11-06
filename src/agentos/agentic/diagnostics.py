@@ -11,7 +11,7 @@ process itself, which is what keeps it trivially testable.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -171,6 +171,7 @@ def detect_recipe(root: Path) -> ProjectRecipe | None:
 class FileDiagnosticCommand:
     command: str
     format: Literal["ruff_json", "eslint_json"]
+    argv: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +192,7 @@ def file_diagnostic_command(path: str, *, project_root: Path) -> FileDiagnosticC
         return FileDiagnosticCommand(
             command=f'python -m ruff check --output-format=json "{path}"',
             format="ruff_json",
+            argv=("python", "-m", "ruff", "check", "--output-format=json", path),
         )
     if (
         lowered.endswith((".ts", ".tsx", ".js", ".jsx"))
@@ -203,6 +205,7 @@ def file_diagnostic_command(path: str, *, project_root: Path) -> FileDiagnosticC
         return FileDiagnosticCommand(
             command=f'npx --no-install eslint --format json "{path}"',
             format="eslint_json",
+            argv=("npx", "--no-install", "eslint", "--format", "json", path),
         )
     return None
 
@@ -222,6 +225,8 @@ def parse_file_diagnostics(fmt: str, stdout: str) -> list[FileDiagnostic] | None
             if not isinstance(item, Mapping):
                 return None
             loc = item.get("location")
+            if loc is None and "location" in item:
+                continue
             if not isinstance(loc, Mapping):
                 return None
             try:
@@ -272,6 +277,31 @@ def changed_line_ranges(payload: Mapping[str, object] | None) -> list[tuple[int,
             count = int(hunk.get("newLines", 1))
         except (KeyError, TypeError, ValueError):
             continue
+        hunk_lines = hunk.get("lines")
+        if isinstance(hunk_lines, list) and hunk_lines and all(isinstance(line, str) for line in hunk_lines):
+            cursor = start
+            max_line = max(start, start + count - 1)
+            changed_lines: list[int] = []
+            for raw_line in hunk_lines:
+                if raw_line.startswith("+"):
+                    changed_lines.append(cursor)
+                    cursor += 1
+                elif raw_line.startswith("-"):
+                    changed_lines.append(min(max(start, cursor), max_line))
+                elif raw_line.startswith(" "):
+                    cursor += 1
+            if changed_lines:
+                ordered = sorted(set(changed_lines))
+                seg_start = ordered[0]
+                seg_end = ordered[0]
+                for ln in ordered[1:]:
+                    if ln == seg_end + 1:
+                        seg_end = ln
+                    else:
+                        ranges.append((seg_start, seg_end))
+                        seg_start = seg_end = ln
+                ranges.append((seg_start, seg_end))
+                continue
         end = max(start, start + count - 1)
         ranges.append((start, end))
     return ranges if ranges else None

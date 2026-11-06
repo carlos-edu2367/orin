@@ -182,7 +182,7 @@ _BLOCKED_COMMAND = re.compile(
 )
 
 _VERIFICATION_CMD_RE = re.compile(
-    r"(?:^|[;&|]\s*)(?:pytest|py\.test|(?:[\"']?[^\s;&|]*[/\\])?python(?:\d*(?:\.\d+)?)?(?:\.exe)?[\"']?\s+-m\s+(?:pytest|unittest|ruff|mypy|flake8|py_compile)|"
+    r"(?:^|[;&|]\s*)(?:(?:uv|poetry|pipenv|pdm)\s+run\s+)?(?:pytest|py\.test|(?:[\"']?[^\s;&|]*[/\\])?python(?:\d*(?:\.\d+)?)?(?:\.exe)?[\"']?\s+-m\s+(?:pytest|unittest|ruff|mypy|flake8|py_compile)|"
     r"(?:npm|pnpm|yarn|bun)\s+(?:test|run\s+(?:test|build|lint|typecheck|check|verify|audit[\w-]*))|"
     r"npx\s+(?:vitest|jest|tsc|eslint|playwright)|vitest|jest|tsc|ruff\s+check|mypy|flake8|cargo\s+(?:test|check)|go\s+test|"
     r"node\s+(?:--check\b|[^\s;&|]*(?:audit|verify|check|test)[^\s;&|]*))",
