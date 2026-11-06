@@ -465,10 +465,12 @@ def test_stream_claude_code_bridge_parses_resets_at_into_retry_after_and_isolate
 
     assert captured_cwds == [str(ensure_isolated_cwd())]
 
-    # Verify CliSlots bounds concurrency when ORIN_CLI_MAX_PROCESSES is configured
+    # Verify CliSlotQueue bounds concurrency when ORIN_CLI_MAX_PROCESSES is configured
+    from agentos.providers.cli_queue import CliSlotQueue
+
     monkeypatch.setattr(
-        "agentos.providers.claude_cli.provider.CLI_SLOTS",
-        CliSlots.from_env({"ORIN_CLI_MAX_PROCESSES": "3"}),
+        "agentos.providers.cli_queue._GLOBAL_QUEUE",
+        CliSlotQueue(limit=3, min_free_memory_mb=0),
     )
     class _SlowPopen:
         def __init__(self, cmd: list[str], **kwargs: Any) -> None:

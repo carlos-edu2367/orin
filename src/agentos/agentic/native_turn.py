@@ -1660,6 +1660,15 @@ class NativeTurnRunner:
                 if self.runtime._fallback_models
                 else None
             )
+            def _on_waiting_slot(position: int, limit: int | None = None, reason: str | None = None) -> None:
+                self.runtime._life(
+                    self.turn,
+                    "provider_waiting",
+                    position=position,
+                    limit=limit,
+                    reason=reason or ("memory" if limit is None else "limit"),
+                )
+
             req = NativeTurnRequest(
                 model=str(self.turn.get("model_id") or ""),
                 system_prompt=str(self.runtime.system_prompt or ""),
@@ -1673,6 +1682,8 @@ class NativeTurnRunner:
                 fallback_model=fallback_model,
                 max_output_tokens=max_output,
                 autocompact=autocompact,
+                conversation_id=str(self.turn.get("conversation_id") or ""),
+                on_waiting_slot=_on_waiting_slot,
             )
 
             handle: NativeTurnHandle | Any | None = None

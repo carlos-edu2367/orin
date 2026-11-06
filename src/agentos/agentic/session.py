@@ -1585,6 +1585,36 @@ class TurnSession:
                     agent_id=actor,
                 )
             return
+        if state == "provider_waiting":
+            position = payload.get("position")
+            limit = payload.get("limit")
+            reason = payload.get("reason") or ("memory" if limit is None else "limit")
+            if reason == "memory" or limit is None:
+                wait_summary = f"Aguardando memória livre para abrir outro processo ({position}º na fila)"
+            else:
+                wait_summary = f"Aguardando vaga na CLI ({position}º na fila, limite de {limit})"
+            wait_payload = {
+                **base,
+                "status": "queued",
+                "waiting_for_slot": True,
+                "queue_position": position,
+            }
+            if is_subagent:
+                self._record(
+                    AgentActivityEventType.TOOL_PROGRESSED,
+                    wait_summary,
+                    wait_payload,
+                    agent_id=actor,
+                    parent_agent_id=self.main_agent_id,
+                )
+            else:
+                self._record(
+                    AgentActivityEventType.TURN_STARTED,
+                    wait_summary,
+                    wait_payload,
+                    agent_id=actor,
+                )
+            return
         if state == "retrying":
             if is_subagent:
                 self._record(

@@ -48,6 +48,7 @@ class StreamKind(StrEnum):
     RATE_LIMIT = "rate-limit"
     ERROR = "error"
     KEEPALIVE = "keepalive"
+    WAITING = "waiting"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +192,9 @@ class NormalizedStreamItem:
     # Anthropic extended thinking: the block's signature, and an encrypted (redacted) block.
     signature: str | None = None
     redacted_thinking: str | None = None
+    queue_position: int | None = None
+    queue_limit: int | None = None
+    wait_reason: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", StreamKind(self.kind))

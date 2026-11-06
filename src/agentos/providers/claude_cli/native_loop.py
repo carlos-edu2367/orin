@@ -46,6 +46,7 @@ from agentos.providers.cli_adapter import (
     CliStreamTranslator,
     CliTurnRequest,
 )
+from agentos.providers.cli_queue import CliSlotTicket, acquire_cli_slot
 from agentos.providers.cli_tools_mcp import (
     BackgroundTurnToolServer,
     McpToolSpec,
@@ -75,6 +76,8 @@ class NativeTurnRequest:
     autocompact: str | int | None = None
     session: Any | None = None
     server_name: str = "orin"
+    conversation_id: str = ""
+    on_waiting_slot: Callable[..., None] | None = None
 
 
 class NativeTurnSink(Protocol):
@@ -152,6 +155,9 @@ class NativeTurnHandle:
         stderr_thread: threading.Thread,
         t0: float,
         adapter: CliAgentAdapter | None = None,
+        ticket: CliSlotTicket | None = None,
+        conversation_id: str = "",
+        on_waiting_slot: Callable[..., None] | None = None,
     ) -> None:
         self._adapter: CliAgentAdapter = (
             adapter if adapter is not None else ClaudeCliAdapter()
@@ -163,6 +169,9 @@ class NativeTurnHandle:
         self._bg_server = bg_server
         self._temp_files = list(temp_files)
         self._slots = slots
+        self._ticket: CliSlotTicket | None = ticket
+        self._conversation_id = str(conversation_id or "")
+        self._on_waiting_slot = on_waiting_slot
         self._cancel_check = cancel_check
         self._deadline_monotonic = deadline_monotonic
         self._clock = clock
@@ -205,7 +214,11 @@ class NativeTurnHandle:
         with self._slot_cond:
             self._active_tool_calls += 1
             if self._holds_slot:
-                self._slots.release()
+                if self._ticket is not None:
+                    self._ticket.release()
+                    self._ticket = None
+                else:
+                    self._slots.release()
                 self._holds_slot = False
             self._slot_cond.notify_all()
 
@@ -222,27 +235,32 @@ class NativeTurnHandle:
                     continue
                 self._reacquiring_slot = True
                 self._slot_cond.release()
+                new_ticket: CliSlotTicket | None = None
                 try:
-                    acquired = self._slots.acquire(
+                    new_ticket = acquire_cli_slot(
+                        self._conversation_id,
                         cancel_check=lambda: (
                             self._closed
                             or self._active_tool_calls > 0
                             or self._holds_slot
                             or self._cancel_check()
-                        )
+                        ),
+                        on_wait=self._on_waiting_slot,
+                        queue=self._slots,
                     )
                 finally:
                     self._slot_cond.acquire()
                     self._reacquiring_slot = False
                     self._slot_cond.notify_all()
-                if acquired:
+                if new_ticket is not None:
                     if (
                         self._closed
                         or self._active_tool_calls > 0
                         or self._holds_slot
                     ):
-                        self._slots.release()
+                        new_ticket.release()
                     else:
+                        self._ticket = new_ticket
                         self._holds_slot = True
                 else:
                     if self._closed or self._cancel_check():
@@ -510,6 +528,8 @@ class NativeTurnHandle:
                     return
                 self._closed = True
                 should_release_slot = self._holds_slot
+                ticket_to_release = self._ticket
+                self._ticket = None
                 self._holds_slot = False
                 self._slot_cond.notify_all()
 
@@ -568,7 +588,10 @@ class NativeTurnHandle:
                     pass
 
             if should_release_slot:
-                self._slots.release()
+                if ticket_to_release is not None:
+                    ticket_to_release.release()
+                else:
+                    self._slots.release()
 
             duration_s = max(0.0, self._clock() - self._t0)
             self._log_run_fn(
@@ -618,7 +641,13 @@ def start_native_turn_for_provider(
             )
 
     slots = provider._effective_slots()
-    if not slots.acquire(cancel_check=request.cancel_check):
+    ticket = acquire_cli_slot(
+        request.conversation_id,
+        cancel_check=request.cancel_check,
+        on_wait=request.on_waiting_slot,
+        queue=slots,
+    )
+    if ticket is None:
         raise NativeLoopUnavailable(
             "Turn cancelled while waiting for a Claude CLI process slot.",
             status_code=499,
@@ -761,6 +790,9 @@ def start_native_turn_for_provider(
             stderr_thread=stderr_thread,
             t0=t0,
             adapter=adapter,
+            ticket=ticket,
+            conversation_id=request.conversation_id,
+            on_waiting_slot=request.on_waiting_slot,
         )
         wrapped_executor.handle = handle
         return handle
@@ -783,7 +815,7 @@ def start_native_turn_for_provider(
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
-        slots.release()
+        ticket.release()
         # A security abort is never "native unavailable": that would fall back to the text path with the
         # same credentials.
         if isinstance(exc, (NativeLoopUnavailable, CliSecurityAbort)):

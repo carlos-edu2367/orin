@@ -561,3 +561,39 @@ def test_expired_deadline_fails_fast_without_spawning_process(
         provider.start_native_turn(_make_request(tmp_path, deadline_offset=-1.0))
     assert "TURN_DEADLINE_EXCEEDED" in str(exc_info.value)
 
+
+def test_start_native_turn_waiting_for_slot_invokes_on_waiting_slot(
+    tmp_path: Path,
+) -> None:
+    from agentos.providers.cli_queue import CliSlotQueue
+
+    queue = CliSlotQueue(limit=1, min_free_memory_mb=0)
+    held = queue.enqueue("conv-A")
+    assert held.wait(0)
+
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "persistent_followup"},
+        slots=queue,
+    )
+    waiting_events: list[tuple[int, int | None]] = []
+
+    def _release_soon() -> None:
+        time.sleep(0.1)
+        held.release()
+
+    rel_thread = threading.Thread(target=_release_soon, daemon=True)
+    rel_thread.start()
+
+    req = _make_request(tmp_path)
+    req.conversation_id = "conv-B"
+    req.on_waiting_slot = lambda pos, lim: waiting_events.append((pos, lim))
+    handle = provider.start_native_turn(req)
+    try:
+        sink = _RecordingSink()
+        out = handle.run_until_result(sink)
+        assert out.result.subtype == "success"
+        assert waiting_events == [(1, 1)]
+    finally:
+        handle.close()
+

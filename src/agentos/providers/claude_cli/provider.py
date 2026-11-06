@@ -38,6 +38,7 @@ from agentos.providers.claude_cli.errors import (
     error_info_to_transport_error,
 )
 from agentos.providers.cli_adapter import CliAgentAdapter, CliTurnRequest
+from agentos.providers.cli_queue import CliSlotQueue, CliSlotTicket, cli_slot_queue
 from agentos.providers.claude_cli.stream import (
     CliEvent,
     CliEventKind,
@@ -238,63 +239,7 @@ def is_anthropic_cloud(base_url: str | None) -> bool:
     return not is_claude_cli_bridge_url(base_url)
 
 
-class CliSlots:
-    """Optional concurrency limiter for `claude -p` processes (`ORIN_CLI_MAX_PROCESSES`)."""
-
-    def __init__(
-        self,
-        limit: int | None = None,
-        *,
-        env: Mapping[str, str] | None = None,
-    ) -> None:
-        if limit is None and env is not None:
-            raw = str(env.get("ORIN_CLI_MAX_PROCESSES") or "").strip()
-            if raw:
-                try:
-                    limit = int(raw)
-                except ValueError:
-                    limit = None
-        self.limit: int | None = (
-            int(limit)
-            if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 1
-            else None
-        )
-        self._sem: threading.BoundedSemaphore | None = (
-            threading.BoundedSemaphore(self.limit) if self.limit is not None else None
-        )
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> CliSlots:
-        source = os.environ if env is None else env
-        raw = str(source.get("ORIN_CLI_MAX_PROCESSES") or "").strip()
-        if not raw:
-            return cls(None)
-        try:
-            parsed = int(raw)
-        except ValueError:
-            return cls(None)
-        return cls(parsed if parsed >= 1 else None)
-
-    def acquire(self, cancel_check: Callable[[], bool] | None = None) -> bool:
-        if cancel_check is not None and cancel_check():
-            return False
-        if self._sem is None:
-            return True
-        while True:
-            if cancel_check is not None and cancel_check():
-                return False
-            if self._sem.acquire(timeout=0.05):
-                return True
-
-    def release(self) -> None:
-        if self._sem is not None:
-            try:
-                self._sem.release()
-            except ValueError:
-                pass
-
-
-CLI_SLOTS = CliSlots.from_env()
+CliSlots = CliSlotQueue
 
 
 def kill_process_tree(proc: Any) -> None:
@@ -480,8 +425,8 @@ class ClaudeCliProvider:
         binary, _ = self.adapter.resolve_binary(self._env)
         return binary
 
-    def _effective_slots(self) -> CliSlots:
-        return self._slots if self._slots is not None else CLI_SLOTS
+    def _effective_slots(self) -> CliSlotQueue:
+        return self._slots if self._slots is not None else cli_slot_queue()
 
     def record_native_unavailable(self, reason: object = "") -> None:
         if getattr(reason, "status_code", None) == 499:
@@ -626,8 +571,9 @@ class ClaudeCliProvider:
             closing=withheld and has_tools_in_turn,
         )
 
-        slots = self._slots if self._slots is not None else CLI_SLOTS
-        slot_acquired = False
+        slots = self._effective_slots()
+        conv_id = str(request.get("conversation_id") or request.get("turn_id") or "")
+        ticket: CliSlotTicket | None = None
         proc: Any = None
         cmd: list[str] = []
         stderr_chunks: list[str] = []
@@ -636,11 +582,37 @@ class ClaudeCliProvider:
         parser = self.adapter.stream_translator()
         mono_started = time.monotonic()
         _ = self._clock()
+        sequence = 0
 
         try:
-            slot_acquired = slots.acquire(cancel_check=effective_cancel)
-            if not slot_acquired:
+            if effective_cancel is not None and effective_cancel():
                 return
+            ticket = slots.enqueue(conv_id)
+            while not ticket.wait(0.0):
+                if effective_cancel is not None and effective_cancel():
+                    ticket.release()
+                    ticket = None
+                    return
+                sequence += 1
+                yield NormalizedStreamItem(
+                    StreamKind.WAITING,
+                    sequence,
+                    queue_position=ticket.position(),
+                    queue_limit=slots.limit,
+                    wait_reason=ticket.wait_reason(),
+                )
+                granted = False
+                for _ in range(10):
+                    if effective_cancel is not None and effective_cancel():
+                        ticket.release()
+                        ticket = None
+                        return
+                    if ticket.wait(0.05):
+                        granted = True
+                        break
+                if granted:
+                    break
+            mono_started = time.monotonic()
 
             prompt_file = self._ensure_prompt_file(system_prompt)
             facade = sys.modules.get("agentos.provider_catalog.claude_code")
@@ -765,7 +737,6 @@ class ClaudeCliProvider:
                 except Exception:
                     pass
 
-            sequence = 0
             saw_stream_thinking = False
             saw_stream_text = False
             emitted_any_tool_call = False
@@ -1034,8 +1005,8 @@ class ClaudeCliProvider:
                     stderr_tail="".join(stderr_chunks),
                     mode="text",
                 )
-            if slot_acquired:
-                slots.release()
+            if ticket is not None:
+                ticket.release()
 
 
 def stream_claude_code_bridge(

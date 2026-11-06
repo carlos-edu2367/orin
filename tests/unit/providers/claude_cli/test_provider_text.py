@@ -388,6 +388,42 @@ def test_cli_slots_respects_env_limit_or_unlimited() -> None:
     limited.release()
 
 
+def test_stream_with_busy_slot_emits_waiting_and_cancel_restores_active_count() -> None:
+    from agentos.providers.cli_queue import CliSlotQueue
+
+    queue = CliSlotQueue(limit=1, min_free_memory_mb=0)
+    held = queue.enqueue("conv-1")
+    assert held.wait(0)
+    assert queue.active_count() == 1
+
+    provider = ClaudeCliProvider(
+        base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+        model="claude-opus-5-5",
+        binary="C:/fake/claude.exe",
+        slots=queue,
+    )
+    seen_waiting: list[Any] = []
+
+    def _cancel_after_waiting() -> bool:
+        return len(seen_waiting) >= 1
+
+    try:
+        for item in provider.stream(
+            {"conversation_id": "conv-2", "messages": [{"role": "user", "content": "Oi"}]},
+            cancel_check=_cancel_after_waiting,
+        ):
+            if item.kind == StreamKind.WAITING:
+                seen_waiting.append(item)
+        assert len(seen_waiting) == 1
+        assert seen_waiting[0].queue_position == 1
+        assert seen_waiting[0].queue_limit == 1
+        assert queue.active_count() == 1
+    finally:
+        held.release()
+        provider.close()
+    assert queue.active_count() == 0
+
+
 def test_stream_uses_isolated_cwd_and_requires_init_with_strict_api_key_source_none() -> None:
     captured_cwds: list[str] = []
 

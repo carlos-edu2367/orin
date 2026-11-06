@@ -817,7 +817,8 @@ class AgenticTurnRuntime:
             if self.context_reporting:
                 self._life(turn, "context_updated", **context)
             request = {
-                "turn_id": turn_id, "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
+                "turn_id": turn_id, "conversation_id": str(turn.get("conversation_id") or ""),
+                "provider": str(turn.get("provider", "")), "model": str(turn.get("model_id", "")),
                 "messages": window, "tools": tool_schemas,
                 "max_output_tokens": min([value for value in (self._output_cap or self.limits.max_output_tokens, remaining_tokens) if value is not None], default=None),
             }
@@ -908,6 +909,7 @@ class AgenticTurnRuntime:
 
             last_empty_thinking_flush: float | None = None
             last_progress_at = self.clock()
+            last_waiting_position: int | None = None
             try:
                 for raw_event in events:
                     if self.cancelled(turn):
@@ -918,6 +920,19 @@ class AgenticTurnRuntime:
                         self._effect_finished(turn, provider_effect_id, state="UNKNOWN", error_code="PROVIDER_DEADLINE_DURING_EFFECT")
                         return self._fail(turn, "TURN_DEADLINE_EXCEEDED", iteration, action_count)
                     event = self._coerce(raw_event)
+                    if event.kind is StreamKind.WAITING:
+                        last_progress_at = now_clock
+                        pos = event.queue_position
+                        if pos is not None and pos != last_waiting_position:
+                            last_waiting_position = pos
+                            self._life(
+                                turn,
+                                "provider_waiting",
+                                position=pos,
+                                limit=event.queue_limit,
+                                reason=event.wait_reason or ("limit" if event.queue_limit is not None else "memory"),
+                            )
+                        continue
                     if event.kind is StreamKind.KEEPALIVE:
                         diff = now_clock - last_progress_at
                         elapsed_s = float(diff.total_seconds()) if hasattr(diff, "total_seconds") else float(diff)
@@ -3158,6 +3173,14 @@ class AgenticTurnRuntime:
             kind_val = str(event.get("kind") or event.get("type") or "").lower()
             if kind_val == "keepalive":
                 return NormalizedStreamItem(StreamKind.KEEPALIVE, int(event.get("sequence") or 1))
+            if kind_val == "waiting":
+                return NormalizedStreamItem(
+                    StreamKind.WAITING,
+                    int(event.get("sequence") or 1),
+                    queue_position=event.get("queue_position"),
+                    queue_limit=event.get("queue_limit"),
+                    wait_reason=event.get("wait_reason"),
+                )
         event_type = type(event).__name__
         if event_type == "ContentDelta":
             return NormalizedStreamItem(StreamKind.TEXT, int(getattr(event, "sequence", 1)), text=str(getattr(event, "delta", "")))

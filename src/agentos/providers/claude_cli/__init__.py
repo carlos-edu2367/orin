@@ -44,7 +44,6 @@ from agentos.providers.claude_cli.native_loop import (
 from agentos.providers.claude_cli.provider import (
     ANTHROPIC_CLOUD_BASE_URL,
     CLAUDE_CODE_LOCAL_BASE_URL,
-    CLI_SLOTS,
     DEFAULT_ANTHROPIC_BASE_URL,
     DEFAULT_CLAUDE_CLI_BRIDGE_URL,
     NATIVE_MODES,
@@ -86,7 +85,6 @@ from agentos.providers.claude_cli.text_protocol import (
 __all__ = [
     "ANTHROPIC_CLOUD_BASE_URL",
     "CLAUDE_CODE_LOCAL_BASE_URL",
-    "CLI_SLOTS",
     "CatalogModel",
     "ClaudeCliAdapter",
     "ClaudeCliModelCatalogClient",

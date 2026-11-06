@@ -84,7 +84,8 @@ class MultiKeyProviderStreamTransport:
                         rejected = _classify_stream_error_item(item)
                         if rejected is not None:
                             raise rejected
-                    yielded = True
+                    if item.kind not in {StreamKind.KEEPALIVE, StreamKind.WAITING}:
+                        yielded = True
                     yield item
                 # A key that just served a full turn is proof it works now,
                 # even if a past failure had it sitting in cooldown -- without
