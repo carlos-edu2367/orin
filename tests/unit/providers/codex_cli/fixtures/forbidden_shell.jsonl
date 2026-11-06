@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a1b333-78a6-7c92-8daf-593b3e32efe5"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\" -Command 'echo FORBIDDEN_SHELL_TEST'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"\"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe\" -Command 'echo FORBIDDEN_SHELL_TEST'","aggregated_output":"FORBIDDEN_SHELL_TEST\r\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"OK"}}
+{"type":"turn.completed","usage":{"input_tokens":16742,"cached_input_tokens":8192,"cache_write_input_tokens":0,"output_tokens":65,"reasoning_output_tokens":0}}

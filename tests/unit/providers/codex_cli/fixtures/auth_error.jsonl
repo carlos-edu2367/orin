@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"01a1b332-1c9e-78d2-8440-45d4c71846d1"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: a567e0481c1a00af-GRU)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: a567e04b6c407df8-GRU)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: a567e050ffa802fd-GRU)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: a567e05c49147e1e-GRU)"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back from WebSockets to HTTPS transport. unexpected status 401 Unauthorized: Missing authentication in header, url: wss://api.openai.com/v1/responses, cf-ray: a567e0705dd229e4-GRU"}}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e07158f7480d-GRU, request id: req_3b3ca1aa38f444188d826137e994ae3b)"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e074895b7df7-GRU, request id: req_360815ca61cd4290b734131dc4f88864)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e07b4fe51ac8-GRU, request id: req_57813e4879d34c34a83f8997f451d8e7)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e08249d47e15-GRU, request id: req_a7fea1f720fe4690871ef39ae57ea694)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e08fe839e5c5-GRU, request id: req_5826eab28c544b00a965686271d6c4b8)"}
+{"type":"error","message":"unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e0a5cea202e7-GRU, request id: req_e7adb51a1bed4923bd876d46ef8739f1"}
+{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Missing authentication in header, url: https://api.openai.com/v1/responses, cf-ray: a567e0a5cea202e7-GRU, request id: req_e7adb51a1bed4923bd876d46ef8739f1"}}
