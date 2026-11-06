@@ -24,6 +24,7 @@ class ToolCallResult:
     text: str
     is_error: bool = False
     images: tuple[Mapping[str, str], ...] = ()
+    tools_changed: bool = False
 
 
 class ToolExecutor(Protocol):

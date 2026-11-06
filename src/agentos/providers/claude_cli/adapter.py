@@ -31,7 +31,7 @@ class ClaudeCliAdapter:
     name: str = "claude"
     capabilities: CliCapabilities = CliCapabilities(
         native_tool_loop=NATIVE_LOOP_VALIDATED,
-        tool_list_changed=False,
+        tool_list_changed=True,
         images_in_tool_results=True,
         persistent_stdin=PERSISTENT_STDIN_OK,
     )

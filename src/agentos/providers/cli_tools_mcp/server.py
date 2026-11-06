@@ -237,7 +237,7 @@ class TurnToolServer:
                         "id": req_id,
                         "result": {
                             "protocolVersion": negotiated,
-                            "capabilities": {"tools": {"listChanged": False}},
+                            "capabilities": {"tools": {"listChanged": True}},
                             "serverInfo": {
                                 "name": self._server_name,
                                 "version": "1.0.0",
@@ -374,6 +374,8 @@ class TurnToolServer:
                                     ),
                                 }
                             )
+                    if getattr(call_res, "tools_changed", False):
+                        headers_out["X-Orin-Tools-Changed"] = "1"
                     return (
                         {
                             "jsonrpc": "2.0",
@@ -463,8 +465,25 @@ class TurnToolServer:
 
             if isinstance(payload, Mapping):
                 resp_obj, extra_headers, status_code = await _dispatch_single(payload)
+                tools_changed = extra_headers.pop("X-Orin-Tools-Changed", None) == "1"
                 if resp_obj is None:
                     return Response("", status_code=status_code, headers=extra_headers)
+                accept_hdr = (request.headers.get("accept") or "").lower()
+                if tools_changed and "text/event-stream" in accept_hdr:
+                    notif = {
+                        "jsonrpc": "2.0",
+                        "method": "notifications/tools/list_changed",
+                    }
+                    sse_body = (
+                        f"event: message\ndata: {json.dumps(notif, ensure_ascii=False)}\n\n"
+                        f"event: message\ndata: {json.dumps(resp_obj, ensure_ascii=False)}\n\n"
+                    )
+                    return Response(
+                        sse_body,
+                        status_code=status_code,
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", **extra_headers},
+                    )
                 return JSONResponse(resp_obj, status_code=status_code, headers=extra_headers)
 
             if isinstance(payload, list) and 0 < len(payload) <= MAX_BATCH_SIZE:
@@ -484,6 +503,7 @@ class TurnToolServer:
                         )
                         continue
                     single_resp, extra_headers, _ = await _dispatch_single(entry)
+                    extra_headers.pop("X-Orin-Tools-Changed", None)
                     merged_headers.update(extra_headers)
                     if single_resp is not None:
                         responses.append(single_resp)

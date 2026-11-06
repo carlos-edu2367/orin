@@ -321,16 +321,19 @@ class RuntimeToolExecutor(ToolExecutor):
         messages: list[dict[str, object]] | None = None,
         gather_seconds: float = BATCH_GATHER_SECONDS,
         deadline: datetime | float | None = None,
+        allow_deferral: bool = True,
     ) -> None:
         self.runtime = runtime
         self.turn = turn
+        self._allow_deferral = bool(allow_deferral)
+        self._explicit_tool_schemas: list[dict[str, object]] | None = (
+            list(tool_schemas) if tool_schemas is not None else None
+        )
+        self._last_discovered_snapshot: tuple[frozenset[str], frozenset[str]] = (
+            self._snapshot_discovered()
+        )
         if tool_schemas is None:
-            raw_schemas = runtime._tool_schemas(turn)
-            tool_schemas = (
-                runtime._names.schemas_out(raw_schemas)
-                if runtime._names is not None
-                else raw_schemas
-            )
+            tool_schemas = self._compute_live_schemas()
         self._tool_schemas = list(tool_schemas)
         self._custom_correlate = correlate
         self.messages: list[dict[str, object]] = messages if messages is not None else []
@@ -444,7 +447,34 @@ class RuntimeToolExecutor(ToolExecutor):
         self._valid_public_names = pub_names
         self._valid_internal_names = int_names
 
+    def _snapshot_discovered(self) -> tuple[frozenset[str], frozenset[str]]:
+        toolset = getattr(self.runtime, "toolset", None)
+        discovered = frozenset(getattr(toolset, "discovered_tool_names", ()) or ())
+        active_mcp = frozenset(getattr(toolset, "active_mcp_tool_names", ()) or ())
+        return discovered, active_mcp
+
+    def _compute_live_schemas(self) -> list[dict[str, object]]:
+        raw_schemas = self.runtime._tool_schemas(
+            self.turn, allow_deferral=self._allow_deferral
+        )
+        return (
+            self.runtime._names.schemas_out(raw_schemas)
+            if self.runtime._names is not None
+            else list(raw_schemas)
+        )
+
     def list_tools(self) -> Sequence[McpToolSpec]:
+        if (
+            getattr(self.runtime, "toolset", None) is not None
+            and self.runtime.phases is None
+            and (
+                self._explicit_tool_schemas is None
+                or self._snapshot_discovered() != self._last_discovered_snapshot
+            )
+        ):
+            self._tool_schemas = self._compute_live_schemas()
+            self._last_discovered_snapshot = self._snapshot_discovered()
+            self._build_specs()
         return list(self._specs)
 
     def note_message_id(self, message_id: str | None) -> None:
@@ -784,11 +814,18 @@ class RuntimeToolExecutor(ToolExecutor):
         msg_first_reads = self._first_read_keys_by_message_id.setdefault(
             str(message_id or "default"), set()
         )
+        before_discovered = self._snapshot_discovered()
         self.runtime._native_message_first_read_keys = msg_first_reads
         try:
             results = self.runtime._run_toolset(self.turn, raw_calls)
         finally:
             self.runtime._native_message_first_read_keys = None
+        after_discovered = self._snapshot_discovered()
+        tools_changed = after_discovered != before_discovered
+        if tools_changed and self.runtime.phases is None:
+            self._tool_schemas = self._compute_live_schemas()
+            self._last_discovered_snapshot = after_discovered
+            self._build_specs()
 
         self.action_count += len(results)
         msg_round_key = str(message_id or "").strip()
@@ -950,6 +987,7 @@ class RuntimeToolExecutor(ToolExecutor):
                     text=text,
                     is_error=is_err,
                     images=images,
+                    tools_changed=tools_changed,
                 )
             )
 
@@ -1486,7 +1524,17 @@ class NativeTurnRunner:
                 self._executor.close()
 
     def _run(self) -> AgenticRunResult | None:
-        raw_schemas = self.runtime._tool_schemas(self.turn)
+        adapter_caps = getattr(
+            getattr(self.provider, "adapter", None), "capabilities", None
+        )
+        allow_deferral = bool(
+            getattr(adapter_caps, "tool_list_changed", True)
+            if adapter_caps is not None
+            else True
+        )
+        raw_schemas = self.runtime._tool_schemas(
+            self.turn, allow_deferral=allow_deferral
+        )
         tool_schemas = (
             self.runtime._names.schemas_out(raw_schemas)
             if self.runtime._names is not None
@@ -1512,13 +1560,13 @@ class NativeTurnRunner:
                     if nm and nm not in seen_names:
                         all_raw.append(s)
                         seen_names.add(nm)
-            executor_schemas = (
+            executor_schemas: list[dict[str, object]] | None = (
                 self.runtime._names.schemas_out(all_raw)
                 if self.runtime._names is not None
                 else all_raw
             )
         else:
-            executor_schemas = tool_schemas
+            executor_schemas = None
 
         window = self.runtime._request_messages(self.messages)
         if self.runtime._names is not None:
@@ -1548,6 +1596,7 @@ class NativeTurnRunner:
             tool_schemas=executor_schemas,
             messages=self.messages,
             deadline=self.deadline,
+            allow_deferral=allow_deferral,
         )
         self._executor = executor
         sink = _RunnerSink(self, executor)
