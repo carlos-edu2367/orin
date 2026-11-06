@@ -433,6 +433,7 @@ provider_configurations = Table(
     # (401/403/429/timeout/connection) before it is tried again.
     Column("key_cooldown_seconds", Integer, nullable=False, server_default="60"),
     Column("catalog_refreshed_at", DateTime(timezone=True), nullable=True),
+    Column("risk_acknowledged_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "provider", name="uq_provider_configurations_user_provider"),

@@ -884,22 +884,26 @@ class HTTPProviderStreamTransport:
         return endpoint, headers, payload
 
     def stream(self, request: Mapping[str, object], *, cancel_check: Any = None) -> Iterator[NormalizedStreamItem]:
-        if self.provider == "anthropic":
+        from agentos.providers.cli_registry import cli_adapter_for
+
+        cli_adapter = cli_adapter_for(self.provider, self.base_url)
+        if cli_adapter is not None:
             from agentos.provider_catalog.claude_code import (
                 stream_claude_code_bridge as _facade_stream_claude_code_bridge,
             )
+            import agentos.providers.claude_cli as _claude_cli_pkg
+            import agentos.providers.claude_cli.provider as _claude_cli_provider_mod
             from agentos.providers.claude_cli import (
-                ClaudeCliProvider,
                 is_claude_cli_bridge_url,
                 stream_claude_code_bridge as _default_stream_claude_code_bridge,
             )
 
-            if is_claude_cli_bridge_url(self.base_url):
-                effective_cancel = cancel_check or (
-                    request.get("cancel_check")
-                    if callable(request.get("cancel_check"))
-                    else None
-                )
+            effective_cancel = cancel_check or (
+                request.get("cancel_check")
+                if callable(request.get("cancel_check"))
+                else None
+            )
+            if self.provider == "anthropic" and is_claude_cli_bridge_url(self.base_url):
                 hook = stream_claude_code_bridge or (
                     _facade_stream_claude_code_bridge
                     if _facade_stream_claude_code_bridge is not _default_stream_claude_code_bridge
@@ -917,22 +921,32 @@ class HTTPProviderStreamTransport:
                         cancel_check=effective_cancel,
                     )
                     return
-                if (
-                    self._claude_cli_provider is None
-                    or getattr(self._claude_cli_provider, "base_url", None) != self.base_url
-                    or getattr(self._claude_cli_provider, "model", None) != self.model
-                ):
-                    if self._claude_cli_provider is not None:
-                        self._claude_cli_provider.close()
-                    self._claude_cli_provider = ClaudeCliProvider(
-                        base_url=self.base_url,
-                        model=self.model,
-                    )
-                yield from self._claude_cli_provider.stream(
-                    request,
-                    cancel_check=effective_cancel,
+            provider_cls = (
+                _claude_cli_provider_mod.ClaudeCliProvider
+                if _claude_cli_provider_mod.ClaudeCliProvider is not _claude_cli_pkg.ClaudeCliProvider
+                else _claude_cli_pkg.ClaudeCliProvider
+            )
+            if (
+                self._claude_cli_provider is None
+                or getattr(self._claude_cli_provider, "base_url", None) != self.base_url
+                or getattr(self._claude_cli_provider, "model", None) != self.model
+                or getattr(getattr(self._claude_cli_provider, "_adapter", None), "name", None)
+                != getattr(cli_adapter, "name", None)
+            ):
+                if self._claude_cli_provider is not None:
+                    closer = getattr(self._claude_cli_provider, "close", None)
+                    if callable(closer):
+                        closer()
+                self._claude_cli_provider = provider_cls(
+                    base_url=self.base_url,
+                    model=self.model,
+                    adapter=cli_adapter,
                 )
-                return
+            yield from self._claude_cli_provider.stream(
+                request,
+                cancel_check=effective_cancel,
+            )
+            return
         if self.provider == "opencode":
             from agentos.provider_catalog.opencode import is_opencode_cloud, stream_opencode_bridge
 

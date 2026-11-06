@@ -149,6 +149,8 @@ class ProviderSetupRequest(_RequestModel):
     base_url: str | None = Field(default=None, min_length=8, max_length=2048)
     enabled: bool = True
     purpose: str = Field(default="provider.configure", min_length=1, max_length=128)
+    risk_acknowledged: bool | None = None
+    risk_acknowledged_at: datetime | str | None = None
 
 
 class ProviderApiKeyCreateRequest(_RequestModel):
@@ -2158,6 +2160,8 @@ def create_app(services: ApiServices) -> FastAPI:
             raise ValueError("API key is required for this provider")
         if provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)) and payload.api_key is None:
             raise ValueError("API key is required for this provider")
+        if provider_name == "google-antigravity" and payload.enabled and not payload.risk_acknowledged and not payload.risk_acknowledged_at:
+            raise ValueError("É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity.")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.configure", resource_id=provider_name, purpose=payload.purpose)
@@ -2167,6 +2171,8 @@ def create_app(services: ApiServices) -> FastAPI:
             "purpose": payload.purpose, "enabled": payload.enabled,
             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "", "idempotency_key": _idempotency(request),
             "base_url": payload.base_url,
+            **({"risk_acknowledged": payload.risk_acknowledged} if payload.risk_acknowledged is not None else {}),
+            **({"risk_acknowledged_at": payload.risk_acknowledged_at} if payload.risk_acknowledged_at is not None else {}),
         }
         result = _require_port(services.provider_configuration).configure(command)
         return JSONResponse(_provider_public(result))
@@ -2795,7 +2801,17 @@ def _is_loopback_client(host: str | None) -> bool:
 
 def _provider_name(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama", "nvidia"}:
+    if normalized not in {
+        "openai",
+        "anthropic",
+        "openrouter",
+        "opencode",
+        "omniroute",
+        "ollama",
+        "nvidia",
+        "openai-codex",
+        "google-antigravity",
+    }:
         raise ValueError("unsupported provider")
     return normalized
 

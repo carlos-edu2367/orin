@@ -86,7 +86,19 @@ from agentos.provider_catalog.claude_code import (
 from agentos.provider_catalog.http import AnthropicModelCatalogClient
 
 
+def _utc_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value.strip():
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
+
+
 def _public(row) -> dict[str, object]:
+    ack_at = _utc_datetime(row.get("risk_acknowledged_at"))
     return {
         "provider": str(row["provider"]),
         "enabled": bool(row["enabled"]),
@@ -95,6 +107,7 @@ def _public(row) -> dict[str, object]:
         "key_cooldown_seconds": int(row["key_cooldown_seconds"]),
         "catalog_refreshed_at": row.get("catalog_refreshed_at"),
         **({"base_url": row["base_url"]} if str(row["provider"]) in PROVIDERS_WITH_BASE_URL and row.get("base_url") else {}),
+        **({"risk_acknowledged_at": ack_at} if str(row["provider"]) == "google-antigravity" or ack_at is not None else {}),
     }
 
 
@@ -134,13 +147,35 @@ class PostgresProviderConfigurationAdapter:
                     provider_configurations.c.provider == provider,
                 )
             ).mappings().first()
+            existing_ack = _utc_datetime(existing.get("risk_acknowledged_at")) if existing else None
+            raw_ack_at = _utc_datetime(command.get("risk_acknowledged_at"))
+            if raw_ack_at is not None:
+                risk_acknowledged_at: datetime | None = raw_ack_at
+            elif command.get("risk_acknowledged") is True:
+                risk_acknowledged_at = existing_ack or now
+            elif "risk_acknowledged" in command and not command.get("risk_acknowledged"):
+                risk_acknowledged_at = None
+            else:
+                risk_acknowledged_at = existing_ack
+
+            if provider == "google-antigravity":
+                from agentos.providers.cli_registry import set_antigravity_risk_acknowledged
+
+                if enabled and risk_acknowledged_at is None:
+                    set_antigravity_risk_acknowledged(None)
+                    raise ValueError(
+                        "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
+                    )
+                set_antigravity_risk_acknowledged(risk_acknowledged_at if enabled else None)
+
             if existing is None:
                 secret_ref = f"provider-secret:{uuid4().hex}"
                 connection.execute(
                     insert(provider_configurations).values(
                         user_id=user_id, provider=provider, enabled=enabled,
                         base_url=base_url, secret_ref=secret_ref, key_cooldown_seconds=60,
-                        catalog_refreshed_at=None, created_at=now, updated_at=now,
+                        catalog_refreshed_at=None, risk_acknowledged_at=risk_acknowledged_at,
+                        created_at=now, updated_at=now,
                     )
                 )
                 row = {
@@ -151,11 +186,13 @@ class PostgresProviderConfigurationAdapter:
                     "has_secret": bool(api_key or existing_keys),
                     "key_cooldown_seconds": 60,
                     "catalog_refreshed_at": None,
+                    "risk_acknowledged_at": risk_acknowledged_at,
                 }
             else:
                 connection.execute(
                     update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
-                        enabled=enabled, base_url=base_url, catalog_refreshed_at=None, updated_at=now,
+                        enabled=enabled, base_url=base_url, catalog_refreshed_at=None,
+                        risk_acknowledged_at=risk_acknowledged_at, updated_at=now,
                     )
                 )
                 row = {
@@ -166,6 +203,7 @@ class PostgresProviderConfigurationAdapter:
                     "has_secret": bool(api_key or existing_keys),
                     "key_cooldown_seconds": existing["key_cooldown_seconds"],
                     "catalog_refreshed_at": None,
+                    "risk_acknowledged_at": risk_acknowledged_at,
                 }
             # Sharing this connection/transaction with the key write below
             # means the provider_configurations row and its principal key
@@ -233,6 +271,10 @@ class PostgresProviderConfigurationAdapter:
                     enabled=False, updated_at=datetime.now(UTC),
                 )
             )
+        if provider == "google-antigravity":
+            from agentos.providers.cli_registry import set_antigravity_risk_acknowledged
+
+            set_antigravity_risk_acknowledged(None)
         has_secret = bool(self._key_pool.list_keys({"user_id": user_id, "provider": provider}))
         return _public({**existing, "has_secret": has_secret, "enabled": False})
 

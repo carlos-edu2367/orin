@@ -38,6 +38,8 @@ _ALLOWED_PROVIDERS = frozenset({
     "omniroute",
     "ollama",
     "nvidia",
+    "openai-codex",
+    "google-antigravity",
 })
 
 

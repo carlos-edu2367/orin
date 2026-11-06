@@ -83,4 +83,6 @@ class RefreshReceipt:
 # gateway all branch on them; Ollama and OpenCode narrow the second set at
 # runtime, since only their local mode is keyless.
 PROVIDERS_WITH_BASE_URL = frozenset({"omniroute", "ollama", "opencode", "nvidia", "anthropic"})
-PROVIDERS_WITH_OPTIONAL_KEY = frozenset({"omniroute", "ollama", "opencode", "nvidia", "anthropic"})
+PROVIDERS_WITH_OPTIONAL_KEY = frozenset(
+    {"omniroute", "ollama", "opencode", "nvidia", "anthropic", "openai-codex", "google-antigravity"}
+)

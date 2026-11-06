@@ -34,7 +34,11 @@ class PostgresProviderCatalogRepository:
     def credential(self, context: ProviderCatalogContext, provider: str) -> dict[str, object] | None:
         with self._engine.connect() as connection:
             row = connection.execute(
-                select(provider_configurations.c.enabled, provider_configurations.c.base_url).where(
+                select(
+                    provider_configurations.c.enabled,
+                    provider_configurations.c.base_url,
+                    provider_configurations.c.risk_acknowledged_at,
+                ).where(
                     provider_configurations.c.user_id == context.user_id,
                     provider_configurations.c.provider == provider,
                 )
@@ -151,6 +155,10 @@ class PostgresProviderCatalogRepository:
             provider_model_catalog.c.user_id == context.user_id,
             provider_model_catalog.c.provider == provider,
             provider_configurations.c.enabled.is_(True),
+            (
+                (provider_configurations.c.provider != "google-antigravity")
+                | provider_configurations.c.risk_acknowledged_at.is_not(None)
+            ),
             (
                 provider_model_catalog.c.is_custom.is_(True)
                 | provider_configurations.c.catalog_refreshed_at.is_not(None)
