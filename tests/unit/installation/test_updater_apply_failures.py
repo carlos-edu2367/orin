@@ -187,3 +187,33 @@ def test_successful_apply_logs_all_steps_to_update_log(
     log_text = (paths.logs / "update.log").read_text(encoding="utf-8")
     for step_name in ("validate", "stop", "activate", "smoke", "state", "relaunch"):
         assert f"step={step_name} outcome=ok duration=" in log_text
+
+
+def test_apply_when_already_applied_does_not_overwrite_updated_attempt_with_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(versions.sys, "frozen", True, raising=False)
+    root = _setup_installation(tmp_path, current="0.12.1", prepared=None)
+    paths = _paths(tmp_path)
+    profile = RuntimeProfile("installed", root / "0.12.1" / "resources" / "runtime", "0.12.1", None)
+
+    updater = Updater(versions_root=root, current_version="0.12.1")
+    updater._write_state(
+        previous="0.11.6",
+        current="0.12.1",
+        attempt={"status": "updated", "version": "0.12.1"},
+    )
+
+    code = cli.command_update(
+        paths,
+        profile,
+        Console(io.StringIO(), colour=False),
+        argparse.Namespace(apply=True, restart=False),
+    )
+
+    assert code == 1
+    attempt = updater.last_attempt()
+    assert attempt is not None
+    assert attempt["status"] == "updated"
+    assert attempt["version"] == "0.12.1"
+

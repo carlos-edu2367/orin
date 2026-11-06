@@ -265,8 +265,20 @@ class Updater:
                 cleared_prepared = True
         state = self._read_state()
         recorded_current = state.get("current")
-        if recorded_current != active and (recorded_current is not None or cleared_prepared):
-            previous = recorded_current if isinstance(recorded_current, str) and SEMVER.fullmatch(recorded_current) else None
+        last_attempt = state.get("last_attempt")
+        stale_failed_attempt = (
+            isinstance(last_attempt, dict)
+            and last_attempt.get("status") == "failed"
+            and isinstance(last_attempt.get("version"), str)
+            and bool(SEMVER.fullmatch(last_attempt["version"]))
+            and version_key(active) >= version_key(last_attempt["version"])
+        )
+        if (recorded_current != active and (recorded_current is not None or cleared_prepared)) or stale_failed_attempt:
+            if recorded_current != active and isinstance(recorded_current, str) and SEMVER.fullmatch(recorded_current):
+                previous: str | None = recorded_current
+            else:
+                existing_prev = state.get("previous")
+                previous = existing_prev if isinstance(existing_prev, str) and SEMVER.fullmatch(existing_prev) else None
             self._write_state(
                 previous=previous,
                 current=active,

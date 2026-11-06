@@ -369,7 +369,7 @@ def command_update(
                 getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
             )
         except UpdateError as error:
-            if apply and not error.rolled_back:
+            if apply and prepared is not None and not error.rolled_back:
                 updater.record_failure(target_version, error.message)
             if json_out is not None:
                 json_out.failed(error)
