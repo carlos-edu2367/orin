@@ -478,6 +478,9 @@ def _validate_path_arg(value: str | Path, label: str) -> str:
 _SENSITIVE_CONFIG_TERMS = (
     "token",
     "key",
+    "secret",
+    "password",
+    "bearer",
     "authorization",
     "model_instructions_file",
     "system_prompt",
@@ -485,7 +488,7 @@ _SENSITIVE_CONFIG_TERMS = (
 
 
 def redact_argv(argv: Sequence[str]) -> list[str]:
-    """Redact temporary file paths (`--mcp-config`, `--system-prompt-file`) and sensitive `-c` overrides before logging."""
+    """Redact temporary file paths (`--mcp-config`, `--system-prompt-file`) and sensitive `-c`/`--config` overrides before logging."""
     redacted: list[str] = []
     skip_next = False
     check_c_next = False
@@ -507,14 +510,19 @@ def redact_argv(argv: Sequence[str]) -> list[str]:
             redacted.append(text)
             skip_next = True
             continue
-        if text == "-c":
+        if text.startswith(("--mcp-config=", "--system-prompt-file=")):
+            prefix = text.split("=", 1)[0]
+            redacted.append(f"{prefix}=<redacted>")
+            continue
+        if text in {"-c", "--config"}:
             redacted.append(text)
             check_c_next = True
             continue
         if text.startswith(("-c=", "--config=")) and any(
             term in text.lower() for term in _SENSITIVE_CONFIG_TERMS
         ):
-            redacted.append("-c=<redacted>")
+            prefix = text.split("=", 1)[0]
+            redacted.append(f"{prefix}=<redacted>")
             continue
         redacted.append(text)
     return redacted

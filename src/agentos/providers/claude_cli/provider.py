@@ -287,9 +287,16 @@ def log_cli_run(
     stderr_tail: str,
     mode: Literal["text", "native"],
     usage: Any = None,
+    loggable_command: Callable[[Sequence[str]], Sequence[str]] | None = None,
 ) -> None:
-    """Log one structured diagnostic line per `claude -p` execution with redacted paths."""
-    redacted_argv = redact_argv(argv)
+    """Log one structured diagnostic line per CLI execution with redacted paths and secrets."""
+    pre_redacted: Sequence[str] = argv
+    if callable(loggable_command):
+        try:
+            pre_redacted = loggable_command(argv)
+        except Exception:
+            pre_redacted = argv
+    redacted_argv = redact_argv(pre_redacted)
     actual_model = (
         (init.model if init is not None and init.model else None)
         or requested_model
@@ -1018,6 +1025,7 @@ class ClaudeCliProvider:
                     duration_s=max(0.0, time.monotonic() - mono_started),
                     stderr_tail="".join(stderr_chunks),
                     mode="text",
+                    loggable_command=getattr(self.adapter, "loggable_command", None),
                 )
             if ticket is not None:
                 ticket.release()

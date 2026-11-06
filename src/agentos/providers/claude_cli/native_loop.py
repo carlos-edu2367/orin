@@ -648,17 +648,32 @@ class NativeTurnHandle:
                     self._slots.release()
 
             duration_s = max(0.0, self._clock() - self._t0)
-            self._log_run_fn(
-                mode="native",
-                argv=self._cmd,
-                requested_model=self._requested_model,
-                init=self._parser.init,
-                result=self._parser.result,
-                usage=self._parser.latest_usage(),
-                duration_s=duration_s,
-                exit_code=self._exit_code,
-                stderr_tail="".join(self._stderr_chunks),
-            )
+            loggable_fn = getattr(self._adapter, "loggable_command", None)
+            try:
+                self._log_run_fn(
+                    mode="native",
+                    argv=self._cmd,
+                    requested_model=self._requested_model,
+                    init=self._parser.init,
+                    result=self._parser.result,
+                    usage=self._parser.latest_usage(),
+                    duration_s=duration_s,
+                    exit_code=self._exit_code,
+                    stderr_tail="".join(self._stderr_chunks),
+                    loggable_command=loggable_fn,
+                )
+            except TypeError:
+                self._log_run_fn(
+                    mode="native",
+                    argv=loggable_fn(self._cmd) if callable(loggable_fn) else self._cmd,
+                    requested_model=self._requested_model,
+                    init=self._parser.init,
+                    result=self._parser.result,
+                    usage=self._parser.latest_usage(),
+                    duration_s=duration_s,
+                    exit_code=self._exit_code,
+                    stderr_tail="".join(self._stderr_chunks),
+                )
 
 
 def start_native_turn_for_provider(

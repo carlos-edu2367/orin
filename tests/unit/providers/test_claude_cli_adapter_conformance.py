@@ -105,7 +105,56 @@ def test_claude_argv_unchanged_by_contract_v2(tmp_path: Path) -> None:
     assert "Bearer xyz" not in " ".join(logged_c)
 
 
+def test_redact_argv_and_log_cli_run_cover_all_secret_flags(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    from agentos.providers.claude_cli.provider import log_cli_run
+
+    adapter = ClaudeCliAdapter()
+    logged = adapter.loggable_command(
+        [
+            "codex",
+            "--config",
+            "mcp_servers.orin.bearer_token=my-secret-value",
+            "-c",
+            "client_secret=super-secret-123",
+            "-c",
+            "proxy.password=hunter2",
+            "-c",
+            "custom_header=Bearer eyJhbGci",
+            "--config=client_secret=inline-secret",
+            "--mcp-config=/tmp/secret-mcp.json",
+            "--system-prompt-file=/tmp/secret-prompt.txt",
+        ]
+    )
+    joined = " ".join(logged)
+    assert "my-secret-value" not in joined
+    assert "super-secret-123" not in joined
+    assert "hunter2" not in joined
+    assert "eyJhbGci" not in joined
+    assert "inline-secret" not in joined
+    assert "/tmp/secret-mcp.json" not in joined
+    assert "/tmp/secret-prompt.txt" not in joined
+
+    with caplog.at_level(logging.INFO, logger="agentos.providers.claude_cli"):
+        log_cli_run(
+            argv=["codex", "--custom-secret-flag", "TOP_SECRET_CUSTOM_ARG"],
+            requested_model="gpt-5.4",
+            init=None,
+            result=None,
+            exit_code=0,
+            duration_s=0.1,
+            stderr_tail="",
+            mode="native",
+            loggable_command=lambda a: ["codex", "--custom-secret-flag", "<adapter-redacted>"],
+        )
+    assert "TOP_SECRET_CUSTOM_ARG" not in caplog.text
+    assert "<adapter-redacted>" in caplog.text
+
+
 __all__ = [
     "TestClaudeCliAdapterConformance",
     "test_claude_argv_unchanged_by_contract_v2",
+    "test_redact_argv_and_log_cli_run_cover_all_secret_flags",
 ]
