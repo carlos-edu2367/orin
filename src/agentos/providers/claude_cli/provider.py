@@ -669,6 +669,19 @@ class ClaudeCliProvider:
             )
             safe_cwd = str(ensure_isolated_cwd())
 
+            encode_fn = getattr(self.adapter, "encode_user_turn", None)
+            if callable(encode_fn):
+                encoded_turn = encode_fn(content_blocks).decode("utf-8")
+            else:
+                user_envelope = {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": content_blocks,
+                    },
+                }
+                encoded_turn = json.dumps(user_envelope, ensure_ascii=False) + "\n"
+
             if self._popen_factory is not None:
                 try:
                     proc = self._popen_factory(
@@ -735,18 +748,6 @@ class ClaudeCliProvider:
             stdout_thread.start()
             stderr_thread.start()
 
-            encode_fn = getattr(self.adapter, "encode_user_turn", None)
-            if callable(encode_fn):
-                encoded_turn = encode_fn(content_blocks).decode("utf-8")
-            else:
-                user_envelope = {
-                    "type": "user",
-                    "message": {
-                        "role": "user",
-                        "content": content_blocks,
-                    },
-                }
-                encoded_turn = json.dumps(user_envelope, ensure_ascii=False) + "\n"
             if getattr(proc, "stdin", None) is not None:
                 try:
                     proc.stdin.write(encoded_turn)
@@ -812,10 +813,33 @@ class ClaudeCliProvider:
                 deadline = min(
                     hard_deadline, time.monotonic() + effective_timeout
                 )
+                from agentos.providers.claude_cli.native_loop import (
+                    find_forbidden_item_kind,
+                )
+
+                bad_raw_kind = find_forbidden_item_kind(
+                    self.adapter.capabilities.forbidden_item_kinds,
+                    raw_line=raw_line,
+                )
+                if bad_raw_kind is not None:
+                    kill_process_tree(proc)
+                    raise CliSecurityAbort(
+                        f"CLI emitted forbidden item kind '{bad_raw_kind}' (native tools must remain disabled)."
+                    )
                 cli_events = parser.feed_line(raw_line)
                 should_break = False
 
                 for ev in cli_events:
+                    bad_ev_kind = find_forbidden_item_kind(
+                        self.adapter.capabilities.forbidden_item_kinds,
+                        raw=ev.raw if isinstance(ev.raw, Mapping) else None,
+                        tool_name=ev.tool_name,
+                    )
+                    if bad_ev_kind is not None:
+                        kill_process_tree(proc)
+                        raise CliSecurityAbort(
+                            f"CLI emitted forbidden item kind '{bad_ev_kind}' (native tools must remain disabled)."
+                        )
                     if ev.kind == CliEventKind.INIT:
                         if parser.init is not None:
                             api_key_source = parser.init.api_key_source.strip()

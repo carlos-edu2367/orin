@@ -644,3 +644,275 @@ def test_native_turn_runner_spawns_new_process_with_resume_session_id_for_one_sh
     assert fake_provider.requests[0].resume_session_id is None
     assert fake_provider.requests[1].resume_session_id == "thread_oneshot_99"
     assert fake_provider.handles[0].sent_users == []
+
+
+def test_early_stdin_broken_pipe_and_pre_init_error_result_classified_correctly(
+    tmp_path: Path,
+) -> None:
+    import io
+
+    script = _write_fake_oneshot_script(tmp_path)
+    adapter = _FakeOneShotAdapter(script)
+
+    class _EarlyExitStdin:
+        closed = False
+
+        def write(self, _data: str) -> int:
+            raise OSError(22, "Invalid argument")
+
+        def flush(self) -> None:
+            raise BrokenPipeError("pipe closed")
+
+        def close(self) -> None:
+            self.closed = True
+            raise OSError(22, "Invalid argument")
+
+    class _EarlyExitProc:
+        pid = 99991
+
+        def __init__(self) -> None:
+            self.stdin = _EarlyExitStdin()
+            self.stdout = io.StringIO(
+                json.dumps(
+                    {
+                        "type": "turn.failed",
+                        "error": {"message": "Not logged in. Run codex login"},
+                    }
+                )
+                + "\n"
+            )
+            self.stderr = io.StringIO("auth error\n")
+
+        def poll(self) -> int:
+            return 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 1
+
+        def kill(self) -> None:
+            pass
+
+        def terminate(self) -> None:
+            pass
+
+    provider = ClaudeCliProvider(
+        binary=str(script),
+        adapter=adapter,
+        popen_factory=lambda *a, **kw: _EarlyExitProc(),
+    )
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    req = NativeTurnRequest(
+        model="gpt-5.4",
+        system_prompt="You are a test agent.",
+        user_content=[{"type": "text", "text": "Hello"}],
+        executor=_EchoExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 30.0,
+        max_turns=5,
+        cwd=cwd,
+    )
+    handle = provider.start_native_turn(req)
+    sink = _Sink()
+    with pytest.raises(ProviderTransportError) as exc_info:
+        handle.run_until_result(sink)
+    assert not isinstance(exc_info.value, NativeLoopUnavailable)
+    assert "Not logged in" in str(exc_info.value)
+
+
+def test_uninitialized_non_error_result_still_fails_closed(tmp_path: Path) -> None:
+    import io
+
+    script = _write_fake_oneshot_script(tmp_path)
+    adapter = _FakeOneShotAdapter(script)
+
+    class _NoInitSuccessProc:
+        pid = 99992
+
+        def __init__(self) -> None:
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {"input_tokens": 5, "output_tokens": 2},
+                    }
+                )
+                + "\n"
+            )
+            self.stderr = io.StringIO("")
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+        def terminate(self) -> None:
+            pass
+
+    provider = ClaudeCliProvider(
+        binary=str(script),
+        adapter=adapter,
+        popen_factory=lambda *a, **kw: _NoInitSuccessProc(),
+    )
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    req = NativeTurnRequest(
+        model="gpt-5.4",
+        system_prompt="You are a test agent.",
+        user_content=[{"type": "text", "text": "Hello"}],
+        executor=_EchoExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 30.0,
+        max_turns=5,
+        cwd=cwd,
+    )
+    handle = provider.start_native_turn(req)
+    sink = _Sink()
+    with pytest.raises(NativeLoopUnavailable) as exc_info:
+        handle.run_until_result(sink)
+    assert "before system/init" in str(exc_info.value)
+    assert sink.texts == []
+
+
+def test_raw_forbidden_item_aborts_even_when_translator_ignores_it_and_in_text_stream(
+    tmp_path: Path,
+) -> None:
+    import io
+
+    script = _write_fake_oneshot_script(tmp_path)
+
+    class _SilentForbiddenTranslator(_OneShotTranslator):
+        def feed_line(self, line: str) -> list[CliEvent]:
+            raw = json.loads(line.strip())
+            if raw.get("type") == "item.started":
+                # Simulate a translator that ignores unknown item types and returns []
+                return []
+            return super().feed_line(line)
+
+    class _SilentForbiddenAdapter(_FakeOneShotAdapter):
+        def stream_translator(self) -> _OneShotTranslator:
+            return _SilentForbiddenTranslator()
+
+    adapter = _SilentForbiddenAdapter(script)
+
+    def _make_proc(*_a: Any, **_kw: Any) -> Any:
+        lines = [
+            json.dumps({"type": "thread.started", "thread_id": "t_1"}),
+            json.dumps(
+                {
+                    "type": "item.started",
+                    "item": {"id": "i1", "type": "command_execution", "command": "whoami"},
+                }
+            ),
+            json.dumps(
+                {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}
+            ),
+        ]
+
+        class _P:
+            pid = 99993
+
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO("\n".join(lines) + "\n")
+                self.stderr = io.StringIO("")
+
+            def poll(self) -> int:
+                return 0
+
+            def wait(self, timeout: float | None = None) -> int:
+                return 0
+
+            def kill(self) -> None:
+                pass
+
+            def terminate(self) -> None:
+                pass
+
+        return _P()
+
+    provider = ClaudeCliProvider(
+        binary=str(script),
+        adapter=adapter,
+        popen_factory=_make_proc,
+    )
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    req = NativeTurnRequest(
+        model="gpt-5.4",
+        system_prompt="You are a test agent.",
+        user_content=[{"type": "text", "text": "Hello"}],
+        executor=_EchoExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 30.0,
+        max_turns=5,
+        cwd=cwd,
+    )
+    handle = provider.start_native_turn(req)
+    with pytest.raises(CliSecurityAbort) as exc_info:
+        handle.run_until_result(_Sink())
+    assert "command_execution" in str(exc_info.value)
+
+    # Also verify ClaudeCliProvider.stream() (text fallback) enforces forbidden_item_kinds
+    with pytest.raises(CliSecurityAbort) as exc_info2:
+        list(
+            provider.stream(
+                {
+                    "model": "gpt-5.4",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "tools": [],
+                }
+            )
+        )
+    assert "command_execution" in str(exc_info2.value)
+
+
+def test_encode_user_turn_rejection_happens_before_popen_and_cleans_wiring(
+    tmp_path: Path,
+) -> None:
+    script = _write_fake_oneshot_script(tmp_path)
+
+    class _TextOnlyAdapter(_FakeOneShotAdapter):
+        def encode_user_turn(self, content: list[dict[str, Any]]) -> bytes:
+            for block in content:
+                if block.get("type") != "text":
+                    raise ValueError("Only text blocks are supported by this CLI")
+            return super().encode_user_turn(content)
+
+    adapter = _TextOnlyAdapter(script)
+    spawned = False
+
+    def _spy_popen(*_a: Any, **_kw: Any) -> Any:
+        nonlocal spawned
+        spawned = True
+        raise AssertionError("Popen should not be called when encode_user_turn rejects input")
+
+    provider = ClaudeCliProvider(
+        binary=str(script),
+        adapter=adapter,
+        popen_factory=_spy_popen,
+    )
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    req = NativeTurnRequest(
+        model="gpt-5.4",
+        system_prompt="You are a test agent.",
+        user_content=[{"type": "image", "source": {"type": "base64", "data": "abc"}}],
+        executor=_EchoExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 30.0,
+        max_turns=5,
+        cwd=cwd,
+    )
+    with pytest.raises(NativeLoopUnavailable) as exc_info:
+        provider.start_native_turn(req)
+    assert "Only text blocks are supported" in str(exc_info.value)
+    assert spawned is False
+    for f in adapter.last_wiring_files:
+        assert not f.exists()
+

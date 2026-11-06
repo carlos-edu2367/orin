@@ -1874,7 +1874,7 @@ class NativeTurnRunner:
                                 handle.send_user(
                                     [{"type": "text", "text": CLOSING_INSTRUCTION}]
                                 )
-                            except RuntimeError:
+                            except (RuntimeError, NativeLoopUnavailable):
                                 self.runtime._effect_finished(
                                     self.turn,
                                     provider_effect_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import os
 import queue
@@ -65,6 +66,41 @@ NATIVE_LOOP_VALIDATED: bool = True
 def native_workdir(adapter_name: str = "claude") -> Path:
     slug = str(adapter_name or "claude").strip() or "claude"
     return orin_paths().data / f"{slug}-cli" / "workdir"
+
+
+def find_forbidden_item_kind(
+    forbidden: frozenset[str] | set[str] | Sequence[str],
+    *,
+    raw: Mapping[str, Any] | None = None,
+    raw_line: str | None = None,
+    tool_name: str | None = None,
+) -> str | None:
+    if not forbidden:
+        return None
+    payload = raw
+    if payload is None and raw_line:
+        stripped = raw_line.strip()
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, Mapping):
+                    payload = parsed
+            except Exception:
+                payload = None
+    candidates: list[object] = []
+    if isinstance(payload, Mapping):
+        item_obj = payload.get("item")
+        if isinstance(item_obj, Mapping):
+            candidates.append(item_obj.get("type"))
+            candidates.append(item_obj.get("kind"))
+        candidates.append(payload.get("type"))
+        candidates.append(payload.get("kind"))
+    if tool_name:
+        candidates.append(tool_name)
+    for cand in candidates:
+        if isinstance(cand, str) and cand in forbidden:
+            return cand
+    return None
 
 
 @dataclass(slots=True)
@@ -312,23 +348,17 @@ class NativeTurnHandle:
         sink: NativeTurnSink,
         text_parts: list[str],
     ) -> NativeTurnOutcome | None:
-        forbidden = self._adapter.capabilities.forbidden_item_kinds
-        if forbidden and isinstance(ev.raw, Mapping):
-            item_obj = ev.raw.get("item")
-            candidates = (
-                item_obj.get("type") if isinstance(item_obj, Mapping) else None,
-                item_obj.get("kind") if isinstance(item_obj, Mapping) else None,
-                ev.raw.get("type"),
-                ev.raw.get("kind"),
-                ev.tool_name,
+        bad_kind = find_forbidden_item_kind(
+            self._adapter.capabilities.forbidden_item_kinds,
+            raw=ev.raw if isinstance(ev.raw, Mapping) else None,
+            tool_name=ev.tool_name,
+        )
+        if bad_kind is not None:
+            self.refuse_tools(f"forbidden item: {bad_kind}")
+            self.close()
+            raise CliSecurityAbort(
+                f"CLI emitted forbidden item kind '{bad_kind}' (native tools must remain disabled)."
             )
-            for cand in candidates:
-                if isinstance(cand, str) and cand in forbidden:
-                    self.refuse_tools(f"forbidden item: {cand}")
-                    self.close()
-                    raise CliSecurityAbort(
-                        f"CLI emitted forbidden item kind '{cand}' (native tools must remain disabled)."
-                    )
 
         if ev.kind == CliEventKind.INIT:
             init = self._parser.init
@@ -373,6 +403,24 @@ class NativeTurnHandle:
             )
 
         if self._parser.init is None:
+            if ev.kind == CliEventKind.RATE_LIMIT:
+                if self._parser.rate_limit is not None:
+                    sink.on_rate_limit(self._parser.rate_limit)
+                return None
+            res_before_init = ev.result if ev.result is not None else self._parser.result
+            if (
+                ev.kind == CliEventKind.RESULT
+                and res_before_init is not None
+                and res_before_init.is_error
+                and res_before_init.subtype != "error_max_turns"
+            ):
+                self.refuse_tools("turn round error before init")
+                err_info = self._adapter.classify_error(
+                    res_before_init, self._parser.rate_limit
+                )
+                err = error_info_to_transport_error(err_info)
+                self.close()
+                raise err
             self.refuse_tools("missing init")
             self.close()
             raise NativeLoopUnavailable(
@@ -530,6 +578,16 @@ class NativeTurnHandle:
                 break
 
             idle_deadline = self._clock() + float(IDLE_TIMEOUT_SECONDS)
+            bad_line_kind = find_forbidden_item_kind(
+                self._adapter.capabilities.forbidden_item_kinds,
+                raw_line=line,
+            )
+            if bad_line_kind is not None:
+                self.refuse_tools(f"forbidden item: {bad_line_kind}")
+                self.close()
+                raise CliSecurityAbort(
+                    f"CLI emitted forbidden item kind '{bad_line_kind}' (native tools must remain disabled)."
+                )
             for ev in self._parser.feed_line(line):
                 outcome = self._dispatch_event(ev, sink, text_parts)
                 if outcome is not None:
@@ -846,6 +904,11 @@ def start_native_turn_for_provider(
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         )
         ensure_isolated_cwd(request.cwd)
+        encode_fn = getattr(adapter, "encode_user_turn", None)
+        if callable(encode_fn):
+            initial_payload = encode_fn(request.user_content).decode("utf-8")
+        else:
+            initial_payload = user_event_line(request.user_content)
 
         t0 = provider._clock()
         proc = popen_fn(
@@ -890,15 +953,16 @@ def start_native_turn_for_provider(
         stderr_thread.start()
 
         if proc.stdin is not None:
-            encode_fn = getattr(adapter, "encode_user_turn", None)
-            if callable(encode_fn):
-                initial_payload = encode_fn(request.user_content).decode("utf-8")
-            else:
-                initial_payload = user_event_line(request.user_content)
-            proc.stdin.write(initial_payload)
-            proc.stdin.flush()
+            try:
+                proc.stdin.write(initial_payload)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
             if not (PERSISTENT_STDIN_OK and adapter.capabilities.persistent_stdin):
-                proc.stdin.close()
+                try:
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
 
         from agentos.providers.claude_cli.provider import kill_process_tree, log_cli_run
 
