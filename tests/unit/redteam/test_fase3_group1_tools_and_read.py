@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,10 @@ from agentos.agentic.workspace import ConversationWorkspace
 from agentos.code_mode.system_prompt import CodePromptOptions
 from agentos.providers.cli_tools_mcp import ToolCallRequest
 from tests.unit.agentic.test_native_turn import FakeNativeProvider, FakeStore
+from tests.unit.redteam._platform_tools import (
+    DEFERRED_MUTATION_TOOL,
+    deferred_mutation_arguments,
+)
 
 TURN = {"turn_id": "turn-rt-1", "conversation_id": "conv-rt-1", "user_id": "user-1", "provider": "openrouter", "code_mode": "code"}
 
@@ -235,32 +240,38 @@ def test_deferred_and_discovered_tools_cannot_bypass_permissions_plan_mode_reado
     tmp_path: Path,
 ) -> None:
     """Deferred tools (called directly or after ToolSearch discovery) must still enforce:
-    1. dont_ask permission mode refusal on execution tools (powershell)
-    2. Plan mode read-only barrier on deferred edit tools (notebook_edit)
-    3. Subagent _read_only_mode barrier on deferred mutation tools (powershell / notebook_edit)
+    1. dont_ask permission mode refusal on deferred mutation tools
+    2. Plan mode read-only barrier on deferred mutation tools
+    3. Subagent _read_only_mode barrier on deferred mutation tools
     4. PreToolUse hook deny/stop (HOOK_DENIED)
     """
-    # 1. dont_ask mode with non_interactive_ask="deny" refuses deferred PowerShell discovered via ToolSearch
+    # 1. dont_ask mode with non_interactive_ask="deny" refuses deferred mutation tool discovered via ToolSearch
     ts_perm = _make_code_toolset(
         tmp_path,
         conversation_id="conv-perm",
         permission_mode="dont_ask",
         non_interactive_ask="deny",
     )
-    ts_perm.invoke("ToolSearch", {"query": "select:powershell"})
-    assert "powershell" in ts_perm.discovered_tool_names
-    out_denied = ts_perm.invoke("powershell", {"command": "Write-Output pwn"})
+    ts_perm.invoke("ToolSearch", {"query": f"select:{DEFERRED_MUTATION_TOOL}"})
+    assert DEFERRED_MUTATION_TOOL in ts_perm.discovered_tool_names
+    out_denied = ts_perm.invoke(
+        DEFERRED_MUTATION_TOOL,
+        deferred_mutation_arguments(ts_perm.workspace.root),
+    )
     assert out_denied.status == "failed"
     assert out_denied.error_code in {"PERMISSION_DENIED", "CODE_PERMISSION_DENIED", "TOOL_REFUSED"}
 
-    # 2. Plan mode read-only barrier on deferred mutation tool (powershell)
+    # 2. Plan mode read-only barrier on deferred mutation tool
     ts_plan = _make_code_toolset(
         tmp_path,
         conversation_id="conv-plan",
         permission_mode="plan_mode",
     )
-    ts_plan.discover(["powershell"])
-    out_plan = ts_plan.invoke("powershell", {"command": "Write-Output mutate"})
+    ts_plan.discover([DEFERRED_MUTATION_TOOL])
+    out_plan = ts_plan.invoke(
+        DEFERRED_MUTATION_TOOL,
+        deferred_mutation_arguments(ts_plan.workspace.root),
+    )
     assert out_plan.status == "failed"
     assert out_plan.error_code in {"PLAN_MODE_BLOCKED", "CODE_PLAN_MODE_READONLY", "PERMISSION_DENIED", "TOOL_REFUSED"}
 
@@ -270,8 +281,11 @@ def test_deferred_and_discovered_tools_cannot_bypass_permissions_plan_mode_reado
         conversation_id="conv-ro",
         read_only_mode=True,
     )
-    assert "powershell" not in ts_ro.deferred_tool_names
-    out_ro = ts_ro.invoke("powershell", {"command": "Write-Output mutate"})
+    assert DEFERRED_MUTATION_TOOL not in ts_ro.deferred_tool_names
+    out_ro = ts_ro.invoke(
+        DEFERRED_MUTATION_TOOL,
+        deferred_mutation_arguments(ts_ro.workspace.root),
+    )
     assert out_ro.status == "failed"
 
     # 4. PreToolUse hook blocking a deferred tool (called directly without ToolSearch)
@@ -285,6 +299,41 @@ def test_deferred_and_discovered_tools_cannot_bypass_permissions_plan_mode_reado
     out_hook = ts_hook.invoke("ListFiles", {"path": "."})
     assert out_hook.status == "failed"
     assert out_hook.error_code == "HOOK_DENIED"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell só existe no Windows")
+def test_powershell_specific_barriers_on_windows(tmp_path: Path) -> None:
+    """Explicitly verify PowerShell refusal across dont_ask, plan_mode, and read_only_mode on Windows."""
+    ts_perm = _make_code_toolset(
+        tmp_path,
+        conversation_id="conv-ps-perm",
+        permission_mode="dont_ask",
+        non_interactive_ask="deny",
+    )
+    ts_perm.invoke("ToolSearch", {"query": "select:powershell"})
+    assert "powershell" in ts_perm.discovered_tool_names
+    out_denied = ts_perm.invoke("powershell", {"command": "Write-Output pwn"})
+    assert out_denied.status == "failed"
+    assert out_denied.error_code in {"PERMISSION_DENIED", "CODE_PERMISSION_DENIED", "TOOL_REFUSED"}
+
+    ts_plan = _make_code_toolset(
+        tmp_path,
+        conversation_id="conv-ps-plan",
+        permission_mode="plan_mode",
+    )
+    ts_plan.discover(["powershell"])
+    out_plan = ts_plan.invoke("powershell", {"command": "Write-Output mutate"})
+    assert out_plan.status == "failed"
+    assert out_plan.error_code in {"PLAN_MODE_BLOCKED", "CODE_PLAN_MODE_READONLY", "PERMISSION_DENIED", "TOOL_REFUSED"}
+
+    ts_ro = _make_code_toolset(
+        tmp_path,
+        conversation_id="conv-ps-ro",
+        read_only_mode=True,
+    )
+    assert "powershell" not in ts_ro.deferred_tool_names
+    out_ro = ts_ro.invoke("powershell", {"command": "Write-Output mutate"})
+    assert out_ro.status == "failed"
 
 
 def test_native_turn_runtime_tool_executor_allows_deferred_and_discovered_tools(

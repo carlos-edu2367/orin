@@ -81,6 +81,11 @@ from agentos.providers.cli_queue import (
 )
 from agentos.providers.cli_tools_mcp import ToolCallRequest
 from tests.unit.agentic.test_native_turn import FakeNativeProvider, FakeStore
+from tests.unit.redteam._platform_tools import (
+    DEFERRED_MUTATION_PUBLIC_NAME,
+    DEFERRED_MUTATION_TOOL,
+    deferred_mutation_arguments,
+)
 
 
 def _make_code_toolset(
@@ -158,30 +163,34 @@ def test_surface1_subagents_do_not_inherit_discovered_tools(tmp_path: Path) -> N
     """Discovered tools in parent conversation must never leak to a new subagent toolset."""
     parent_toolset = _make_code_toolset(tmp_path, conversation_id="conv-parent")
     # Discover a deferred tool in parent
-    discovered = parent_toolset.discover(["powershell", "enter_plan_mode"])
-    assert "powershell" in discovered
-    assert "powershell" in parent_toolset.discovered_tool_names
+    discovered = parent_toolset.discover([DEFERRED_MUTATION_TOOL, "enter_plan_mode"])
+    assert DEFERRED_MUTATION_TOOL in discovered
+    assert DEFERRED_MUTATION_TOOL in parent_toolset.discovered_tool_names
 
     # A subagent gets its own freshly created toolset
     subagent_toolset = _make_code_toolset(tmp_path, conversation_id="conv-parent")
-    assert "powershell" not in subagent_toolset.discovered_tool_names
+    assert DEFERRED_MUTATION_TOOL not in subagent_toolset.discovered_tool_names
     assert len(subagent_toolset.discovered_tool_names) == 0
-    assert "powershell" in subagent_toolset.deferred_tool_names
+    assert DEFERRED_MUTATION_TOOL in subagent_toolset.deferred_tool_names
 
 
 def test_surface1_calling_deferred_tool_by_public_or_internal_name_executes_and_discovers(tmp_path: Path) -> None:
     """A model calling a deferred tool directly (by public or internal name) executes and registers discovery."""
     toolset = _make_code_toolset(tmp_path)
-    assert "powershell" in toolset.deferred_tool_names
+    assert DEFERRED_MUTATION_TOOL in toolset.deferred_tool_names
 
-    # Call using public name "PowerShell" without previous ToolSearch
-    outcome_pub = toolset.invoke("PowerShell", {"command": "echo test"})
+    # Call using public name without previous ToolSearch
+    outcome_pub = toolset.invoke(
+        DEFERRED_MUTATION_PUBLIC_NAME,
+        deferred_mutation_arguments(toolset.workspace.root),
+    )
     assert outcome_pub.status == "succeeded"
-    assert "powershell" in toolset.discovered_tool_names
+    assert DEFERRED_MUTATION_TOOL in toolset.discovered_tool_names
 
     # Calling another tool using internal snake_case
     assert "enter_plan_mode" in toolset.deferred_tool_names
     outcome_int = toolset.invoke("enter_plan_mode", {})
+    assert outcome_int.status == "succeeded"
     assert "enter_plan_mode" in toolset.discovered_tool_names
 
 
