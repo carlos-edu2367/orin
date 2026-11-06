@@ -103,6 +103,14 @@ Carlos, com o Orin desta branch (`uv run orin`), modo código, modelo `claude-op
 8. Ao fim e após cancelar no meio, não sobra processo `claude`, porta loopback aberta nem diretório
    `orin-claude-mcp-*` ou `orin-claude-sys-*` no temp.
 
+**Critérios adicionais da Fase 3:**
+
+9. Nenhuma mensagem `[Sistema do Modo Code] ... Rode verify_project` (o `code_completion_gate` não recusa mais a resposta final).
+10. Nenhum evento `auto_todo_settle_*` e os `todos` (`pending` / `in_progress`) permanecem intactos no fim do turno.
+11. A marcação `"Não verificado"` (`Concluído · não verificado` / `code_mode.unverified`) aparece no card/timeline do Modo Code quando houve alteração de arquivos e nenhuma verificação rodou.
+12. `tools_tokens` medido no primeiro `context_updated` do turno no modo código fica **abaixo de 4.000** (tanto no caminho nativo quanto no protocolo de texto).
+13. Com `ORIN_CLI_MAX_PROCESSES=1` e dois subagentes disparados em paralelo, o segundo emite e exibe `"Aguardando vaga na CLI (1º na fila, limite de 1)"` no `AgentPulse` enquanto espera e limpa o aviso assim que começa a rodar.
+
 **Contraprova no texto:** repetir a Tarefa B com `ORIN_CLAUDE_CLI_NATIVE_TOOLS=off` e anotar `cache_read` e
 `cache_creation` por iteração (confirma o item 7 do spike em uso real).
 
