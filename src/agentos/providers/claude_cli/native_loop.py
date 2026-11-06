@@ -22,12 +22,16 @@ from agentos.providers.claude_cli.command import (
     user_event_line,
     write_owner_only_temp,
 )
+import tempfile
+
+from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
 from agentos.providers.claude_cli.errors import (
     CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
     classify_result_error,
+    error_info_to_transport_error,
 )
 from agentos.providers.claude_cli.stream import (
     CliEvent,
@@ -36,6 +40,11 @@ from agentos.providers.claude_cli.stream import (
     CliResult,
     CliUsage,
     StreamJsonParser,
+)
+from agentos.providers.cli_adapter import (
+    CliAgentAdapter,
+    CliStreamTranslator,
+    CliTurnRequest,
 )
 from agentos.providers.cli_tools_mcp import (
     BackgroundTurnToolServer,
@@ -142,7 +151,11 @@ class NativeTurnHandle:
         stdout_thread: threading.Thread,
         stderr_thread: threading.Thread,
         t0: float,
+        adapter: CliAgentAdapter | None = None,
     ) -> None:
+        self._adapter: CliAgentAdapter = (
+            adapter if adapter is not None else ClaudeCliAdapter()
+        )
         self._proc = proc
         self._cmd = cmd
         self._requested_model = requested_model
@@ -161,7 +174,7 @@ class NativeTurnHandle:
         self._stderr_thread = stderr_thread
         self._t0 = t0
 
-        self._parser = StreamJsonParser()
+        self._parser: CliStreamTranslator = self._adapter.stream_translator()
         self._tool_bytes: dict[str, int] = {}
         self._tool_names: dict[str, str] = {}
         self._had_visible_output = False
@@ -368,7 +381,10 @@ class NativeTurnHandle:
             if res is not None:
                 self.refuse_tools("turn round completed")
                 if res.is_error and res.subtype != "error_max_turns":
-                    err = classify_result_error(res, self._parser.rate_limit)
+                    err_info = self._adapter.classify_error(
+                        res, self._parser.rate_limit
+                    )
+                    err = error_info_to_transport_error(err_info)
                     self.close()
                     raise err
                 final_text = "".join(text_parts) or res.result_text
@@ -589,11 +605,12 @@ def start_native_turn_for_provider(
             exhausted=False,
         )
 
+    adapter: CliAgentAdapter = getattr(provider, "adapter", None) or ClaudeCliAdapter()
     effective_base_env = merge_with_system_env(provider._env)
 
     if provider._popen_factory is None:
         ver = claude_cli_version(resolved_binary, env=effective_base_env)
-        if ver is not None and not is_version_validated(ver):
+        if ver is not None and not adapter.version_supported(ver):
             raise NativeLoopUnavailable(
                 f"Claude CLI version {ver} is outside validated range {VALIDATED_CLI_RANGE}",
                 status_code=503,
@@ -617,10 +634,9 @@ def start_native_turn_for_provider(
         bg_server = BackgroundTurnToolServer.start(
             TurnToolServer(wrapped_executor, server_name=request.server_name)
         )
-        mcp_config_path = write_owner_only_temp(
-            bg_server.handle.mcp_config_json(),
-            prefix="orin-claude-mcp-",
-            suffix=".json",
+        mcp_config_path = adapter.write_tool_server_config(
+            bg_server.handle,
+            Path(tempfile.gettempdir()),
         )
         temp_files.append(mcp_config_path)
 
@@ -635,10 +651,10 @@ def start_native_turn_for_provider(
         remaining_s = max(1.0, request.deadline_monotonic - now)
         mcp_tool_timeout_ms = max(1_000, int(remaining_s * 1000))
 
-        isolated_env = build_isolated_claude_env(
+        isolated_env = adapter.environment(
             effective_base_env,
             max_output_tokens=request.max_output_tokens,
-            mcp_tool_timeout_ms=mcp_tool_timeout_ms,
+            tool_timeout_ms=mcp_tool_timeout_ms,
         )
 
         session_kwargs: dict[str, Any] = {}
@@ -647,17 +663,22 @@ def start_native_turn_for_provider(
             if isinstance(flags, Mapping):
                 session_kwargs.update(flags)
 
-        cmd = build_claude_command(
-            binary=resolved_binary,
-            system_prompt_file=prompt_path,
-            model=request.model or provider.model,
-            effort=request.effort,
-            fallback_model=request.fallback_model,
-            max_turns=max(1, int(request.max_turns)),
-            mcp_config_file=mcp_config_path,
-            mcp_server_name=request.server_name,
-            autocompact=request.autocompact,
-            **session_kwargs,
+        cmd = adapter.build_command(
+            CliTurnRequest(
+                binary=resolved_binary,
+                system_prompt_file=prompt_path,
+                model=request.model or provider.model,
+                effort=request.effort,
+                fallback_model=request.fallback_model,
+                max_turns=max(1, int(request.max_turns)),
+                tool_server_config_file=mcp_config_path,
+                tool_server_name=request.server_name,
+                autocompact=request.autocompact,
+                session_id=session_kwargs.get("session_id"),
+                resume_session_id=session_kwargs.get("resume_session_id")
+                or session_kwargs.get("resume"),
+                persist_session=bool(session_kwargs.get("persist_session", False)),
+            )
         )
 
         popen_cmd = (
@@ -739,6 +760,7 @@ def start_native_turn_for_provider(
             stdout_thread=stdout_thread,
             stderr_thread=stderr_thread,
             t0=t0,
+            adapter=adapter,
         )
         wrapped_executor.handle = handle
         return handle

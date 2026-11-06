@@ -1,6 +1,7 @@
 """Native Claude CLI (`claude -p`) adapter package."""
 from __future__ import annotations
 
+from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
 from agentos.providers.claude_cli.catalog import (
     PUBLISHED_CLAUDE_MODEL_CATALOG_URL,
     CatalogModel,
@@ -87,6 +88,7 @@ __all__ = [
     "CLAUDE_CODE_LOCAL_BASE_URL",
     "CLI_SLOTS",
     "CatalogModel",
+    "ClaudeCliAdapter",
     "ClaudeCliModelCatalogClient",
     "ClaudeCliProvider",
     "ClaudeCodeModelCatalogClient",

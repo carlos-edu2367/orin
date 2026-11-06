@@ -35,6 +35,10 @@ STRIPPED_ENV_EXACT: frozenset[str] = frozenset(
         "ANTHROPIC_CUSTOM_HEADERS",
         "ANTHROPIC_MODEL",
         "ANTHROPIC_SMALL_FAST_MODEL",
+        "CLAUDE_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_CODE_SIMPLE",
         "CLAUDE_CODE_USE_BEDROCK",
@@ -55,7 +59,9 @@ STRIPPED_ENV_PREFIXES: tuple[str, ...] = (
     "ANTHROPIC_BEDROCK_",
     "ANTHROPIC_VERTEX_",
     "ANTHROPIC_FOUNDRY_",
+    "CLAUDE_API_",
     "CLAUDE_CODE_",
+    "OPENAI_",
 )
 
 
@@ -342,9 +348,14 @@ def write_owner_only_temp(
     *,
     prefix: str = "orin-claude-",
     suffix: str = ".tmp",
+    directory: Path | None = None,
 ) -> Path:
     """Create a temporary file with owner-only (`0o600`) permissions."""
-    fd, raw_path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    fd, raw_path = tempfile.mkstemp(
+        prefix=prefix,
+        suffix=suffix,
+        dir=str(directory) if directory is not None else None,
+    )
     path = Path(raw_path)
     try:
         try:

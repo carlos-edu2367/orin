@@ -1,29 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import StrEnum
 import json
 from typing import Any, Mapping
 from uuid import uuid4
 
-from agentos.providers.claude_cli.errors import RateLimitState
-from agentos.providers.models import Measurement, ProviderUsage
-
-
-@dataclass(frozen=True, slots=True)
-class StreamUsage(ProviderUsage):
-    """Extended usage snapshot preserving Anthropic prompt cache creation and read metrics."""
-
-    cache_read_input_tokens: int | None = None
-    cache_creation_input_tokens: int | None = None
-
-
-def _int_field(mapping: Mapping[str, Any], *keys: str) -> int:
-    for key in keys:
-        val = mapping.get(key)
-        if isinstance(val, int) and not isinstance(val, bool) and val >= 0:
-            return val
-    return 0
+from agentos.providers.cli_adapter import (
+    CliEvent,
+    CliEventKind,
+    CliInit,
+    CliResult,
+    CliUsage,
+    RateLimitState,
+    StreamUsage,
+)
 
 
 def _parse_block_index(event: Mapping[str, Any]) -> int | None:
@@ -33,103 +22,6 @@ def _parse_block_index(event: Mapping[str, Any]) -> int | None:
     if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
         return raw
     return None
-
-
-@dataclass(frozen=True, slots=True)
-class CliUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    cache_creation_input_tokens: int = 0
-
-    @property
-    def context_tokens(self) -> int:
-        return (
-            self.input_tokens
-            + self.cache_read_input_tokens
-            + self.cache_creation_input_tokens
-        )
-
-    def to_stream_usage(self) -> StreamUsage:
-        total_in = self.context_tokens
-        return StreamUsage(
-            input_tokens=total_in,
-            output_tokens=self.output_tokens,
-            total_tokens=total_in + self.output_tokens,
-            cached_input_tokens=self.cache_read_input_tokens,
-            reasoning_tokens=None,
-            measurement=Measurement.CONFIRMED,
-            cache_read_input_tokens=self.cache_read_input_tokens,
-            cache_creation_input_tokens=self.cache_creation_input_tokens,
-        )
-
-    @classmethod
-    def from_raw(cls, raw: Mapping[str, Any] | None) -> CliUsage:
-        if not isinstance(raw, Mapping):
-            return cls()
-        return cls(
-            input_tokens=_int_field(raw, "input_tokens", "inputTokens"),
-            output_tokens=_int_field(raw, "output_tokens", "outputTokens"),
-            cache_read_input_tokens=_int_field(
-                raw, "cache_read_input_tokens", "cacheReadInputTokens"
-            ),
-            cache_creation_input_tokens=_int_field(
-                raw, "cache_creation_input_tokens", "cacheCreationInputTokens"
-            ),
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class CliInit:
-    session_id: str
-    model: str
-    api_key_source: str
-    mcp_servers: Mapping[str, str]
-    tools: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class CliResult:
-    subtype: str
-    is_error: bool
-    result_text: str
-    stop_reason: str | None
-    num_turns: int
-    duration_ms: int
-    session_id: str
-    api_error_status: int | None
-    usage: CliUsage
-    model_usage: Mapping[str, CliUsage]
-
-
-class CliEventKind(StrEnum):
-    INIT = "init"
-    TEXT_DELTA = "text_delta"
-    THINKING_DELTA = "thinking_delta"
-    THINKING_SIGNATURE = "thinking_signature"
-    TOOL_USE_START = "tool_use_start"
-    TOOL_INPUT_DELTA = "tool_input_delta"
-    TOOL_USE_END = "tool_use_end"
-    ASSISTANT_MESSAGE = "assistant_message"
-    TOOL_RESULT = "tool_result"
-    USAGE = "usage"
-    RATE_LIMIT = "rate_limit"
-    COMPACT_BOUNDARY = "compact_boundary"
-    RESULT = "result"
-    ERROR = "error"
-
-
-@dataclass(frozen=True, slots=True)
-class CliEvent:
-    kind: CliEventKind
-    text: str = ""
-    index: int | None = None
-    tool_use_id: str | None = None
-    tool_name: str | None = None
-    tool_input: Mapping[str, Any] | None = None
-    message_id: str | None = None
-    usage: CliUsage | None = None
-    raw: Mapping[str, Any] = field(default_factory=dict)
 
 
 class StreamJsonParser:

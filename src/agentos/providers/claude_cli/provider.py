@@ -28,13 +28,16 @@ from agentos.providers.claude_cli.command import (
     resolve_claude_binary,
     write_owner_only_temp,
 )
+from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
 from agentos.providers.claude_cli.errors import (
     CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
     RateLimitState,
     classify_result_error,
+    error_info_to_transport_error,
 )
+from agentos.providers.cli_adapter import CliAgentAdapter, CliTurnRequest
 from agentos.providers.claude_cli.stream import (
     CliEvent,
     CliEventKind,
@@ -423,7 +426,11 @@ class ClaudeCliProvider:
         env: Mapping[str, str] | None = None,
         clock: Callable[[], float] = time.monotonic,
         slots: CliSlots | None = None,
+        adapter: CliAgentAdapter | None = None,
     ) -> None:
+        self.adapter: CliAgentAdapter = (
+            adapter if adapter is not None else ClaudeCliAdapter()
+        )
         self.base_url = normalize_anthropic_base_url(
             base_url or DEFAULT_CLAUDE_CLI_BRIDGE_URL
         )
@@ -460,7 +467,18 @@ class ClaudeCliProvider:
         return self._prompt_file_path
 
     def _resolve_binary(self) -> str | None:
-        return _resolve_binary_for_provider(self._binary, self._env)
+        if self._binary:
+            return self._binary
+        facade = sys.modules.get("agentos.provider_catalog.claude_code")
+        patched = (
+            getattr(facade, "_resolve_claude_binary", None)
+            if facade is not None
+            else None
+        )
+        if callable(patched) and patched is not resolve_claude_binary:
+            return patched(self._env)
+        binary, _ = self.adapter.resolve_binary(self._env)
+        return binary
 
     def _effective_slots(self) -> CliSlots:
         return self._slots if self._slots is not None else CLI_SLOTS
@@ -472,12 +490,19 @@ class ClaudeCliProvider:
         record_native_unavailable(binary, now=self._clock(), reason=reason)
 
     def native_turn_available(self, turn: Mapping[str, object]) -> bool:
-        binary = self._resolve_binary()
+        if not self.adapter.capabilities.native_tool_loop:
+            return False
+        if self._binary:
+            binary: str | None = self._binary
+            version = claude_cli_version(binary, env=self._env)
+        else:
+            binary, version = self.adapter.resolve_binary(self._env)
         if not binary:
             return False
         if _is_circuit_open(binary, now=self._clock()):
             return False
-        version = claude_cli_version(binary, env=self._env)
+        if not self.adapter.version_supported(version):
+            return False
         return native_tools_enabled(
             conversation_mode=str(turn.get("conversation_mode") or ""),
             code_mode=is_code_mode_value(turn.get("code_mode")),
@@ -576,7 +601,7 @@ class ClaudeCliProvider:
             else max(effective_timeout * 10.0, 1800.0)
         )
 
-        resolved_binary = _resolve_binary_for_provider(self._binary, self._env)
+        resolved_binary = self._resolve_binary()
         if not resolved_binary:
             raise ProviderTransportError(
                 "Claude Code CLI executable ('claude') was not found on this machine."
@@ -608,7 +633,7 @@ class ClaudeCliProvider:
         stderr_chunks: list[str] = []
         stdout_thread: threading.Thread | None = None
         stderr_thread: threading.Thread | None = None
-        parser = StreamJsonParser()
+        parser = self.adapter.stream_translator()
         mono_started = time.monotonic()
         _ = self._clock()
 
@@ -618,16 +643,36 @@ class ClaudeCliProvider:
                 return
 
             prompt_file = self._ensure_prompt_file(system_prompt)
-            cmd = build_claude_command(
-                binary=resolved_binary,
-                system_prompt_file=prompt_file,
-                model=req_model or None,
-                effort=effort,
-                max_turns=1,
+            facade = sys.modules.get("agentos.provider_catalog.claude_code")
+            patched_build = (
+                getattr(facade, "_build_claude_cli_command", None)
+                if facade is not None
+                else None
             )
-            isolated_env = build_isolated_claude_env(
+            if callable(patched_build) and patched_build is not build_claude_command:
+                cmd = list(
+                    patched_build(
+                        binary=resolved_binary,
+                        system_prompt_file=prompt_file,
+                        model=req_model or None,
+                        effort=effort,
+                        max_turns=1,
+                    )
+                )
+            else:
+                cmd = self.adapter.build_command(
+                    CliTurnRequest(
+                        binary=resolved_binary,
+                        system_prompt_file=prompt_file,
+                        model=req_model or None,
+                        effort=effort,
+                        max_turns=1,
+                    )
+                )
+            isolated_env = self.adapter.environment(
                 merge_with_system_env(self._env),
                 max_output_tokens=max_output_tokens,
+                tool_timeout_ms=None,
             )
             creationflags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -865,9 +910,10 @@ class ClaudeCliProvider:
                             )
                     elif ev.kind == CliEventKind.RESULT:
                         if parser.result is not None and parser.result.is_error:
-                            raise classify_result_error(
+                            err_info = self.adapter.classify_error(
                                 parser.result, parser.rate_limit
                             )
+                            raise error_info_to_transport_error(err_info)
                         if (
                             not saw_stream_text
                             and parser.result is not None

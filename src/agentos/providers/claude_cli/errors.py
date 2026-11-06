@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, tzinfo
 import re
 import time
-from typing import TYPE_CHECKING, Any, Mapping
 
 from agentos.agentic.provider_stream import ProviderKeyRejected
-
-if TYPE_CHECKING:
-    from agentos.providers.claude_cli.stream import CliResult
+from agentos.providers.cli_adapter import (
+    CliErrorInfo,
+    CliErrorKind,
+    CliResult,
+    RateLimitState,
+)
 
 _API_ERROR_STATUS_RE = re.compile(r"\bAPI Error:\s*(\d{3})\b")
 
@@ -31,40 +32,6 @@ class CliSecurityAbort(ProviderTransportError):
 
     def __init__(self, message: str = "") -> None:
         super().__init__(message, status_code=401, exhausted=True)
-
-
-@dataclass(frozen=True, slots=True)
-class RateLimitState:
-    status: str
-    rate_limit_type: str | None = None
-    resets_at: float | None = None
-
-    @classmethod
-    def from_info(cls, info: Mapping[str, Any]) -> RateLimitState:
-        status = str(info.get("status") or "").strip()
-        rl_type = (
-            str(info.get("rateLimitType") or info.get("rate_limit_type") or "").strip()
-            or None
-        )
-        resets_raw = info.get("resetsAt")
-        if resets_raw is None:
-            windows = info.get("unifiedWindows")
-            if isinstance(windows, Mapping):
-                for win in windows.values():
-                    if isinstance(win, Mapping) and win.get("resetsAt") is not None:
-                        resets_raw = win.get("resetsAt")
-                        break
-        resets_at: float | None = None
-        if (
-            isinstance(resets_raw, (int, float))
-            and not isinstance(resets_raw, bool)
-            and resets_raw > 0
-        ):
-            val = float(resets_raw)
-            if val > 10_000_000_000:
-                val /= 1000.0
-            resets_at = val
-        return cls(status=status, rate_limit_type=rl_type, resets_at=resets_at)
 
 
 def format_reset_local(resets_at: float, *, tz: tzinfo | None = None) -> str:
@@ -160,3 +127,69 @@ def classify_result_error(
         status_code=effective_status,
         exhausted=False,
     )
+
+
+def classify_result_error_info(
+    result: CliResult,
+    rate_limit: RateLimitState | None,
+    *,
+    now: float | None = None,
+    tz: tzinfo | None = None,
+) -> CliErrorInfo:
+    transport_err = classify_result_error(result, rate_limit, now=now, tz=tz)
+    status = transport_err.status_code
+    raw_lower = (result.result_text or "").lower()
+
+    if status in (401, 403):
+        kind = CliErrorKind.AUTH
+        retryable = False
+    elif status == 404:
+        kind = CliErrorKind.MODEL_NOT_FOUND
+        retryable = False
+    elif status == 429 or (rate_limit is not None and rate_limit.status.lower() == "rejected"):
+        kind = CliErrorKind.RATE_LIMITED
+        retryable = False
+    elif status == 529 or (status is not None and 500 <= status <= 599):
+        kind = CliErrorKind.TRANSIENT
+        retryable = True
+    elif (
+        "prompt is too long" in raw_lower
+        or "context_length_exceeded" in raw_lower
+        or "too many tokens" in raw_lower
+    ):
+        kind = CliErrorKind.CONTEXT_OVERFLOW
+        retryable = False
+    else:
+        kind = CliErrorKind.FATAL
+        retryable = False
+
+    return CliErrorInfo(
+        kind=kind,
+        status_code=status,
+        user_message=str(transport_err),
+        retryable=retryable,
+        retry_after_seconds=transport_err.retry_after_seconds,
+    )
+
+
+def error_info_to_transport_error(info: CliErrorInfo) -> ProviderTransportError:
+    return ProviderTransportError(
+        info.user_message,
+        status_code=info.status_code,
+        retry_after_seconds=info.retry_after_seconds,
+        exhausted=(info.kind == CliErrorKind.AUTH),
+    )
+
+
+__all__ = [
+    "CliErrorInfo",
+    "CliErrorKind",
+    "CliSecurityAbort",
+    "NativeLoopUnavailable",
+    "ProviderTransportError",
+    "RateLimitState",
+    "classify_result_error",
+    "classify_result_error_info",
+    "error_info_to_transport_error",
+    "format_reset_local",
+]
