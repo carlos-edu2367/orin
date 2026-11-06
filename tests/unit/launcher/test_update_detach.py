@@ -226,6 +226,7 @@ def test_detach_hands_off_lock_to_child_closing_double_click_race_window(
     profile = _installed_profile(tmp_path)
     lock_file = paths.run / "update-apply.lock"
     child_pid = os.getpid()
+    monkeypatch.setattr(cli, "process_is_alive", lambda pid: pid == child_pid)
     spawn_calls: list[list[str]] = []
 
     class _ChildProc:
