@@ -151,13 +151,17 @@ def test_real_claude_guard_covers_the_binary_production_resolves(tmp_path: Path,
 
     bin_dir = tmp_path / "npm"
     bin_dir.mkdir()
-    shim = bin_dir / "claude"
+    # Windows only finds the npm shim through PATHEXT, so it needs the .cmd suffix there.
+    shim = bin_dir / ("claude.cmd" if os.name == "nt" else "claude")
     shim.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
     shim.chmod(0o755)
     exe = bin_dir / "node_modules" / "@anthropic-ai" / "claude-code" / "bin" / "claude.exe"
     exe.parent.mkdir(parents=True)
     exe.write_text("not a real binary", encoding="utf-8")
     monkeypatch.setenv("PATH", str(bin_dir))
+    # The resolver checks these install folders before PATH; on a machine with the real CLI they would win.
+    for name in ("APPDATA", "USERPROFILE", "LOCALAPPDATA", "HOME"):
+        monkeypatch.delenv(name, raising=False)
     guarded = _real_claude_binaries()
     resolved = resolve_claude_binary({"PATH": str(bin_dir)})
     assert resolved is not None
