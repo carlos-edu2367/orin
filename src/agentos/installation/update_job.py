@@ -55,6 +55,7 @@ class UpdateJob:
                 "speed": self._speed, "label": self._label, "version": self._version, "error": self._error,
             }
         if not running and snapshot["state"] in ("idle", "checking", "downloading", "verifying", "extracting", "validating", "ready"):
+            updater.reconcile()
             prepared = updater.prepared_release()
             if prepared is not None:
                 snapshot.update(state="ready", version=prepared.version, notes=prepared.notes, release_url=prepared.release_url, progress=1.0)

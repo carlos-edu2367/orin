@@ -247,6 +247,32 @@ class Updater:
             return None
         return release
 
+    def reconcile(self) -> None:
+        """Clean up prepared/state artifacts after an apply interrupted mid-switch."""
+        active = self.active_version()
+        if active is None:
+            return
+        cleared_prepared = False
+        prepared_path = self.root / PREPARED_FILE
+        if prepared_path.is_file():
+            try:
+                data = json.loads(prepared_path.read_text(encoding="utf-8"))
+                prepared_version = str(data.get("version") or "")
+            except (OSError, ValueError, TypeError, AttributeError):
+                prepared_version = ""
+            if SEMVER.fullmatch(prepared_version) and version_key(active) >= version_key(prepared_version):
+                self._clear_prepared()
+                cleared_prepared = True
+        state = self._read_state()
+        recorded_current = state.get("current")
+        if recorded_current != active and (recorded_current is not None or cleared_prepared):
+            previous = recorded_current if isinstance(recorded_current, str) and SEMVER.fullmatch(recorded_current) else None
+            self._write_state(
+                previous=previous,
+                current=active,
+                attempt={"status": "updated", "version": active},
+            )
+
     def apply_prepared(self) -> UpdateResult:
         """Activate the prepared release (stops the running Orin first, via ``before_activate``)."""
         self._started = self._clock()
@@ -279,7 +305,14 @@ class Updater:
         return self._result("updated", release)
 
     def record_failure(self, version: str, message: str) -> None:
-        self._write_state(attempt={"status": "failed", "version": version, "message": message})
+        state = self._read_state()
+        active = self.active_version() or self.current_version
+        previous = state.get("previous") if isinstance(state.get("previous"), str) else None
+        self._write_state(
+            previous=previous,
+            current=active,
+            attempt={"status": "failed", "version": version, "message": message},
+        )
 
     def last_attempt(self) -> dict[str, Any] | None:
         attempt = self._read_state().get("last_attempt")
