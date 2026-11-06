@@ -136,6 +136,8 @@ class CliSlotQueue:
         self._cond = threading.Condition()
         self._waiting: list[CliSlotTicket] = []
         self._active_by_conv: dict[str, int] = {}
+        self._last_used_seq_by_conv: dict[str, int] = {}
+        self._use_seq: int = 0
         self._active_total: int = 0
         self._compat_tickets: list[CliSlotTicket] = []
 
@@ -209,11 +211,19 @@ class CliSlotQueue:
                     waiting_ticket._last_wait_reason = reason
                 return
             best_idx = 0
-            best_active = self._active_by_conv.get(self._waiting[0].conversation_id, 0)
+            best_conv = self._waiting[0].conversation_id
+            best_key = (
+                self._active_by_conv.get(best_conv, 0),
+                self._last_used_seq_by_conv.get(best_conv, 0),
+            )
             for idx in range(1, len(self._waiting)):
-                cand_active = self._active_by_conv.get(self._waiting[idx].conversation_id, 0)
-                if cand_active < best_active:
-                    best_active = cand_active
+                cand_conv = self._waiting[idx].conversation_id
+                cand_key = (
+                    self._active_by_conv.get(cand_conv, 0),
+                    self._last_used_seq_by_conv.get(cand_conv, 0),
+                )
+                if cand_key < best_key:
+                    best_key = cand_key
                     best_idx = idx
             chosen = self._waiting.pop(best_idx)
             chosen._granted = True
@@ -222,6 +232,9 @@ class CliSlotQueue:
             self._active_by_conv[chosen.conversation_id] = (
                 self._active_by_conv.get(chosen.conversation_id, 0) + 1
             )
+            if chosen.conversation_id:
+                self._use_seq += 1
+                self._last_used_seq_by_conv[chosen.conversation_id] = self._use_seq
             self._cond.notify_all()
 
     def _wait_for_ticket(self, ticket: CliSlotTicket, timeout: float) -> bool:
@@ -250,16 +263,26 @@ class CliSlotQueue:
             if ticket not in self._waiting:
                 return 0
             sim_active = dict(self._active_by_conv)
+            sim_last_used = dict(self._last_used_seq_by_conv)
+            sim_seq = self._use_seq
             remaining = list(self._waiting)
             step = 0
             while remaining:
                 step += 1
                 best_idx = 0
-                best_count = sim_active.get(remaining[0].conversation_id, 0)
+                best_conv = remaining[0].conversation_id
+                best_key = (
+                    sim_active.get(best_conv, 0),
+                    sim_last_used.get(best_conv, 0),
+                )
                 for idx in range(1, len(remaining)):
-                    cand_count = sim_active.get(remaining[idx].conversation_id, 0)
-                    if cand_count < best_count:
-                        best_count = cand_count
+                    cand_conv = remaining[idx].conversation_id
+                    cand_key = (
+                        sim_active.get(cand_conv, 0),
+                        sim_last_used.get(cand_conv, 0),
+                    )
+                    if cand_key < best_key:
+                        best_key = cand_key
                         best_idx = idx
                 picked = remaining.pop(best_idx)
                 if picked is ticket:
@@ -267,6 +290,9 @@ class CliSlotQueue:
                 sim_active[picked.conversation_id] = (
                     sim_active.get(picked.conversation_id, 0) + 1
                 )
+                if picked.conversation_id:
+                    sim_seq += 1
+                    sim_last_used[picked.conversation_id] = sim_seq
             return 0
 
     def _ticket_wait_reason(self, ticket: CliSlotTicket) -> Literal["limit", "memory"] | None:
@@ -292,6 +318,9 @@ class CliSlotQueue:
                     self._active_by_conv.pop(ticket.conversation_id, None)
                 else:
                     self._active_by_conv[ticket.conversation_id] = prev - 1
+                if ticket.conversation_id:
+                    self._use_seq += 1
+                    self._last_used_seq_by_conv[ticket.conversation_id] = self._use_seq
             else:
                 try:
                     self._waiting.remove(ticket)
@@ -369,7 +398,7 @@ def acquire_cli_slot(
     if ticket.wait(0.0):
         return ticket
 
-    last_position: int | None = None
+    last_wait_state: tuple[int, str | None] | None = None
     step = max(0.005, float(poll_seconds))
     try:
         while True:
@@ -377,10 +406,11 @@ def acquire_cli_slot(
                 ticket.release()
                 return None
             pos = ticket.position()
-            if pos > 0 and pos != last_position:
-                last_position = pos
+            reason = ticket.wait_reason()
+            if pos > 0 and (pos, reason) != last_wait_state:
+                last_wait_state = (pos, reason)
                 if on_wait is not None:
-                    _invoke_on_wait(on_wait, pos, q.limit, ticket.wait_reason())
+                    _invoke_on_wait(on_wait, pos, q.limit, reason)
             if ticket.wait(step):
                 if cancel_check is not None and cancel_check():
                     ticket.release()

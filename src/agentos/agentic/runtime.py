@@ -909,7 +909,7 @@ class AgenticTurnRuntime:
 
             last_empty_thinking_flush: float | None = None
             last_progress_at = self.clock()
-            last_waiting_position: int | None = None
+            last_waiting_state: tuple[int, str | None] | None = None
             try:
                 for raw_event in events:
                     if self.cancelled(turn):
@@ -923,14 +923,15 @@ class AgenticTurnRuntime:
                     if event.kind is StreamKind.WAITING:
                         last_progress_at = now_clock
                         pos = event.queue_position
-                        if pos is not None and pos != last_waiting_position:
-                            last_waiting_position = pos
+                        wait_reason = event.wait_reason or ("limit" if event.queue_limit is not None else "memory")
+                        if pos is not None and (pos, wait_reason) != last_waiting_state:
+                            last_waiting_state = (pos, wait_reason)
                             self._life(
                                 turn,
                                 "provider_waiting",
                                 position=pos,
                                 limit=event.queue_limit,
-                                reason=event.wait_reason or ("limit" if event.queue_limit is not None else "memory"),
+                                reason=wait_reason,
                             )
                         continue
                     if event.kind is StreamKind.KEEPALIVE:

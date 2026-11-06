@@ -1689,13 +1689,20 @@ class NativeTurnRunner:
                 if self.runtime._fallback_models
                 else None
             )
+            last_waiting_state: list[tuple[int, str | None] | None] = [None]
+
             def _on_waiting_slot(position: int, limit: int | None = None, reason: str | None = None) -> None:
+                eff_reason = reason or ("memory" if limit is None else "limit")
+                state_key = (int(position), eff_reason)
+                if state_key == last_waiting_state[0]:
+                    return
+                last_waiting_state[0] = state_key
                 self.runtime._life(
                     self.turn,
                     "provider_waiting",
                     position=position,
                     limit=limit,
-                    reason=reason or ("memory" if limit is None else "limit"),
+                    reason=eff_reason,
                 )
 
             req = NativeTurnRequest(

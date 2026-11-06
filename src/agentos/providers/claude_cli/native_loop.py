@@ -244,6 +244,10 @@ class NativeTurnHandle:
                             or self._active_tool_calls > 0
                             or self._holds_slot
                             or self._cancel_check()
+                            or (
+                                self._deadline_monotonic is not None
+                                and self._clock() >= self._deadline_monotonic
+                            )
                         ),
                         on_wait=self._on_waiting_slot,
                         queue=self._slots,
@@ -263,7 +267,14 @@ class NativeTurnHandle:
                         self._ticket = new_ticket
                         self._holds_slot = True
                 else:
-                    if self._closed or self._cancel_check():
+                    if (
+                        self._closed
+                        or self._cancel_check()
+                        or (
+                            self._deadline_monotonic is not None
+                            and self._clock() >= self._deadline_monotonic
+                        )
+                    ):
                         break
 
     def refuse_tools(self, reason: str) -> None:
@@ -648,16 +659,41 @@ def start_native_turn_for_provider(
             )
 
     slots = provider._effective_slots()
+
+    def _slot_cancel_check() -> bool:
+        if request.cancel_check is not None and request.cancel_check():
+            return True
+        if request.deadline_monotonic is not None and provider._clock() >= request.deadline_monotonic:
+            return True
+        return False
     ticket = acquire_cli_slot(
         request.conversation_id,
-        cancel_check=request.cancel_check,
+        cancel_check=_slot_cancel_check,
         on_wait=request.on_waiting_slot,
         queue=slots,
     )
     if ticket is None:
+        if (
+            request.deadline_monotonic is not None
+            and provider._clock() >= request.deadline_monotonic
+            and not (request.cancel_check is not None and request.cancel_check())
+        ):
+            raise ProviderTransportError(
+                "TURN_DEADLINE_EXCEEDED: Turn deadline exceeded before CLI slot was acquired",
+                status_code=None,
+                exhausted=False,
+            )
         raise NativeLoopUnavailable(
             "Turn cancelled while waiting for a Claude CLI process slot.",
             status_code=499,
+            exhausted=False,
+        )
+
+    if request.deadline_monotonic is not None and provider._clock() >= request.deadline_monotonic:
+        ticket.release()
+        raise ProviderTransportError(
+            "TURN_DEADLINE_EXCEEDED: Turn deadline exceeded after acquiring CLI slot",
+            status_code=None,
             exhausted=False,
         )
 

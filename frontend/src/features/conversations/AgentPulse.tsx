@@ -82,9 +82,13 @@ export const STALE_RESPONDING_THRESHOLD_MS = 2500
 export function pulseDetailFromEvents(
   events: ConversationActivityEvent[],
 ): string | undefined {
-  const last = events.at(-1)
-  if (!last || !last.waitingForSlot) return undefined
-  return last.summary || undefined
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type.startsWith('context.')) continue
+    if (!event.waitingForSlot) return undefined
+    return event.summary || undefined
+  }
+  return undefined
 }
 
 export function formatElapsed(elapsedSec: number): string {
