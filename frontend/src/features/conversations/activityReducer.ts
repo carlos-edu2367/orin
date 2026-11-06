@@ -136,13 +136,7 @@ export function settleTodos(
   todos: TodoItem[],
   outcome: 'completed' | 'failed' | 'cancelled' = 'completed',
 ): TodoItem[] {
-  if (todos.length === 0) return todos
-  if (outcome === 'completed') {
-    if (!todos.some((item) => item.status !== 'completed')) return todos
-    return todos.map((item) =>
-      item.status === 'completed' ? item : { ...item, status: 'completed' },
-    )
-  }
+  if (todos.length === 0 || outcome === 'completed') return todos
   if (!todos.some((item) => item.status === 'in_progress')) return todos
   return todos.map((item) =>
     item.status === 'in_progress' ? { ...item, status: 'pending' } : item,

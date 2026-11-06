@@ -1833,9 +1833,6 @@ class NativeTurnRunner:
                     self.runtime._emit_optimistic_lie_retraction(
                         self.turn, sink.speak_state
                     )
-                    self.runtime._settle_remaining_todos(
-                        self.turn, str(self.turn_id)
-                    )
                     verification = self.runtime._code_verification(self.turn)
                     if verification is not None:
                         self.runtime._life(

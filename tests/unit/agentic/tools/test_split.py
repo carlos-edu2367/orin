@@ -49,7 +49,7 @@ FAMILIES = [
     ("mcp.admin", "McpTools", ("search_mcp_tools", "call_mcp_tool", "configure_mcp")),
     ("orin.plugins_admin", "PluginTools", ("install_plugin", "list_plugins")),
     ("orin.projects", "ProjectTools", ("list_projects", "propose_code_session")),
-    ("planning.todo", "TodoTools", ("todo_write", "complete_remaining_todos")),
+    ("planning.todo", "TodoTools", ("todo_write",)),
     ("planning.tasks", "TaskTools", ("task_create", "task_update", "task_get", "task_list")),
     ("planning.plan_mode", "PlanModeTools", ("enter_plan_mode", "exit_plan_mode", "write_contract")),
     ("interaction.ask_user", "AskUserTools", ("ask_user",)),

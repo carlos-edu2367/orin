@@ -1168,23 +1168,6 @@ def test_code_completion_gate_accepts_direct_test_run_command_and_no_recipe_veri
     assert tools.code_verification_status() == "verified"
 
 
-def test_complete_remaining_todos_marks_pending_and_in_progress_items_completed(toolset: AgentToolset) -> None:
-    toolset.invoke(
-        "todo_write",
-        {
-            "todos": [
-                {"id": "1", "content": "Criar arquivo", "status": "completed"},
-                {"id": "2", "content": "Rodar testes", "status": "in_progress"},
-                {"id": "3", "content": "Validar build", "status": "pending"},
-            ]
-        },
-    )
-    settled = toolset.complete_remaining_todos()
-    assert settled is not None
-    assert [item["status"] for item in settled] == ["completed", "completed", "completed"]
-    assert toolset.complete_remaining_todos() is None
-
-
 def test_read_process_output_and_stop_process_integrate_with_preview_servers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
 

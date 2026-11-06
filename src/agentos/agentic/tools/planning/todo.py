@@ -75,21 +75,6 @@ class TodoTools:
             },
         }
 
-    def complete_remaining_todos(self, *, failed: bool = False, state: str | None = None) -> list[dict[str, Any]] | None:
-        """Mark any remaining pending or in_progress tasks as completed when a turn finishes successfully."""
-        if failed or (state is not None and str(state).lower() in {"failed", "cancelled", "blocked", "error"}):
-            return None
-        if not self._todos:
-            return None
-        if not any(str(item.get("status") or "") != "completed" for item in self._todos):
-            return None
-        for item in self._todos:
-            if str(item.get("status") or "") != "completed":
-                item["status"] = "completed"
-        if callable(self._on_todo_update):
-            self._on_todo_update(list(self._todos))
-        return [dict(item) for item in self._todos]
-
 
 class TodoItem(ToolInput):
     content: str = Field(description="The task, in imperative form.")

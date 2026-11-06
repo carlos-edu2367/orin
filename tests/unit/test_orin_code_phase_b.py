@@ -589,7 +589,7 @@ def test_run_command_cwd_prefix_artifacts_read_registration_and_todo_failure_gua
     overwrite_res = toolset.invoke("write_file", {"path": "frontend/gen.txt", "content": "v2\n"})
     assert overwrite_res.status == "succeeded"
 
-    # 2. complete_remaining_todos does NOT mark tasks completed when failed=True
+    # 2. todos preserve their statuses as written
     toolset.invoke(
         "todo_write",
         {
@@ -600,8 +600,6 @@ def test_run_command_cwd_prefix_artifacts_read_registration_and_todo_failure_gua
             ]
         },
     )
-    assert toolset.complete_remaining_todos(failed=True) is None
-    assert toolset.complete_remaining_todos(state="cancelled") is None
     assert [t["status"] for t in toolset._todos] == ["completed", "in_progress", "pending"]
 
 

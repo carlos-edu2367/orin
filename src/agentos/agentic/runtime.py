@@ -1335,7 +1335,6 @@ class AgenticTurnRuntime:
                     private_result={"outcome": "final"},
                 )
                 self._emit_optimistic_lie_retraction(turn, speak_state)
-                self._settle_remaining_todos(turn, str(turn_id))
                 verification = self._code_verification(turn)
                 if verification is not None:
                     self._life(turn, "code_verification", status=verification)
@@ -2554,34 +2553,6 @@ class AgenticTurnRuntime:
             ],
         )
         return results
-
-    def _settle_remaining_todos(self, turn: dict[str, object], turn_id: str, *, failed: bool = False) -> None:
-        if failed or str(turn.get("state") or "").lower() in {"failed", "cancelled", "blocked", "error"}:
-            return
-        complete_todos_fn = getattr(self.toolset, "complete_remaining_todos", None)
-        if not callable(complete_todos_fn):
-            return
-        try:
-            settled_todos = complete_todos_fn()
-            if settled_todos:
-                self._life(
-                    turn,
-                    "tool_finished",
-                    tool_name="todo_write",
-                    invocation_id=f"auto_todo_settle_{turn_id}",
-                    status="succeeded",
-                    summary=f"Lista de tarefas ({len(settled_todos)}/{len(settled_todos)} concluídas)",
-                    tool_payload={
-                        "todos": settled_todos,
-                        "total": len(settled_todos),
-                        "completed": len(settled_todos),
-                        "in_progress": 0,
-                        "pending": 0,
-                        "tool_kind": "planning",
-                    },
-                )
-        except Exception:
-            pass
 
     def _load(self, turn_id: str) -> dict[str, object]:
         if hasattr(self.store, "load"):

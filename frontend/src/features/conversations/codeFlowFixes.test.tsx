@@ -15,39 +15,12 @@ import { renderActivityGroup } from './ActivityStream'
 import type { ApiClient } from '../../api/client'
 
 describe('Code Flow Bug Fixes (Frontend)', () => {
-  it('settleTodos transitions pending and in_progress todos to completed on terminal turn state', () => {
+  it('settleTodos leaves todos untouched when the turn completes', () => {
     const todos: TodoItem[] = [
-      { id: '1', content: 'Create component', status: 'completed' },
-      { id: '2', content: 'Run tests', status: 'in_progress', activeForm: 'Running tests' },
-      { id: '3', content: 'Verify build', status: 'pending' },
+      { id: '1', content: 'a', status: 'in_progress', activeForm: 'a' },
+      { id: '2', content: 'b', status: 'pending', activeForm: 'b' },
     ]
-    const settled = settleTodos(todos, 'completed')
-    expect(settled.map((t) => t.status)).toEqual(['completed', 'completed', 'completed'])
-
-    const withTodoEvent = applyActivityEvent(createActivityState(), {
-      eventId: 'evt-todo-1',
-      cursor: '1',
-      type: 'todo.updated',
-      kind: 'tool',
-      state: 'working',
-      agentId: 'main',
-      turnId: 'turn-1',
-      summary: 'Updated todos',
-      todos,
-    })
-    expect(withTodoEvent.todos.some((t) => t.status === 'in_progress')).toBe(true)
-
-    const afterTurnCompleted = applyActivityEvent(withTodoEvent, {
-      eventId: 'evt-complete-1',
-      cursor: '2',
-      type: 'turn.completed',
-      kind: 'lifecycle',
-      state: 'completed',
-      agentId: 'main',
-      turnId: 'turn-1',
-      summary: 'Turn completed',
-    })
-    expect(afterTurnCompleted.todos.every((t) => t.status === 'completed')).toBe(true)
+    expect(settleTodos(todos, 'completed')).toBe(todos)
   })
 
   it('activityReducer snapshot settles todos when latest state is terminal', () => {
@@ -79,7 +52,7 @@ describe('Code Flow Bug Fixes (Frontend)', () => {
         },
       ],
     })
-    expect(state.todos.map((t) => t.status)).toEqual(['completed', 'completed'])
+    expect(state.todos.map((t) => t.status)).toEqual(['completed', 'in_progress'])
   })
 
   it('TodoBar hides pulsing active indicator and collapses by default when isTurnRunning is false or todos > 4', () => {
