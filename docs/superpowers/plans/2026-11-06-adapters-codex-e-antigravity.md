@@ -101,13 +101,13 @@
   - Os campos `CliCapabilities.reports_tool_inventory: bool = True` e `CliCapabilities.forbidden_item_kinds: frozenset[str] = frozenset()`.
   - `CliTurnRequest.prompt_via_stdin_once: bool`. É derivado de `capabilities.persistent_stdin`, não configurado à mão.
 
-- [ ] **Step 1: Estenda a suíte de conformidade.**
+- [x] **Step 1: Estenda a suíte de conformidade.**
   - `test_wiring_never_puts_secret_in_argv`: o token de `FakeToolServerHandle` não aparece em `wiring.argv` nem em `loggable_command(build_command(...))`.
   - `test_encode_user_turn_is_single_line_utf8`: a saída termina em `\n` e não contém outro `\n`.
-- [ ] **Step 2: Rode e veja falhar.** `uv run pytest tests/unit/providers -q`.
-- [ ] **Step 3: Implemente o contrato v2 e migre o `ClaudeCliAdapter`.** O `build_command` do Claude continua gerando o argv atual, byte a byte. Para provar, crie `test_claude_argv_unchanged_by_contract_v2`, que compara com um snapshot gerado antes da mudança.
-- [ ] **Step 4: Rode `tests/unit/providers` e `tests/unit/redteam`.** Esperado: tudo passa.
-- [ ] **Step 5: Commit.** `refactor(providers): CliAgentAdapter v2 with tool-server wiring and user-turn encoding`
+- [x] **Step 2: Rode e veja falhar.** `uv run pytest tests/unit/providers -q`.
+- [x] **Step 3: Implemente o contrato v2 e migre o `ClaudeCliAdapter`.** O `build_command` do Claude continua gerando o argv atual, byte a byte. Para provar, crie `test_claude_argv_unchanged_by_contract_v2`, que compara com um snapshot gerado antes da mudança.
+- [x] **Step 4: Rode `tests/unit/providers` e `tests/unit/redteam`.** Esperado: tudo passa.
+- [x] **Step 5: Commit.** `refactor(providers): CliAgentAdapter v2 with tool-server wiring and user-turn encoding`
 
 ### Task 2: Loop nativo sem pressupostos do Claude
 
@@ -125,15 +125,15 @@
   - Modo one-shot: com `persistent_stdin=False`, o loop escreve `encode_user_turn`, fecha o stdin e não aceita `send_user` depois (levanta `NativeLoopUnavailable("one-shot")`). O próximo turno abre outro processo com `resume_session_id`.
   - Com `reports_tool_inventory=False`, a checagem de segurança "init antes de result" passa a aceitar o primeiro evento `INIT` sem `tools`. Um evento de item cujo tipo esteja em `forbidden_item_kinds` dispara `CliSecurityAbort`.
 
-- [ ] **Step 1: Testes com um adapter falso one-shot** (em `tests/unit/providers/test_native_loop_one_shot.py`):
+- [x] **Step 1: Testes com um adapter falso one-shot** (em `tests/unit/providers/test_native_loop_one_shot.py`):
   - o stdin é fechado depois do primeiro write;
   - `send_user` levanta erro;
   - um item proibido aborta o turno;
   - uma chamada MCP entre o init e o result é executada pelo `ToolExecutor`.
-- [ ] **Step 2: Rode e veja falhar.**
-- [ ] **Step 3: Implemente.** O que for genérico pode ir para `src/agentos/providers/cli_runtime/`, se ajudar a ler. Se mover algo, deixe reexports em `claude_cli/` para os imports atuais continuarem funcionando.
-- [ ] **Step 4: Rode a suíte inteira.** `uv run pytest -q`. Esperado: 0 falhas novas.
-- [ ] **Step 5: Commit.** `refactor(native-loop): support one-shot CLIs and adapter-specific workdirs`
+- [x] **Step 2: Rode e veja falhar.**
+- [x] **Step 3: Implemente.** O que for genérico pode ir para `src/agentos/providers/cli_runtime/`, se ajudar a ler. Se mover algo, deixe reexports em `claude_cli/` para os imports atuais continuarem funcionando.
+- [x] **Step 4: Rode a suíte inteira.** `uv run pytest -q`. Esperado: 0 falhas novas.
+- [x] **Step 5: Commit.** `refactor(native-loop): support one-shot CLIs and adapter-specific workdirs`
 
 ### Task 3: Roteamento de provedor e configuração sem API key
 
@@ -149,13 +149,13 @@
 - Produces: `cli_adapter_for(provider: str, base_url: str | None) -> CliAgentAdapter | None`.
 - Os ids `openai-codex` e `google-antigravity` são válidos sem API key e não exigem `base_url`.
 
-- [ ] **Step 1: Testes.**
+- [x] **Step 1: Testes.**
   - `cli_adapter_for("anthropic", "http://127.0.0.1:18447")` devolve um `ClaudeCliAdapter`;
   - `cli_adapter_for("openai-codex", None)` devolve um `CodexCliAdapter`. Até a Task A3, use um stub registrado no teste;
   - salvar a configuração `openai-codex` sem chave não dá 400.
-- [ ] **Step 2: Rode e veja falhar.** Depois implemente e faça `provider_stream` usar `cli_adapter_for` em vez do `if is_claude_cli_bridge_url`.
-- [ ] **Step 3: Rode.** `uv run pytest tests/unit/providers tests/unit/agentic -q`. Esperado: passa.
-- [ ] **Step 4: Commit.** `feat(providers): registry for subscription CLI providers`
+- [x] **Step 2: Rode e veja falhar.** Depois implemente e faça `provider_stream` usar `cli_adapter_for` em vez do `if is_claude_cli_bridge_url`.
+- [x] **Step 3: Rode.** `uv run pytest tests/unit/providers tests/unit/agentic -q`. Esperado: passa.
+- [x] **Step 4: Commit.** `feat(providers): registry for subscription CLI providers`
 
 ## Fase A — Codex
 
@@ -165,14 +165,14 @@
 - Create: `docs/agent_memory/2026-11-xx-codex-cli-spike.md`
 - Create: `tests/unit/providers/codex_cli/fixtures/*.jsonl`
 
-- [ ] **Step 1: Termos.** Leia os termos do plano ChatGPT do Carlos sobre o uso do `codex exec` por outro programa local e registre a conclusão, com link, no doc do spike. Se proibirem, pare e leve ao Carlos.
-- [ ] **Step 2: Binário.** Hoje há só o app desktop (`WindowsApps\OpenAI.Codex_*`) e o `codex` não está no PATH. Registre:
+- [x] **Step 1: Termos.** Leia os termos do plano ChatGPT do Carlos sobre o uso do `codex exec` por outro programa local e registre a conclusão, com link, no doc do spike. Se proibirem, pare e leve ao Carlos.
+- [x] **Step 2: Binário.** Hoje há só o app desktop (`WindowsApps\OpenAI.Codex_*`) e o `codex` não está no PATH. Registre:
   - de onde vem o binário: `npm i -g @openai/codex` ou o executável que o app traz;
   - o caminho no Windows;
   - a saída de `codex --version`;
   - se `codex exec` usa o login do app (o `~/.codex/auth.json` já existe).
-- [ ] **Step 3: Autorização.** Peça ao Carlos autorização para no máximo 6 chamadas reais, com o modelo mais barato do `models_cache.json` e `model_reasoning_effort=low`.
-- [ ] **Step 4: Grave os fixtures**, rodando com o servidor MCP de eco (`tests/fixtures/mcp_echo_server.py`) e com o isolamento da D4:
+- [x] **Step 3: Autorização.** Peça ao Carlos autorização para no máximo 6 chamadas reais, com o modelo mais barato do `models_cache.json` e `model_reasoning_effort=low`.
+- [x] **Step 4: Grave os fixtures**, rodando com o servidor MCP de eco (`tests/fixtures/mcp_echo_server.py`) e com o isolamento da D4:
   - `simple_text.jsonl`;
   - `tool_call.jsonl` (uma chamada ao MCP `orin`);
   - `resume.jsonl` (`exec resume <thread_id>`);
@@ -181,8 +181,8 @@
   - `bad_model.jsonl`.
 
   Registre o código de saída de cada um e a forma de `item.updated`, `turn.failed` e `error`, que a doc não descreve.
-- [ ] **Step 5: Confirme as chaves `-c` no argv real.** Confira cada uma: `mcp_servers.orin.*`, `model_instructions_file`, `features.shell_tool`, `web_search` e `model_reasoning_effort`. Também confira se o `resume` aceita os mesmos `-c` e o `--json`. Toda divergência da D4 a D6 vira uma nota "D4 corrigida: …" no topo deste plano antes da A1.
-- [ ] **Step 6: Commit** dos fixtures e do doc (sem tokens; confira com `grep -ri bearer`).
+- [x] **Step 5: Confirme as chaves `-c` no argv real.** Confira cada uma: `mcp_servers.orin.*`, `model_instructions_file`, `features.shell_tool`, `web_search` e `model_reasoning_effort`. Também confira se o `resume` aceita os mesmos `-c` e o `--json`. Toda divergência da D4 a D6 vira uma nota "D4 corrigida: …" no topo deste plano antes da A1.
+- [x] **Step 6: Commit** dos fixtures e do doc (sem tokens; confira com `grep -ri bearer`).
 
 ### Task A1: Comando, ambiente e catálogo do Codex
 
@@ -200,14 +200,14 @@
   - `codex_version(binary) -> tuple[int, int, int] | None` e `MIN_CODEX_VERSION`, que é a versão gravada na A0.
   - `discover_codex_models(codex_home: Path) -> tuple[CliModelInfo, ...]` (D7).
 
-- [ ] **Step 1: Testes.**
+- [x] **Step 1: Testes.**
   - argv exato para um turno novo e para um `resume`;
   - o token só aparece no env, nunca no argv;
   - `OPENAI_API_KEY` é removida;
   - `models_cache.json` com 10 modelos (fixture copiada da forma real, só com `slug`, `display_name`, `visibility` e `supported_reasoning_levels`) gera os `CliModelInfo` filtrados;
   - um JSON corrompido devolve a lista fixa.
-- [ ] **Step 2: Rode, veja falhar, implemente e rode de novo.** Esperado: passa.
-- [ ] **Step 3: Commit.** `feat(codex-cli): isolated command, env and model catalog`
+- [x] **Step 2: Rode, veja falhar, implemente e rode de novo.** Esperado: passa.
+- [x] **Step 3: Commit.** `feat(codex-cli): isolated command, env and model catalog`
 
 ### Task A2: Tradutor JSONL do Codex
 
@@ -230,14 +230,14 @@
 
   Os tipos de item proibidos (`command_execution`, `file_change` e `web_search`) passam para o loop com `raw["item"]["type"]` preservado.
 
-- [ ] **Step 1: Testes com os fixtures da A0.**
+- [x] **Step 1: Testes com os fixtures da A0.**
   - o texto final do `simple_text` é igual ao gravado;
   - `tool_call` produz exatamente uma chamada com o nome e os argumentos gravados;
   - `turn.completed` com `input_tokens=24763` e `cached_input_tokens=24448` dá `CliUsage(input_tokens=315, cache_read_input_tokens=24448)`;
   - uma linha não-JSON vira `ERROR` sem exceção;
   - um `item.updated` repetido com o mesmo texto não duplica `TEXT_DELTA`.
-- [ ] **Step 2: Rode, veja falhar, implemente e rode de novo.** Esperado: passa.
-- [ ] **Step 3: Commit.** `feat(codex-cli): JSONL stream translator`
+- [x] **Step 2: Rode, veja falhar, implemente e rode de novo.** Esperado: passa.
+- [x] **Step 3: Commit.** `feat(codex-cli): JSONL stream translator`
 
 ### Task A3: `CodexCliAdapter`, classificação de erro e conformidade
 
@@ -260,11 +260,11 @@
 | rede ou 5xx | `TRANSIENT` (retryable) |
 | o resto | `FATAL` |
 
-- [ ] **Step 1: Teste de conformidade.** Ele instancia `AdapterFixtures(adapter=CodexCliAdapter(), simple_text=…, tool_call=…, error_scenarios=[auth, rate_limit, bad_model])` e roda a suíte compartilhada.
-- [ ] **Step 2: Rode, veja falhar, implemente e registre** `"openai-codex"` no `cli_registry`.
-- [ ] **Step 3: Teste de ponta a ponta com uma CLI falsa.** Siga o modelo de `tests/unit/providers/claude_cli/fake_claude.py` e crie `fake_codex.py`, que reproduz os fixtures e chama o MCP real do turno. São dois turnos: o segundo usa `resume` com o `thread_id` do primeiro, e a ferramenta é executada pelo `ToolExecutor` do Orin.
-- [ ] **Step 4: Rode.** `uv run pytest tests/unit/providers -q`. Esperado: passa no Windows e no Linux.
-- [ ] **Step 5: Commit.** `feat(codex-cli): adapter, error classification and conformance`
+- [x] **Step 1: Teste de conformidade.** Ele instancia `AdapterFixtures(adapter=CodexCliAdapter(), simple_text=…, tool_call=…, error_scenarios=[auth, rate_limit, bad_model])` e roda a suíte compartilhada.
+- [x] **Step 2: Rode, veja falhar, implemente e registre** `"openai-codex"` no `cli_registry`.
+- [x] **Step 3: Teste de ponta a ponta com uma CLI falsa.** Siga o modelo de `tests/unit/providers/claude_cli/fake_claude.py` e crie `fake_codex.py`, que reproduz os fixtures e chama o MCP real do turno. São dois turnos: o segundo usa `resume` com o `thread_id` do primeiro, e a ferramenta é executada pelo `ToolExecutor` do Orin.
+- [x] **Step 4: Rode.** `uv run pytest tests/unit/providers -q`. Esperado: passa no Windows e no Linux.
+- [x] **Step 5: Commit.** `feat(codex-cli): adapter, error classification and conformance`
 
 ### Task A4: Card de configuração e seletor de modelo do Codex
 
@@ -279,25 +279,25 @@
 **Interfaces:**
 - Produces: `GET` do status do provedor `openai-codex` com `{installed: bool, version: str | null, supported: bool, authenticated: bool, login_command: "codex login"}`. `authenticated` é a existência de `CODEX_HOME/auth.json`; o conteúdo nunca é lido.
 
-- [ ] **Step 1: Testes.**
+- [x] **Step 1: Testes.**
   - Vitest:
     - sem binário, o card mostra "Instale o Codex CLI";
     - sem `auth.json`, mostra `codex login`;
     - com tudo certo, mostra a versão e "Pronto".
   - pytest: o status nunca lê o conteúdo do `auth.json` (um mock de `open` sobre ele falha o teste).
-- [ ] **Step 2: Rode, veja falhar, implemente e rode de novo.** Rode `npm run lint`, `npx vitest run` e `npm run build`.
-- [ ] **Step 3: Commit.** `feat(ui): Codex subscription provider card`
+- [x] **Step 2: Rode, veja falhar, implemente e rode de novo.** Rode `npm run lint`, `npx vitest run` e `npm run build`.
+- [x] **Step 3: Commit.** `feat(ui): Codex subscription provider card`
 
 ### Task A5: Replay manual (com o Carlos)
 
-- [ ] **Step 1:** com autorização, rode uma conversa de 3 turnos com uma ferramenta de leitura, um turno no Orin Code e uma troca de modelo no meio. Registre o resultado no doc do spike.
+- [x] **Step 1:** com autorização, rode uma conversa de 3 turnos com uma ferramenta de leitura, um turno no Orin Code e uma troca de modelo no meio. Registre o resultado no doc do spike.
 
 ## Fase C — Antigravity (só depois da decisão D2)
 
 ### Task C0: Decisão do Carlos
 
 - [x] **Step 1:** decidido em 2026-11-06: opção (c), assinatura com `agy -p`, desligada por padrão (veja D2).
-- [ ] **Step 2: Teste do opt-in.** `test_antigravity_disabled_until_risk_acknowledged`: sem o aceite, `cli_adapter_for("google-antigravity", None)` devolve `None`, salvar a configuração é recusado com uma mensagem que pede o aceite, e o modelo não aparece no seletor. O aceite fica salvo na configuração do provedor (`risk_acknowledged_at`), nunca em `localStorage`.
+- [x] **Step 2: Teste do opt-in.** `test_antigravity_disabled_until_risk_acknowledged`: sem o aceite, `cli_adapter_for("google-antigravity", None)` devolve `None`, salvar a configuração é recusado com uma mensagem que pede o aceite, e o modelo não aparece no seletor. O aceite fica salvo na configuração do provedor (`risk_acknowledged_at`), nunca em `localStorage`.
 
 ### Task C1: Spike do `agy` e gravação de fixtures
 
@@ -307,11 +307,11 @@
 
 A doc deixa estas perguntas em aberto, e o spike precisa respondê-las antes da C2:
 
-- [ ] **Step 1: Binário.** Hoje só existe o `Antigravity IDE\bin\antigravity-ide`. Descubra como instalar o `agy` no Windows e exija versão 1.1.1 ou maior: o bug de stdout vazio fora de TTY, issue #76, foi corrigido na 1.0.15 para Windows, e erros silenciosos na 1.1.1.
-- [ ] **Step 2: System prompt.** Não há flag documentada. Teste se o `AGENTS.md` ou o `GEMINI.md` na pasta de trabalho isolada (`native_workdir("antigravity")`) é lido no modo `-p`.
-- [ ] **Step 3: MCP.** Não há flag. Confirme que `<workdir>/.agents/mcp_config.json` (`serverUrl` e `headers.Authorization`) é lido no headless e se `${ENV}` é expandido nos headers. Se não for, o token vai no arquivo, que é owner-only e apagado no fim do turno, como o JSON do Claude.
-- [ ] **Step 4: Permissões sem tocar no `settings.json` global.** Descubra se há settings por workspace que permitam `mcp(orin/*)` e neguem as ferramentas embutidas. Se a única saída for `--dangerously-skip-permissions`, as ferramentas embutidas ficariam liberadas. Nesse caso, a fase para e volta ao Carlos.
-- [ ] **Step 5: Grave os fixtures** de `stream-json`, com stdin persistente (`--input-format stream-json`):
+- [x] **Step 1: Binário.** Hoje só existe o `Antigravity IDE\bin\antigravity-ide`. Descubra como instalar o `agy` no Windows e exija versão 1.1.1 ou maior: o bug de stdout vazio fora de TTY, issue #76, foi corrigido na 1.0.15 para Windows, e erros silenciosos na 1.1.1.
+- [x] **Step 2: System prompt.** Não há flag documentada. Teste se o `AGENTS.md` ou o `GEMINI.md` na pasta de trabalho isolada (`native_workdir("antigravity")`) é lido no modo `-p`.
+- [x] **Step 3: MCP.** Não há flag. Confirme que `<workdir>/.agents/mcp_config.json` (`serverUrl` e `headers.Authorization`) é lido no headless e se `${ENV}` é expandido nos headers. Se não for, o token vai no arquivo, que é owner-only e apagado no fim do turno, como o JSON do Claude.
+- [x] **Step 4: Permissões sem tocar no `settings.json` global.** Descubra se há settings por workspace que permitam `mcp(orin/*)` e neguem as ferramentas embutidas. Se a única saída for `--dangerously-skip-permissions`, as ferramentas embutidas ficariam liberadas. Nesse caso, a fase para e volta ao Carlos.
+- [x] **Step 5: Grave os fixtures** de `stream-json`, com stdin persistente (`--input-format stream-json`):
   - `simple_text`;
   - `tool_call` (um `step_update` com `step_type: "tool"` e `tool_info` contendo chamada e resultado juntos);
   - segundo turno no mesmo processo;
@@ -339,17 +339,17 @@ A doc deixa estas perguntas em aberto, e o spike precisa respondê-las antes da 
   O mapeamento de `usage` é: `input_tokens - cache_read_tokens`, `cache_read_tokens` e `output_tokens`; `thinking_tokens` vai para o raciocínio.
 - Produces: `encode_user_turn` no formato `{"event":"user","message":{"content":[{"type":"text","text":…}]}}`. Imagens são recusadas antes do envio com uma mensagem clara, porque o `agy` só aceita blocos de texto e um bloco de outro tipo encerra o processo com código 1.
 
-- [ ] **Step 1: Escreva a conformidade e os testes do tradutor com os fixtures da C1.** Inclua:
+- [x] **Step 1: Escreva a conformidade e os testes do tradutor com os fixtures da C1.** Inclua:
   - `test_status_waiting_or_canceled_is_not_success`;
   - `test_image_content_rejected_before_spawn`.
-- [ ] **Step 2: Rode, veja falhar, implemente, registre `"google-antigravity"` e rode de novo.** Esperado: passa.
-- [ ] **Step 3: Commit.** `feat(antigravity-cli): adapter, translator and conformance`
+- [x] **Step 2: Rode, veja falhar, implemente, registre `"google-antigravity"` e rode de novo.** Esperado: passa.
+- [x] **Step 3: Commit.** `feat(antigravity-cli): adapter, translator and conformance`
 
 ### Task C3: Card do Antigravity e replay manual
 
-- [ ] **Step 1:** crie o `AntigravitySetup.tsx`, com testes iguais aos da A4 e mais um: o botão "Ativar" fica desabilitado até a caixa do aviso ser marcada. O login é "abra `agy` uma vez e entre com sua conta Google". O aviso cita o trecho do FAQ (D2), traz o link e diz que a conta Google pode ser restringida.
-- [ ] **Step 2:** faça o replay manual com o Carlos, como na A5.
-- [ ] **Step 3: Commit.** `feat(ui): Antigravity subscription provider card`
+- [x] **Step 1:** crie o `AntigravitySetup.tsx`, com testes iguais aos da A4 e mais um: o botão "Ativar" fica desabilitado até a caixa do aviso ser marcada. O login é "abra `agy` uma vez e entre com sua conta Google". O aviso cita o trecho do FAQ (D2), traz o link e diz que a conta Google pode ser restringida.
+- [x] **Step 2:** faça o replay manual com o Carlos, como na A5.
+- [x] **Step 3: Commit.** `feat(ui): Antigravity subscription provider card`
 
 ---
 
