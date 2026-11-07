@@ -199,3 +199,84 @@ def test_posix_integration_remove_deletes_the_command_and_menu_entry(tmp_path: P
     assert not (tmp_path / "bin" / "orin").exists()
     assert not (tmp_path / "home" / ".local" / "share" / "applications" / "orin-desktop.desktop").exists()
     integration.remove(options)  # removing twice is harmless
+
+
+def test_posix_integration_creates_and_removes_desktop_shortcut_automatically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    desktop = home / "Área de Trabalho"
+    desktop.mkdir(parents=True)
+    config_dir = home / ".config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "user-dirs.dirs").write_text(
+        '# XDG user dirs\nXDG_DESKTOP_DIR="$HOME/Área de Trabalho"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    options = InstallOptions(root=tmp_path / "Orin", bin_root=tmp_path / "bin")
+    integration = inst.PosixIntegration()
+    integration.integrate(options, "0.12.3")
+
+    menu_file = home / ".local" / "share" / "applications" / "orin-desktop.desktop"
+    desktop_file = desktop / "orin-desktop.desktop"
+    assert menu_file.is_file()
+    assert desktop_file.is_file()
+    assert "--desktop" in desktop_file.read_text(encoding="utf-8")
+
+    integration.remove(options)
+    assert not menu_file.exists()
+    assert not desktop_file.exists()
+
+    # When desktop_shortcut=False (--no-shortcut), Desktop icon is not created
+    no_shortcut_opts = InstallOptions(
+        root=tmp_path / "Orin",
+        bin_root=tmp_path / "bin",
+        desktop_shortcut=False,
+        menu_entry=False,
+    )
+    integration.integrate(no_shortcut_opts, "0.12.3")
+    assert not desktop_file.exists()
+
+
+def test_run_silent_succeeds_when_sys_stdout_is_none_in_windowed_exe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    integration = FakeIntegration()
+
+    class _FakeInstaller:
+        def __init__(self, options: InstallOptions, emit=None) -> None:
+            self.options = options
+            self._emit = emit or (lambda e: None)
+
+        def run(self):
+            from agentos.installation.installer import InstallResult
+
+            self._emit(UpdateEvent("start", "check", 0, 7, "Procurando"))
+            self._emit(UpdateEvent("done", "check", 0, 7, "Procurando", detail="0.12.3"))
+            integration.integrate(self.options, "0.12.3")
+            return InstallResult(
+                "installed",
+                "0.12.3",
+                self.options.root,
+                ("orin", "--desktop"),
+                None,
+                None,
+                None,
+                1000,
+                0.5,
+            )
+
+    code = setup_app.run_silent(
+        InstallOptions(root=tmp_path / "Orin", bin_root=tmp_path / "bin"),
+        installer_factory=_FakeInstaller,  # type: ignore[arg-type]
+    )
+    assert code == 0
+    assert len(integration.calls) == 1

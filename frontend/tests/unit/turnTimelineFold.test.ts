@@ -127,6 +127,51 @@ describe('buildTurnTimeline', () => {
       ).toBe(false)
     }
   })
+
+  it('settles Preparando (generating_arguments) when tool.started/finished uses a different invocationId for the same toolName', async () => {
+    const { summarizeActivities } = await import('../../src/features/conversations/activitySummary')
+    const events = [
+      event({
+        eventId: 'evt-prep-mismatch',
+        type: 'tool.progressed',
+        toolName: 'read_file',
+        toolKind: 'filesystem',
+        invocationId: 'item_codex_1',
+        phase: 'generating_arguments',
+        summary: 'Preparando read_file...',
+      }),
+      event({
+        eventId: 'evt-start-mcp',
+        type: 'tool.started',
+        toolName: 'read_file',
+        toolKind: 'filesystem',
+        invocationId: 'mcp_1_1',
+        summary: 'Lendo Dashboard.tsx',
+      }),
+      event({
+        eventId: 'evt-finish-mcp',
+        type: 'tool.finished',
+        toolName: 'read_file',
+        toolKind: 'filesystem',
+        invocationId: 'mcp_1_1',
+        status: 'succeeded',
+        summary: 'Leu Dashboard.tsx',
+      }),
+    ]
+
+    const timeline = buildTurnTimeline(events, 'turn-1', 'msg-1', '', false)
+    const activityItems = timeline.filter((item) => item.kind === 'activity')
+    expect(activityItems).toHaveLength(1)
+    if (activityItems[0]?.kind === 'activity') {
+      expect(activityItems[0].group.label).toBe('Leu Dashboard.tsx')
+      expect(activityItems[0].group.count).toBe(1)
+    }
+
+    const summaryGroups = summarizeActivities(events)
+    expect(summaryGroups).toHaveLength(1)
+    expect(summaryGroups[0].label).toBe('Leu Dashboard.tsx')
+    expect(summaryGroups[0].count).toBe(1)
+  })
 })
 
 describe('resolveTurnId', () => {

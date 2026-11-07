@@ -325,11 +325,10 @@ class AntigravityStreamTranslator:
                 or self._session_id(packet)
             )
             raw_idx = su.get("step_index")
-            step_idx = (
-                raw_idx
-                if isinstance(raw_idx, int) and not isinstance(raw_idx, bool)
-                else 0
-            )
+            if isinstance(raw_idx, int) and not isinstance(raw_idx, bool):
+                step_idx = raw_idx
+            else:
+                step_idx = max(self._turn_step_usages, default=0)
 
             if step_type == "user_input":
                 if state == "DONE":
@@ -339,7 +338,7 @@ class AntigravityStreamTranslator:
             if step_type == "agent_response":
                 usage_obj = su.get("usage")
                 if isinstance(usage_obj, Mapping):
-                    self._turn_step_usages[step_idx] = {
+                    new_usage = {
                         "input_tokens": _non_neg_int(
                             usage_obj, "input_tokens"
                         ),
@@ -353,13 +352,25 @@ class AntigravityStreamTranslator:
                             usage_obj, "cache_read_tokens"
                         ),
                     }
-                    step_usage = _build_cli_usage(
-                        self._turn_step_usages[step_idx]["input_tokens"],
-                        self._turn_step_usages[step_idx]["output_tokens"],
-                        self._turn_step_usages[step_idx]["cache_read_tokens"],
-                        self._turn_step_usages[step_idx]["thinking_tokens"],
-                    )
-                    self._latest_usage = step_usage
+                    prev_step = self._turn_step_usages.get(step_idx)
+                    if prev_step is not None or any(v > 0 for v in new_usage.values()):
+                        merged_step = {
+                            k: max(prev_step.get(k, 0) if prev_step else 0, v)
+                            for k, v in new_usage.items()
+                        }
+                        self._turn_step_usages[step_idx] = merged_step
+                        latest_step_idx = max(self._turn_step_usages)
+                        latest_step_in = self._turn_step_usages[latest_step_idx].get(
+                            "input_tokens", 0
+                        )
+                        step_usage = _build_cli_usage(
+                            merged_step["input_tokens"],
+                            merged_step["output_tokens"],
+                            merged_step["cache_read_tokens"],
+                            merged_step["thinking_tokens"],
+                            context_window_used_tokens=latest_step_in,
+                        )
+                        self._latest_usage = step_usage
 
                 events: list[CliEvent] = []
                 text_delta = su.get("text_delta")

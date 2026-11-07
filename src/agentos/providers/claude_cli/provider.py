@@ -667,8 +667,7 @@ class ClaudeCliProvider:
                         max_turns=1,
                         tool_server_wiring=fallback_wiring,
                         capabilities=self.adapter.capabilities,
-                    ),
-                    fallback_wiring,
+                    )
                 )
             isolated_env = self.adapter.environment(
                 merge_with_system_env(self._env),

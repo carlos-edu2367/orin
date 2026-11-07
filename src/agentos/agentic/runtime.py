@@ -1772,20 +1772,29 @@ class AgenticTurnRuntime:
         # deliberately conservative fraction rather than another full-sized
         # prompt.
         remaining = min(48_000, max(4_000, 2 * self.limits.max_context_tokens))
-        for index in reversed(sorted(indices)):
-            if index < 0 or index >= len(messages):
-                continue
+        valid_indices = [idx for idx in reversed(sorted(indices)) if 0 <= idx < len(messages)]
+        for pos, index in enumerate(valid_indices):
             msg = messages[index]
             if self._is_tool_result(msg):
-                msg = self._compress(msg)
+                msg = self._compress_tool_message(msg)
             try:
                 encoded = json.dumps(msg, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
                 encoded = str(msg)
             if remaining <= 0:
                 break
-            parts.append(encoded[:remaining])
-            remaining -= len(parts[-1])
+            has_earlier = pos + 1 < len(valid_indices)
+            max_piece = max(4_000, remaining - 2_000) if has_earlier and remaining > 6_000 else remaining
+            if len(encoded) > max_piece:
+                if max_piece > 400:
+                    half = (max_piece - 32) // 2
+                    chunk = f"{encoded[:half]}\n...[trecho truncado]...\n{encoded[-half:]}"
+                else:
+                    chunk = encoded[:max_piece]
+            else:
+                chunk = encoded
+            parts.append(chunk)
+            remaining -= len(chunk)
         parts.reverse()
         return "\n".join(parts)
 
@@ -1935,6 +1944,8 @@ class AgenticTurnRuntime:
                 if cost <= available:
                     available -= cost
                     kept.add(idx)
+                else:
+                    break
             else:
                 break
         for unit in reversed(self._group_tool_units(messages)):
@@ -1957,11 +1968,13 @@ class AgenticTurnRuntime:
             # being changed to stop doing.
             dropped = self._dropped_tool_names(messages, kept)
             detail = f" Saíram resultados de: {', '.join(dropped)}." if dropped else ""
+            has_summary_above = bool(0 in kept and messages and messages[0].get("role") == "system")
+            summary_tail = " O que já foi decidido e apurado está resumido acima." if has_summary_above else ""
             marker = {
                 "role": "system",
                 "content": (
                     f"[{omitted} mensagens anteriores foram omitidas para caber no orçamento de contexto."
-                    f"{detail} O que já foi decidido e apurado está resumido acima.]"
+                    f"{detail}{summary_tail}]"
                 ),
             }
         window: list[dict[str, object]] = []
@@ -1982,7 +1995,14 @@ class AgenticTurnRuntime:
         if self.first_user_context:
             # excludeDynamicSystemPromptSections: per-machine context rides with the first message, not the system prompt.
             position = next((offset for offset, item in enumerate(window) if item.get("role") in {"user", "assistant"}), len(window))
-            window.insert(position, {"role": "user", "content": system_reminder(self.first_user_context)})
+            window.insert(
+                position,
+                {
+                    "role": "user",
+                    "content": system_reminder(self.first_user_context),
+                    "_first_user_context": True,
+                },
+            )
         # The contract is rebuilt into every request instead of living in
         # ``messages``: a message can be trimmed away or folded into a
         # compaction summary, and the definition of the task must outlive
@@ -2029,7 +2049,9 @@ class AgenticTurnRuntime:
         return next(
             (
                 index for index in range(len(messages) - 1, -1, -1)
-                if messages[index].get("role") == "user" and not cls._is_tool_result_message(messages[index])
+                if messages[index].get("role") == "user"
+                and not messages[index].get("_first_user_context")
+                and not cls._is_tool_result_message(messages[index])
             ),
             None,
         )
@@ -2095,6 +2117,36 @@ class AgenticTurnRuntime:
         if len(text) <= AGED_TOOL_RESULT_CHARS:
             return text
         return f"{text[:AGED_TOOL_RESULT_CHARS]}\n[compressed: {len(text)} characters total; re-run the tool if you need the rest]"
+
+    @classmethod
+    def _compress_tool_message(cls, message: Mapping[str, object]) -> dict[str, object]:
+        if bool(message.get("_tool_image_result")):
+            if message.get("content") != "[earlier tool image omitted]":
+                return {**message, "content": "[earlier tool image omitted]", "_content_shrunk": True}
+            return dict(message)
+        content = message.get("content")
+        if isinstance(content, str):
+            compressed = cls._compress(content)
+            if compressed != content:
+                return {**message, "content": compressed, "_content_shrunk": True}
+            return dict(message)
+        if isinstance(content, list):
+            changed = False
+            blocks: list[object] = []
+            for block in content:
+                if isinstance(block, Mapping) and block.get("type") == "tool_result":
+                    old_text = str(block.get("content", ""))
+                    new_text = cls._compress(old_text)
+                    if new_text != old_text:
+                        blocks.append({**block, "content": new_text})
+                        changed = True
+                    else:
+                        blocks.append(block)
+                else:
+                    blocks.append(block)
+            if changed:
+                return {**message, "content": blocks, "_content_shrunk": True}
+        return dict(message)
 
     @classmethod
     def _age_tool_results(cls, messages: list[dict[str, object]], keep_recent: int = RECENT_UNAGED_TOOL_RESULTS) -> list[dict[str, object]]:

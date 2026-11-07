@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
@@ -1056,10 +1057,6 @@ class _RunnerSink:
     ) -> None:
         self._runner = runner
         self._executor = executor
-        self._adapter_name = str(
-            getattr(getattr(runner.provider, "adapter", None), "name", "claude")
-            or "claude"
-        )
         self.had_visible_output = False
         self._thinking_buffer: list[str] = []
         self._last_thinking_flush = time.monotonic()
@@ -1093,6 +1090,13 @@ class _RunnerSink:
         executor.speak_state = self.speak_state
         executor.on_batch_finished = self._on_tool_batch_finished
         executor.consume_round_buffers = self.consume_round_buffers
+
+    @property
+    def _adapter_name(self) -> str:
+        return str(
+            getattr(getattr(self._runner.provider, "adapter", None), "name", "claude")
+            or "claude"
+        )
 
     def on_message_id(self, message_id: str | None) -> None:
         msg_key = str(message_id or "").strip()
@@ -1328,7 +1332,7 @@ class _RunnerSink:
         if message_id:
             self.on_message_id(message_id)
         self.flush_thinking_buffer()
-        if self._adapter_name == "antigravity":
+        if self._adapter_name in ("antigravity", "codex"):
             return
         self._executor.register_tool_use_complete(
             tool_use_id,
@@ -1504,6 +1508,8 @@ class NativeTurnRunner:
         excluded_system_contents.discard("")
 
         def _keep_prior_message(m: Mapping[str, object]) -> bool:
+            if m.get("_first_user_context"):
+                return False
             if m.get("role") != "system":
                 return True
             text_val, _ = _extract_content_text_and_images(m.get("content"))
@@ -1580,25 +1586,44 @@ class NativeTurnRunner:
                 len(str(b.get("text") or "")) for b in prior_blocks
             )
             if total_prior_chars > prior_char_budget:
+                tool_use_span_re = re.compile(
+                    r"\n?\[Tool Use:[^\]]*\]\n.*?\n\[/Tool Use\]", re.DOTALL
+                )
                 kept_prior_blocks: list[dict[str, Any]] = []
                 omitted_tool_blocks = 0
-                for b in prior_blocks:
+                omitted_msg_blocks = 0
+                idx_p = 0
+                while idx_p < len(prior_blocks):
+                    b = prior_blocks[idx_p]
                     b_text = str(b.get("text") or "")
-                    is_tool_only = (
-                        b_text.startswith("[Tool Result")
-                        or (
-                            b_text.startswith("[Assistant]\n[Tool Use")
-                            and b_text.endswith("[/Tool Use]")
-                        )
-                    )
-                    if (
-                        total_prior_chars > prior_char_budget
-                        and is_tool_only
-                    ):
-                        total_prior_chars -= len(b_text)
-                        omitted_tool_blocks += 1
-                        continue
+                    if total_prior_chars > prior_char_budget:
+                        if b_text.startswith("[Tool Result"):
+                            total_prior_chars -= len(b_text)
+                            omitted_tool_blocks += 1
+                            idx_p += 1
+                            continue
+                        if "[Tool Use:" in b_text and "[/Tool Use]" in b_text:
+                            stripped = tool_use_span_re.sub("", b_text).strip()
+                            removed_chars = len(b_text) - len(stripped)
+                            total_prior_chars -= removed_chars
+                            omitted_tool_blocks += 1
+                            if stripped and stripped != "[Assistant]":
+                                kept_prior_blocks.append({**b, "text": stripped})
+                            else:
+                                total_prior_chars -= len(stripped)
+                            # Always evict immediately following [Tool Result] blocks paired with this tool use
+                            while (
+                                idx_p + 1 < len(prior_blocks)
+                                and str(prior_blocks[idx_p + 1].get("text") or "").startswith("[Tool Result")
+                            ):
+                                idx_p += 1
+                                tr_text = str(prior_blocks[idx_p].get("text") or "")
+                                total_prior_chars -= len(tr_text)
+                                omitted_tool_blocks += 1
+                            idx_p += 1
+                            continue
                     kept_prior_blocks.append(b)
+                    idx_p += 1
                 if (
                     total_prior_chars > prior_char_budget
                     and len(kept_prior_blocks) > 2
@@ -1613,7 +1638,7 @@ class NativeTurnRunner:
                             and not b_text.startswith("[System]")
                         ):
                             total_prior_chars -= len(b_text)
-                            omitted_tool_blocks += 1
+                            omitted_msg_blocks += 1
                             continue
                         second_pass.append(b)
                     kept_prior_blocks = second_pass
@@ -1622,19 +1647,24 @@ class NativeTurnRunner:
                         2_000, prior_char_budget // len(kept_prior_blocks)
                     )
                     for b in kept_prior_blocks:
+                        if total_prior_chars <= prior_char_budget:
+                            break
                         b_text = str(b.get("text") or "")
                         if len(b_text) > per_block_cap:
-                            b["text"] = (
+                            new_b_text = (
                                 b_text[: per_block_cap - 120]
                                 + "\n...[trecho anterior truncado para preservar a mensagem atual]..."
                             )
-                if omitted_tool_blocks > 0:
+                            total_prior_chars -= len(b_text) - len(new_b_text)
+                            b["text"] = new_b_text
+                if omitted_tool_blocks > 0 or omitted_msg_blocks > 0:
+                    omitted_total = omitted_tool_blocks + omitted_msg_blocks
                     kept_prior_blocks.insert(
                         0,
                         {
                             "type": "text",
                             "text": (
-                                f"[System]\n[{omitted_tool_blocks} blocos antigos de ferramentas foram "
+                                f"[System]\n[{omitted_total} blocos antigos do histórico foram "
                                 "omitidos para preservar a mensagem atual e o histórico recente.]"
                             ),
                         },
@@ -2055,18 +2085,24 @@ class NativeTurnRunner:
                             sink.reset_for_new_message()
                             self.runtime._life(self.turn, "running")
                             continue
+                        self.runtime._effect_finished(
+                            self.turn,
+                            provider_effect_id,
+                            state="APPLIED",
+                            private_result={"outcome": "verify_continuation"},
+                        )
                         if supports_session_resume and resume_session_id:
-                            self.runtime._effect_finished(
-                                self.turn,
-                                provider_effect_id,
-                                state="APPLIED",
-                                private_result={"outcome": "verify_continuation"},
-                            )
                             user_content = [{"type": "text", "text": VERIFY_REQUIRED_MESSAGE}]
-                            sink.reset_for_new_message()
-                            self.runtime._life(self.turn, "running")
-                            next_process = True
-                            break
+                        else:
+                            assistant_text = "".join(sink.text_parts).strip()
+                            if assistant_text:
+                                self.messages.append({"role": "assistant", "content": assistant_text})
+                            self.messages.append({"role": "user", "content": VERIFY_REQUIRED_MESSAGE})
+                            user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        break
 
                     stop_decision = self.runtime._emit(
                         HookEvent.STOP,
@@ -2090,18 +2126,24 @@ class NativeTurnRunner:
                             sink.reset_for_new_message()
                             self.runtime._life(self.turn, "running")
                             continue
+                        self.runtime._effect_finished(
+                            self.turn,
+                            provider_effect_id,
+                            state="APPLIED",
+                            private_result={"outcome": "stop_hook_continuation"},
+                        )
                         if supports_session_resume and resume_session_id:
-                            self.runtime._effect_finished(
-                                self.turn,
-                                provider_effect_id,
-                                state="APPLIED",
-                                private_result={"outcome": "stop_hook_continuation"},
-                            )
                             user_content = [{"type": "text", "text": hook_msg}]
-                            sink.reset_for_new_message()
-                            self.runtime._life(self.turn, "running")
-                            next_process = True
-                            break
+                        else:
+                            assistant_text = "".join(sink.text_parts).strip()
+                            if assistant_text:
+                                self.messages.append({"role": "assistant", "content": assistant_text})
+                            self.messages.append({"role": "user", "content": hook_msg})
+                            user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        break
 
                     self.runtime._effect_finished(
                         self.turn,
@@ -2244,6 +2286,8 @@ class NativeTurnRunner:
                     new_native = self.runtime._native_provider(self.turn)
                     if new_native is not None:
                         self.provider = new_native
+                        resume_session_id = None
+                        user_content = self._build_initial_user_content(tool_schemas)
                         effort = (
                             self.runtime.effort
                             if (

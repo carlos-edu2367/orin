@@ -184,3 +184,75 @@ def test_compact_source_preserves_latest_user_and_assistant_messages_when_early_
     assert runtime._compact_source(messages, set()) == ""
 
 
+def test_f01_compact_source_compresses_tool_result_dicts_without_mutating_and_preserves_user_turns() -> None:
+    runtime = _runtime(_SilentProvider(), max_context_tokens=24_000)
+    huge_tool_content = "TOOL_START_" + ("x" * 47_500) + "_TOOL_END"
+    tool_msg = {
+        "role": "tool",
+        "tool_call_id": "call_big",
+        "name": "read_file",
+        "content": huge_tool_content,
+    }
+    messages: list[dict[str, object]] = [
+        {"role": "user", "content": "Decisão inicial importante do usuário no começo"},
+        tool_msg,
+        {"role": "assistant", "content": "Pergunta ao final do turno 1"},
+    ]
+    source = runtime._compact_source(messages, {0, 1, 2})
+    # Must not mutate the original tool_msg in place
+    assert tool_msg["content"] == huge_tool_content
+    # Because the 47.5KB tool result is compressed to ~1600 chars inside _compact_source,
+    # the earlier user message at index 0 is NOT starved out of the 48K budget!
+    assert "Decisão inicial importante do usuário no começo" in source
+    assert "Pergunta ao final do turno 1" in source
+    assert "[compressed:" in source
+
+
+def test_f08_request_messages_system_prefix_and_omission_marker_honesty() -> None:
+    runtime = _runtime(_SilentProvider(), max_context_tokens=1_000)
+    # Leading system message exceeds available budget, followed by a tiny system message
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "S" * 6_000},
+        {"role": "system", "content": "tiny_second_system"},
+        {"role": "user", "content": "older_user_dropped " + ("u" * 4_000)},
+        {"role": "assistant", "content": "older_assistant_dropped " + ("a" * 4_000)},
+        {"role": "user", "content": "current_user"},
+    ]
+    window = runtime._request_messages(messages)
+    contents = [str(m.get("content") or "") for m in window]
+    # Because messages[0] did not fit, the loop must break and NOT include tiny_second_system out of order
+    assert "tiny_second_system" not in contents
+    # And because messages[0] (the summary) was NOT kept, the omission marker must not falsely claim
+    # "O que já foi decidido e apurado está resumido acima."
+    markers = [c for c in contents if "mensagens anteriores foram omitidas" in c]
+    assert len(markers) == 1
+    assert "está resumido acima" not in markers[0]
+
+
+def test_f09_expand_skill_preserves_closing_tag_and_request_footer_under_truncation() -> None:
+    from agentos.conversations.chat import MAX_EXPANDED_COMMAND_BODY, _expand_skill
+
+    class _FakeSkillLib:
+        def get(self, _req: object) -> dict[str, object]:
+            return {
+                "id": "writing-plans",
+                "name": "Writing Plans",
+                "version": "1.0.0",
+                "available": True,
+                "instructions": "I" * (MAX_EXPANDED_COMMAND_BODY + 5_000),
+            }
+
+    expanded = _expand_skill(
+        _FakeSkillLib(),
+        "user-1",
+        "writing-plans",
+        "1- pode criar novo slug, 2- pode sim",
+    )
+    assert expanded is not None
+    assert len(expanded.body) <= MAX_EXPANDED_COMMAND_BODY
+    assert expanded.body.startswith("Pedido da pessoa: 1- pode criar novo slug, 2- pode sim")
+    assert "</agentos-skill-instructions>" in expanded.body
+    assert expanded.body.endswith("Pedido da pessoa: 1- pode criar novo slug, 2- pode sim")
+
+
+

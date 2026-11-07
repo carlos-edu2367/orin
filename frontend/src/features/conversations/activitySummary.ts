@@ -288,6 +288,10 @@ export function computeSettledEventIds(
 ): Set<string> {
   const settled = new Set<string>()
   const openByTurn = new Map<string, ConversationActivityEvent[]>()
+  const hasTerminalTurnEvent = events.some(
+    (ev) => !ev.parentAgentId && TERMINAL_TURN_TYPES.has(ev.type),
+  )
+  const effectiveTurnCompleted = turnCompleted || hasTerminalTurnEvent
 
   for (const event of events) {
     const turnScope = `${event.agentId ?? ''}:${event.turnId ?? ''}`
@@ -297,10 +301,18 @@ export function computeSettledEventIds(
       const remaining: ConversationActivityEvent[] = []
       for (const openEvent of list) {
         const openCallId = openEvent.invocationId
+        const isGeneratingArgs =
+          openEvent.type === 'tool.progressed' &&
+          (openEvent.phase === 'generating_arguments' ||
+            openEvent.payload?.phase === 'generating_arguments' ||
+            /^Preparando\b/i.test(openEvent.summary ?? ''))
+        const sameToolName = Boolean(
+          event.toolName && openEvent.toolName && event.toolName === openEvent.toolName,
+        )
         const isPreStartProgress =
           openEvent.type === 'tool.progressed' &&
           (eventCallId
-            ? openCallId === eventCallId || !openCallId
+            ? openCallId === eventCallId || !openCallId || (isGeneratingArgs && sameToolName)
             : true)
         if (isPreStartProgress) {
           if (openEvent.eventId) settled.add(openEvent.eventId)
@@ -324,8 +336,16 @@ export function computeSettledEventIds(
       const remaining: ConversationActivityEvent[] = []
       for (const openEvent of list) {
         const openCallId = openEvent.invocationId
+        const isGeneratingArgs =
+          openEvent.type === 'tool.progressed' &&
+          (openEvent.phase === 'generating_arguments' ||
+            openEvent.payload?.phase === 'generating_arguments' ||
+            /^Preparando\b/i.test(openEvent.summary ?? ''))
+        const sameToolName = Boolean(
+          event.toolName && openEvent.toolName && event.toolName === openEvent.toolName,
+        )
         const matchesInvocation = eventCallId
-          ? openCallId === eventCallId || !openCallId
+          ? openCallId === eventCallId || !openCallId || (isGeneratingArgs && sameToolName)
           : true
         if (matchesInvocation) {
           if (openEvent.eventId) settled.add(openEvent.eventId)
@@ -348,10 +368,20 @@ export function computeSettledEventIds(
     }
   }
 
-  if (turnCompleted) {
+  if (effectiveTurnCompleted) {
     for (const list of openByTurn.values()) {
       for (const openEvent of list) {
         if (openEvent.eventId) settled.add(openEvent.eventId)
+      }
+    }
+    for (const ev of events) {
+      if (
+        ev.type === 'tool.progressed' &&
+        (ev.phase === 'generating_arguments' ||
+          ev.payload?.phase === 'generating_arguments' ||
+          /^Preparando\b/i.test(ev.summary ?? ''))
+      ) {
+        if (ev.eventId) settled.add(ev.eventId)
       }
     }
   }

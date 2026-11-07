@@ -273,6 +273,39 @@ def test_completed_turn_contract_is_not_auto_resumed_while_interrupted_or_waitin
     )
     store.finish(second, code="WAITING_USER")
     assert "30%" in str(store.latest_contract(conv_id))
-    _follow_up(store, conv_id, "Resposta da pessoa", key="request-3")
+    third = _follow_up(store, conv_id, "Resposta da pessoa", key="request-3")
     assert "30%" in str(store.latest_contract(conv_id))
+
+    # F-02: Once Turn 3 (which answered Turn 2's WAITING_USER) finishes normally without calling
+    # write_contract, Turn 2's WAITING_USER contract has been consumed and MUST NOT be resurrected on Turn 4!
+    store.delta(third, "Plano executado com base na resposta.")
+    store.finish(third)
+    assert store.latest_contract(conv_id) is None
+
+
+def test_f02_cancelled_failed_and_invalid_contracts_are_not_auto_resumed() -> None:
+    store = _store()
+    first = _first_turn(store)
+    conv_id = str(first["conversation_id"])
+    # Valid contract followed by invalid contract in the same turn
+    store.record_step(
+        first,
+        kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+        payload=transcript.assistant_tool_call_payload(
+            "",
+            [
+                {"id": "c_valid", "name": "write_contract", "arguments": _CONTRACT_ARGUMENTS},
+                {"id": "c_invalid", "name": "write_contract", "arguments": '{"objective": ""}'},
+            ],
+        ),
+    )
+    # While Turn 1 is still running, the invalid call is skipped and the valid one is returned
+    found = store.latest_contract(conv_id)
+    assert found is not None
+    assert found["objective"].startswith("Reformular")
+
+    # If Turn 1 is cancelled, its contract must NOT be auto-resumed on the next turn
+    store.finish(first, failed=True, code="TURN_CANCELLED")
+    assert store.latest_contract(conv_id) is None
+
 

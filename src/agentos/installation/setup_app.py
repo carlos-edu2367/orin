@@ -428,7 +428,8 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:  # noqa: BLE001 - no display, or tkinter missing: fall back to the terminal flow
         if os.environ.get("ORIN_SETUP_DEBUG"):
             raise
-        sys.stderr.write(f"Sem interface gráfica disponível ({type(error).__name__}); instalando pelo terminal.\n")
+        if sys.stderr is not None:
+            sys.stderr.write(f"Sem interface gráfica disponível ({type(error).__name__}); instalando pelo terminal.\n")
         return run_silent(options)
     return window.run()
 

@@ -8,6 +8,7 @@ asked for ``--verbose``.
 
 from __future__ import annotations
 
+import io
 import os
 import sys
 from dataclasses import dataclass
@@ -54,6 +55,8 @@ class Console:
     colour: bool | None = None
 
     def __post_init__(self) -> None:
+        if self.stream is None:
+            self.stream = io.StringIO()
         if self.colour is None:
             self.colour = _supports_colour(self.stream)
 

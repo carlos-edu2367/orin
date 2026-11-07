@@ -21,7 +21,7 @@ _OPEN_TAG_RE = re.compile(
 )
 _ESCAPE_TAG_RE = re.compile(r"<(/?)(orin_tool_call|tool_call)", re.IGNORECASE)
 _ESCAPE_BRACKET_RE = re.compile(
-    r"\[(/?)(tool result|user|assistant|system)", re.IGNORECASE
+    r"\[(/?)(tool result|tool use|user|assistant|system)", re.IGNORECASE
 )
 
 _INTERNAL_BY_PUBLIC = {

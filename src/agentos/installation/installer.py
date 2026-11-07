@@ -218,18 +218,74 @@ class PosixIntegration:
         shim = options.bin_root / "orin"
         shim.write_text(posix_shim(options.root), encoding="utf-8")
         shim.chmod(0o755)
+        home = Path.home()
+        entry = desktop_entry(options.root)
         if options.desktop_shortcut or options.menu_entry:
-            applications = Path.home() / ".local" / "share" / "applications"
+            applications = home / ".local" / "share" / "applications"
             applications.mkdir(parents=True, exist_ok=True)
-            (applications / "orin-desktop.desktop").write_text(desktop_entry(options.root), encoding="utf-8")
+            menu_file = applications / "orin-desktop.desktop"
+            menu_file.write_text(entry, encoding="utf-8")
+            menu_file.chmod(0o755)
+        if options.desktop_shortcut:
+            desktop_dir = self._desktop_dir(home)
+            if desktop_dir is not None and desktop_dir.is_dir():
+                desktop_file = desktop_dir / "orin-desktop.desktop"
+                desktop_file.write_text(entry, encoding="utf-8")
+                desktop_file.chmod(0o755)
+                self._trust_desktop_file(desktop_file)
         if str(options.bin_root) not in os.environ.get("PATH", "").split(os.pathsep):
             return f'Para usar o comando orin, adicione ao seu shell: export PATH="{options.bin_root}:$PATH"'
         return None
 
-
     def remove(self, options: InstallOptions) -> None:
         (options.bin_root / "orin").unlink(missing_ok=True)
-        (Path.home() / ".local" / "share" / "applications" / "orin-desktop.desktop").unlink(missing_ok=True)
+        home = Path.home()
+        (home / ".local" / "share" / "applications" / "orin-desktop.desktop").unlink(missing_ok=True)
+        desktop_dir = self._desktop_dir(home)
+        if desktop_dir is not None:
+            (desktop_dir / "orin-desktop.desktop").unlink(missing_ok=True)
+        for name in ("Desktop", "Área de Trabalho", "Area de Trabalho"):
+            (home / name / "orin-desktop.desktop").unlink(missing_ok=True)
+
+    @staticmethod
+    def _desktop_dir(home: Path) -> Path | None:
+        user_dirs = home / ".config" / "user-dirs.dirs"
+        if user_dirs.is_file():
+            try:
+                for raw_line in user_dirs.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or not line.startswith("XDG_DESKTOP_DIR="):
+                        continue
+                    val = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if val.startswith("$HOME/"):
+                        candidate: Path | None = home / val[len("$HOME/"):]
+                    elif val == "$HOME":
+                        candidate = None
+                    else:
+                        candidate = Path(val)
+                    if candidate is not None and candidate.is_dir():
+                        return candidate
+            except OSError:
+                pass
+        for name in ("Desktop", "Área de Trabalho", "Area de Trabalho"):
+            candidate = home / name
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    @staticmethod
+    def _trust_desktop_file(desktop_file: Path) -> None:
+        if os.name == "nt":
+            return
+        try:
+            subprocess.run(
+                ["gio", "set", str(desktop_file), "metadata::trusted", "true"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def integration_for(system: str | None = None) -> Integration:
