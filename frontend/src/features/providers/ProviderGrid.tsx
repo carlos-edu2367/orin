@@ -5,11 +5,17 @@ import { ProviderCard, type ProviderCardState } from './ProviderCard'
 
 export type ProviderCardStates = Partial<Record<ProviderName, ProviderCardState>>
 
+const SUBSCRIPTION_CLI_PROVIDERS = new Set<string>(['openai-codex', 'google-antigravity'])
+
 export function ProviderGrid({ states }: { states: ProviderCardStates }) {
   const pathname = useLocation().pathname
   const { capabilities } = useSession()
   const current = pathname.startsWith('/settings/providers/') ? pathname.split('/').at(-1) : null
   return <div className="provider-grid" aria-label="Providers">
-    {PROVIDER_NAMES.filter((provider) => provider !== 'omniroute' || capabilities.omniroute).map((provider, index) => <ProviderCard key={provider} provider={provider} state={states[provider] ?? { status: 'unconfigured', detail: '' }} index={index} current={current === provider} />)}
+    {PROVIDER_NAMES.filter(
+      (provider) =>
+        (provider !== 'omniroute' || capabilities.omniroute) &&
+        (!SUBSCRIPTION_CLI_PROVIDERS.has(provider) || provider in states || current === provider),
+    ).map((provider, index) => <ProviderCard key={provider} provider={provider} state={states[provider] ?? { status: 'unconfigured', detail: '' }} index={index} current={current === provider} />)}
   </div>
 }

@@ -51,8 +51,8 @@ export const BRANDS: Record<ProviderName, ProviderBrand> = {
   },
   'openai-codex': {
     id: 'openai-codex',
-    name: 'OpenAI Codex (Assinatura)',
-    label: 'OpenAI Codex (Assinatura)',
+    name: 'Codex (Assinatura)',
+    label: 'Codex (Assinatura)',
     tagline: 'Use sua assinatura ChatGPT Plus, Pro, Business, Edu ou Enterprise via Codex CLI local.',
     accent: '#10a37f',
     keyHint: 'Sem chave de API (login via codex login)',
