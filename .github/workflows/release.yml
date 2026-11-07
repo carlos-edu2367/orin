@@ -37,6 +37,16 @@ jobs:
             echo "Tag version $version does not match desktop/package.json version $package_version." >&2
             exit 1
           fi
+          # The installed runtime reports these with `orin --version`; the updater's smoke test rejects a mismatch.
+          python_version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          module_version="$(python3 -c 'import re; print(re.search(r"__version__ = \"([^\"]+)\"", open("src/agentos/version.py").read()).group(1))')"
+          frontend_version="$(python3 -c 'import json; print(json.load(open("frontend/package.json"))["version"])')"
+          for pair in "pyproject.toml:$python_version" "src/agentos/version.py:$module_version" "frontend/package.json:$frontend_version"; do
+            if [ "${pair##*:}" != "$version" ]; then
+              echo "Tag version $version does not match ${pair%%:*} version ${pair##*:}." >&2
+              exit 1
+            fi
+          done
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build-windows:
