@@ -304,12 +304,24 @@ export function buildTurnTimeline(
     ? events.filter((event) => event.turnId === turnId)
     : events
   const turnEvents = enrichEventsWithStartedMetadata(rawTurnEvents)
-  const settled = computeSettledEventIds(turnEvents)
   const firstCodeEvent = turnEvents.find((event) => isCodeModeEvent(event) && event.type !== 'code_mode.unverified')
   const hasTerminalTurnEvent = turnEvents.some(
     (event) => !event.parentAgentId && TERMINAL_TURN_EVENT_TYPES.has(event.type),
   )
   const isTurnCompleted = explicitTurnCompleted || hasTerminalTurnEvent
+  const settled = computeSettledEventIds(turnEvents)
+  if (isTurnCompleted) {
+    for (const ev of turnEvents) {
+      if (
+        ev.type === 'tool.progressed' &&
+        (ev.phase === 'generating_arguments' ||
+          ev.payload?.phase === 'generating_arguments' ||
+          /^Preparando\b/i.test(ev.summary ?? ''))
+      ) {
+        if (ev.eventId) settled.add(ev.eventId)
+      }
+    }
+  }
 
   const primaryAgentId = turnEvents.find(
     (event) => !event.parentAgentId && event.type !== 'agent.created' && event.agentId,

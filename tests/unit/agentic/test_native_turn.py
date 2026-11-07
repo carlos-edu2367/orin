@@ -1319,3 +1319,343 @@ def test_native_max_budget_usd_fires_and_charges_the_shared_meter_once(tmp_path:
     # Two distinct messages priced once each, with (context input incl. cache, output).
     assert seen == [(100, 5), (10, 5)]
     assert meter.total == Decimal("0.80")
+
+
+def test_native_turn_ages_prior_tool_results_and_caps_prior_history_preserving_current_user(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    captured_requests: list[NativeTurnRequest] = []
+
+    def _round(
+        req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle
+    ) -> NativeTurnOutcome:
+        captured_requests.append(req)
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_text("Resposta do turno 2.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Resposta do turno 2."),
+            init=init,
+            final_text="Resposta do turno 2.",
+            exit_code=0,
+        )
+
+    prov = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round])
+    )
+    prior_messages: list[dict[str, object]] = [
+        {
+            "role": "system",
+            "content": "Resumo da conversa até aqui:\n- Decisão anterior preservada.",
+        },
+        {"role": "user", "content": "Pergunta inicial do turno 1"},
+    ]
+    for idx in range(1, 95):
+        call_id = f"call_{idx}"
+        prior_messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": f"src/file_{idx}.ts"}),
+                        },
+                    }
+                ],
+            }
+        )
+        prior_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": "read_file",
+                "content": f"FILE_{idx}_START " + ("x" * 12_000) + f" FILE_{idx}_END",
+            }
+        )
+    prior_messages.append(
+        {
+            "role": "assistant",
+            "content": "Diagnóstico do turno 1 concluído. Perguntas:\n1. Slug novo?\n2. Parar os 3 testes?",
+        }
+    )
+    prior_messages.append(
+        {
+            "role": "user",
+            "content": "1- pode criar novo slug\n2- pode sim, vamo parar os outros 3 testes",
+        }
+    )
+
+    store.history_for_turn = lambda turn: prior_messages  # type: ignore[method-assign]
+
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=prov,
+        toolset=toolset,
+        limits=AgenticLimits(
+            max_iterations=10, max_actions=10, context_window_tokens=1_000_000
+        ),
+        system_prompt="System prompt base",
+        volatile_prompt="Volatile context",
+    )
+
+    result = runtime.run("t2", turn=store.turn)
+    assert result.state == "completed"
+    assert len(captured_requests) == 1
+
+    blocks = captured_requests[0].user_content
+    combined = "\n\n".join(str(b.get("text") or "") for b in blocks)
+
+    # 1. Prior tool results must be aged to AGED_TOOL_RESULT_CHARS (not 12,000 chars each)
+    assert "x" * 5_000 not in combined
+    # 2. Oldest tool results must be evicted so prior history fits under MAX_NATIVE_PRIOR_HISTORY_CHARS (120k),
+    #    while recent tool results and user/assistant/system blocks remain intact.
+    assert "FILE_1_START" not in combined
+    assert "FILE_94_START" in combined
+    # 3. Compaction summary (system message that is not runtime system_prompt/volatile_prompt) must be preserved
+    assert "Resumo da conversa até aqui" in combined
+    assert "Pergunta inicial do turno 1" in combined
+    # 4. Prior assistant diagnosis and current user reply must be intact at the end
+    assert "Diagnóstico do turno 1 concluído." in combined
+    assert (
+        "[User]\n1- pode criar novo slug\n2- pode sim, vamo parar os outros 3 testes"
+        in combined
+    )
+    # 5. Total combined payload must stay safely below Antigravity's 190KB truncation threshold
+    assert len(combined.encode("utf-8")) < 135_000
+
+
+def test_antigravity_retroactive_tool_events_do_not_emit_generating_tool_call_or_shift_pending_queue(
+    tmp_path: Path,
+) -> None:
+    from agentos.providers.antigravity_cli import AntigravityCliAdapter
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "a.txt").write_text("hello a\n", encoding="utf-8")
+    (workspace.root / "b.txt").write_text("hello b\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+
+    def _round(
+        req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle
+    ) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        # In Antigravity (agy), MCP tool calls execute BEFORE step_update(state=DONE) arrives on stdout
+        req.executor.call_tool(
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": "a.txt"},
+            )
+        )
+        sink.on_tool_use_started("conv:1", "Read")
+        sink.on_tool_use_complete("conv:1", "Read", {"file_path": "a.txt"})
+
+        req.executor.call_tool(
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": "b.txt"},
+            )
+        )
+        sink.on_tool_use_started("conv:2", "Read")
+        sink.on_tool_use_complete("conv:2", "Read", {"file_path": "b.txt"})
+
+        sink.on_text("Leitura concluída.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Leitura concluída."),
+            init=init,
+            final_text="Leitura concluída.",
+            exit_code=0,
+        )
+
+    prov = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round])
+    )
+    prov.adapter = AntigravityCliAdapter()  # type: ignore[attr-defined]
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=prov,
+        toolset=toolset,
+        limits=AgenticLimits(
+            max_iterations=10, max_actions=10, context_window_tokens=1_000_000
+        ),
+    )
+
+    result = runtime.run("t1", turn=store.turn)
+    assert result.state == "completed"
+
+    gen_events = [s for s in store.states if s[0] == "generating_tool_call"]
+    assert gen_events == []
+    started_events = [s[1] for s in store.states if s[0] == "tool_started"]
+    assert len(started_events) == 2
+    # Second tool call must NOT inherit the first tool call's retroactive conv:1 id
+    assert started_events[1].get("invocation_id") != "conv:1"
+
+
+def test_antigravity_multi_step_usage_reports_latest_step_context_window_tokens_not_cumulative_sum(
+    tmp_path: Path,
+) -> None:
+    import json
+    from agentos.providers.antigravity_cli import AntigravityStreamTranslator
+
+    tr = AntigravityStreamTranslator()
+    tr.feed_line(
+        json.dumps(
+            {
+                "event": "init",
+                "conversation_id": "conv-ctx",
+                "init": {"model": "gemini-4-argon-high", "tools": []},
+            }
+        )
+    )
+    for step_idx, inp_tok in ((1, 400_000), (2, 450_000), (3, 500_000)):
+        tr.feed_line(
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": "conv-ctx",
+                        "step_index": step_idx,
+                        "state": "DONE",
+                        "step_type": "agent_response",
+                        "text_delta": f"step {step_idx} ",
+                        "usage": {
+                            "input_tokens": inp_tok,
+                            "output_tokens": 100,
+                            "thinking_tokens": 10,
+                            "cache_read_tokens": 300_000,
+                        },
+                    },
+                }
+            )
+        )
+    tr.feed_line(
+        json.dumps(
+            {
+                "event": "result",
+                "result": {
+                    "conversation_id": "conv-ctx",
+                    "status": "SUCCESS",
+                    "response": "step 1 step 2 step 3 ",
+                    "duration_seconds": 1.0,
+                    "num_turns": 1,
+                    "usage": {
+                        "input_tokens": 1_350_000,
+                        "output_tokens": 300,
+                        "thinking_tokens": 30,
+                        "cache_read_tokens": 900_000,
+                    },
+                },
+            }
+        )
+    )
+    assert tr.result is not None
+    usage = tr.result.usage
+    assert usage.context_tokens == 1_350_000
+    assert usage.context_window_used_tokens == 500_000
+
+    def _round(
+        req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle
+    ) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_assistant_usage("msg_agy_1", usage)
+        sink.on_text("Done")
+        return NativeTurnOutcome(
+            result=_make_result(text="Done", usage=usage),
+            init=init,
+            final_text="Done",
+            exit_code=0,
+        )
+
+    rt, store = _usage_runtime(
+        tmp_path,
+        [_round],
+        limits=AgenticLimits(
+            max_iterations=10, max_actions=10, context_window_tokens=1_000_000
+        ),
+    )
+    out = rt.run("t1", turn=store.turn)
+    assert out.state == "completed"
+    # Billing usage still records cumulative 1,350,000 input tokens
+    assert store.usages[-1]["input_tokens"] == 1_350_000
+    # Context window meter uses latest step's 500,000 input tokens (50% of 1M), not 1,350,000
+    ctx_events = [s[1] for s in store.states if s[0] == "context_updated"]
+    assert ctx_events[-1]["used_tokens"] == 500_000
+    assert ctx_events[-1]["percentage"] == 50
+
+
+def test_adversarial_native_turn_huge_prose_history_and_large_current_user_message(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    captured_requests: list[NativeTurnRequest] = []
+
+    def _round(
+        req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle
+    ) -> NativeTurnOutcome:
+        captured_requests.append(req)
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_text("OK")
+        return NativeTurnOutcome(
+            result=_make_result(text="OK"),
+            init=init,
+            final_text="OK",
+            exit_code=0,
+        )
+
+    prov = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round])
+    )
+    prior_messages: list[dict[str, object]] = [
+        {
+            "role": "system",
+            "content": [{"type": "text", "text": "Resumo estruturado preservado."}],
+        },
+    ]
+    # 30 pure-prose exchanges (no tool calls) totaling ~240,000 chars
+    for idx in range(30):
+        prior_messages.append(
+            {"role": "user", "content": f"PROSE_USER_{idx} " + ("u" * 4_000)}
+        )
+        prior_messages.append(
+            {"role": "assistant", "content": f"PROSE_ASST_{idx} " + ("a" * 4_000)}
+        )
+    # Plus a 50,000-char current user message with a marker at the very end
+    large_cur_user = ("CUR_BODY " * 5_500) + "FINAL_USER_TAIL_MARKER"
+    prior_messages.append({"role": "user", "content": large_cur_user})
+
+    store.history_for_turn = lambda turn: prior_messages  # type: ignore[method-assign]
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=prov,
+        toolset=toolset,
+        limits=AgenticLimits(
+            max_iterations=10, max_actions=10, context_window_tokens=1_000_000
+        ),
+        system_prompt="System prompt base",
+        volatile_prompt="Volatile context",
+    )
+
+    result = runtime.run("t_adv", turn=store.turn)
+    assert result.state == "completed"
+    combined = "\n\n".join(
+        str(b.get("text") or "") for b in captured_requests[0].user_content
+    )
+    assert "Resumo estruturado preservado." in combined
+    assert "PROSE_ASST_29" in combined
+    assert combined.endswith("FINAL_USER_TAIL_MARKER")
+    assert len(combined.encode("utf-8")) < 165_000
+
+

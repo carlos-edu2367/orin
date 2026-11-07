@@ -124,3 +124,63 @@ def test_the_trim_marker_does_not_instruct_the_model_to_redo_work() -> None:
     text = str(marker["content"]).lower()
     for phrase in REWORK_PHRASES:
         assert phrase not in text
+
+
+def test_skill_body_puts_user_request_at_top_so_first_request_text_sees_it() -> None:
+    from agentos.conversations.chat import _skill_body
+
+    huge_instructions = "STEP " * 2_000  # 10,000 chars (> 2,000 limit of _first_request_text)
+    expanded = _skill_body(
+        {
+            "id": "superpowers:writing-plans",
+            "name": "writing-plans",
+            "version": "1.0.0",
+            "instructions": huge_instructions,
+        },
+        "1- pode criar novo slug\n2- pode sim, vamo parar os outros 3 testes",
+    )
+    first_req = str(expanded)[:2_000]
+    assert "1- pode criar novo slug" in first_req
+    assert expanded.startswith("Pedido da pessoa: 1- pode criar novo slug")
+
+
+def test_compact_source_preserves_latest_user_and_assistant_messages_when_early_steps_exceed_budget() -> None:
+    runtime = _runtime(_SilentProvider(), max_context_tokens=24_000)
+    messages: list[dict[str, object]] = [
+        {"role": "user", "content": "Pergunta inicial do turno 1"},
+    ]
+    for i in range(40):
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": f"c_{i}",
+                "name": "read_file",
+                "content": f"EARLY_TOOL_{i}_" + ("z" * 5_000),
+            }
+        )
+    messages.append(
+        {
+            "role": "assistant",
+            "content": "Diagnóstico final do turno 1: criamos novo slug ou reabrimos?",
+        }
+    )
+    messages.append(
+        {
+            "role": "user",
+            "content": "Resposta decisiva do usuário: pode criar novo slug!",
+        }
+    )
+    indices = set(range(len(messages)))
+    source = runtime._compact_source(messages, indices)
+
+    assert "Diagnóstico final do turno 1: criamos novo slug ou reabrimos?" in source
+    assert "Resposta decisiva do usuário: pode criar novo slug!" in source
+    # Chronological order: assistant diagnosis appears before user reply
+    assert source.index("Diagnóstico final do turno 1") < source.index(
+        "Resposta decisiva do usuário"
+    )
+    # Adversarial: out-of-range and negative indices must be ignored without raising IndexError
+    assert runtime._compact_source(messages, {-5, 0, 9999}) != ""
+    assert runtime._compact_source(messages, set()) == ""
+
+

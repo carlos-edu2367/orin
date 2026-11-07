@@ -67,6 +67,7 @@ CLI_PARALLEL_MCP: bool = True
 CLI_PARALLEL_NEEDS_READONLY_HINT: bool = True
 SESSION_BRANCH: str = "B"
 NATIVE_CWD: Path = native_workdir("claude")
+MAX_NATIVE_PRIOR_HISTORY_CHARS: int = 120_000
 
 
 def _resolve_native_cwd(adapter_name: str = "claude") -> Path:
@@ -1055,6 +1056,10 @@ class _RunnerSink:
     ) -> None:
         self._runner = runner
         self._executor = executor
+        self._adapter_name = str(
+            getattr(getattr(runner.provider, "adapter", None), "name", "claude")
+            or "claude"
+        )
         self.had_visible_output = False
         self._thinking_buffer: list[str] = []
         self._last_thinking_flush = time.monotonic()
@@ -1270,6 +1275,8 @@ class _RunnerSink:
             if tail_text:
                 self._emit_visual_delta(tail_text)
         self._message_wrote_text = False
+        if self._adapter_name == "antigravity":
+            return
         self._executor.register_tool_use_started(
             tool_use_id, tool_name, message_id=message_id
         )
@@ -1321,6 +1328,8 @@ class _RunnerSink:
         if message_id:
             self.on_message_id(message_id)
         self.flush_thinking_buffer()
+        if self._adapter_name == "antigravity":
+            return
         self._executor.register_tool_use_complete(
             tool_use_id,
             tool_name,
@@ -1403,12 +1412,17 @@ class _RunnerSink:
             self._runner.runtime.limits.context_window_tokens
             or self._runner.runtime.limits.max_context_tokens
         )
+        ctx_used = (
+            usage.context_window_used_tokens
+            if usage.context_window_used_tokens is not None
+            else used_in
+        )
         updated_ctx = {
             **self._runner.last_context,
-            "used_tokens": used_in,
+            "used_tokens": ctx_used,
             "limit_tokens": limit,
-            "free_tokens": max(0, (limit or 0) - used_in),
-            "percentage": min(100, round(used_in / limit * 100)) if limit else 0,
+            "free_tokens": max(0, (limit or 0) - ctx_used),
+            "percentage": min(100, round(ctx_used / limit * 100)) if limit else 0,
             "compaction_count": self._runner.runtime._compaction_count,
         }
         self._runner.last_context = updated_ctx
@@ -1479,14 +1493,31 @@ class NativeTurnRunner:
         source_msgs = window if window is not None else self.messages
         pinned = self.runtime._last_user_index(source_msgs)
 
+        excluded_system_contents: set[str] = {
+            str(self.runtime.system_prompt or "").strip(),
+            str(self.runtime.volatile_prompt or "").strip(),
+        }
+        if self.runtime.contract is not None:
+            excluded_system_contents.add(
+                str(self.runtime.contract.render() or "").strip()
+            )
+        excluded_system_contents.discard("")
+
+        def _keep_prior_message(m: Mapping[str, object]) -> bool:
+            if m.get("role") != "system":
+                return True
+            text_val, _ = _extract_content_text_and_images(m.get("content"))
+            content = text_val.strip()
+            return bool(content) and content not in excluded_system_contents
+
         if pinned is not None:
             prior_messages = [
-                m for m in source_msgs[:pinned] if m.get("role") != "system"
+                m for m in source_msgs[:pinned] if _keep_prior_message(m)
             ]
             current_msg = source_msgs[pinned]
         else:
             prior_messages = (
-                [m for m in source_msgs[:-1] if m.get("role") != "system"]
+                [m for m in source_msgs[:-1] if _keep_prior_message(m)]
                 if source_msgs
                 else []
             )
@@ -1496,16 +1527,9 @@ class NativeTurnRunner:
                 else {"role": "user", "content": ""}
             )
 
-        blocks: list[dict[str, Any]] = []
-        if prior_messages:
-            out_prior = (
-                self.runtime._names.messages_out(prior_messages)
-                if (window is None and self.runtime._names is not None)
-                else prior_messages
-            )
-            blocks.extend(
-                TranscriptState().blocks_for(out_prior, native_history=True)
-            )
+        cur_text, cur_images = _extract_content_text_and_images(
+            current_msg.get("content")
+        )
 
         volatile_parts: list[str] = []
         if self.runtime.first_user_context:
@@ -1529,21 +1553,112 @@ class NativeTurnRunner:
                 f"{phases.PHASE_INSTRUCTIONS[self.runtime.phases.current]}\n"
                 f"Ferramentas disponíveis agora: {published}."
             )
-        if volatile_parts:
+        volatile_text = (
+            system_reminder("\n\n".join(volatile_parts))
+            if volatile_parts
+            else ""
+        )
+        reserved_tail_chars = (
+            len(cur_text) + len(volatile_text) + len(reminder_body or "")
+        )
+        prior_char_budget = max(
+            16_000,
+            MAX_NATIVE_PRIOR_HISTORY_CHARS - max(0, reserved_tail_chars - 20_000),
+        )
+
+        blocks: list[dict[str, Any]] = []
+        if prior_messages:
+            out_prior = (
+                self.runtime._names.messages_out(prior_messages)
+                if (window is None and self.runtime._names is not None)
+                else prior_messages
+            )
+            prior_blocks = TranscriptState().blocks_for(
+                out_prior, native_history=True, strip_leading_system=False
+            )
+            total_prior_chars = sum(
+                len(str(b.get("text") or "")) for b in prior_blocks
+            )
+            if total_prior_chars > prior_char_budget:
+                kept_prior_blocks: list[dict[str, Any]] = []
+                omitted_tool_blocks = 0
+                for b in prior_blocks:
+                    b_text = str(b.get("text") or "")
+                    is_tool_only = (
+                        b_text.startswith("[Tool Result")
+                        or (
+                            b_text.startswith("[Assistant]\n[Tool Use")
+                            and b_text.endswith("[/Tool Use]")
+                        )
+                    )
+                    if (
+                        total_prior_chars > prior_char_budget
+                        and is_tool_only
+                    ):
+                        total_prior_chars -= len(b_text)
+                        omitted_tool_blocks += 1
+                        continue
+                    kept_prior_blocks.append(b)
+                if (
+                    total_prior_chars > prior_char_budget
+                    and len(kept_prior_blocks) > 2
+                ):
+                    second_pass: list[dict[str, Any]] = []
+                    cutoff_idx = max(0, len(kept_prior_blocks) - 2)
+                    for idx_b, b in enumerate(kept_prior_blocks):
+                        b_text = str(b.get("text") or "")
+                        if (
+                            idx_b < cutoff_idx
+                            and total_prior_chars > prior_char_budget
+                            and not b_text.startswith("[System]")
+                        ):
+                            total_prior_chars -= len(b_text)
+                            omitted_tool_blocks += 1
+                            continue
+                        second_pass.append(b)
+                    kept_prior_blocks = second_pass
+                if total_prior_chars > prior_char_budget and kept_prior_blocks:
+                    per_block_cap = max(
+                        2_000, prior_char_budget // len(kept_prior_blocks)
+                    )
+                    for b in kept_prior_blocks:
+                        b_text = str(b.get("text") or "")
+                        if len(b_text) > per_block_cap:
+                            b["text"] = (
+                                b_text[: per_block_cap - 120]
+                                + "\n...[trecho anterior truncado para preservar a mensagem atual]..."
+                            )
+                if omitted_tool_blocks > 0:
+                    kept_prior_blocks.insert(
+                        0,
+                        {
+                            "type": "text",
+                            "text": (
+                                f"[System]\n[{omitted_tool_blocks} blocos antigos de ferramentas foram "
+                                "omitidos para preservar a mensagem atual e o histórico recente.]"
+                            ),
+                        },
+                    )
+                prior_blocks = kept_prior_blocks
+            blocks.extend(prior_blocks)
+
+        if volatile_text:
             blocks.append(
                 {
                     "type": "text",
-                    "text": system_reminder("\n\n".join(volatile_parts)),
+                    "text": volatile_text,
                 }
             )
         if reminder_body:
             blocks.append({"type": "text", "text": reminder_body})
 
-        cur_text, cur_images = _extract_content_text_and_images(
-            current_msg.get("content")
-        )
         if cur_text or not (blocks or cur_images):
-            blocks.append({"type": "text", "text": cur_text})
+            rendered_cur_text = (
+                f"[User]\n{cur_text}"
+                if (blocks and cur_text and not cur_text.startswith("[User]"))
+                else cur_text
+            )
+            blocks.append({"type": "text", "text": rendered_cur_text})
         blocks.extend(cur_images)
         return blocks
 
@@ -1619,6 +1734,10 @@ class NativeTurnRunner:
         else:
             executor_schemas = None
 
+        # Age prior turns' completed tool results to AGED_TOOL_RESULT_CHARS (1,600 chars)
+        # before building the initial window so CLI providers are not flooded with raw
+        # 100KB tool outputs from earlier turns.
+        self.runtime._age_tool_results(self.messages, keep_recent=0)
         window = self.runtime._request_messages(self.messages)
         if self.runtime._names is not None:
             window = self.runtime._names.messages_out(window)

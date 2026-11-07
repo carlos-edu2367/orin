@@ -89,6 +89,44 @@ describe('buildTurnTimeline', () => {
     expect(timeline[1].kind).toBe('activity')
     expect(timeline[2]).toMatchObject({ kind: 'text', content: 'parte-3' })
   })
+
+  it('drops orphaned Preparando (generating_arguments) tool.progressed placeholders when turnCompleted is true', () => {
+    const events = [
+      event({
+        eventId: 'evt-read-done',
+        type: 'tool.finished',
+        toolName: 'read_file',
+        toolKind: 'filesystem',
+        invocationId: 'call-1',
+        status: 'succeeded',
+        summary: 'Leu Dashboard.tsx',
+      }),
+      event({
+        eventId: 'evt-prep-orphan',
+        type: 'tool.progressed',
+        toolName: 'read_file',
+        toolKind: 'filesystem',
+        invocationId: 'conv:99',
+        phase: 'generating_arguments',
+        summary: 'Preparando read_file...',
+      }),
+      event({
+        type: 'assistant.delta',
+        messageId: 'msg-1',
+        content: 'Análise concluída.',
+      }),
+    ]
+
+    const timeline = buildTurnTimeline(events, 'turn-1', 'msg-1', 'Análise concluída.', true)
+    const activityItems = timeline.filter((item) => item.kind === 'activity')
+    expect(activityItems).toHaveLength(1)
+    if (activityItems[0]?.kind === 'activity') {
+      expect(activityItems[0].group.label).toBe('Leu Dashboard.tsx')
+      expect(
+        activityItems[0].group.events.some((e) => (e.summary ?? '').startsWith('Preparando')),
+      ).toBe(false)
+    }
+  })
 })
 
 describe('resolveTurnId', () => {

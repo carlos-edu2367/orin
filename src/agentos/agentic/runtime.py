@@ -1772,15 +1772,21 @@ class AgenticTurnRuntime:
         # deliberately conservative fraction rather than another full-sized
         # prompt.
         remaining = min(48_000, max(4_000, 2 * self.limits.max_context_tokens))
-        for index in sorted(indices):
+        for index in reversed(sorted(indices)):
+            if index < 0 or index >= len(messages):
+                continue
+            msg = messages[index]
+            if self._is_tool_result(msg):
+                msg = self._compress(msg)
             try:
-                encoded = json.dumps(messages[index], ensure_ascii=False, default=str)
+                encoded = json.dumps(msg, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
-                encoded = str(messages[index])
+                encoded = str(msg)
             if remaining <= 0:
                 break
             parts.append(encoded[:remaining])
             remaining -= len(parts[-1])
+        parts.reverse()
         return "\n".join(parts)
 
     def _request_compaction_summary(self, source: str, turn: Mapping[str, object], *, code_mode: bool = False) -> str:
@@ -1923,8 +1929,16 @@ class AgenticTurnRuntime:
         pinned = messages[pinned_index] if pinned_index is not None else None
         available = budget - (self._estimated_tokens(pinned) if pinned is not None else 0)
         kept: set[int] = {pinned_index} if pinned_index is not None else set()
+        for idx, item in enumerate(messages):
+            if item.get("role") == "system":
+                cost = self._estimated_tokens(item)
+                if cost <= available:
+                    available -= cost
+                    kept.add(idx)
+            else:
+                break
         for unit in reversed(self._group_tool_units(messages)):
-            if pinned_index is not None and pinned_index in unit:
+            if any(idx in kept for idx in unit):
                 continue
             cost = sum(self._estimated_tokens(messages[index]) for index in unit)
             if cost > available:

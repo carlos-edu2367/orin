@@ -33,6 +33,7 @@ class CliUsage:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     reasoning_tokens: int | None = None
+    context_window_used_tokens: int | None = field(default=None, compare=False)
 
     @property
     def context_tokens(self) -> int:

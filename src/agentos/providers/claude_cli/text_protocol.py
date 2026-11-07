@@ -425,14 +425,15 @@ class TranscriptState:
         allowed_now: set[str] | None = None,
         closing: bool = False,
         native_history: bool = False,
+        strip_leading_system: bool = True,
     ) -> list[dict[str, Any]]:
         msgs = [m for m in window if isinstance(m, Mapping)]
-        if msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
-            msgs = msgs[1:]
-
         volatile_system_msgs: list[Mapping[str, Any]] = []
-        while msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
-            volatile_system_msgs.append(msgs.pop(0))
+        if strip_leading_system:
+            if msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
+                msgs = msgs[1:]
+            while msgs and str(msgs[0].get("role") or "").strip().lower() == "system":
+                volatile_system_msgs.append(msgs.pop(0))
 
         groups: list[tuple[str, list[dict[str, Any]]]] = []
         idx = 0

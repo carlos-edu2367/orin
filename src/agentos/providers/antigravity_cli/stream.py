@@ -107,6 +107,8 @@ def _build_cli_usage(
     out_tok: int,
     cache_read: int,
     think_tok: int,
+    *,
+    context_window_used_tokens: int | None = None,
 ) -> CliUsage:
     return CliUsage(
         input_tokens=max(0, raw_in - cache_read),
@@ -114,6 +116,11 @@ def _build_cli_usage(
         cache_read_input_tokens=max(0, cache_read),
         cache_creation_input_tokens=0,
         reasoning_tokens=think_tok if think_tok > 0 else None,
+        context_window_used_tokens=(
+            max(0, context_window_used_tokens)
+            if context_window_used_tokens is not None
+            else max(0, raw_in)
+        ),
     )
 
 
@@ -182,6 +189,10 @@ class AntigravityStreamTranslator:
                 u.get("thinking_tokens", 0)
                 for u in self._turn_step_usages.values()
             )
+            latest_step_idx = max(self._turn_step_usages)
+            latest_step_in = self._turn_step_usages[latest_step_idx].get(
+                "input_tokens", 0
+            )
             if isinstance(result_usage_obj, Mapping):
                 self._prev_result_raw_usage = {
                     "input_tokens": _non_neg_int(
@@ -197,7 +208,13 @@ class AntigravityStreamTranslator:
                         result_usage_obj, "cache_read_tokens"
                     ),
                 }
-            return _build_cli_usage(raw_in, out_tok, cache_read, think_tok)
+            return _build_cli_usage(
+                raw_in,
+                out_tok,
+                cache_read,
+                think_tok,
+                context_window_used_tokens=latest_step_in,
+            )
 
         if isinstance(result_usage_obj, Mapping):
             cum_in = _non_neg_int(result_usage_obj, "input_tokens")

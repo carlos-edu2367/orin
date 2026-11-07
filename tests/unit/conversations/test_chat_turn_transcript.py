@@ -236,3 +236,43 @@ def test_a_conversation_that_never_planned_has_no_contract() -> None:
     _record_a_read(store, first, path="a.txt", content="x")
 
     assert store.latest_contract(str(first["conversation_id"])) is None
+
+
+def test_completed_turn_contract_is_not_auto_resumed_while_interrupted_or_waiting_user_turn_is() -> None:
+    store = _store()
+    first = _first_turn(store)
+    conv_id = str(first["conversation_id"])
+    store.record_step(
+        first,
+        kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+        payload=transcript.assistant_tool_call_payload(
+            "", [{"id": "c1", "name": "write_contract", "arguments": _CONTRACT_ARGUMENTS}]
+        ),
+    )
+    # Normal completion: the contract was for Turn 1 and should NOT auto-resume on Turn 2
+    store.finish(first)
+    assert store.latest_contract(conv_id) is None
+
+    # Turn 2 writes a contract and pauses in WAITING_USER: even after Turn 3 is created
+    # (which transitions Turn 2's state to completed while preserving last_error='WAITING_USER'),
+    # the contract SHOULD be resumed.
+    second = _follow_up(store, conv_id, "Novo objetivo com pergunta", key="request-2")
+    store.record_step(
+        second,
+        kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+        payload=transcript.assistant_tool_call_payload(
+            "",
+            [
+                {
+                    "id": "c2",
+                    "name": "write_contract",
+                    "arguments": _CONTRACT_ARGUMENTS.replace("18%", "30%"),
+                }
+            ],
+        ),
+    )
+    store.finish(second, code="WAITING_USER")
+    assert "30%" in str(store.latest_contract(conv_id))
+    _follow_up(store, conv_id, "Resposta da pessoa", key="request-3")
+    assert "30%" in str(store.latest_contract(conv_id))
+
