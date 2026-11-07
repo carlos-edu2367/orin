@@ -191,7 +191,11 @@ class BashTools:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
         if len(command) > 4096:
-            raise AgentToolError("command is too long")
+            raise AgentToolError(
+                f"command is too long ({len(command)} > 4096 characters). "
+                "To create or change a file use write_file or edit_file; "
+                "for a long script write it to a file first and run that file."
+            )
         if _BLOCKED_COMMAND.search(command):
             raise AgentToolError("This command is blocked because it would affect the host system.")
         clean_description = str(description or "").strip()[:240]

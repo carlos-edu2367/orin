@@ -1247,6 +1247,16 @@ def test_reset_assistant_message_clears_draft_content_and_emits_reset_event() ->
     assert conv_final["messages"][-1]["content"].count("Draft text") == 0
 
 
+def test_run_command_over_limit_mentions_length_and_write_file(toolset: AgentToolset) -> None:
+    long_cmd = "echo " + ("a" * 4100)
+    outcome = toolset.invoke("run_command", {"command": long_cmd})
+    assert outcome.status == "failed"
+    assert f"({len(long_cmd)} > 4096 characters)" in outcome.content
+    assert "write_file" in outcome.content
+    assert "edit_file" in outcome.content
+
+
+
 
 
 
