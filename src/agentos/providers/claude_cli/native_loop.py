@@ -660,7 +660,7 @@ class NativeTurnHandle:
             try:
                 if self._proc.poll() is None:
                     try:
-                        self._exit_code = self._proc.wait(timeout=0.3)
+                        self._exit_code = self._proc.wait(timeout=1.5 if not getattr(self._adapter.capabilities, "persistent_stdin", True) else 0.3)
                     except Exception:
                         self._kill_tree_fn(self._proc)
                         try:
@@ -890,7 +890,12 @@ def start_native_turn_for_provider(
                 autocompact=request.autocompact,
                 session_id=session_kwargs.get("session_id"),
                 resume_session_id=resume_session_id,
-                persist_session=bool(session_kwargs.get("persist_session", False)),
+                persist_session=bool(
+                    session_kwargs.get(
+                        "persist_session",
+                        not getattr(adapter.capabilities, "persistent_stdin", True),
+                    )
+                ),
             )
         )
 

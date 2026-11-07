@@ -58,3 +58,24 @@ Todos os fixtures foram gravados com `codex.exe` 0.167.0, `-m gpt-6-luna` e `-c 
 3. **Detalhes dos pacotes JSONL observados na prática (para A2 e A3):**
    - `mcp_tool_call`: o campo `item.tool` traz o nome curto da ferramenta (`"echo"`), e `item.server` traz `"orin"`. O resultado em `item.completed` vem em `item.result.content` (lista de blocos `{"type": "text", "text": "..."}`).
    - `error` e `turn.failed`: durante falhas de rede/autenticação, o Codex emite avisos de reconexão (`{"type": "error", "message": "Reconnecting... 1/5 (...)"}`) e itens `item.completed` com `item.type == "error"` antes do erro final (`{"type": "error", "message": "..."}` seguido de `{"type": "turn.failed", "error": {"message": "..."}}`). O `CodexJsonlTranslator` deve aguardar o `turn.failed` (ou um pacote `error` que não seja `"Reconnecting..."`) para emitir `RESULT(is_error=True)`, evitando abortar turnos durante uma reconexão bem-sucedida ou duplicar eventos `RESULT`.
+
+## 5. Replay de 3 turnos com `CodexCliAdapter` e `NativeTurnHandle` (Task A5)
+
+Executado ponta a ponta via `start_native_turn_for_provider(ClaudeCliProvider(adapter=CodexCliAdapter()), ...)` com o servidor HTTP MCP real do Orin (`BackgroundTurnToolServer`):
+
+1. **Turno 1 (Chat + ferramenta de leitura `read_note`, modelo `gpt-6-luna`):**
+   - `session_id` gerado pelo Codex: `01a1b37d-270d-7672-be16-df42633270ed`
+   - Ferramenta executada pelo `ToolExecutor` do Orin: `["read_note"]` (`executor_calls = 1`)
+   - Texto final: `"PROJETO_ORIN_CODEX_OK_42"`
+   - Uso reportado (`CliUsage` com desconto de cache D5): `input_tokens=8617`, `cache_read_input_tokens=15872`, `output_tokens=93`.
+2. **Turno 2 (Modo Orin Code + `resume_session_id`, modelo `gpt-6-luna`):**
+   - Retomou `session_id = "01a1b37d-270d-7672-be16-df42633270ed"` via `codex exec resume`
+   - Pergunta sobre o número lido no turno anterior sem nova chamada de ferramenta (`tools_called = []`)
+   - Texto final: `"42"`
+   - Uso reportado: `input_tokens=9686`, `cache_read_input_tokens=23936`, `output_tokens=98`.
+3. **Turno 3 (Troca de modelo no meio da conversa para `gpt-5.6-luna` + `resume_session_id`):**
+   - Retomou a mesma sessão `01a1b37d-270d-7672-be16-df42633270ed` com `-m gpt-5.6-luna`
+   - Confirmou o código completo lido no 1º turno sem nova chamada de ferramenta: `"PROJETO_ORIN_CODEX_OK_42"`
+   - Uso reportado: `input_tokens=24479`, `cache_read_input_tokens=23936`, `output_tokens=158`.
+4. **Ajuste descoberto no replay:**
+   - Para CLIs one-shot (`persistent_stdin=False`), `start_native_turn_for_provider` deve definir `persist_session=True` por padrão (omitindo `--ephemeral` no `codex exec`) e aguardar até `1.5s` no `close()` para o processo concluir o flush do rollout antes de encerrar a árvore de processos, permitindo que o turno seguinte faça `codex exec resume <thread_id>`.

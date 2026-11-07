@@ -624,3 +624,48 @@ def test_codex_adapter_never_opens_auth_json_or_writes_config_toml(
     assert (codex_home / "config.toml").exists()
 
 
+def test_native_turn_defaults_persist_session_true_for_one_shot_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One-shot Codex turns must not pass --ephemeral by default so resume works on Turn 2."""
+    captured_argv: list[list[str]] = []
+
+    adapter = CodexCliAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "resolve_binary",
+        lambda env=None: (str(FAKE_CODEX_SCRIPT), (0, 167, 0)),
+    )
+
+    real_build = adapter.build_command
+
+    def _spy_build(req: CliTurnRequest, wiring: Any = None) -> list[str]:
+        cmd = real_build(req, wiring)
+        captured_argv.append(list(cmd))
+        return cmd
+
+    monkeypatch.setattr(adapter, "build_command", _spy_build)
+    provider = ClaudeCliProvider(adapter=adapter)
+    req = NativeTurnRequest(
+        model="gpt-6-luna",
+        system_prompt="You are Orin.",
+        user_content=[{"type": "text", "text": "Hello"}],
+        executor=_EchoExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 20.0,
+        max_turns=2,
+        cwd=tmp_path / "workdir",
+    )
+    handle = start_native_turn_for_provider(provider, req)
+    try:
+        sink = _RecordingSink()
+        handle.run_until_result(sink)
+    finally:
+        handle.close()
+
+    assert len(captured_argv) == 1
+    assert "--ephemeral" not in captured_argv[0]
+
+
+
