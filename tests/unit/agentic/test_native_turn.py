@@ -931,6 +931,122 @@ def test_same_message_read_and_edit_of_unread_file_is_rejected_with_read_in_same
     assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 2\n"
 
 
+def test_without_message_ids_a_read_does_not_block_edits_in_later_batches(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "blind.py").write_text("x = 1\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.01)
+
+    r_read = executor.call_tool(
+        ToolCallRequest(
+            name="Read",
+            arguments={"file_path": "blind.py"},
+            meta={TOOL_USE_ID_META_KEY: "tu_r1"},
+        )
+    )
+    assert r_read.is_error is False
+
+    r_edit = executor.call_tool(
+        ToolCallRequest(
+            name="Edit",
+            arguments={"file_path": "blind.py", "old_string": "x = 1", "new_string": "x = 2"},
+            meta={TOOL_USE_ID_META_KEY: "tu_e1"},
+        )
+    )
+    assert r_edit.is_error is False
+    assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_without_message_ids_read_and_edit_in_one_gathered_batch_is_still_refused(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "blind.py").write_text("x = 1\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.08)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_read = pool.submit(
+            executor.call_tool,
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": "blind.py"},
+                meta={TOOL_USE_ID_META_KEY: "tu_r1"},
+            ),
+        )
+        time.sleep(0.01)
+        f_edit = pool.submit(
+            executor.call_tool,
+            ToolCallRequest(
+                name="Edit",
+                arguments={"file_path": "blind.py", "old_string": "x = 1", "new_string": "x = 2"},
+                meta={TOOL_USE_ID_META_KEY: "tu_e1"},
+            ),
+        )
+        r_read = f_read.result(timeout=2.0)
+        r_edit = f_edit.result(timeout=2.0)
+
+    assert r_read.is_error is False
+    assert r_edit.is_error is True
+    assert "same batch" in r_edit.text.lower()
+    assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_with_real_message_ids_behavior_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "blind.py").write_text("x = 1\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.01)
+
+    r_read = executor.call_tool(
+        ToolCallRequest(
+            name="Read",
+            arguments={"file_path": "blind.py"},
+            meta={TOOL_USE_ID_META_KEY: "tu_r1", "message_id": "m1"},
+        )
+    )
+    assert r_read.is_error is False
+
+    r_edit = executor.call_tool(
+        ToolCallRequest(
+            name="Edit",
+            arguments={"file_path": "blind.py", "old_string": "x = 1", "new_string": "x = 2"},
+            meta={TOOL_USE_ID_META_KEY: "tu_e1", "message_id": "m1"},
+        )
+    )
+    assert r_edit.is_error is True
+    assert "same batch" in r_edit.text.lower()
+    assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 1\n"
+
+
 def test_write_barrier_waits_for_closing_read_batch_even_with_multiple_concurrent_writes() -> None:
     import threading as _th
 

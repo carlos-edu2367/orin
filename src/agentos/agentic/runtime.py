@@ -125,7 +125,11 @@ CONTINUE_AFTER_OUTPUT_LIMIT = (
     "do not repeat what you already wrote, do not apologize and do not summarize."
 )
 INTERRUPTED_TOOL_RESULT = "Interrupted by user: this tool call was not run."
-SAME_BATCH_READ_MESSAGE = "You read this file in the same batch; look at the read result before editing it."
+SAME_BATCH_READ_MESSAGE = (
+    "You read this file in the same batch; look at the read result before editing it. "
+    "Wait for the read result, then edit in your next tool call. "
+    "Do not re-read the file and do not write it through the shell."
+)
 
 VERIFY_REQUIRED_MESSAGE = (
     "[Sistema] Você alterou o workspace nesta tarefa e ainda não verificou o resultado. Antes de responder, "

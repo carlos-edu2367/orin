@@ -210,6 +210,7 @@ class _BatchEntry:
     done: threading.Event = field(default_factory=threading.Event)
     result: ToolCallResult | None = None
     error: BaseException | None = None
+    batch_key: str | None = None
 
 
 class _OpenReadBatch:
@@ -267,6 +268,8 @@ class ToolBatchCollector:
                 prior_entries = list(self._in_flight_reads.get(msg_key, ()))
             for prior in prior_entries:
                 prior.done.wait()
+            if prior_entries and prior_entries[-1].batch_key:
+                entry.batch_key = prior_entries[-1].batch_key
 
             with self._exec_lock:
                 results = self._run_batch([entry], msg_key)
@@ -383,6 +386,8 @@ class RuntimeToolExecutor(ToolExecutor):
         self._tool_use_message_id: dict[str, str] = {}
         self._current_message_id: str = "msg_1"
         self._msg_seq: int = 1
+        self._adapter_message_ids: bool = False
+        self._batch_seq: int = 0
         self._closed = threading.Event()
         self._first_read_keys_by_message_id: dict[str, set[str]] = {}
         self._seen_tool_round_message_ids: set[str] = set()
@@ -541,6 +546,7 @@ class RuntimeToolExecutor(ToolExecutor):
     def note_message_id(self, message_id: str | None) -> None:
         if message_id and str(message_id).strip():
             with self._corr_lock:
+                self._adapter_message_ids = True
                 self._current_message_id = str(message_id).strip()
 
     def register_tool_use_started(
@@ -551,11 +557,11 @@ class RuntimeToolExecutor(ToolExecutor):
         message_id: str | None = None,
     ) -> None:
         with self._corr_lock:
-            msg_id = (
-                str(message_id).strip()
-                if message_id and str(message_id).strip()
-                else self._current_message_id
-            )
+            if message_id and str(message_id).strip():
+                self._adapter_message_ids = True
+                msg_id = str(message_id).strip()
+            else:
+                msg_id = self._current_message_id
             if tool_use_id:
                 self._tool_use_message_id[str(tool_use_id)] = msg_id
 
@@ -570,11 +576,11 @@ class RuntimeToolExecutor(ToolExecutor):
         int_name = self._resolve_internal_name(tool_name)
         canon_args = _canonical_json(tool_input)
         with self._corr_lock:
-            msg_id = (
-                str(message_id).strip()
-                if message_id and str(message_id).strip()
-                else self._tool_use_message_id.get(str(tool_use_id), self._current_message_id)
-            )
+            if message_id and str(message_id).strip():
+                self._adapter_message_ids = True
+                msg_id = str(message_id).strip()
+            else:
+                msg_id = self._tool_use_message_id.get(str(tool_use_id), self._current_message_id)
             if tool_use_id:
                 self._tool_use_message_id[str(tool_use_id)] = msg_id
                 self._pending_tool_uses.append(
@@ -680,6 +686,7 @@ class RuntimeToolExecutor(ToolExecutor):
                 else None
             )
             if isinstance(meta_msg, str) and meta_msg.strip():
+                self._adapter_message_ids = True
                 message_id = meta_msg.strip()
             else:
                 message_id = self._tool_use_message_id.get(
@@ -873,8 +880,17 @@ class RuntimeToolExecutor(ToolExecutor):
             calls_dict[ent.call_id] = call_obj
             raw_calls.append(call_obj)
 
+        if self._adapter_message_ids:
+            batch_key = str(message_id or "default")
+        elif entries and entries[0].batch_key:
+            batch_key = entries[0].batch_key
+        else:
+            self._batch_seq += 1
+            batch_key = f"batch:{self._batch_seq}"
+        for ent in entries:
+            ent.batch_key = batch_key
         msg_first_reads = self._first_read_keys_by_message_id.setdefault(
-            str(message_id or "default"), set()
+            batch_key, set()
         )
         before_discovered = self._snapshot_discovered()
         self.runtime._native_message_first_read_keys = msg_first_reads

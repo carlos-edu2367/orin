@@ -59,7 +59,11 @@ def test_an_edit_of_a_file_read_only_in_the_same_batch_is_refused(tmp_path: Path
     results = runtime._run_toolset(TURN, [_call(1, "read_file", {"path": "a.txt"}), _call(2, "edit_file", edit)])
     assert results[1]["status"] == "failed"
     assert results[1]["error_code"] == "READ_IN_SAME_BATCH"
-    assert results[1]["content"] == "You read this file in the same batch; look at the read result before editing it."
+    assert results[1]["content"] == (
+        "You read this file in the same batch; look at the read result before editing it. "
+        "Wait for the read result, then edit in your next tool call. "
+        "Do not re-read the file and do not write it through the shell."
+    )
     assert (toolset.workspace.root / "a.txt").read_bytes() == b"one\n"
     again = runtime._run_toolset(TURN, [_call(3, "edit_file", edit)])
     assert again[0]["status"] == "succeeded"  # the refusal is not remembered as a failed signature
