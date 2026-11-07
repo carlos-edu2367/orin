@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../../api/client'
@@ -334,5 +334,74 @@ describe('AntigravitySetup', () => {
       expect(riskCheckbox).toBeChecked()
     })
     expect(screen.getByRole('button', { name: /Salvar e ativar/i })).not.toBeDisabled()
+  })
+
+  it('blocks direct form submission (Enter / submit event) when riskAcknowledged is false, isReady is false, checking is true, or csrf is missing', async () => {
+    const onSave = vi.fn((event) => event?.preventDefault?.())
+    const readyStatus: AntigravityCliStatus = {
+      installed: true,
+      version: '1.5.2',
+      supported: true,
+      authenticated: true,
+      login_command: 'agy',
+    }
+    const client = createMockClient(readyStatus)
+
+    // 1. Ready status, but riskAcknowledged=false -> submit blocked
+    const r1 = render(
+      <AntigravitySetup
+        client={client}
+        bootstrap={{ status: 'ready', csrfToken: 'csrf-token' }}
+        initialStatus={readyStatus}
+        riskAcknowledged={false}
+        onSave={onSave}
+      />,
+    )
+    fireEvent.submit(r1.container.querySelector('form')!)
+    expect(onSave).not.toHaveBeenCalled()
+    r1.unmount()
+
+    // 2. riskAcknowledged=true, but isReady=false (not authenticated) -> submit blocked
+    const r2 = render(
+      <AntigravitySetup
+        client={client}
+        bootstrap={{ status: 'ready', csrfToken: 'csrf-token' }}
+        initialStatus={{ ...readyStatus, authenticated: false }}
+        riskAcknowledged={true}
+        onSave={onSave}
+      />,
+    )
+    fireEvent.submit(r2.container.querySelector('form')!)
+    expect(onSave).not.toHaveBeenCalled()
+    r2.unmount()
+
+    // 3. riskAcknowledged=true and isReady=true, but bootstrap missing_csrf (unavailable) -> submit blocked
+    const r3 = render(
+      <AntigravitySetup
+        client={client}
+        bootstrap={{ status: 'missing_csrf' }}
+        initialStatus={readyStatus}
+        riskAcknowledged={true}
+        onSave={onSave}
+      />,
+    )
+    fireEvent.submit(r3.container.querySelector('form')!)
+    expect(onSave).not.toHaveBeenCalled()
+    r3.unmount()
+
+    // 4. riskAcknowledged=true, isReady=true, bootstrap=ready, but action.pending=true -> submit blocked
+    const r4 = render(
+      <AntigravitySetup
+        client={client}
+        bootstrap={{ status: 'ready', csrfToken: 'csrf-token' }}
+        initialStatus={readyStatus}
+        riskAcknowledged={true}
+        action={{ pending: true, error: null, kind: 'configure' }}
+        onSave={onSave}
+      />,
+    )
+    fireEvent.submit(r4.container.querySelector('form')!)
+    expect(onSave).not.toHaveBeenCalled()
+    r4.unmount()
   })
 })

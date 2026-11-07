@@ -19,17 +19,24 @@ CLI_PROVIDERS: dict[str, Callable[[], CliAgentAdapter]] = {
 
 
 def _is_valid_risk_acknowledgement(value: object) -> bool:
-    if value is None or value is False:
-        return False
-    if value is True:
-        return True
+    if value is None or isinstance(value, bool):
+        return value is True
     if isinstance(value, datetime):
         return True
     if isinstance(value, str):
         cleaned = value.strip()
         if not cleaned or cleaned.lower() in {"false", "0", "no", "none", "null"}:
             return False
-        return True
+        normalized = (
+            f"{cleaned[:-1]}+00:00"
+            if cleaned.endswith(("Z", "z"))
+            else cleaned
+        )
+        try:
+            datetime.fromisoformat(normalized)
+            return True
+        except ValueError:
+            return False
     return False
 
 

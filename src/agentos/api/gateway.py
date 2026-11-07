@@ -2170,7 +2170,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 or (
                     isinstance(payload.risk_acknowledged_at, str)
                     and bool(payload.risk_acknowledged_at.strip())
-                    and payload.risk_acknowledged_at.strip().lower() not in {"false", "0", "no", "none", "null"}
+                    and __import__("agentos.providers.cli_registry", fromlist=["_is_valid_risk_acknowledgement"])._is_valid_risk_acknowledgement(payload.risk_acknowledged_at)
                 )
             )
             if payload.risk_acknowledged is False or (not payload.risk_acknowledged and not has_valid_ack_at):
@@ -2865,9 +2865,14 @@ def _inspect_antigravity_cli_status() -> dict[str, object]:
     ver_tuple = antigravity_command.antigravity_version(binary) if binary is not None else None
     version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
     supported = antigravity_command.is_antigravity_version_supported(ver_tuple)
-    state_path = Path(antigravity_command.resolve_antigravity_home()) / "jetski_state.pbtxt"
+    home_path = Path(antigravity_command.resolve_antigravity_home())
+    state_path = home_path / "jetski_state.pbtxt"
     try:
-        authenticated = bool(not state_path.is_symlink() and state_path.is_file())
+        authenticated = bool(
+            not home_path.is_symlink()
+            and not state_path.is_symlink()
+            and state_path.is_file()
+        )
     except OSError:
         authenticated = False
     return {

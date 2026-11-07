@@ -271,6 +271,19 @@ def test_antigravity_status_rejects_directory_or_symlink_jetski_state(
     assert response_symlink.status_code == 200
     assert response_symlink.json()["authenticated"] is False
 
+    # Also reject when the antigravity-cli home directory itself is a symlink
+    def fake_home_is_symlink(self: Path) -> bool:
+        if self == tmp_path:
+            return True
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", fake_home_is_symlink)
+    response_home_symlink = client.get(
+        "/v1/providers/google-antigravity/status", headers=AUTH
+    )
+    assert response_home_symlink.status_code == 200
+    assert response_home_symlink.json()["authenticated"] is False
+
 
 def test_antigravity_status_broken_binary_version_none_and_oserror_on_state_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

@@ -272,7 +272,10 @@ class AntigravityStreamTranslator:
                     orin_canonical = _strip_orin_prefix(t_str)
                     if orin_canonical is not None:
                         normalized_tools.append(f"orin/{orin_canonical}")
-                    elif t_str in FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS:
+                    elif (
+                        t_str in FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS
+                        and t_str != "forbidden_builtin_tool"
+                    ):
                         # Static list of built-in tools emitted by `agy` in `init.tools`
                         continue
                     else:
@@ -297,7 +300,8 @@ class AntigravityStreamTranslator:
             su = packet.get("step_update")
             if not isinstance(su, Mapping):
                 return []
-            step_type = str(su.get("step_type") or "").strip()
+            step_type_raw = str(su.get("step_type") or "").strip()
+            step_type = step_type_raw.lower()
             state = str(su.get("state") or "").strip().upper()
             conv_id = (
                 str(su.get("conversation_id") or "").strip()
@@ -361,14 +365,22 @@ class AntigravityStreamTranslator:
                     )
                 return events
 
-            if step_type == "tool":
+            if (
+                step_type == "tool"
+                or su.get("tool_name") is not None
+                or isinstance(su.get("tool_info"), Mapping)
+                or step_type_raw in FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS
+            ):
                 tool_info = (
                     su["tool_info"]
                     if isinstance(su.get("tool_info"), Mapping)
                     else {}
                 )
                 raw_tool_name = str(
-                    su.get("tool_name") or tool_info.get("name") or ""
+                    su.get("tool_name")
+                    or tool_info.get("name")
+                    or (step_type_raw if step_type != "tool" else "")
+                    or ""
                 ).strip()
                 tool_use_id = f"{conv_id}:{step_idx}"
                 canonical_name = _strip_orin_prefix(raw_tool_name)

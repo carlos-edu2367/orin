@@ -132,7 +132,7 @@ export function AntigravitySetup({
   }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    if (!isReady || !riskAcknowledged) {
+    if (action.pending || checking || unavailable || !isReady || !riskAcknowledged) {
       event.preventDefault()
       return
     }

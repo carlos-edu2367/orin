@@ -499,3 +499,71 @@ def test_antigravity_multi_user_isolation_across_all_paths(
     assert any(ev.kind is StreamKind.TEXT and ev.text == "from-antigravity:gemini-2.5-pro" for ev in events_a)
     assert captured_adapters == [agy_stub]
     world.engine.dispose()
+
+
+
+def test_redteam_bogus_risk_acknowledged_at_strings_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Red Team C4: Non-ISO strings or integers in risk_acknowledged_at must be rejected by
+    cli_adapter_for and by PUT /v1/providers/google-antigravity (even with in-memory FakeProviderConfiguration).
+    """
+    from fastapi.testclient import TestClient
+    from agentos.api import ApiServices, AuthenticatedPrincipal, InMemorySecurityService, create_app
+
+    agy_stub = _StubSubscriptionAdapter("antigravity", "gemini-2.5-pro")
+    monkeypatch.setitem(CLI_PROVIDERS, "google-antigravity", lambda: agy_stub)
+
+    for bad_ack in (
+        None,
+        False,
+        0,
+        1,
+        "   ",
+        "false",
+        "0",
+        "no",
+        "none",
+        "null",
+        "true",
+        "yes",
+        "1",
+        "not-a-timestamp",
+    ):
+        assert (
+            cli_adapter_for("google-antigravity", None, risk_acknowledged_at=bad_ack)
+            is None
+        )
+
+    class _RecordingConfigPort:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def configure(self, command: dict[str, Any]) -> dict[str, Any]:
+            self.calls.append(command)
+            return {
+                "provider": command["provider"],
+                "enabled": command["enabled"],
+                "has_secret": False,
+                "key_cooldown_seconds": 60,
+                "catalog_refreshed_at": None,
+                "risk_acknowledged_at": command.get("risk_acknowledged_at"),
+            }
+
+    security = InMemorySecurityService()
+    security.add_pat(
+        "pat-ok",
+        AuthenticatedPrincipal("user-1", "cred-1", frozenset({"api"})),
+    )
+    cfg_port = _RecordingConfigPort()
+    app = create_app(ApiServices(security=security, provider_configuration=cfg_port))  # type: ignore[arg-type]
+    client = TestClient(app, raise_server_exceptions=False)
+    for bogus_str in ("true", "yes", "1", "not-a-timestamp", "0", "false"):
+        resp = client.put(
+            "/v1/providers/google-antigravity",
+            json={"enabled": True, "risk_acknowledged_at": bogus_str},
+            headers={"Authorization": "Bearer pat-ok", "Idempotency-Key": f"idem-{bogus_str}"},
+        )
+        assert resp.status_code >= 400, f"Expected failure for bogus risk_acknowledged_at={bogus_str!r}, got {resp.status_code}: {resp.text}"
+    assert cfg_port.calls == []

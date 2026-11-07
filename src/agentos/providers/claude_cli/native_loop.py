@@ -77,6 +77,11 @@ def find_forbidden_item_kind(
 ) -> str | None:
     if not forbidden:
         return None
+    forbidden_set = (
+        forbidden
+        if isinstance(forbidden, (set, frozenset))
+        else frozenset(forbidden)
+    )
     payload = raw
     if payload is None and raw_line:
         stripped = raw_line.strip()
@@ -88,23 +93,80 @@ def find_forbidden_item_kind(
             except Exception:
                 payload = None
     candidates: list[object] = []
-    if isinstance(payload, Mapping):
-        item_obj = payload.get("item")
+
+    def _collect(obj: Any, depth: int = 0) -> None:
+        if depth > 6 or not isinstance(obj, Mapping):
+            return
+        candidates.append(obj.get("type"))
+        candidates.append(obj.get("kind"))
+        item_obj = obj.get("item")
         if isinstance(item_obj, Mapping):
             candidates.append(item_obj.get("type"))
             candidates.append(item_obj.get("kind"))
-        step_obj = payload.get("step_update")
-        if isinstance(step_obj, Mapping) and step_obj.get("step_type") == "tool":
-            candidates.append(step_obj.get("tool_name"))
+        step_obj = obj.get("step_update")
+        if isinstance(step_obj, Mapping):
+            step_type_raw = str(step_obj.get("step_type") or "").strip()
+            candidates.append(step_type_raw)
             tool_info = step_obj.get("tool_info")
-            if isinstance(tool_info, Mapping):
-                candidates.append(tool_info.get("name"))
-        candidates.append(payload.get("type"))
-        candidates.append(payload.get("kind"))
+            is_tool_step = (
+                step_type_raw.lower() == "tool"
+                or step_obj.get("tool_name") is not None
+                or isinstance(tool_info, Mapping)
+            )
+            if is_tool_step:
+                tname = str(
+                    step_obj.get("tool_name")
+                    or (
+                        tool_info.get("name")
+                        if isinstance(tool_info, Mapping)
+                        else ""
+                    )
+                    or ""
+                ).strip()
+                candidates.append(tname)
+                if (
+                    "forbidden_builtin_tool" in forbidden_set
+                    and step_type_raw.lower()
+                    not in ("user_input", "agent_response")
+                ):
+                    if not tname.startswith(
+                        ("mcp_orin_", "orin/", "mcp__orin__")
+                    ) or tname in {"mcp_orin_", "orin/", "mcp__orin__"}:
+                        candidates.append(
+                            tname
+                            if tname in forbidden_set
+                            else "forbidden_builtin_tool"
+                        )
+        init_obj = obj.get("init")
+        if (
+            isinstance(init_obj, Mapping)
+            and "forbidden_builtin_tool" in forbidden_set
+        ):
+            raw_tools = init_obj.get("tools")
+            if isinstance(raw_tools, list):
+                for item in raw_tools:
+                    if not isinstance(item, str) or not item.strip():
+                        continue
+                    t_str = item.strip()
+                    if t_str == "forbidden_builtin_tool":
+                        candidates.append("forbidden_builtin_tool")
+                    elif (
+                        not t_str.startswith(
+                            ("mcp_orin_", "orin/", "mcp__orin__")
+                        )
+                        and t_str not in forbidden_set
+                    ):
+                        candidates.append("forbidden_builtin_tool")
+        for val in obj.values():
+            if isinstance(val, Mapping):
+                _collect(val, depth + 1)
+
+    if isinstance(payload, Mapping):
+        _collect(payload, 0)
     if tool_name:
         candidates.append(tool_name)
     for cand in candidates:
-        if isinstance(cand, str) and cand in forbidden:
+        if isinstance(cand, str) and cand in forbidden_set:
             return cand
     return None
 
@@ -375,6 +437,21 @@ class NativeTurnHandle:
                         f"Claude CLI reported apiKeySource='{init.api_key_source}' instead of 'none'. "
                         "Refusing to consume API credits."
                     )
+                for tool_item in init.tools:
+                    if (
+                        tool_item
+                        in self._adapter.capabilities.forbidden_item_kinds
+                        or not (
+                            tool_item.startswith(f"{self._server_name}/")
+                            or tool_item.startswith(f"mcp__{self._server_name}__")
+                            or tool_item.startswith(f"mcp_{self._server_name}_")
+                        )
+                    ):
+                        self.refuse_tools(f"unauthorized init tool: {tool_item}")
+                        self.close()
+                        raise CliSecurityAbort(
+                            f"CLI reported unauthorized tool '{tool_item}' in init.tools (native tools must remain disabled)."
+                        )
                 mcp_status = init.mcp_servers.get(self._server_name)
                 if (
                     mcp_status != "connected"

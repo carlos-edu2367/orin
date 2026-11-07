@@ -695,7 +695,7 @@ def test_resolve_binary_hermetic_and_version_gate(tmp_path: Path) -> None:
     # Hermetic empty env must not leak host LOCALAPPDATA
     assert resolve_antigravity_binary({"PATH": ""}) is None
 
-    # LocalAppData fallback on Windows
+    # LocalAppData fallback on Windows (and cross-platform when LOCALAPPDATA / USERPROFILE is passed)
     local_app = tmp_path / "LocalAppData"
     agy_bin_dir = local_app / "agy" / "bin"
     agy_bin_dir.mkdir(parents=True)
@@ -704,8 +704,18 @@ def test_resolve_binary_hermetic_and_version_gate(tmp_path: Path) -> None:
     resolved = resolve_antigravity_binary(
         {"PATH": "", "LOCALAPPDATA": str(local_app)}
     )
-    if resolved is not None:
-        assert Path(resolved) == fake_exe
+    assert resolved is not None
+    assert Path(resolved) == fake_exe
+
+    user_profile = tmp_path / "UserProfile"
+    profile_agy = user_profile / "AppData" / "Local" / "agy" / "bin" / "agy.exe"
+    profile_agy.parent.mkdir(parents=True)
+    profile_agy.write_text("fake", encoding="utf-8")
+    resolved_profile = resolve_antigravity_binary(
+        {"PATH": "", "USERPROFILE": str(user_profile)}
+    )
+    assert resolved_profile is not None
+    assert Path(resolved_profile) == profile_agy
 
     models = discover_antigravity_models(
         FAKE_ANTIGRAVITY_SCRIPT, run_models_cmd=True
@@ -965,5 +975,315 @@ def test_adversarial_stream_and_error_classification() -> None:
     )
     assert "--effort" in cmd_matching
     assert cmd_matching[cmd_matching.index("--effort") + 1] == "medium"
+
+
+def test_redteam_partial_wiring_failure_cleans_up_token_files_and_leaves_no_untracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Red Team C1:
+    1. If `wire_antigravity_tool_server` fails midway (e.g. writing `orin_settings.json` fails),
+       already-written `orin.md` and `mcp_config.json` containing the bearer token must be unlinked.
+    2. `wire_antigravity_tool_server` and `build_antigravity_command` must NOT leave untracked
+       `AGENTS.md` or `GEMINI.md` files containing the system prompt outside `wiring.files`.
+    3. Symlinked `orin.md`, `mcp_config.json`, `orin_settings.json`, `AGENTS.md`, `GEMINI.md`,
+       `.git`, `.agents`, `.agents/agents`, or `system_prompt_file` must raise `ValueError`.
+    """
+    import agentos.providers.antigravity_cli.command as cmd_mod
+
+    handle = FakeToolServerHandle()
+    ws_partial = tmp_path / "ws_partial"
+    real_write = cmd_mod._write_owner_only_file
+
+    def _fail_on_settings(path: Path, content: str) -> Path:
+        if path.name == "orin_settings.json":
+            raise OSError("simulated disk failure on settings file")
+        return real_write(path, content)
+
+    monkeypatch.setattr(cmd_mod, "_write_owner_only_file", _fail_on_settings)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        wire_antigravity_tool_server(handle, ws_partial)
+
+    # Neither orin.md nor mcp_config.json may remain on disk with the secret token!
+    assert not (ws_partial / ".agents" / "agents" / "orin.md").exists()
+    assert not (ws_partial / ".agents" / "mcp_config.json").exists()
+    assert not (ws_partial / ".agents" / "orin_settings.json").exists()
+    monkeypatch.setattr(cmd_mod, "_write_owner_only_file", real_write)
+
+    # Normal wiring + command build must not create untracked AGENTS.md or GEMINI.md
+    ws_clean = tmp_path / "ws_clean"
+    sys_file = tmp_path / "sys_clean.txt"
+    sys_file.write_text("TOP_SECRET_SYSTEM_PROMPT", encoding="utf-8")
+    wiring = wire_antigravity_tool_server(
+        handle, ws_clean, system_prompt_file=sys_file
+    )
+    build_antigravity_command(
+        CliTurnRequest(
+            binary="agy",
+            system_prompt_file=sys_file,
+            model="gemini-3.8-flash-low",
+            tool_server_wiring=wiring,
+        ),
+        wiring,
+    )
+    assert not (ws_clean / "AGENTS.md").exists()
+    assert not (ws_clean / "GEMINI.md").exists()
+
+    # Symlink checks for AGENTS.md, GEMINI.md, system_prompt_file, and orin.md
+    real_is_symlink = Path.is_symlink
+
+    for symlink_target_name in (
+        "orin.md",
+        "mcp_config.json",
+        "orin_settings.json",
+        "AGENTS.md",
+        "GEMINI.md",
+        ".git",
+        ".agents",
+    ):
+        ws_sym = tmp_path / f"ws_sym_{symlink_target_name}"
+        monkeypatch.setattr(
+            Path,
+            "is_symlink",
+            lambda self, target=symlink_target_name: (
+                True if self.name == target else real_is_symlink(self)
+            ),
+        )
+        with pytest.raises(ValueError, match="symlink"):
+            wire_antigravity_tool_server(
+                handle, ws_sym, system_prompt_file=sys_file
+            )
+        # Ensure no leaked token files remain after symlink rejection
+        assert not (ws_sym / ".agents" / "agents" / "orin.md").exists()
+        assert not (ws_sym / ".agents" / "mcp_config.json").exists()
+
+    # Symlinked system_prompt_file must be rejected by both wire_antigravity_tool_server and build_antigravity_command
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda self: True if self == sys_file else real_is_symlink(self),
+    )
+    with pytest.raises(ValueError, match="symlink"):
+        wire_antigravity_tool_server(
+            handle, tmp_path / "ws_sym_prompt", system_prompt_file=sys_file
+        )
+    with pytest.raises(ValueError, match="symlink"):
+        build_antigravity_command(
+            CliTurnRequest(
+                binary="agy",
+                system_prompt_file=sys_file,
+                model="gemini-3.8-flash-low",
+                tool_server_wiring=wiring,
+            ),
+            wiring,
+        )
+    monkeypatch.setattr(Path, "is_symlink", real_is_symlink)
+
+
+def test_redteam_yaml_json_injection_and_argv_redaction(tmp_path: Path) -> None:
+    """Red Team C2:
+    1. `_render_orin_agent_md` and `wire_antigravity_tool_server` reject control characters,
+       Unicode line separators (`\\u2028`, `\\u2029`, `\\x85`), whitespace in URLs/tokens,
+       and non-http(s) URLs.
+    2. `redact_antigravity_argv` redacts both the flag and the following value for two-token
+       sensitive flags (`--token`, `--api-key`, `-p`, `--prompt`).
+    """
+    from agentos.providers.antigravity_cli.command import _render_orin_agent_md
+
+    for bad_url in (
+        "http://127.0.0.1:8000/mcp\u2028injected: true",
+        "http://127.0.0.1:8000/mcp\u2029injected: true",
+        "http://127.0.0.1:8000/mcp\x85injected: true",
+        "http://127.0.0.1:8000/mcp\x07bell",
+        "http://127.0.0.1:8000/mcp with space",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+    ):
+        class _BadUrlHandle:
+            url = bad_url
+            token = "valid-token-123"
+
+        with pytest.raises(ValueError):
+            wire_antigravity_tool_server(_BadUrlHandle(), tmp_path / "ws_url")
+        with pytest.raises(ValueError):
+            _render_orin_agent_md(
+                server_name="orin",
+                url=bad_url,
+                token="valid-token-123",
+                system_prompt="sys",
+            )
+
+    for bad_token in (
+        "tok\u2028injected",
+        "tok\u2029injected",
+        "tok\x85injected",
+        "tok\x1b[31m",
+        "tok with spaces",
+    ):
+        class _BadTokHandle:
+            url = "http://127.0.0.1:8000/mcp"
+            token = bad_token
+
+        with pytest.raises(ValueError):
+            wire_antigravity_tool_server(_BadTokHandle(), tmp_path / "ws_tok")
+        with pytest.raises(ValueError):
+            _render_orin_agent_md(
+                server_name="orin",
+                url="http://127.0.0.1:8000/mcp",
+                token=bad_token,
+                system_prompt="sys",
+            )
+
+    # Two-element sensitive flags must redact the following value even if the value lacks sensitive keywords
+    raw_argv = [
+        "agy",
+        "--api-key",
+        "plain_value_without_keywords_123",
+        "--token",
+        "another_plain_value_456",
+        "-p",
+        "confidential_user_prompt_text",
+    ]
+    redacted = redact_antigravity_argv(raw_argv)
+    joined = " ".join(redacted)
+    assert "plain_value_without_keywords_123" not in joined
+    assert "another_plain_value_456" not in joined
+    assert "confidential_user_prompt_text" not in joined
+
+
+def test_redteam_native_loop_aborts_on_done_builtin_tool_nested_packet_and_unknown_init_tool(
+    tmp_path: Path,
+) -> None:
+    """Red Team C3:
+    1. `step_update` with `step_type == 'tool'` and `state == 'DONE'` (or case variation `'TOOL'`)
+       for a forbidden built-in tool (`write_to_file`, `run_command`) aborts with `CliSecurityAbort`.
+    2. Nested `step_update` / `item` with forbidden tool in raw JSONL packet aborts with `CliSecurityAbort`.
+    3. `init.tools` containing an unknown non-`orin/*` tool that is NOT in `FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS`
+       aborts immediately with `CliSecurityAbort`.
+    """
+    import queue
+    import threading
+    from agentos.providers.claude_cli.native_loop import (
+        NativeTurnHandle,
+        find_forbidden_item_kind,
+    )
+    from tests.unit.providers.claude_cli.fakes import FakeClaudePopen
+
+    adapter = AntigravityCliAdapter()
+
+    # Case 1: step_update with state="DONE" and case-varied step_type="TOOL"
+    done_builtin_line = json.dumps(
+        {
+            "event": "step_update",
+            "step_update": {
+                "conversation_id": "c-sec-1",
+                "step_index": 1,
+                "state": "DONE",
+                "step_type": "TOOL",
+                "tool_name": "write_to_file",
+                "tool_info": {"name": "write_to_file", "parameters": {}},
+            },
+        }
+    )
+    assert (
+        find_forbidden_item_kind(
+            adapter.capabilities.forbidden_item_kinds,
+            raw_line=done_builtin_line,
+        )
+        == "write_to_file"
+    )
+
+    # Case 2: Nested packet containing a forbidden tool / step_update
+    nested_line = json.dumps(
+        {
+            "event": "envelope",
+            "data": {
+                "step_update": {
+                    "step_type": "tool",
+                    "state": "DONE",
+                    "tool_name": "run_command",
+                }
+            },
+        }
+    )
+    assert (
+        find_forbidden_item_kind(
+            adapter.capabilities.forbidden_item_kinds,
+            raw_line=nested_line,
+        )
+        == "run_command"
+    )
+
+    # Case 3: init.tools containing an unknown non-orin/* tool NOT in FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS
+    unknown_tool_name = "brand_new_undocumented_agy_builtin_tool"
+    assert unknown_tool_name not in FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS
+    init_with_unknown_tool = json.dumps(
+        {
+            "event": "init",
+            "conversation_id": "c-sec-init",
+            "init": {
+                "model": "gemini-3.8-flash-low",
+                "tools": ["run_command", "mcp_orin_echo", unknown_tool_name],
+            },
+        }
+    )
+
+    class _DummySlots:
+        def acquire(self, **_: Any) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    class _DummyBgServer:
+        class handle:
+            url = "http://127.0.0.1:0/mcp"
+            in_flight = 0
+
+            @staticmethod
+            def refuse_calls(reason: str) -> None:
+                pass
+
+            @staticmethod
+            def allow_calls() -> None:
+                pass
+
+        def close(self, timeout: float = 1.0) -> None:
+            pass
+
+    q: queue.Queue[str | None] = queue.Queue()
+    q.put(init_with_unknown_tool)
+    q.put(None)
+    t_noop = threading.Thread(target=lambda: None)
+    t_noop.start()
+    proc = FakeClaudePopen(["agy"], ndjson_lines=[])
+
+    handle = NativeTurnHandle(
+        proc=proc,
+        cmd=["agy"],
+        requested_model="gemini-3.8-flash-low",
+        server_name="orin",
+        bg_server=_DummyBgServer(),  # type: ignore[arg-type]
+        temp_files=(),
+        slots=_DummySlots(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 10.0,
+        clock=time.monotonic,
+        kill_tree_fn=lambda p: None,
+        log_run_fn=lambda **kw: None,
+        stdout_queue=q,
+        stderr_chunks=[],
+        stdout_thread=t_noop,
+        stderr_thread=t_noop,
+        t0=time.monotonic(),
+        adapter=adapter,
+    )
+    sink = _RecordingSink()
+    try:
+        with pytest.raises(CliSecurityAbort):
+            handle.run_until_result(sink)
+        assert sink.inits == []
+    finally:
+        handle.close()
+
 
 

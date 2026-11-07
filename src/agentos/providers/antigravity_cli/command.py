@@ -106,11 +106,18 @@ def clean_antigravity_model_id(model: str | None) -> str | None:
     return cleaned
 
 
+def _has_forbidden_control_or_linebreak(value: str) -> bool:
+    return any(
+        ord(ch) < 32 or ord(ch) == 127 or ch in {"\x85", "\u2028", "\u2029"}
+        for ch in value
+    )
+
+
 def _validate_path_arg(value: str | Path, label: str) -> str:
     if not isinstance(value, (str, Path)):
         raise ValueError(f"Invalid {label} path")
     raw = str(value)
-    if "\x00" in raw or "\n" in raw or "\r" in raw:
+    if _has_forbidden_control_or_linebreak(raw):
         raise ValueError(f"Invalid {label} path")
     text = raw.strip()
     if not text or text.startswith("-"):
@@ -162,7 +169,7 @@ def resolve_antigravity_binary(
     raw_local = str(source_env.get("LOCALAPPDATA") or "").strip()
     if raw_local:
         local_appdata_candidates.append(Path(raw_local))
-    elif os.name == "nt":
+    elif (env is not None and "USERPROFILE" in env) or os.name == "nt":
         raw_profile = str(source_env.get("USERPROFILE") or "").strip()
         if raw_profile:
             local_appdata_candidates.append(
@@ -290,6 +297,43 @@ def _write_owner_only_file(path: Path, content: str) -> Path:
     return path
 
 
+def _validate_mcp_server_params(
+    *,
+    server_name: str,
+    url: Any,
+    token: Any,
+) -> tuple[str, str, str]:
+    srv = str(server_name or "").strip()
+    if not srv or not _SAFE_SERVER_NAME_RE.fullmatch(srv):
+        raise ValueError(f"Invalid Antigravity MCP server_name: {server_name!r}")
+
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Invalid MCP handle.url: must be a non-empty string")
+    if _has_forbidden_control_or_linebreak(url):
+        raise ValueError("Invalid MCP handle.url: control characters forbidden")
+    clean_url = url.strip()
+    if any(ch.isspace() for ch in clean_url) or not clean_url.startswith(
+        ("http://", "https://")
+    ):
+        raise ValueError(
+            "Invalid MCP handle.url: must be an HTTP(S) URL without whitespace"
+        )
+
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("Invalid MCP handle.token: must be a non-empty string")
+    if _has_forbidden_control_or_linebreak(token):
+        raise ValueError(
+            "Invalid MCP handle.token: control characters forbidden"
+        )
+    clean_token = token.strip()
+    if any(ch.isspace() for ch in clean_token):
+        raise ValueError(
+            "Invalid MCP handle.token: whitespace characters forbidden"
+        )
+
+    return srv, clean_url, clean_token
+
+
 def _render_orin_agent_md(
     *,
     server_name: str,
@@ -297,7 +341,12 @@ def _render_orin_agent_md(
     token: str,
     system_prompt: str,
 ) -> str:
-    auth_val = f"Bearer {token}"
+    srv, clean_url, clean_token = _validate_mcp_server_params(
+        server_name=server_name,
+        url=url,
+        token=token,
+    )
+    auth_val = f"Bearer {clean_token}"
     return (
         "---\n"
         "name: orin\n"
@@ -306,10 +355,10 @@ def _render_orin_agent_md(
         "excludeDefaultComponents: true\n"
         "inheritMcp: false\n"
         "mcpServers:\n"
-        f"  - name: {server_name}\n"
-        f"    url: {json.dumps(url)}\n"
+        f"  - name: {srv}\n"
+        f"    url: {json.dumps(clean_url, ensure_ascii=True)}\n"
         "    headers:\n"
-        f"      Authorization: {json.dumps(auth_val)}\n"
+        f"      Authorization: {json.dumps(auth_val, ensure_ascii=True)}\n"
         "---\n\n"
         "# Instructions\n\n"
         f"{system_prompt.strip()}\n"
@@ -320,8 +369,16 @@ def _update_agent_md_instructions(
     agent_md_path: Path,
     system_prompt: str,
 ) -> None:
-    if agent_md_path.is_symlink() or not agent_md_path.is_file():
+    if agent_md_path.is_symlink():
+        raise ValueError(f"Refusing to write to symlink: {agent_md_path}")
+    if not agent_md_path.is_file():
         return
+    workdir = agent_md_path.parent.parent.parent
+    for doc_name in ("AGENTS.md", "GEMINI.md"):
+        doc_candidate = workdir / doc_name
+        if doc_candidate.is_symlink():
+            raise ValueError(f"Refusing symlinked {doc_name}: {doc_candidate}")
+
     existing = agent_md_path.read_text(encoding="utf-8")
     marker = "# Instructions"
     if marker in existing:
@@ -330,16 +387,6 @@ def _update_agent_md_instructions(
     else:
         updated = f"{existing.rstrip()}\n\n{marker}\n\n{system_prompt.strip()}\n"
     _write_owner_only_file(agent_md_path, updated)
-
-    # Also update AGENTS.md and GEMINI.md in workspace directory if safe
-    try:
-        workdir = agent_md_path.parent.parent.parent
-        temp_root = Path(tempfile.gettempdir()).resolve()
-        if workdir.is_dir() and workdir.resolve() != temp_root:
-            _write_owner_only_file(workdir / "AGENTS.md", f"{system_prompt.strip()}\n")
-            _write_owner_only_file(workdir / "GEMINI.md", f"{system_prompt.strip()}\n")
-    except Exception:
-        pass
 
 
 def wire_antigravity_tool_server(
@@ -350,45 +397,41 @@ def wire_antigravity_tool_server(
     system_prompt_file: Path | None = None,
 ) -> ToolServerWiring:
     """Create isolated `.agents/agents/orin.md`, `.agents/mcp_config.json`, and `.agents/orin_settings.json`."""
-    srv = str(server_name or "").strip()
-    if not srv or not _SAFE_SERVER_NAME_RE.fullmatch(srv):
-        raise ValueError(f"Invalid Antigravity MCP server_name: {server_name!r}")
+    srv, clean_url, clean_token = _validate_mcp_server_params(
+        server_name=server_name,
+        url=getattr(handle, "url", None),
+        token=getattr(handle, "token", None),
+    )
 
-    raw_url = getattr(handle, "url", None)
-    if not isinstance(raw_url, str) or not raw_url.strip():
-        raise ValueError("Invalid MCP handle.url: must be a non-empty string")
-    if "\x00" in raw_url or "\n" in raw_url or "\r" in raw_url:
-        raise ValueError("Invalid MCP handle.url: control characters forbidden")
-
-    raw_token = getattr(handle, "token", None)
-    if not isinstance(raw_token, str) or not raw_token.strip():
-        raise ValueError("Invalid MCP handle.token: must be a non-empty string")
-    if "\x00" in raw_token or "\n" in raw_token or "\r" in raw_token:
-        raise ValueError(
-            "Invalid MCP handle.token: control characters forbidden"
-        )
-
+    _validate_path_arg(directory, "directory")
     workdir = Path(directory)
     if workdir.is_symlink():
         raise ValueError(f"Refusing symlinked working directory: {workdir}")
     workdir.mkdir(parents=True, exist_ok=True)
+    for doc_name in ("AGENTS.md", "GEMINI.md"):
+        doc_candidate = workdir / doc_name
+        if doc_candidate.is_symlink():
+            raise ValueError(f"Refusing symlinked {doc_name}: {doc_candidate}")
+
     git_dir = workdir / ".git"
     if git_dir.is_symlink():
         raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
     git_dir.mkdir(exist_ok=True)
 
     sys_prompt = "You are a helpful assistant."
-    if (
-        system_prompt_file is not None
-        and not system_prompt_file.is_symlink()
-        and system_prompt_file.is_file()
-    ):
-        try:
-            read_sys = system_prompt_file.read_text(encoding="utf-8").strip()
-            if read_sys:
-                sys_prompt = read_sys
-        except Exception:
-            pass
+    if system_prompt_file is not None:
+        sys_file_path = Path(system_prompt_file)
+        if sys_file_path.is_symlink():
+            raise ValueError(
+                f"Refusing symlinked system_prompt_file: {sys_file_path}"
+            )
+        if sys_file_path.is_file():
+            try:
+                read_sys = sys_file_path.read_text(encoding="utf-8").strip()
+                if read_sys:
+                    sys_prompt = read_sys
+            except Exception:
+                pass
 
     agents_dir = workdir / ".agents"
     if agents_dir.is_symlink():
@@ -401,67 +444,73 @@ def wire_antigravity_tool_server(
     agent_md_path = agents_subdir / "orin.md"
     mcp_config_path = agents_dir / "mcp_config.json"
     settings_file = agents_dir / "orin_settings.json"
+    wiring_files = (agent_md_path, mcp_config_path, settings_file)
 
-    agent_md_content = _render_orin_agent_md(
-        server_name=srv,
-        url=raw_url.strip(),
-        token=raw_token.strip(),
-        system_prompt=sys_prompt,
-    )
-    _write_owner_only_file(agent_md_path, agent_md_content)
+    try:
+        for fpath in wiring_files:
+            if fpath.is_symlink():
+                raise ValueError(f"Refusing to write to symlink: {fpath}")
 
-    mcp_config_payload = {
-        "mcpServers": {
-            srv: {
-                "url": raw_url.strip(),
-                "headers": {"Authorization": f"Bearer {raw_token.strip()}"},
+        agent_md_content = _render_orin_agent_md(
+            server_name=srv,
+            url=clean_url,
+            token=clean_token,
+            system_prompt=sys_prompt,
+        )
+        _write_owner_only_file(agent_md_path, agent_md_content)
+
+        mcp_config_payload = {
+            "mcpServers": {
+                srv: {
+                    "url": clean_url,
+                    "headers": {"Authorization": f"Bearer {clean_token}"},
+                }
             }
         }
-    }
-    _write_owner_only_file(
-        mcp_config_path,
-        json.dumps(mcp_config_payload, ensure_ascii=False, indent=2) + "\n",
-    )
+        _write_owner_only_file(
+            mcp_config_path,
+            json.dumps(mcp_config_payload, ensure_ascii=True, indent=2) + "\n",
+        )
 
-    try:
-        resolved_workdir = str(workdir.resolve())
-    except OSError:
-        resolved_workdir = str(workdir.absolute())
+        try:
+            resolved_workdir = str(workdir.resolve())
+        except OSError:
+            resolved_workdir = str(workdir.absolute())
 
-    settings_payload = {
-        "trustedWorkspaces": [resolved_workdir],
-        "allowNonWorkspaceAccess": False,
-        "enableTerminalSandbox": True,
-        "disableSlashCommands": True,
-        "permissions": {
-            "allow": [f"mcp({srv}/*)"],
-            "deny": [
-                "command(*)",
-                "read_file(*)",
-                "write_file(*)",
-                "read_url(*)",
-                "execute_url(*)",
-                "unsandboxed(*)",
-            ],
-        },
-    }
-    _write_owner_only_file(
-        settings_file,
-        json.dumps(settings_payload, ensure_ascii=False, indent=2) + "\n",
-    )
-
-    try:
-        temp_root = Path(tempfile.gettempdir()).resolve()
-        if workdir.resolve() != temp_root:
-            _write_owner_only_file(workdir / "AGENTS.md", f"{sys_prompt}\n")
-            _write_owner_only_file(workdir / "GEMINI.md", f"{sys_prompt}\n")
+        settings_payload = {
+            "trustedWorkspaces": [resolved_workdir],
+            "allowNonWorkspaceAccess": False,
+            "enableTerminalSandbox": True,
+            "disableSlashCommands": True,
+            "permissions": {
+                "allow": [f"mcp({srv}/*)"],
+                "deny": [
+                    "command(*)",
+                    "read_file(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "unsandboxed(*)",
+                ],
+            },
+        }
+        _write_owner_only_file(
+            settings_file,
+            json.dumps(settings_payload, ensure_ascii=True, indent=2) + "\n",
+        )
     except Exception:
-        pass
+        for fpath in wiring_files:
+            try:
+                if not fpath.is_symlink():
+                    fpath.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
 
     return ToolServerWiring(
         argv=("--agent", "orin", "--settings", str(settings_file)),
         env={},
-        files=(agent_md_path, mcp_config_path, settings_file),
+        files=wiring_files,
     )
 
 
@@ -526,16 +575,8 @@ def build_antigravity_command(
             )
 
     prompt_file = Path(request.system_prompt_file)
-    if not prompt_file.is_symlink() and prompt_file.is_file():
-        try:
-            prompt_text = prompt_file.read_text(encoding="utf-8").strip()
-        except Exception:
-            prompt_text = ""
-        if prompt_text and eff_wiring is not None:
-            for fpath in eff_wiring.files:
-                if Path(fpath).name == "orin.md":
-                    _update_agent_md_instructions(Path(fpath), prompt_text)
-                    break
+    if prompt_file.is_symlink():
+        raise ValueError(f"Refusing symlinked system_prompt_file: {prompt_file}")
 
     cmd: list[str] = [
         binary_str,
@@ -613,6 +654,17 @@ def build_antigravity_command(
                 raise ValueError(
                     f"ToolServerWiring for Antigravity CLI only permits '--agent orin' and '--settings <path>', got: {token!r}"
                 )
+
+    if prompt_file.is_file():
+        try:
+            prompt_text = prompt_file.read_text(encoding="utf-8").strip()
+        except Exception:
+            prompt_text = ""
+        if prompt_text and eff_wiring is not None:
+            for fpath in eff_wiring.files:
+                if Path(fpath).name == "orin.md":
+                    _update_agent_md_instructions(Path(fpath), prompt_text)
+                    break
 
     return cmd
 
@@ -703,11 +755,24 @@ def redact_antigravity_argv(argv: Sequence[str]) -> list[str]:
         if text.startswith("--settings="):
             redacted.append("--settings=<redacted-settings>")
             continue
-        if text in {"--mcp-config", "--system-prompt-file"}:
+        if text in {
+            "-p",
+            "--prompt",
+            "--system-prompt",
+            "--mcp-config",
+            "--system-prompt-file",
+        }:
             redacted.append(text)
             redact_generic_next = True
             continue
-        if text.startswith(("--mcp-config=", "--system-prompt-file=")):
+        if text.startswith(
+            (
+                "--prompt=",
+                "--system-prompt=",
+                "--mcp-config=",
+                "--system-prompt-file=",
+            )
+        ):
             prefix = text.split("=", 1)[0]
             redacted.append(f"{prefix}=<redacted>")
             continue
@@ -716,6 +781,9 @@ def redact_antigravity_argv(argv: Sequence[str]) -> list[str]:
             if "=" in text and text.startswith("-"):
                 prefix = text.split("=", 1)[0]
                 redacted.append(f"{prefix}=<redacted>")
+            elif text.startswith("-"):
+                redacted.append(text)
+                redact_generic_next = True
             else:
                 redacted.append("<redacted>")
             continue
