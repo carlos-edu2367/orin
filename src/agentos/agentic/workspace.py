@@ -62,6 +62,14 @@ def _directory_name(workspace_id: str) -> str:
     raise WorkspaceError("conversation_id is not a safe directory name")
 
 
+def _canonical_absolute(path: Path) -> str:
+    """Stable key for a path outside the root: forward slashes and, on Windows, an upper-case drive letter."""
+    text = Path(path).as_posix()
+    if os.name == "nt" and len(text) >= 2 and text[1] == ":":
+        text = text[0].upper() + text[1:]
+    return text
+
+
 class ConversationWorkspace:
     # Additional working directories (W4): resolved folders outside ``root`` the tools may also use, set by
     # the turn from settings and ``/add-dir``; every entry was checked by ``agentic.directories``.

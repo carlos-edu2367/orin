@@ -70,6 +70,26 @@ SESSION_BRANCH: str = "B"
 NATIVE_CWD: Path = native_workdir("claude")
 MAX_NATIVE_PRIOR_HISTORY_CHARS: int = 120_000
 
+_REFUSAL_REASONS: dict[str, str] = {
+    "REPEATED_TOOL_FAILURE": "the same tool call failed 3 times in a row",
+    "WAITING_USER": "the turn is waiting for the person's answer",
+    "HOOK_STOPPED": "a hook stopped the turn",
+    "ACTION_LIMIT": "the turn reached its action limit",
+    "SAFETY_TOOL_ROUNDS": "the turn reached its tool-round limit",
+    "TURN_CANCELLED": "the turn was cancelled",
+    "EFFECT_RECONCILIATION_REQUIRED": "an earlier effect must be reconciled first",
+}
+
+
+def refusal_message(abort_code: str) -> str:
+    """What the model reads when a tool is refused after the turn stopped: why, and when tools come back."""
+    reason = _REFUSAL_REASONS.get(str(abort_code), str(abort_code))
+    return (
+        f"turn stopped: {abort_code} ({reason}). Tools are unavailable for the rest of this turn; this call did not run. "
+        "Do not promise further checks now: tell the person what happened and what is still unverified; "
+        "every tool is available again on their next message."
+    )
+
 
 def _resolve_native_cwd(adapter_name: str = "claude") -> Path:
     """Orin's own workdir, unless it sits inside a git checkout (the development layout): then the CLI
@@ -340,7 +360,7 @@ class RuntimeToolExecutor(ToolExecutor):
         self._explicit_tool_schemas: list[dict[str, object]] | None = (
             list(tool_schemas) if tool_schemas is not None else None
         )
-        self._last_discovered_snapshot: tuple[frozenset[str], frozenset[str]] = (
+        self._last_discovered_snapshot: tuple[frozenset[str], frozenset[str], bool] = (
             self._snapshot_discovered()
         )
         if tool_schemas is None:
@@ -458,11 +478,12 @@ class RuntimeToolExecutor(ToolExecutor):
         self._valid_public_names = pub_names
         self._valid_internal_names = int_names
 
-    def _snapshot_discovered(self) -> tuple[frozenset[str], frozenset[str]]:
+    def _snapshot_discovered(self) -> tuple[frozenset[str], frozenset[str], bool]:
         toolset = getattr(self.runtime, "toolset", None)
         discovered = frozenset(getattr(toolset, "discovered_tool_names", ()) or ())
         active_mcp = frozenset(getattr(toolset, "active_mcp_tool_names", ()) or ())
-        return discovered, active_mcp
+        # Entering or leaving Plan Mode changes what tools/list offers (exit_plan_mode), so it counts as a change.
+        return discovered, active_mcp, bool(getattr(toolset, "_plan_mode_active", False))
 
     def _compute_live_schemas(self) -> list[dict[str, object]]:
         raw_schemas = self.runtime._tool_schemas(
@@ -602,7 +623,7 @@ class RuntimeToolExecutor(ToolExecutor):
     def call_tool(self, request: ToolCallRequest) -> ToolCallResult:
         if self.abort_code is not None:
             return ToolCallResult(
-                text=f"turn stopped: {self.abort_code}",
+                text=refusal_message(self.abort_code),
                 is_error=True,
             )
 
@@ -817,7 +838,7 @@ class RuntimeToolExecutor(ToolExecutor):
     ) -> list[ToolCallResult]:
         if self.abort_code is not None:
             return [
-                ToolCallResult(text=f"turn stopped: {self.abort_code}", is_error=True)
+                ToolCallResult(text=refusal_message(self.abort_code), is_error=True)
                 for _ in entries
             ]
 
@@ -826,11 +847,11 @@ class RuntimeToolExecutor(ToolExecutor):
             self.abort_code = "ACTION_LIMIT"
             if self.handle is not None:
                 try:
-                    self.handle.refuse_tools("turn stopped: ACTION_LIMIT")
+                    self.handle.refuse_tools(refusal_message("ACTION_LIMIT"))
                 except Exception:
                     pass
             return [
-                ToolCallResult(text="turn stopped: ACTION_LIMIT", is_error=True)
+                ToolCallResult(text=refusal_message("ACTION_LIMIT"), is_error=True)
                 for _ in entries
             ]
 
@@ -922,6 +943,13 @@ class RuntimeToolExecutor(ToolExecutor):
                     res["status"] = "succeeded"
                     res["content"] = f"Resposta da pessoa:\n{answer}"
                     res["wait_for_user"] = False
+                    # The answer may approve a production action later in this turn (tools/shell/confirmation.py).
+                    note_answer = getattr(getattr(self.runtime, "toolset", None), "note_user_answer", None)
+                    if callable(note_answer):
+                        try:
+                            note_answer(str(calls_dict.get(str(res.get("id") or ""), {}).get("arguments") or ""), answer)
+                        except Exception:  # noqa: BLE001 - recording an approval never breaks the turn
+                            pass
 
         round_text_parts, round_thinking_parts = (
             self.consume_round_buffers()
@@ -990,7 +1018,7 @@ class RuntimeToolExecutor(ToolExecutor):
 
         if self.abort_code is not None and self.handle is not None:
             try:
-                self.handle.refuse_tools(f"turn stopped: {self.abort_code}")
+                self.handle.refuse_tools(refusal_message(self.abort_code))
             except Exception:
                 pass
 
@@ -1015,7 +1043,7 @@ class RuntimeToolExecutor(ToolExecutor):
             text = str(res.get("content") or "")
             if self.abort_code is not None and self.abort_code not in {"WAITING_USER", "TURN_CANCELLED"}:
                 is_err = True
-                stop_suffix = f"turn stopped: {self.abort_code}"
+                stop_suffix = refusal_message(self.abort_code)
                 text = f"{text}\n{stop_suffix}".strip() if text else stop_suffix
             elif self.abort_code == "TURN_CANCELLED":
                 is_err = True
@@ -1437,6 +1465,15 @@ class _RunnerSink:
 
     def on_compacted(self) -> None:
         self._runner.runtime._compaction_count += 1
+        if self._runner.runtime.context_reporting:
+            # The CLI folded its own session: tell the UI (the next usage report brings the new size).
+            try:
+                self._runner.runtime._life(
+                    self._runner.turn, "context_compacted", boundary="compact", trigger="auto",
+                    source="cli", compaction_count=self._runner.runtime._compaction_count,
+                )
+            except Exception:  # noqa: BLE001 - a notice never breaks the turn
+                pass
         try:
             self._runner.runtime._release_read_stubs(
                 self._runner.messages, folded=True
@@ -1693,6 +1730,31 @@ class NativeTurnRunner:
         blocks.extend(cur_images)
         return blocks
 
+    def _compact_prior_history(self, tool_schemas: list[dict[str, object]]) -> bool:
+        """Summarize earlier history before it is handed to the CLI, as the classic loop does.
+
+        The CLI's own autocompact only lives inside its process: nothing it folds is persisted, so the next
+        turn rebuilt the whole history again and the prior-history cap silently dropped the oldest part with
+        no summary. Compacting here writes the boundary, so later turns start from the summary.
+        """
+        runtime = self.runtime
+        threshold = runtime._autocompact_threshold()
+        if threshold is None or runtime._compaction_count >= 8:
+            return False
+        pinned = runtime._pinned_index if isinstance(runtime._pinned_index, int) else len(self.messages)
+        prior_chars = sum(runtime._estimated_tokens(item) * 4 for item in self.messages[:pinned])
+        estimate = (
+            runtime._estimated_tokens({"messages": self.messages, "tools": tool_schemas})
+            + runtime._prompt_overhead_tokens()
+        )
+        if prior_chars <= MAX_NATIVE_PRIOR_HISTORY_CHARS and estimate < threshold:
+            return False
+        try:
+            return runtime._compact_keeping_recent(self.messages, self.turn)
+        except Exception:  # noqa: BLE001 - the cap below still bounds the prompt
+            _LOGGER.warning("native turn: prior-history compaction failed", exc_info=True)
+            return False
+
     def _remaining_deadline_monotonic(self) -> float:
         now_dt = self.runtime.clock()
         rem_sec = max(0.1, (self.deadline - now_dt).total_seconds())
@@ -1769,6 +1831,7 @@ class NativeTurnRunner:
         # before building the initial window so CLI providers are not flooded with raw
         # 100KB tool outputs from earlier turns.
         self.runtime._age_tool_results(self.messages, keep_recent=0)
+        self._compact_prior_history(tool_schemas)
         window = self.runtime._request_messages(self.messages)
         if self.runtime._names is not None:
             window = self.runtime._names.messages_out(window)

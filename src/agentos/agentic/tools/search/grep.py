@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from agentos.agentic.ripgrep import event_path, event_text, ripgrep_binary, run_ripgrep
 from agentos.agentic.workspace import MAX_SEARCH_RESULTS, WorkspaceError
 from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _TEXT, _schema, linked_or_outside
+from agentos.agentic.tools.search.glob import parse_glob_filter
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 from agentos.ignore import DENIED_SEGMENTS
 
@@ -30,6 +31,51 @@ def _grep_output(
     if offset:
         output["appliedOffset"] = offset
     return output
+
+
+def _merge_context_windows(matches: list[dict[str, Any]], *, post_ctx: int, line_numbers: bool) -> str:
+    """Render matches with context like ripgrep: per file each line once, ``--`` between non-contiguous groups.
+
+    Matched lines are marked ``:``; context lines ``+`` when they follow a match within the after-context
+    window and ``-`` otherwise.
+    """
+    per_file: dict[str, dict[str, Any]] = {}
+    for item in matches:
+        entry = per_file.setdefault(str(item["path"]), {"match": {}, "context": {}})
+        start = int(item["line"])
+        before = item.get("before_context") or []
+        after = item.get("after_context") or []
+        end = int(item.get("end_line", start))
+        pieces = str(item["text"]).splitlines() or [""]
+        entry["match"].setdefault(start, []).append(pieces[0])
+        for offset, extra in enumerate(pieces[1:], start=1):
+            if start + offset <= end:
+                entry["match"].setdefault(start + offset, []).append(extra)
+        for index, text in enumerate(before):
+            entry["context"].setdefault(start - len(before) + index, text)
+        for index, text in enumerate(after):
+            entry["context"].setdefault(end + 1 + index, text)
+    out: list[str] = []
+    for path, entry in per_file.items():
+        match_lines: dict[int, list[str]] = entry["match"]
+        shown = sorted(set(match_lines) | set(entry["context"]))
+        if out:
+            out.append("--")
+        previous: int | None = None
+        last_match: int | None = None
+        for number in shown:
+            if previous is not None and number > previous + 1:
+                out.append("--")
+            previous = number
+            if number in match_lines:
+                last_match = number
+                for text in match_lines[number]:
+                    out.append(f"{path}:{number}: {text}" if line_numbers else f"{path}: {text}")
+                continue
+            sign = "+" if (last_match is not None and number - last_match <= post_ctx) else "-"
+            text = entry["context"][number]
+            out.append(f"{path}{sign}{number}: {text}" if line_numbers else f"{path}{sign} {text}")
+    return "\n".join(out)
 
 
 class GrepTools:
@@ -293,20 +339,7 @@ class GrepTools:
         if not sliced_matches:
             body = "[no match]"
         elif pre_ctx > 0 or post_ctx > 0:
-            blocks: list[str] = []
-            for item in sliced_matches:
-                block_lines: list[str] = []
-                b_lines = item.get("before_context") or []
-                a_lines = item.get("after_context") or []
-                for idx_b, b_text in enumerate(b_lines):
-                    b_line_no = item["line"] - len(b_lines) + idx_b
-                    block_lines.append(f"{item['path']}-{b_line_no}: {b_text}" if line_numbers else f"{item['path']}- {b_text}")
-                block_lines.append(f"{item['path']}:{item['line']}: {item['text']}" if line_numbers else f"{item['path']}: {item['text']}")
-                for idx_a, a_text in enumerate(a_lines):
-                    a_line_no = item.get("end_line", item["line"]) + 1 + idx_a
-                    block_lines.append(f"{item['path']}+{a_line_no}: {a_text}" if line_numbers else f"{item['path']}+ {a_text}")
-                blocks.append("\n".join(block_lines))
-            body = "\n--\n".join(blocks)
+            body = _merge_context_windows(sliced_matches, post_ctx=post_ctx, line_numbers=line_numbers)
         else:
             body = "\n".join(
                 f"{item['path']}:{item['line']}: {item['text']}" if line_numbers else f"{item['path']}: {item['text']}"
@@ -360,12 +393,19 @@ class GrepTools:
         ]
         if fixed:
             arguments.append("-F")
+        # The caller's globs come first: ripgrep gives the last matching glob precedence, so the
+        # ignored-directory exclusions below still win over a broad inclusive glob like "src/**".
+        if glob and glob not in {"**/*", "**", "*"}:
+            include, exclude = parse_glob_filter(glob)
+            for item in include:
+                if item not in {"**/*", "**", "*"}:
+                    arguments += ["--glob", item.lstrip("/")]
+            for item in exclude:
+                arguments += ["--glob", "!" + item.lstrip("/")]
         for ignored in sorted(_GLOB_IGNORED_DIRS | DENIED_SEGMENTS | {".git"}):
             arguments += ["--glob", f"!{ignored}"]
         if multiline:
             arguments += ["-U", "--multiline-dotall"]
-        if glob and glob not in {"**/*", "**", "*"}:
-            arguments += ["--glob", glob]
         if file_type:
             arguments += ["--type", file_type]
         if pre_ctx:

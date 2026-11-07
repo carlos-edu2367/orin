@@ -14,6 +14,75 @@ from agentos.agentic.tools._shared import AgentToolError, _GLOB_IGNORED_DIRS, _T
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
+def expand_braces(pattern: str, _limit: int = 256) -> list[str]:
+    """Expand ``{a,b}`` groups (nested and repeated) into plain patterns; an unbalanced brace stays literal."""
+    start = -1
+    depth = 0
+    for index, char in enumerate(pattern):
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                inner = pattern[start + 1 : index]
+                alternatives: list[str] = []
+                level, last = 0, 0
+                for pos, ch in enumerate(inner):
+                    if ch == "{":
+                        level += 1
+                    elif ch == "}":
+                        level -= 1
+                    elif ch == "," and level == 0:
+                        alternatives.append(inner[last:pos])
+                        last = pos + 1
+                alternatives.append(inner[last:])
+                head, tail = pattern[:start], pattern[index + 1 :]
+                expanded: list[str] = []
+                for alternative in alternatives:
+                    for rest in expand_braces(head + alternative + tail, _limit):
+                        expanded.append(rest)
+                        if len(expanded) >= _limit:
+                            return expanded
+                return expanded
+    return [pattern]
+
+
+def split_glob_list(raw: str) -> list[str]:
+    """Split a glob filter on whitespace and on commas that are outside braces (ripgrep's several ``-g``)."""
+    items: list[str] = []
+    buffer: list[str] = []
+    depth = 0
+    for char in raw.strip():
+        if char == "{":
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+        if depth == 0 and (char == "," or char.isspace()):
+            if buffer:
+                items.append("".join(buffer))
+                buffer = []
+            continue
+        buffer.append(char)
+    if buffer:
+        items.append("".join(buffer))
+    return items
+
+
+def parse_glob_filter(raw: str) -> tuple[list[str], list[str]]:
+    """``(include, exclude)`` plain glob patterns of a filter: lists, braces and ``!`` negation resolved."""
+    include: list[str] = []
+    exclude: list[str] = []
+    for item in split_glob_list(raw or ""):
+        negated = item.startswith("!")
+        for expanded in expand_braces(item[1:] if negated else item):
+            expanded = expanded.strip().replace("\\", "/")
+            if expanded:
+                (exclude if negated else include).append(expanded)
+    return include, exclude
+
+
 class GlobTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
@@ -67,7 +136,15 @@ class GlobTools:
 
     @classmethod
     def _glob_matches_path(cls, rel_posix: str, pattern: str, *, allow_basename: bool = False) -> bool:
-        clean_pattern = (pattern or "**/*").strip().replace("\\", "/")
+        include, exclude = parse_glob_filter(pattern or "**/*")
+        if any(cls._glob_matches_single(rel_posix, item, allow_basename) for item in exclude):
+            return False
+        if not include:
+            return True
+        return any(cls._glob_matches_single(rel_posix, item, allow_basename) for item in include)
+
+    @classmethod
+    def _glob_matches_single(cls, rel_posix: str, clean_pattern: str, allow_basename: bool) -> bool:
         if clean_pattern in {"", "*", "**", "**/*"}:
             return True
         regex = cls._compile_glob_regex(clean_pattern)

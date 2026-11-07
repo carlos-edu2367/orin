@@ -77,7 +77,8 @@ from agentos.agentic.tools.search.glob import GlobTools
 from agentos.agentic.tools.search.grep import GrepTools
 from agentos.agentic.tools.orin.search_code import CodeSearchTools
 from agentos.agentic.tools.shell.bash import BashTools
-from agentos.agentic.tools.shell.publish import publish_actions
+from agentos.agentic.tools.shell.confirmation import guard_sensitive_command, needs_confirmation, parse_answer_blocks
+from agentos.agentic.tools.shell.publish import publish_actions  # noqa: F401 - re-exported for callers and tests
 from agentos.agentic.tools.shell.powershell import PowerShellTools
 from agentos.agentic.tools.shell.tasks import ShellTaskTools
 from agentos.agentic.tools.orin.verify import VerifyTools
@@ -414,6 +415,24 @@ class AgentToolset(
         self.memory_tracker = memory_tracker
         # W1-R9: an explicitly non-interactive Code run may not turn an ordinary "ask" into a silent allow.
         self._non_interactive_ask_allowed = str(non_interactive_ask or "allow").strip().lower() != "deny"
+        # Production confirmations: answers the person gave in this turn, a reader of the turn's dialogue (set by the
+        # session) and the commands already approved in this turn (tools/shell/confirmation.py).
+        self._user_answers: list[tuple[str, str]] = []
+        self._approval_dialogue: Callable[[], list[tuple[str, str]]] | None = None
+        self._sensitive_approvals: set[str] = set()
+
+    def note_user_answer(self, questions_json: str, answer: str) -> None:
+        """Record the person's in-turn answer to an AskUserQuestion, so a production action it approves may run."""
+        pairs = parse_answer_blocks(answer)
+        if pairs and all(not question for question, _ in pairs):
+            try:
+                raw = json.loads(questions_json or "{}")
+            except ValueError:
+                raw = {}
+            items = raw.get("questions") if isinstance(raw, Mapping) else None
+            asked = " ".join(str(item.get("question") or "") for item in items if isinstance(item, Mapping)) if isinstance(items, list) else ""
+            pairs = [(asked, text) for _, text in pairs]
+        self._user_answers.extend(pairs)
 
     @property
     def active_mcp_tool_names(self) -> frozenset[str]:
@@ -873,6 +892,12 @@ class AgentToolset(
                     {"tool_kind": definition.kind, "code_mode": True},
                     "CODE_PERMISSION_DENIED",
                 )
+            if (
+                perm_decision == "ask" and self._code_mode_active and name in {"run_command", "powershell", "monitor"}
+                and needs_confirmation(self, name, arguments)
+            ):
+                # The production guard below asks, naming what the command does; a second, generic prompt is noise.
+                perm_decision = "allow"
             if perm_decision == "ask" and self._lifecycle is not None:
                 request = self._emit_lifecycle(
                     self._lifecycle,
@@ -994,27 +1019,11 @@ class AgentToolset(
                             "CODE_PLAN_APPROVAL_REQUIRED",
                         )
         if self._code_mode_active and name in {"run_command", "powershell", "monitor"}:
-            command = str(arguments.get("command") or "")
-            # Quotes, escapes and git's global options do not change what the shell runs, so the guards read the analysis (W4-R5).
-            actions = publish_actions(command, name)
-            if re.search(r"\b(deploy|release|publish)\b", re.sub(r"[\"'`\\]", "", command), re.IGNORECASE):
-                return ToolOutcome(
-                    "failed", "Confirmação necessária para produção",
-                    "Deploy, publicação e release em produção sempre exigem confirmação explícita da pessoa.",
-                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_DEPLOY_CONFIRMATION_REQUIRED",
-                )
-            if "push" in actions and not self._code_mode_permits_push:
-                return ToolOutcome(
-                    "failed", "Confirmação necessária para publicar",
-                    "Commits locais são permitidos; git push precisa de confirmação explícita ou da preferência Autonomia total.",
-                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
-                )
-            if actions & {"pr", "repo"} and not self._code_mode_permits_pr:
-                return ToolOutcome(
-                    "failed", "Confirmação necessária para publicar",
-                    "Commits locais são permitidos; pull request precisa de confirmação ou da preferência Autonomia total.",
-                    {"tool_kind": definition.kind, "code_mode": True}, "CODE_PUSH_CONFIRMATION_REQUIRED",
-                )
+            # Decided by what the command does (deploy, publish, production DB write, push, PR), never by a word in it;
+            # approvable from the conversation or an approval card (see tools/shell/confirmation.py).
+            sensitive = guard_sensitive_command(self, name, arguments, definition.kind)
+            if sensitive is not None:
+                return sensitive
         limit = definition.max_result_size_chars
         err_payload: dict[str, Any] = {"tool_kind": definition.kind}
         if name in {"run_command", "powershell", "monitor"}:

@@ -250,4 +250,44 @@ describe('Fase B: ToolPermissionCard, 4 Permission Modes & Rewind UI', () => {
       )
     })
   })
+
+  it('shows a production approval with what the command does and no "always allow"', async () => {
+    const event = parseConversationActivityEvent(
+      {
+        event_id: 'evt-perm-prod',
+        event_type: 'code_mode.decision_required',
+        turn_id: 'turn-9',
+        agent_id: 'agent:main',
+        summary: 'Aprovação necessária',
+        payload: {
+          permission_request: {
+            request_id: 'perm_prod',
+            turn_id: 'turn-9',
+            tool_name: 'run_command',
+            command: 'supabase functions deploy sync',
+            sensitive: { kinds: ['deploy'], labels: ['Deploy em produção (supabase functions deploy)'] },
+          },
+        },
+      },
+      '11',
+    )
+    const request = event.toolPermission!
+    expect(request.sensitive?.labels).toEqual(['Deploy em produção (supabase functions deploy)'])
+
+    const onDecision = vi.fn().mockResolvedValue(undefined)
+    const { unmount } = render(<ToolPermissionCard request={request} onDecision={onDecision} />)
+    expect(screen.getByTestId('tool-permission-effects')).toHaveTextContent('supabase functions deploy')
+    expect(screen.queryByText('Sempre permitir no projeto')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByText('Aprovar e executar'))
+    await waitFor(() => expect(onDecision).toHaveBeenCalledWith('allow_once'))
+    unmount()
+
+    const onResolve = vi.fn()
+    render(<CodePermissionDock requests={[{ ...request, state: 'pending' }]} onResolve={onResolve} />)
+    expect(screen.getByText('Produção')).toBeInTheDocument()
+    expect(screen.queryByTestId('code-perm-allow-always')).not.toBeInTheDocument()
+    expect(screen.getByTestId('code-permission-dock')).toHaveClass('code-perm-dock--high-risk')
+    fireEvent.keyDown(window, { key: '2' })
+    expect(onResolve).toHaveBeenCalledWith('perm_prod', { behavior: 'allow', scope: 'once' })
+  })
 })

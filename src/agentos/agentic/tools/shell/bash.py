@@ -18,6 +18,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import WorkspaceError
+from agentos.host_python import posix_path_hint
 from agentos.host_shell import _is_windows, current_host_shell, posix_to_windows_path, shell_argv
 from agentos.process_identity import process_created
 from agentos.agentic.reminders import system_reminder
@@ -629,6 +630,10 @@ class BashTools:
         self._queue_reindex(artifacts)
         rel_cwd = self.workspace.key(self._current_cwd.resolve())
         cwd_prefix = f"[cwd: {rel_cwd}]\n" if rel_cwd != "." else ""
+        if not succeeded and effective_dialect == "posix":
+            path_hint = posix_path_hint(command)
+            if path_hint:
+                body += f"\n\n{path_hint}"
         if re.search(r"\boperation\s+cancel+ed\b", body, re.IGNORECASE) and not artifacts:
             raise AgentToolError(
                 f"{cwd_prefix}exit={process.returncode}\n{body}\n\n"

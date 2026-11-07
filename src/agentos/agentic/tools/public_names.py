@@ -63,6 +63,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "project_map": "ProjectMap",
     "verify_project": "VerifyProject",
     "preview_start": "PreviewStart",
+    "preview_open": "PreviewOpen",
     "preview_stop": "PreviewStop",
     "preview_logs": "PreviewLogs",
     "remember": "Remember",

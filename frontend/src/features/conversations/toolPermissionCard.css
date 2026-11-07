@@ -1,0 +1,15 @@
+/* A production action (deploy, publish, DB write, push) waiting for the person's approval. */
+.tool-permission-card--sensitive {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+.tool-permission-card--sensitive .approval-card__glyph {
+  color: var(--danger);
+  font-weight: 700;
+}
+.tool-permission-card__effects {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.55;
+}

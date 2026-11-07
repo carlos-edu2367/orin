@@ -280,6 +280,10 @@ class _LazyVisionReader:
         return self._reader.transcribe(images, instruction=instruction)
 
 
+from agentos.host_python import environment_notes  # noqa: E402
+from agentos.agentic.tool_availability import note_lost_tools  # noqa: E402
+
+
 def environment_facts() -> dict[str, str]:
     """Describe the machine the agent's commands actually run on.
 
@@ -289,13 +293,18 @@ def environment_facts() -> dict[str, str]:
     """
     shell = current_host_shell()
     tooling = ", ".join(name for name in ("git", "node", "npm", "uv", "docker") if shutil.which(name))
+    from agentos.host_python import cached_python
+
+    python, python_note = cached_python()
     return {
         "os": f"{platform.system()} {platform.release()}".strip(),
         "os_version": platform.version(),
         "platform": sys.platform,
         "shell": shell.label,
         "shell_dialect": shell.dialect,
-        "python": platform.python_version(),
+        "shell_kind": shell.kind,
+        "python": python,
+        "python_note": python_note,
         "available": tooling or "none detected",
     }
 
@@ -587,6 +596,7 @@ def build_system_prompt(
             f"- Operating system: {environment.get('os', 'unknown')}",
             f"- run_command executes through: {environment.get('shell', 'unknown')} — use that shell's syntax, not another one's.",
             f"- Python: {environment.get('python', 'unknown')}. Also on PATH: {environment.get('available', 'unknown')}.",
+            *(f"- {note}" for note in environment_notes(environment)),
         ]
     if subagents_enabled:
         lines += [
@@ -2884,12 +2894,14 @@ class TurnSession:
                 history=lambda: [dict(item) for item in store_cell[0].history_for_turn(store_cell[0].load(""))],
                 slot=slot,
             )
+            grants = self._inherited_code_grants(caller, sub_permission_mode, read_only=read_only_subagent)
             subagent_tools = self._toolset(
                 subagents=can_delegate,
                 caller=child_caller if can_delegate else None,
                 share_read_state=False,
                 browser_agent_key=agent_id,
                 code_mode_active=is_code_mode,
+                **grants,
                 permission_broker=getattr(self, "_active_permission_broker", None),
                 permission_mode=sub_permission_mode,
                 interactive_permissions=bool(self.turn.get("interactive_permissions")),
@@ -3592,6 +3604,51 @@ class TurnSession:
             )
         return f"{task}\n\nWhen you are done, reply with the complete result. The main agent only sees your final message."
 
+    def _subagent_session_section(self, toolset: AgentToolset, environment: Mapping[str, str]) -> str:
+        """The main agent's "# Session" facts for a subagent: where it works and what it may do there."""
+        from agentos.code_mode.system_prompt import _mode_text
+
+        root = str(self.workspace.root)
+        in_shell = ""
+        try:
+            if os.name == "nt" and environment.get("shell_dialect") == "posix":
+                in_shell = f" In the shell it is {windows_to_posix_path(self.workspace.root)}."
+        except Exception:  # noqa: BLE001 - prompt enrichment never blocks a delegation
+            in_shell = ""
+        lines = ["", "", "## Session", f"- Working directory: {root}.{in_shell}"]
+        if getattr(toolset, "_read_only_mode", False):
+            lines.append("- You are read-only: inspect and report; never change files or run commands that change state.")
+            return "\n".join(lines)
+        mode = getattr(getattr(toolset, "_permission_mode", None), "value", None) or str(self.permission_mode)
+        exit_label = "`exit_plan_mode`"
+        lines.append(f"- {_mode_text(mode, None, exit_label, host_access=bool(self.host_folders))}")
+        if mode != "plan_mode":
+            lines.append(
+                "- You have the same freedom as the main agent: create, edit and delete files and run commands with "
+                "your tools to do the task yourself; do not hand the change back as instructions."
+            )
+        if getattr(toolset, "_code_mode_permits_push", False):
+            lines.append("- `git push` is authorized for this turn. Production deploys still need confirmation.")
+        return "\n".join(lines)
+
+    def _inherited_code_grants(self, caller: SubagentCaller, sub_permission_mode: str, *, read_only: bool) -> dict[str, Any]:
+        """What the subagent inherits from the toolset of whoever started it: the same freedom, never more.
+
+        Push and pull requests follow only when the subagent runs in its parent's mode (a definition that narrows the
+        mode narrows them too); a push the user authorized for this turn holds for every agent of the turn.
+        """
+        parent = getattr(caller, "toolset", None) or getattr(self, "toolset", None)
+        if read_only or parent is None:
+            return {}
+        same_mode = str(sub_permission_mode) == str(caller.permission_mode)
+        return {
+            "code_mode_permits_push": bool(getattr(parent, "_code_mode_permits_push", False))
+            and (same_mode or bool(self.turn.get("code_mode_push_authorized"))),
+            "code_mode_permits_pr": bool(getattr(parent, "_code_mode_permits_pr", False)) and same_mode,
+            "code_mode_requires_approval": bool(getattr(parent, "_code_mode_requires_approval", False)),
+            "code_mode_work_kind": str(getattr(parent, "_code_mode_work_kind", "") or "implementation"),
+        }
+
     def _subagent_prompt(self, record: Mapping[str, object], task: str, toolset: AgentToolset) -> str:
         builtin_type = str(record.get("builtin_type") or "")
         header_lines: list[str] = []
@@ -3665,14 +3722,16 @@ class TurnSession:
             if environment.get("shell_dialect") == "cmd"
             else "(Unix syntax: forward slashes, /dev/null, $VAR)"
         )
+        prompt += self._subagent_session_section(toolset, environment)
         prompt += (
             "\n\n## Workspace and environment\n"
-            "- You share one working directory with the main agent. All paths are relative to it; do not use absolute paths.\n"
+            "- You share the working directory above with the main agent. Prefer paths relative to it.\n"
             f"- Operating system: {environment['os']}.\n"
             f"- run_command executes through: {environment['shell']} — use that shell's syntax {shell_syntax_hint}.\n"
             "- Always prefer dedicated tools (`read_file`, `list_files`, `search_files`, `write_file`, `edit_file`) over shell commands (`run_command`).\n"
             "- When calling `write_file` or `edit_file`, always provide the `'path'` argument first before `'content'`.\n"
             f"- Python: {environment['python']}. Also on PATH: {environment['available']}."
+            + "".join(f"\n- {note}" for note in environment_notes(environment))
         )
         if toolset.name_translator is not None:
             from agentos.agentic.tools.public_names import public_text
@@ -3989,7 +4048,15 @@ class TurnSession:
             setattr(toolset._permission_broker, "mode", effective_perm_mode)
         if effective_perm_mode == "plan_mode" or self._in_plan_mode:
             toolset._plan_mode_active = True
+        # Production confirmations may come from the person's message that started this turn (confirmation.py).
+        toolset._approval_dialogue = self._approval_dialogue_pairs
         return toolset
+
+    def _approval_dialogue_pairs(self) -> list[tuple[str, str]]:
+        from agentos.agentic.tools.shell.confirmation import dialogue_pairs
+
+        reader = getattr(self.store, "history_for_turn", None)
+        return dialogue_pairs(reader(self.turn)) if callable(reader) else []
 
     def _additional_directory_sources(self) -> list[str]:
         """Folders this turn may also work in: ``permissions.additionalDirectories`` from the effective settings (W4)."""
@@ -4414,7 +4481,7 @@ class TurnSession:
         to both. The model hears which servers are off and why (never their secrets).
         """
         from agentos.mcp.file_config import load_file_servers, policy_refusal
-        from agentos.mcp.file_servers import connect_file_servers
+        from agentos.mcp.file_servers import connect_file_servers, format_failure_notes
         from agentos.mcp.models import slugify
         from agentos.mcp.toolset import McpToolProvider
 
@@ -4472,10 +4539,14 @@ class TurnSession:
                 else:
                     servers.append(server)
             connect = getattr(self, "_mcp_file_connect", None)
+            recovered: list[str] = []
             ready, failures = connect_file_servers(
-                servers, user_id=str(self.turn.get("user_id") or ""), **({"connect": connect} if connect is not None else {}),
+                servers, user_id=str(self.turn.get("user_id") or ""), recovered=recovered,
+                **({"connect": connect} if connect is not None else {}),
             )
-            notes.extend(f"- {name}: {why}" for name, why in failures)
+            notes.extend(format_failure_notes(failures))
+            if recovered:
+                notes.append(f"- {', '.join(recovered)}: available again")
             if ready:
                 if provider is None:
                     self.mcp_provider = McpToolProvider(ready)
@@ -5272,6 +5343,7 @@ class TurnSession:
             if self.turn.get("code_mode") == "code"
             else tuple(item.name for item in toolset.definitions())
         )
+        note_lost_tools(self._reminders, str(self.turn.get("conversation_id") or ""), toolset)
         project_sessions: tuple[Mapping[str, str], ...] = ()
         active_project_id = str(self.turn.get("project_id") or "").strip()
         active_user_id = str(self.turn.get("user_id") or "").strip()

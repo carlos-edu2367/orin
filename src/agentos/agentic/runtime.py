@@ -43,6 +43,12 @@ from .compaction import (
 CODE_COMPACTION_SECTIONS = COMPACTION_SECTIONS
 CODE_COMPACTION_INSTRUCTION = COMPACTION_INSTRUCTION
 
+# Refusals that wait on a person, not failures of the tool: they never count toward REPEATED_TOOL_FAILURE.
+POLICY_REFUSAL_CODES = frozenset({
+    "CODE_DEPLOY_CONFIRMATION_REQUIRED", "CODE_PUSH_CONFIRMATION_REQUIRED", "CODE_PERMISSION_DENIED",
+    "CODE_PLAN_MODE_READONLY", "CODE_PLAN_APPROVAL_REQUIRED",
+})
+
 MAX_PARALLEL_TOOLS = 8
 MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
 AGED_TOOL_RESULT_CHARS = 1600
@@ -1608,22 +1614,50 @@ class AgenticTurnRuntime:
 
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
         """Clear old tool results first; summarize only when that is not enough."""
-        if self._compaction_count >= 8 or len(messages) < CONTEXT_COMPACTION_KEEP_UNITS + 2:
+        if self._compaction_count >= 8 or len(messages) < 2:
             return
-        estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
+        # Measured as the request is sent: the system prompt, the per-turn reminders and the contract ride
+        # with every call, so leaving them out let the meter read ~100% while autocompact never fired.
+        overhead = self._prompt_overhead_tokens()
+        estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas}) + overhead
         limit = self.limits.max_context_tokens
         if estimate >= int(limit * MICROCOMPACT_THRESHOLD):
             before = estimate
             if self._microcompact(messages, keep_recent=MICROCOMPACT_KEEP_RECENT):
                 self._release_read_stubs(messages)
-                estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas})
+                estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas}) + overhead
                 self._persist_compact_boundary(turn, kind="microcompact", trigger="auto", pre_tokens=before, post_tokens=estimate)
                 if self.context_reporting:
                     self._life(turn, "context_microcompacted", pre_tokens=before, post_tokens=estimate)
         threshold = self._autocompact_threshold()
         if threshold is None or estimate < threshold:
             return
-        self._run_compaction(messages, turn, keep_units=CONTEXT_COMPACTION_KEEP_UNITS)
+        self._compact_keeping_recent(messages, turn)
+
+    def _compact_keeping_recent(self, messages: list[dict[str, object]], turn: Mapping[str, object]) -> bool:
+        """Summarize keeping the usual recent units; with too few units for that, keep only the last two.
+
+        A window filled by a handful of large units (big tool results, a small local model) has no more
+        than ``CONTEXT_COMPACTION_KEEP_UNITS`` units, so the first attempt folds nothing and the old units
+        would only be dropped by the trim, with no summary.
+        """
+        if self._run_compaction(messages, turn, keep_units=CONTEXT_COMPACTION_KEEP_UNITS):
+            return True
+        if self._last_compaction_block is not None:
+            return False
+        return self._run_compaction(messages, turn, keep_units=2)
+
+    def _prompt_overhead_tokens(self) -> int:
+        """Tokens every request carries outside ``messages``: system prompt, volatile prompt, contract, first-user context."""
+        parts: list[str] = [str(self.system_prompt or ""), str(self.volatile_prompt or "")]
+        if self.contract is not None:
+            try:
+                parts.append(self.contract.render())
+            except Exception:  # noqa: BLE001 - an estimate never breaks the turn
+                pass
+        if self.first_user_context:
+            parts.append(str(self.first_user_context))
+        return sum(self._estimated_tokens({"role": "system", "content": part}) for part in parts if part)
 
     def _autocompact_threshold(self) -> int | None:
         """Tokens at which the conversation is summarized; None when ``autoCompact`` is off."""
@@ -1842,8 +1876,17 @@ class AgenticTurnRuntime:
         touched: list[str] = []
         user_messages: list[str] = []
         errors: list[str] = []
+        earlier: list[str] = []
         for index in sorted(indices):
             item = messages[index]
+            if item.get("role") == "system":
+                # An earlier summary folded again: dropping it would lose everything it already recorded.
+                raw = item.get("content")
+                if isinstance(raw, list):
+                    raw = "\n".join(str(block.get("text") or "") for block in raw if isinstance(block, Mapping))
+                text = str(raw or "").replace(COMPACTION_HEADER, "").strip()
+                earlier.extend(f"- {line.strip()}" if not line.lstrip().startswith(("-", "#")) else line.rstrip() for line in text.splitlines() if line.strip())
+                continue
             for call in item.get("tool_calls") or ():
                 if not isinstance(call, Mapping):
                     continue
@@ -1865,7 +1908,8 @@ class AgenticTurnRuntime:
                     errors.append(f"- {content.strip()[:200]}")
         sections = {
             CODE_COMPACTION_SECTIONS[0]: user_messages[:2] or ["- none"],
-            CODE_COMPACTION_SECTIONS[1]: ["- preserved from workspace trajectory"],
+            CODE_COMPACTION_SECTIONS[1]: cls._bounded_lines([line.replace("### ", "#### ", 1) for line in earlier], 3_500)
+            or ["- preserved from workspace trajectory"],
             CODE_COMPACTION_SECTIONS[2]: touched[-12:] or ["- none"],
             CODE_COMPACTION_SECTIONS[3]: errors[-6:] or ["- none"],
             CODE_COMPACTION_SECTIONS[4]: touched[-6:] or ["- none"],
@@ -1877,6 +1921,18 @@ class AgenticTurnRuntime:
         return "\n".join(f"### {name}\n" + "\n".join(lines) for name, lines in sections.items())
 
     _fallback_code_compaction_summary = _fallback_compaction_summary
+
+    @staticmethod
+    def _bounded_lines(lines: list[str], budget: int) -> list[str]:
+        """The first lines that fit in ``budget`` characters (each cut to 300), so later sections survive the 8k cap."""
+        kept: list[str] = []
+        for line in lines:
+            piece = line[:300]
+            if len(piece) + 1 > budget:
+                break
+            kept.append(piece)
+            budget -= len(piece) + 1
+        return kept
 
     @classmethod
     def _estimated_tokens(cls, message: Mapping[str, object] | object) -> int:
@@ -2295,8 +2351,10 @@ class AgenticTurnRuntime:
         def duplicate_outcome(name: str, arguments: Mapping[str, object]) -> ToolOutcome:
             previous = self._failed_signatures[self._signature(name, arguments)]
             content = (
-                f"{previous}\n\n[this exact call already failed in this turn; "
-                "it was not run again — change the arguments or use a different tool]"
+                f"{previous}\n\n[this exact call already failed in this turn and nothing has changed since, "
+                "so it was not run again. Change the arguments (path, pattern, old_string...), fix the cause "
+                "named in the error above, or run any other successful tool call first (e.g. Read the file, "
+                "list the directory) — an identical retry is allowed once something has succeeded in between]"
             )
             return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
 
@@ -2312,7 +2370,7 @@ class AgenticTurnRuntime:
             to know which file a tool touched. ``run_command`` is not
             read-only, so a command that only reads is never served from here.
             """
-            if name in {"check_subagent", "read_process_output", "preview_logs"}:
+            if name in {"check_subagent", "read_process_output", "preview_logs", "preview_open"}:
                 return None
             if not (callable(is_read_only) and is_read_only(name)):
                 return None
@@ -2347,7 +2405,7 @@ class AgenticTurnRuntime:
             if error is not None or arguments is None:
                 continue
             sig = self._signature(name, arguments)
-            if name in {"check_subagent", "read_process_output", "preview_logs"}:
+            if name in {"check_subagent", "read_process_output", "preview_logs", "preview_open"}:
                 continue
             if sig in first_seen and not duplicate[i] and repeated[i] is None:
                 first_index[i] = first_seen[sig]
@@ -2583,24 +2641,15 @@ class AgenticTurnRuntime:
             sig = self._signature(name, arguments)
             if outcome.status == "succeeded":
                 self._consecutive_tool_failures.clear()
-            elif first_index[index] is None:
+            elif first_index[index] is None and outcome.error_code not in POLICY_REFUSAL_CODES:
+                # A refusal that waits on a person (production confirmation, a denied permission, plan mode) is not a
+                # broken tool: counting it ended the turn and took every tool away from the model mid-answer.
                 self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
-            is_mutating_fn = getattr(self.toolset, "is_mutating", None)
-            if outcome.status == "succeeded" and (
-                name in {
-                    "write_file",
-                    "edit_file",
-                    "notebook_edit",
-                    "delete_file",
-                    "run_command",
-                    "powershell",
-                    "preview_start",
-                    "preview_stop",
-                    "stop_process",
-                    "verify_project",
-                }
-                or (callable(is_mutating_fn) and is_mutating_fn(name))
-            ):
+            if outcome.status == "succeeded":
+                # Any successful call (a Read of the path, a write, a command...)
+                # changes the state the earlier failure depended on, so an
+                # identical retry is allowed again; only back-to-back repeats of
+                # a failing call are short-circuited.
                 self._failed_signatures.clear()
             elif outcome.status == "failed" and not duplicate[index] and not outcome.payload.get("transient") and outcome.error_code != "READ_IN_SAME_BATCH":
                 self._failed_signatures[sig] = outcome.content
@@ -3113,6 +3162,15 @@ class AgenticTurnRuntime:
         if compacted:
             info = self._last_compaction or {}
             self.store.delta(turn, f"Conversa compactada: cerca de {info.get('pre_tokens', 0)} → {info.get('post_tokens', 0)} tokens.")
+            if self.context_reporting:
+                # Without a fresh measurement the meter keeps the pre-compaction figure until the next message.
+                try:
+                    schemas = self._tool_schemas(turn)
+                    if self._names is not None:
+                        schemas = self._names.schemas_out(schemas)
+                except Exception:  # noqa: BLE001 - the meter is best effort
+                    schemas = []
+                self._life(turn, "context_updated", **self._context_usage(messages, self._request_messages(messages), schemas))
         elif self._last_compaction_block:
             self.store.delta(turn, f"⚠️ A compactação foi bloqueada por um hook: {self._last_compaction_block}")
         else:

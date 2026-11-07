@@ -23,7 +23,13 @@ export function isEditRequest(request: DockToolPermissionRequest): boolean {
   return Boolean(request.path) && !request.command && /(edit|write|notebook|patch)/.test(tool)
 }
 
+/** A production action (deploy, publish, DB write, push) is approved for this command only, never "again". */
+export function isSensitiveRequest(request: DockToolPermissionRequest): boolean {
+  return Boolean(request.sensitive && request.sensitive.labels.length > 0)
+}
+
 function allowAgain(request: DockToolPermissionRequest): CodePermissionDockDecision {
+  if (isSensitiveRequest(request)) return { behavior: 'allow', scope: 'once' }
   if (isEditRequest(request)) return { behavior: 'allow', scope: 'session', kind: 'edits' }
   return request.ruleSuggestion
     ? { behavior: 'allow', scope: 'project', updatedRule: request.ruleSuggestion }
@@ -46,6 +52,7 @@ const HIGH_RISK_COMMAND_PATTERNS = [
 ]
 
 export function assessPermissionRisk(request: DockToolPermissionRequest): 'high' | 'normal' {
+  if (isSensitiveRequest(request)) return 'high'
   const haystack = [request.command, request.path, request.target, request.ruleSuggestion]
     .filter(Boolean)
     .join(' ')
@@ -66,6 +73,13 @@ function resolveBadgeAndTitle(request: DockToolPermissionRequest): {
   const tool = (request.toolName || '').toLowerCase()
   const cmd = (request.command || '').trim()
 
+  if (isSensitiveRequest(request)) {
+    return {
+      badge: 'Produção',
+      badgeVariant: 'bash',
+      title: 'Aprovar ação em produção (só este comando)',
+    }
+  }
   if (tool === 'exit_plan_mode' || tool === 'enter_plan_mode' || request.planApproval) {
     return {
       badge: 'Plan',
@@ -438,6 +452,7 @@ export function CodePermissionDock({
               <span>Sim</span>
             </button>
 
+            {!isSensitiveRequest(current) && (
             <button
               type="button"
               disabled={busy}
@@ -458,6 +473,7 @@ export function CodePermissionDock({
                 <span>Sim, e não perguntar de novo nesta sessão</span>
               )}
             </button>
+            )}
 
             <button
               type="button"

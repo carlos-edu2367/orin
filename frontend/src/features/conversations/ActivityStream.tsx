@@ -145,7 +145,7 @@ export function renderActivityGroup(
     )
   }
   if ((first.toolName === 'ask_user' || first.codeApproval || first.questions) && first.questions && first.turnId && onAnswer) {
-    return <UserQuestionCard questions={first.questions} active={(openQuestionTurnIds?.has(first.turnId) ?? false) && !first.questionsAnswered} onSubmit={(answers) => onAnswer(first, answers)} />
+    return <UserQuestionCard questions={first.questions} active={(openQuestionTurnIds?.has(first.turnId) ?? false) && !first.questionsAnswered} onSubmit={(answers) => onAnswer(first, answers)} answeredText={first.questionsAnswerText} />
   }
   if (first.pluginApproval && first.turnId && onPluginApprove && onPluginDecline) {
     return <PluginApprovalCard plugin={first.pluginApproval} active={openQuestionTurnIds?.has(first.turnId) ?? false} onApprove={() => onPluginApprove(first)} onDecline={() => onPluginDecline(first)} />

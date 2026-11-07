@@ -629,7 +629,7 @@ def test_read_file_out_of_range_offset_does_not_mark_file_as_read_for_edit(
     assert out_edit.error_code == "FILE_NOT_READ"
 
 
-def test_edit_file_refuses_editing_lines_beyond_token_budget_cut(
+def test_edit_file_allows_editing_lines_beyond_token_budget_cut_but_refuses_stale(
     tmp_path: Path,
 ) -> None:
     """BUG REPRODUCTION (IMPORTANT - tools/files/read.py:222-247 & edit.py:63):
@@ -654,35 +654,24 @@ def test_edit_file_refuses_editing_lines_beyond_token_budget_cut(
     assert rec is not None
     assert rec.limit < 350
 
-    # Attempt to edit line 340 which was NEVER delivered in Read output
+    # A partial read is enough (Claude Code parity): the exact old_string exists and the file is unchanged.
     out_edit = toolset.invoke(
         "Edit",
         {
             "path": "partially_read.py",
             "old_string": lines[339],
-            "new_string": "val_0340 = 'mutated_without_reading'",
+            "new_string": "val_0340 = 'mutated_after_partial_read'",
         },
     )
-    assert out_edit.status == "failed", (
-        f"edit_file allowed modifying line 340 even though Read output was cut at line {rec.limit} "
-        "by the token budget!"
-    )
-    assert out_edit.error_code == "FILE_NOT_READ"
+    assert out_edit.status == "succeeded", out_edit.content
 
-    # Reading the remaining window unlocks editing line 340
-    out_read_tail = toolset.invoke("Read", {"path": "partially_read.py", "offset": rec.limit + 1, "limit": 200})
-    assert out_read_tail.status == "succeeded"
-    assert "val_0340" in out_read_tail.content
-
-    out_edit_ok = toolset.invoke(
-        "Edit",
-        {
-            "path": "partially_read.py",
-            "old_string": lines[339],
-            "new_string": "val_0340 = 'mutated_after_reading'",
-        },
+    # ...but an external change after the read is still refused as stale.
+    p.write_text(p.read_text(encoding="utf-8") + "tail = 1\n", encoding="utf-8")
+    out_stale = toolset.invoke(
+        "Edit", {"path": "partially_read.py", "old_string": lines[338], "new_string": "x = 1"},
     )
-    assert out_edit_ok.status == "succeeded"
+    assert out_stale.status == "failed"
+    assert out_stale.error_code == "STALE_FILE_READ"
 
 
 def test_phase1_regressions_same_batch_guard_stub_release_and_crlf_preservation(

@@ -106,9 +106,8 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
     // When no URL is provided or detected, renders clean empty state
     cleanup()
     render(<CodeWorkbenchPanel files={SAMPLE_FILES} terminalEntries={[]} />)
-    expect(screen.getByTestId('workbench-preview-empty')).toHaveTextContent(
-      'Nenhuma prévia ativa no momento. Informe uma URL http(s) acima ou inicie um servidor local no terminal.',
-    )
+    expect(screen.getByTestId('workbench-preview-empty')).toHaveTextContent('Nenhuma prévia ativa')
+    expect(screen.getByTestId('workbench-preview-empty')).toHaveTextContent('abre a prévia aqui')
     expect(screen.queryByTestId('workbench-preview-iframe')).not.toBeInTheDocument()
   })
 
@@ -214,9 +213,12 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
     expect(screen.queryByTestId('workspace-files-search')).not.toBeInTheDocument()
 
     const searchInput = screen.getByTestId('workbench-files-search')
-    expect(screen.getByText('src/pages/TrilhaHype.tsx')).toBeInTheDocument()
-    expect(screen.getByText('src/styles/trilha.css')).toBeInTheDocument()
-    expect(screen.getByText('README.md')).toBeInTheDocument()
+    // Explorer tree: folders first, files as single-line rows with their base name.
+    const tree = screen.getByRole('tree')
+    expect(within(tree).getByText('TrilhaHype.tsx')).toBeInTheDocument()
+    expect(within(tree).getByText('trilha.css')).toBeInTheDocument()
+    expect(within(tree).getByText('README.md')).toBeInTheDocument()
+    expect(screen.getByTestId('workbench-file-detail')).toHaveTextContent('Diff · src/pages/TrilhaHype.tsx')
 
     // First file with structuredPatch shows StructuredDiffView
     expect(screen.getByLabelText('Visualização de diff unificado')).toBeInTheDocument()
@@ -229,8 +231,8 @@ describe('CodeWorkbenchPanel (ref-08.png — Orin Code Split Workbench)', () => 
 
     // Filter files by search query
     fireEvent.change(searchInput, { target: { value: 'TrilhaHype' } })
-    expect(screen.getByText('src/pages/TrilhaHype.tsx')).toBeInTheDocument()
-    expect(screen.queryByText('README.md')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('tree')).getByText('TrilhaHype.tsx')).toBeInTheDocument()
+    expect(within(screen.getByRole('tree')).queryByText('README.md')).not.toBeInTheDocument()
   })
 
   it('switches to Terminal tab and renders terminal entries or empty state', () => {

@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { StructuredDiffView } from './WorkspaceFileCard'
 import type { ToolPermissionDecision, ToolPermissionRequest } from './activityTypes'
+import './toolPermissionCard.css'
 
 export type ToolPermissionCardProps = {
   request: ToolPermissionRequest
@@ -16,6 +17,8 @@ export function ToolPermissionCard({ request, active = true, onDecision }: ToolP
   const canAct = active && resolved === null && Boolean(onDecision)
   const hasPatch = Boolean(request.structuredPatch && request.structuredPatch.length > 0)
   const hasStats = request.addedLines !== undefined || request.removedLines !== undefined
+  // A production action (deploy, publish, DB write, push) is approved for this command only.
+  const sensitive = request.sensitive && request.sensitive.labels.length > 0 ? request.sensitive : null
 
   async function decide(decision: ToolPermissionDecision) {
     if (!canAct || busy || !onDecision) return
@@ -33,23 +36,26 @@ export function ToolPermissionCard({ request, active = true, onDecision }: ToolP
 
   return (
     <section
-      className="approval-card tool-permission-card"
+      className={sensitive ? 'approval-card tool-permission-card tool-permission-card--sensitive' : 'approval-card tool-permission-card'}
       data-testid="tool-permission-card"
       data-active={canAct}
+      data-sensitive={sensitive ? 'true' : undefined}
       data-resolved={resolved ?? undefined}
-      aria-label={`Permissão para ${request.toolName}`}
+      aria-label={sensitive ? 'Aprovação de ação em produção' : `Permissão para ${request.toolName}`}
     >
       <header className="approval-card__header">
-        <span className="approval-card__glyph" aria-hidden="true">›_</span>
+        <span className="approval-card__glyph" aria-hidden="true">{sensitive ? '!' : '›_'}</span>
         <div>
-          <strong>Permissão necessária · {request.toolName}</strong>
+          <strong>{sensitive ? 'Aprovação necessária · ação em produção' : `Permissão necessária · ${request.toolName}`}</strong>
           <p>
-            {request.path
-              ? `Arquivo: ${request.path}`
-              : request.command
-                ? `Comando no terminal`
-                : `Execução de ${request.toolName}`}
-            {request.ruleSuggestion ? ` · Regra: ${request.ruleSuggestion}` : ''}
+            {sensitive
+              ? 'Este comando só roda se você aprovar. A aprovação vale apenas para este comando.'
+              : request.path
+                ? `Arquivo: ${request.path}`
+                : request.command
+                  ? `Comando no terminal`
+                  : `Execução de ${request.toolName}`}
+            {!sensitive && request.ruleSuggestion ? ` · Regra: ${request.ruleSuggestion}` : ''}
           </p>
         </div>
         {hasStats && (
@@ -62,6 +68,12 @@ export function ToolPermissionCard({ request, active = true, onDecision }: ToolP
       </header>
 
       <div className="approval-card__form">
+        {sensitive && (
+          <ul className="tool-permission-card__effects" data-testid="tool-permission-effects">
+            {sensitive.labels.map((label) => <li key={label}>{label}</li>)}
+          </ul>
+        )}
+
         {request.command && (
           <pre className="tool-permission-card__command">
             <code>$ {request.command}</code>
@@ -76,9 +88,9 @@ export function ToolPermissionCard({ request, active = true, onDecision }: ToolP
 
         {resolved && (
           <p className="approval-card__hint" role="status">
-            {resolved === 'allow_once' && 'Permissão concedida para esta ação.'}
+            {resolved === 'allow_once' && (sensitive ? 'Aprovado. O comando vai rodar agora.' : 'Permissão concedida para esta ação.')}
             {resolved === 'allow_always' && `Sempre permitido neste projeto${request.ruleSuggestion ? ` (${request.ruleSuggestion})` : ''}.`}
-            {resolved === 'deny' && 'Ação negada.'}
+            {resolved === 'deny' && (sensitive ? 'Negado. Nada foi executado.' : 'Ação negada.')}
           </p>
         )}
 
@@ -92,21 +104,25 @@ export function ToolPermissionCard({ request, active = true, onDecision }: ToolP
             >
               {busy === 'deny' ? 'Negando…' : 'Negar'}
             </button>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => void decide('allow_always')}
-              disabled={busy !== null}
-            >
-              {busy === 'allow_always' ? 'Salvando…' : 'Sempre permitir no projeto'}
-            </button>
+            {!sensitive && (
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => void decide('allow_always')}
+                disabled={busy !== null}
+              >
+                {busy === 'allow_always' ? 'Salvando…' : 'Sempre permitir no projeto'}
+              </button>
+            )}
             <button
               type="button"
               className="approval-card__submit"
               onClick={() => void decide('allow_once')}
               disabled={busy !== null}
             >
-              {busy === 'allow_once' ? 'Permitindo…' : 'Permitir'}
+              {busy === 'allow_once'
+                ? (sensitive ? 'Aprovando…' : 'Permitindo…')
+                : (sensitive ? 'Aprovar e executar' : 'Permitir')}
             </button>
           </footer>
         )}

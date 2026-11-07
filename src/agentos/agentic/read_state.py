@@ -8,7 +8,8 @@ import hashlib
 import threading
 
 from agentos.agentic.tools._shared import EXTERNAL_CHANGE_HASH_LIMIT_BYTES, ReadFileRecord
-from agentos.agentic.workspace import ConversationWorkspace
+from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
+from agentos.pathsafety import is_drive_path
 
 
 MAX_TRACKED_CONVERSATIONS = 64
@@ -64,7 +65,16 @@ def prepare_carried_state(state: MutableMapping[str, object], workspace: Convers
 
     for key, record in valid_records[:MAX_CARRIED_READS]:
         try:
-            target = workspace.resolve(key)
+            try:
+                target = workspace.resolve(key)
+            except WorkspaceError:
+                # An absolute key under an additional directory cannot resolve yet: the turn
+                # grants those folders after this state is carried in. Keep it (the edit guard
+                # re-checks the digest anyway) rather than silently dropping the read.
+                if is_drive_path(key) or key.startswith("/"):
+                    record.explicit_read = False
+                    continue
+                raise
             if not target.is_file():
                 state.pop(key, None)
                 removed += 1

@@ -7,7 +7,7 @@ CODE_MODE_CORE_TOOLS: frozenset[str] = frozenset({
     "read_file", "view_file", "transcribe_pdf", "write_file", "edit_file", "notebook_edit",
     "glob_files", "list_files", "search_files", "search_code", "project_map",
     "run_command", "powershell", "read_process_output", "stop_process", "verify_project",
-    "enter_worktree", "exit_worktree", "preview_start", "preview_stop", "preview_logs",
+    "enter_worktree", "exit_worktree", "preview_start", "preview_open", "preview_stop", "preview_logs",
     "enter_plan_mode", "exit_plan_mode",
     "todo_write", "task_create", "task_update", "task_get", "task_list",
     "ask_user", "run_subagent", "check_subagent", "fetch_url", "web_search",
@@ -41,11 +41,11 @@ ALWAYS_LOADED_CODE_TOOLS: frozenset[str] = frozenset({
 })
 
 FOLLOW_UP_TOOLS: Mapping[str, tuple[str, ...]] = {
-    "run_command": ("read_process_output", "stop_process"),
-    "powershell": ("read_process_output", "stop_process"),
+    "run_command": ("read_process_output", "stop_process", "preview_open"),
+    "powershell": ("read_process_output", "stop_process", "preview_open"),
     "run_subagent": ("check_subagent",),
     "enter_plan_mode": ("exit_plan_mode",),
-    "preview_start": ("preview_logs",),
+    "preview_start": ("preview_logs", "preview_open"),
 }
 
 TOOL_SEARCH_ENV = "ORIN_CODE_TOOL_SEARCH"

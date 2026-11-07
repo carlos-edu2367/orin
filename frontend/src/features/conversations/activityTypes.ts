@@ -96,6 +96,15 @@ export type ActivityBashOutput = {
   detected_url?: string
 }
 
+/** Local preview server reported by PreviewStart / PreviewOpen / PreviewStop (`payload.preview`). */
+export type ActivityPreviewServer = {
+  url?: string
+  name?: string
+  status?: string
+  hmr?: boolean
+  exitCode?: number | null
+}
+
 export type ActivityPlanApproval = {
   plan_path?: string
   plan_content?: string
@@ -204,6 +213,8 @@ export type ConversationActivityEvent = {
   mergedEventIds?: string[]
   /** UI-only: this ask_user batch was already answered inside a live turn, so its card stays closed. */
   questionsAnswered?: boolean
+  /** UI-only: the persisted answer message for this batch, shown in its card (never as a separate user bubble). */
+  questionsAnswerText?: string
   contextUsage?: ContextUsage
   codeStage?: string
   verification?: 'unverified'
@@ -230,6 +241,8 @@ export type ConversationActivityEvent = {
   planContent?: string
   autoBackgrounded?: boolean
   detectedUrl?: string
+  /** Preview server state from PreviewStart / PreviewOpen; drives the Bancada Preview tab. */
+  previewServer?: ActivityPreviewServer
   shellId?: string
   exitCode?: number | null
   /** Interactive tool permission request emitted in Code Mode. */
@@ -263,6 +276,8 @@ export type ToolPermissionRequest = {
   addedLines?: number
   removedLines?: number
   planApproval?: ActivityPlanApproval
+  /** A production action (deploy, publish, DB write, push): approved for this command only, never saved as a rule. */
+  sensitive?: { kinds: string[]; labels: string[] }
 }
 
 export type ContextUsage = {

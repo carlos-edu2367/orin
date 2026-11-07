@@ -1,6 +1,12 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import type { StructuredPatchHunk } from './activityTypes'
 import { StructuredDiffView } from './WorkspaceFileCard'
+import { WorkbenchFileTree } from './WorkbenchFileTree'
+import { fileIconFor } from './workbenchTreeModel'
+import { isLikelyHmrUrl, type CodeWorkbenchPreviewState } from './workbenchPreview'
+import './codeWorkbench.css'
+
+export type { CodeWorkbenchPreviewState } from './workbenchPreview'
 
 export type CodeWorkbenchFileItem = {
   path: string
@@ -25,6 +31,14 @@ export type CodeWorkbenchPanelProps = {
   activeTab?: CodeWorkbenchTab
   onTabChange?: (tab: CodeWorkbenchTab) => void
   initialPreviewUrl?: string | null
+  /** Preview server reported by the agent (PreviewStart / PreviewOpen); wins over initialPreviewUrl. */
+  preview?: CodeWorkbenchPreviewState | null
+  /** Changes after every successful write/edit: drives "auto-reload on file changes". */
+  fileChangeToken?: string | null
+  onRetryPreview?: () => void
+  /** Workspace folder name shown in the explorer header. */
+  rootName?: string | null
+  onRefreshFiles?: () => void
   running?: boolean
   elapsedLabel?: string | null
   selectedFilePath?: string | null
@@ -34,6 +48,7 @@ export type CodeWorkbenchPanelProps = {
 }
 
 const URL_ERROR_MESSAGE = 'URL inválida. Use http:// ou https://.'
+export const AUTO_RELOAD_DEBOUNCE_MS = 600
 
 export function sanitizePreviewUrl(raw: string): string | null {
   if (typeof raw !== 'string') return null
@@ -76,6 +91,24 @@ function detectPreviewUrlFromTerminal(
   return null
 }
 
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin
+  } catch {
+    return false
+  }
+}
+
+/** Current address of the preview frame when the browser lets us read it (same origin only). */
+function readFrameHref(frame: HTMLIFrameElement | null): string | null {
+  try {
+    const href = frame?.contentWindow?.location.href
+    return href && href !== 'about:blank' ? href : null
+  } catch {
+    return null
+  }
+}
+
 function statusLabelForFile(status?: CodeWorkbenchFileItem['status']): string {
   switch (status) {
     case 'added':
@@ -100,44 +133,122 @@ function statusLabelForTerminal(status?: CodeWorkbenchTerminalEntry['status']): 
   }
 }
 
+function describeFile(file: CodeWorkbenchFileItem): string {
+  const stats =
+    file.addedLines !== undefined || file.removedLines !== undefined
+      ? ` · +${file.addedLines ?? 0} −${file.removedLines ?? 0}`
+      : ''
+  return `${file.path} · ${statusLabelForFile(file.status)}${stats}`
+}
+
+type UserUrlState = { token: string | null; draft: string | null; committed: string | null }
+type ReloadState = { count: number; base: string; href: string | null }
+
+function ReloadIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+      <path d="M13 8a5 5 0 1 1-1.5-3.55M13 2.5v2.5h-2.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function ExternalIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+      <path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11.5 9.5v4h-9v-9h4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function DesktopIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+      <path d="M2 3h12v8H2zM6 14h4M8 11v3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function MobileIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
+      <path d="M4.5 1.5h7v13h-7zM7 12.5h2" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
 export function CodeWorkbenchPanel({
   files,
   terminalEntries = [],
   activeTab,
   onTabChange,
   initialPreviewUrl,
+  preview = null,
+  fileChangeToken = null,
+  onRetryPreview,
+  rootName = null,
+  onRefreshFiles,
   running = false,
   elapsedLabel = null,
   selectedFilePath,
   onSelectFile,
   onClose,
 }: CodeWorkbenchPanelProps) {
+  const previewToken = preview?.token ?? null
+  const agentUrl = preview?.url ? sanitizePreviewUrl(preview.url) : null
+
   const resolvedInitialUrl = useMemo(() => {
+    if (agentUrl && preview?.status === 'running') return agentUrl
     const fromProp = initialPreviewUrl ? sanitizePreviewUrl(initialPreviewUrl) : null
     if (fromProp) return fromProp
     if (!initialPreviewUrl) {
       const fromTerminal = detectPreviewUrlFromTerminal(terminalEntries)
       if (fromTerminal) return fromTerminal
     }
-    return ''
-  }, [initialPreviewUrl, terminalEntries])
+    return agentUrl ?? ''
+  }, [agentUrl, initialPreviewUrl, preview?.status, terminalEntries])
 
   const [internalTab, setInternalTab] = useState<CodeWorkbenchTab>(activeTab ?? 'preview')
-  const [userUrlDraft, setUserUrlDraft] = useState<string | null>(null)
-  const [userCommittedUrl, setUserCommittedUrl] = useState<string | null>(null)
+  // What the person typed in the URL bar; discarded when the agent opens another preview.
+  const [userUrl, setUserUrl] = useState<UserUrlState>({ token: previewToken, draft: null, committed: null })
   const [urlError, setUrlError] = useState<string | null>(null)
   const [viewport, setViewport] = useState<'desktop' | 'mobile'>('desktop')
-  const [reloadCount, setReloadCount] = useState<number>(0)
+  const [reload, setReload] = useState<ReloadState>({ count: 0, base: '', href: null })
+  const [autoReloadOverride, setAutoReloadOverride] = useState<boolean | null>(null)
+  const [dismissedFailure, setDismissedFailure] = useState<string | null>(null)
   const [fileQuery, setFileQuery] = useState<string>('')
   const [userSelectedFile, setUserSelectedFile] = useState<{
     baseProp: string | null | undefined
     path: string
   } | null>(null)
+  const frameRef = useRef<HTMLIFrameElement | null>(null)
+  const lastLoadedHref = useRef<string | null>(null)
+  const seenChangeToken = useRef<string | null>(fileChangeToken)
 
-  const urlInput = userUrlDraft ?? resolvedInitialUrl
-  const committedUrl = userCommittedUrl ?? resolvedInitialUrl
+  const userUrlApplies = userUrl.token === previewToken
+  const urlInput = userUrlApplies && userUrl.draft !== null ? userUrl.draft : resolvedInitialUrl
+  const committedUrl = userUrlApplies && userUrl.committed !== null ? userUrl.committed : resolvedInitialUrl
+  const safeCommittedUrl = sanitizePreviewUrl(committedUrl)
+  const userNavigated = userUrlApplies && userUrl.committed !== null
+
+  const previewStarting = preview?.status === 'starting' && !userNavigated
+  const previewFailed =
+    preview?.status === 'failed' && !userNavigated && dismissedFailure !== preview.token
+  const frameUrl =
+    safeCommittedUrl && reload.base === safeCommittedUrl && reload.href && sameOrigin(reload.href, safeCommittedUrl)
+      ? (sanitizePreviewUrl(reload.href) ?? safeCommittedUrl)
+      : safeCommittedUrl
+  const hmrDetected = preview?.hmr ?? isLikelyHmrUrl(safeCommittedUrl)
+  const autoReload = autoReloadOverride ?? !hmrDetected
+  const showFrame = Boolean(frameUrl) && !previewStarting && !previewFailed
 
   const currentTab: CodeWorkbenchTab = activeTab ?? internalTab
+
+  const updateUserUrl = (patch: Partial<Omit<UserUrlState, 'token'>>) => {
+    setUserUrl((current) => {
+      const base = current.token === previewToken ? current : { token: previewToken, draft: null, committed: null }
+      return { ...base, ...patch, token: previewToken }
+    })
+  }
 
   const handleTabSelect = (nextTab: CodeWorkbenchTab) => {
     setInternalTab(nextTab)
@@ -145,10 +256,10 @@ export function CodeWorkbenchPanel({
   }
 
   const handleUrlInputChange = (rawValue: string) => {
-    setUserUrlDraft(rawValue)
+    updateUserUrl({ draft: rawValue })
     const trimmed = rawValue.trim()
     if (!trimmed) {
-      setUserCommittedUrl('')
+      updateUserUrl({ draft: rawValue, committed: '' })
       setUrlError(null)
       return
     }
@@ -158,7 +269,7 @@ export function CodeWorkbenchPanel({
     }
     const sanitized = sanitizePreviewUrl(rawValue)
     if (sanitized) {
-      setUserCommittedUrl(sanitized)
+      updateUserUrl({ draft: rawValue, committed: sanitized })
       setUrlError(null)
     }
   }
@@ -170,7 +281,7 @@ export function CodeWorkbenchPanel({
       return null
     }
     setUrlError(null)
-    setUserCommittedUrl(sanitized)
+    updateUserUrl({ committed: sanitized })
     return sanitized
   }
 
@@ -179,15 +290,25 @@ export function CodeWorkbenchPanel({
     applyUrlInput()
   }
 
+  /** Reloads the frame keeping the page the person navigated to when the browser exposes it. */
+  const reloadFrame = (base: string) => {
+    const href = readFrameHref(frameRef.current) ?? lastLoadedHref.current
+    setReload((current) => ({ count: current.count + 1, base, href }))
+  }
+
   const handleReload = () => {
     if (!urlInput.trim()) {
-      setReloadCount((count) => count + 1)
+      setReload((current) => ({ ...current, count: current.count + 1 }))
       return
     }
     const sanitized = applyUrlInput()
-    if (sanitized) {
-      setReloadCount((count) => count + 1)
-    }
+    if (sanitized) reloadFrame(sanitized)
+  }
+
+  const handleRetry = () => {
+    if (preview) setDismissedFailure(preview.token)
+    onRetryPreview?.()
+    if (safeCommittedUrl) reloadFrame(safeCommittedUrl)
   }
 
   const handleOpenExternal = () => {
@@ -195,6 +316,19 @@ export function CodeWorkbenchPanel({
     if (!sanitized || typeof window === 'undefined') return
     window.open(sanitized, '_blank', 'noopener,noreferrer')
   }
+
+  // Auto-reload after the agent writes/edits files (debounced; skipped for HMR dev servers).
+  useEffect(() => {
+    if (fileChangeToken === seenChangeToken.current) return
+    seenChangeToken.current = fileChangeToken
+    if (!autoReload || !showFrame || !safeCommittedUrl) return
+    const base = safeCommittedUrl
+    const timer = window.setTimeout(() => {
+      const href = readFrameHref(frameRef.current) ?? lastLoadedHref.current
+      setReload((current) => ({ count: current.count + 1, base, href }))
+    }, AUTO_RELOAD_DEBOUNCE_MS)
+    return () => window.clearTimeout(timer)
+  }, [autoReload, fileChangeToken, safeCommittedUrl, showFrame])
 
   const filteredFiles = useMemo(() => {
     const normalizedQuery = fileQuery.trim().toLowerCase()
@@ -229,6 +363,11 @@ export function CodeWorkbenchPanel({
     return modifiedOrAdded.length
   }, [files])
 
+  const terminalRunning = terminalEntries.some((entry) => entry.status === 'running')
+  const selectedIcon = selectedFile ? fileIconFor(selectedFile.path.split('/').pop() ?? selectedFile.path) : null
+
+  const tabClass = (tab: CodeWorkbenchTab) => (currentTab === tab ? 'code-workbench__tab is-active' : 'code-workbench__tab')
+
   return (
     <aside
       data-testid="code-workbench-panel"
@@ -246,30 +385,35 @@ export function CodeWorkbenchPanel({
           role="tab"
           data-testid="workbench-tab-preview"
           aria-selected={currentTab === 'preview'}
-          className={currentTab === 'preview' ? 'code-workbench__tab is-active' : 'code-workbench__tab'}
+          className={tabClass('preview')}
           onClick={() => handleTabSelect('preview')}
         >
-          Prévia
+          <span>Prévia</span>
+          {(showFrame || previewStarting) && (
+            <span className={previewStarting ? 'code-workbench__tab-dot is-starting' : 'code-workbench__tab-dot is-live'} aria-hidden="true" />
+          )}
         </button>
         <button
           type="button"
           role="tab"
           data-testid="workbench-tab-files"
           aria-selected={currentTab === 'files'}
-          className={currentTab === 'files' ? 'code-workbench__tab is-active' : 'code-workbench__tab'}
+          className={tabClass('files')}
           onClick={() => handleTabSelect('files')}
         >
-          Arquivos
+          <span>Arquivos</span>
+          {changedCount > 0 && <span className="code-workbench__tab-count">{changedCount}</span>}
         </button>
         <button
           type="button"
           role="tab"
           data-testid="workbench-tab-terminal"
           aria-selected={currentTab === 'terminal'}
-          className={currentTab === 'terminal' ? 'code-workbench__tab is-active' : 'code-workbench__tab'}
+          className={tabClass('terminal')}
           onClick={() => handleTabSelect('terminal')}
         >
-          Terminal
+          <span>Terminal</span>
+          {terminalRunning && <span className="code-workbench__tab-dot is-starting" aria-hidden="true" />}
         </button>
         {onClose && (
           <button
@@ -284,48 +428,49 @@ export function CodeWorkbenchPanel({
         )}
       </div>
 
-      <div className="code-workbench__body">
+      <div className={`code-workbench__body is-${currentTab}`}>
         {currentTab === 'preview' && (
-          <div className="code-workbench__preview-pane">
+          <div className="code-workbench__preview-pane" data-preview-status={previewStarting ? 'starting' : previewFailed ? 'failed' : showFrame ? 'running' : 'empty'}>
             <div className="code-workbench__toolbar">
-              <div className="code-workbench__nav-actions">
-                <button
-                  type="button"
-                  data-testid="workbench-preview-back"
-                  className="code-workbench__icon-btn"
-                  aria-label="Voltar na prévia"
-                >
-                  ←
-                </button>
-                <button
-                  type="button"
-                  data-testid="workbench-preview-forward"
-                  className="code-workbench__icon-btn"
-                  aria-label="Avançar na prévia"
-                >
-                  →
-                </button>
-                <button
-                  type="button"
-                  data-testid="workbench-preview-reload"
-                  className="code-workbench__icon-btn"
-                  aria-label="Recarregar prévia"
-                  onClick={handleReload}
-                >
-                  ↻
-                </button>
-              </div>
+              <button
+                type="button"
+                data-testid="workbench-preview-reload"
+                className="code-workbench__icon-btn"
+                aria-label="Recarregar prévia"
+                title="Recarregar (mantém a página atual)"
+                onClick={handleReload}
+              >
+                <ReloadIcon />
+              </button>
 
               <form className="code-workbench__url-form" onSubmit={handleUrlSubmit}>
+                {showFrame && <span className="code-workbench__url-live" aria-hidden="true" />}
                 <input
                   type="text"
                   data-testid="workbench-preview-url-input"
                   className="code-workbench__url-input"
                   aria-label="Endereço da prévia"
+                  placeholder="http://localhost:5173"
+                  spellCheck={false}
                   value={urlInput}
                   onChange={(event) => handleUrlInputChange(event.target.value)}
                 />
               </form>
+
+              <button
+                type="button"
+                data-testid="workbench-preview-autoreload"
+                className={autoReload ? 'code-workbench__chip-btn is-active' : 'code-workbench__chip-btn'}
+                aria-pressed={autoReload}
+                title={
+                  hmrDetected
+                    ? 'O servidor parece ter hot reload (HMR); a prévia já se atualiza sozinha.'
+                    : 'Recarregar a prévia quando o agente alterar arquivos'
+                }
+                onClick={() => setAutoReloadOverride(!autoReload)}
+              >
+                Auto
+              </button>
 
               <div
                 data-testid="workbench-viewport-toggle"
@@ -338,28 +483,20 @@ export function CodeWorkbenchPanel({
                   data-testid="workbench-viewport-desktop"
                   aria-label="Visualização desktop"
                   aria-pressed={viewport === 'desktop'}
-                  className={
-                    viewport === 'desktop'
-                      ? 'code-workbench__viewport-btn is-active'
-                      : 'code-workbench__viewport-btn'
-                  }
+                  className={viewport === 'desktop' ? 'code-workbench__viewport-btn is-active' : 'code-workbench__viewport-btn'}
                   onClick={() => setViewport('desktop')}
                 >
-                  🖥
+                  <DesktopIcon />
                 </button>
                 <button
                   type="button"
                   data-testid="workbench-viewport-mobile"
                   aria-label="Visualização mobile"
                   aria-pressed={viewport === 'mobile'}
-                  className={
-                    viewport === 'mobile'
-                      ? 'code-workbench__viewport-btn is-active'
-                      : 'code-workbench__viewport-btn'
-                  }
+                  className={viewport === 'mobile' ? 'code-workbench__viewport-btn is-active' : 'code-workbench__viewport-btn'}
                   onClick={() => setViewport('mobile')}
                 >
-                  📱
+                  <MobileIcon />
                 </button>
               </div>
 
@@ -368,9 +505,10 @@ export function CodeWorkbenchPanel({
                 data-testid="workbench-preview-open-external"
                 className="code-workbench__icon-btn"
                 aria-label="Abrir prévia em nova aba"
+                title="Abrir em nova aba"
                 onClick={handleOpenExternal}
               >
-                ↗
+                <ExternalIcon />
               </button>
             </div>
 
@@ -387,29 +525,45 @@ export function CodeWorkbenchPanel({
             <div
               data-testid="workbench-preview-stage"
               data-viewport={viewport}
-              data-reload-count={reloadCount}
+              data-reload-count={reload.count}
               data-preview-url={committedUrl}
-              className={
-                viewport === 'mobile'
-                  ? 'code-workbench__stage is-mobile'
-                  : 'code-workbench__stage is-desktop'
-              }
+              data-auto-reload={autoReload ? 'on' : 'off'}
+              className={viewport === 'mobile' ? 'code-workbench__stage is-mobile' : 'code-workbench__stage is-desktop'}
             >
-              {sanitizePreviewUrl(committedUrl) ? (
+              {previewStarting ? (
+                <div className="code-workbench__preview-state is-starting" data-testid="workbench-preview-starting" role="status">
+                  <span className="code-workbench__spinner" aria-hidden="true" />
+                  <strong>Iniciando servidor de prévia{preview?.name ? ` · ${preview.name}` : ''}…</strong>
+                  <span>A prévia abre aqui assim que a porta responder.</span>
+                </div>
+              ) : previewFailed ? (
+                <div className="code-workbench__preview-state is-failed" data-testid="workbench-preview-failed" role="alert">
+                  <strong>Não foi possível abrir a prévia{preview?.name ? ` · ${preview.name}` : ''}</strong>
+                  <pre className="code-workbench__preview-error">{preview?.error || 'Falha ao iniciar o servidor.'}</pre>
+                  <button type="button" className="code-workbench__retry-btn" data-testid="workbench-preview-retry" onClick={handleRetry}>
+                    Tentar novamente
+                  </button>
+                </div>
+              ) : showFrame && frameUrl ? (
                 <iframe
-                  key={`${committedUrl}-${reloadCount}`}
-                  src={sanitizePreviewUrl(committedUrl)!}
+                  key={`${safeCommittedUrl}-${reload.count}`}
+                  ref={frameRef}
+                  src={frameUrl}
                   title="Prévia da aplicação"
                   className="code-workbench__preview-iframe"
                   data-testid="workbench-preview-iframe"
                   sandbox="allow-scripts allow-forms allow-same-origin"
+                  onLoad={() => {
+                    lastLoadedHref.current = readFrameHref(frameRef.current)
+                  }}
                 />
               ) : (
-                <div
-                  className="code-workbench__preview-empty"
-                  data-testid="workbench-preview-empty"
-                >
-                  Nenhuma prévia ativa no momento. Informe uma URL http(s) acima ou inicie um servidor local no terminal.
+                <div className="code-workbench__preview-empty" data-testid="workbench-preview-empty">
+                  <strong>Nenhuma prévia ativa</strong>
+                  <span>
+                    Peça ao agente para mostrar o app: ele inicia o servidor de desenvolvimento e abre a prévia aqui
+                    automaticamente. Você também pode digitar uma URL http(s) acima.
+                  </span>
                 </div>
               )}
             </div>
@@ -419,82 +573,70 @@ export function CodeWorkbenchPanel({
         {currentTab === 'files' && (
           <div data-testid="workbench-files-view" className="code-workbench__files-pane">
             <div className="code-workbench__files-sidebar">
-              <div className="code-workbench__files-search-wrap">
-                <input
-                  type="search"
-                  data-testid="workbench-files-search"
-                  className="code-workbench__files-search"
-                  placeholder="Filtrar arquivos..."
-                  aria-label="Filtrar arquivos no workbench"
-                  value={fileQuery}
-                  onChange={(event) => setFileQuery(event.target.value)}
-                />
-              </div>
-
-              {filteredFiles.length === 0 ? (
-                <p className="code-workbench__empty">
-                  {files.length === 0
-                    ? 'Nenhum arquivo alterado ainda.'
-                    : 'Nenhum arquivo encontrado para o filtro.'}
-                </p>
-              ) : (
-                <ul className="code-workbench__file-list">
-                  {filteredFiles.map((file) => {
-                    const isSelected = selectedFile?.path === file.path
-                    return (
-                      <li key={file.path}>
-                        <button
-                          type="button"
-                          data-testid={`workbench-file-item-${file.path}`}
-                          className={
-                            isSelected
-                              ? 'code-workbench__file-item is-selected'
-                              : 'code-workbench__file-item'
-                          }
-                          onClick={() => handleSelectFile(file.path)}
-                        >
-                          <span className="code-workbench__file-path">{file.path}</span>
-                          <span className="code-workbench__file-meta">
-                            <span
-                              className={`code-workbench__file-badge is-${file.status ?? 'modified'}`}
-                            >
-                              {statusLabelForFile(file.status)}
-                            </span>
-                            {(file.addedLines !== undefined || file.removedLines !== undefined) && (
-                              <span className="code-workbench__file-stats">
-                                <span className="workspace-diff__stat-add">
-                                  +{file.addedLines ?? 0}
-                                </span>{' '}
-                                <span className="workspace-diff__stat-del">
-                                  -{file.removedLines ?? 0}
-                                </span>
-                              </span>
-                            )}
-                          </span>
-                        </button>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )}
+              <WorkbenchFileTree
+                files={files}
+                query={fileQuery}
+                selectedPath={selectedFile?.path ?? null}
+                onOpenFile={handleSelectFile}
+                rootName={rootName}
+                onRefresh={onRefreshFiles}
+                describeFile={describeFile}
+                emptyMessage={files.length === 0 ? 'Nenhum arquivo alterado ainda.' : 'Nenhum arquivo encontrado para o filtro.'}
+                filterSlot={
+                  <div className="code-workbench__files-search-wrap">
+                    <input
+                      type="search"
+                      data-testid="workbench-files-search"
+                      className="code-workbench__files-search"
+                      placeholder="Filtrar arquivos..."
+                      aria-label="Filtrar arquivos no workbench"
+                      value={fileQuery}
+                      onChange={(event) => setFileQuery(event.target.value)}
+                    />
+                  </div>
+                }
+              />
             </div>
 
             <div data-testid="workbench-file-detail" className="code-workbench__file-detail">
               {selectedFile ? (
                 <>
                   <header className="code-workbench__file-detail-header">
-                    <strong>{`Diff · ${selectedFile.path}`}</strong>
-                    <span className="code-workbench__file-badge">
+                    {selectedIcon && (
+                      <span className={`wb-file-icon is-${selectedIcon.tone}`} aria-hidden="true">
+                        {selectedIcon.label}
+                      </span>
+                    )}
+                    <strong className="code-workbench__file-detail-path" title={selectedFile.path}>
+                      <span className="code-workbench__file-detail-prefix">{'Diff ·\u00a0'}</span>
+                      {selectedFile.path.includes('/') && (
+                        <span className="code-workbench__file-detail-dir">
+                          {selectedFile.path.slice(0, selectedFile.path.lastIndexOf('/') + 1)}
+                        </span>
+                      )}
+                      <span className="code-workbench__file-detail-base">
+                        {selectedFile.path.slice(selectedFile.path.lastIndexOf('/') + 1)}
+                      </span>
+                    </strong>
+                    {(selectedFile.addedLines !== undefined || selectedFile.removedLines !== undefined) && (
+                      <span className="code-workbench__file-stats">
+                        <span className="workspace-diff__stat-add">+{selectedFile.addedLines ?? 0}</span>{' '}
+                        <span className="workspace-diff__stat-del">-{selectedFile.removedLines ?? 0}</span>
+                      </span>
+                    )}
+                    <span className={`code-workbench__file-badge is-${selectedFile.status ?? 'modified'}`}>
                       {statusLabelForFile(selectedFile.status)}
                     </span>
                   </header>
-                  {selectedFile.structuredPatch && selectedFile.structuredPatch.length > 0 ? (
-                    <StructuredDiffView hunks={selectedFile.structuredPatch} />
-                  ) : (
-                    <p className="code-workbench__empty">
-                      Sem diff estruturado disponível para este arquivo.
-                    </p>
-                  )}
+                  <div className="code-workbench__file-detail-body">
+                    {selectedFile.structuredPatch && selectedFile.structuredPatch.length > 0 ? (
+                      <StructuredDiffView hunks={selectedFile.structuredPatch} />
+                    ) : (
+                      <p className="code-workbench__empty">
+                        Sem diff estruturado disponível para este arquivo.
+                      </p>
+                    )}
+                  </div>
                 </>
               ) : (
                 <p className="code-workbench__empty">
@@ -518,7 +660,7 @@ export function CodeWorkbenchPanel({
                     className="code-workbench__terminal-entry"
                   >
                     <header className="code-workbench__terminal-header">
-                      <code className="code-workbench__terminal-cmd">$ {entry.command}</code>
+                      <code className="code-workbench__terminal-cmd" title={entry.command}>$ {entry.command}</code>
                       <span
                         className={`code-workbench__terminal-status is-${entry.status ?? 'completed'}`}
                       >
@@ -558,11 +700,9 @@ export function CodeWorkbenchPanel({
           className="code-workbench__footer-files-btn"
           onClick={() => handleTabSelect('files')}
         >
-          <span aria-hidden="true">📄</span>
           <span>
             {changedCount} {changedCount === 1 ? 'arquivo alterado' : 'arquivos alterados'}
           </span>
-          <span aria-hidden="true">▾</span>
         </button>
       </footer>
     </aside>

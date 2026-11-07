@@ -1180,7 +1180,7 @@ describe('ChatPage', () => {
     }
   })
 
-  it('does not render a duplicate user answer pinned at the bottom when answering ask_user with trailing whitespace/newlines', async () => {
+  it('does not render the ask_user answer as a user bubble (it shows once, in the card) when answering ask_user with trailing whitespace/newlines', async () => {
     let answered = false
     let savedMessageContent = ''
     globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
@@ -1272,7 +1272,7 @@ describe('ChatPage', () => {
     const userBubbles = Array.from(container.querySelectorAll('.bubble--user')).filter((el) =>
       el.textContent?.includes('Respostas às perguntas do agente:'),
     )
-    expect(userBubbles).toHaveLength(1)
+    expect(userBubbles).toHaveLength(0)
   })
 })
 

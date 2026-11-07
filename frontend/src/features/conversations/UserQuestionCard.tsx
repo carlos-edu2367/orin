@@ -8,6 +8,8 @@ type UserQuestionCardProps = {
   active: boolean
   submitting?: boolean
   onSubmit: (answers: UserQuestionAnswer[]) => Promise<void>
+  /** The persisted answer message ("Respostas às perguntas do agente: …"), shown here instead of a user bubble. */
+  answeredText?: string
 }
 
 type AnswerMap = Record<string, UserQuestionAnswer>
@@ -16,7 +18,7 @@ type AnswerMap = Record<string, UserQuestionAnswer>
  * Presents a batch as a local wizard. The final answer is still sent atomically
  * because the waiting-user turn resumes only after the complete batch arrives.
  */
-export function UserQuestionCard({ questions, active, submitting = false, onSubmit }: UserQuestionCardProps) {
+export function UserQuestionCard({ questions, active, submitting = false, onSubmit, answeredText }: UserQuestionCardProps) {
   const [answers, setAnswers] = useState<AnswerMap>({})
   const [expandedNotes, setExpandedNotes] = useState<Record<string, boolean>>({})
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -160,21 +162,47 @@ export function UserQuestionCard({ questions, active, submitting = false, onSubm
           </form>
         </>
       ) : (
-        <p className="user-question-card__answered">Respostas enviadas · o agente continuará com este contexto.</p>
+        <>
+          <p className="user-question-card__answered">Respostas enviadas · o agente continuará com este contexto.</p>
+          {/* The answer lives here, not in a separate user bubble: from this session, or from the persisted message. */}
+          {(() => {
+            const shown: AnswerMap = Object.keys(answers).length > 0 ? answers : parseAnsweredText(answeredText, questions)
+            return questions.filter((question) => shown[question.id]).map((question, index) => (
+              <AnsweredQuestion key={question.id} question={question} answer={shown[question.id]} index={index} />
+            ))
+          })()}
+        </>
       )}
     </section>
   )
 }
 
-function AnsweredQuestion({ question, answer, index, onEdit }: { question: UserQuestion; answer: UserQuestionAnswer; index: number; onEdit: () => void }) {
+function AnsweredQuestion({ question, answer, index, onEdit }: { question: UserQuestion; answer: UserQuestionAnswer; index: number; onEdit?: () => void }) {
   const selections = answer.selected.map((id) => question.options.find((option) => option.id === id)?.label).filter((label): label is string => Boolean(label))
   const summaryParts = [...selections]
   if (answer.note) summaryParts.push(`Obs.: ${answer.note}`)
   const summary = summaryParts.join(' · ') || 'Sem resposta adicional'
   return <article className="user-question-card__answered-step">
     <div><span>{String(index + 1).padStart(2, '0')}</span><strong>{question.question}</strong><p>{summary}</p></div>
-    <button type="button" aria-label={`Editar resposta: ${question.question}`} onClick={onEdit}>Editar</button>
+    {onEdit && <button type="button" aria-label={`Editar resposta: ${question.question}`} onClick={onEdit}>Editar</button>}
   </article>
+}
+
+/** Answers recovered from the message submitQuestionAnswers sends (question text, then "Seleção: …" and "Observação: …"). */
+export function parseAnsweredText(text: string | undefined, questions: UserQuestion[]): AnswerMap {
+  const result: AnswerMap = {}
+  if (!text) return result
+  const starts = questions.map((question) => ({ question, at: text.indexOf(question.question) })).filter((item) => item.at >= 0).sort((a, b) => a.at - b.at)
+  starts.forEach(({ question, at }, index) => {
+    const block = text.slice(at + question.question.length, index + 1 < starts.length ? starts[index + 1].at : undefined)
+    const selection = /Seleção:\s*(.*)/.exec(block)?.[1]?.trim() ?? ''
+    const note = /Observação:\s*([\s\S]*)/.exec(block)?.[1]?.trim() ?? ''
+    const selected = selection && selection !== 'nenhuma'
+      ? question.options.filter((option) => selection.includes(option.label)).map((option) => option.id)
+      : []
+    if (selected.length > 0 || note) result[question.id] = { id: question.id, selected, note }
+  })
+  return result
 }
 
 function emptyAnswer(id: string): UserQuestionAnswer {

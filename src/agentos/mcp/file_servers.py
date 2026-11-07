@@ -3,7 +3,9 @@
 Listing a server's tools means starting it (or calling it) once; the answer is kept per exact configuration for
 ``DISCOVERY_TTL_SECONDS`` (a failure for ``FAILURE_TTL_SECONDS``), so a turn after the first one starts at once.
 Servers are listed in parallel and the turn waits at most ``MCP_TIMEOUT`` milliseconds (default 3 s) for them; one
-that answers later is ready for the next turn. A failure's text never carries the values of the server's
+that answers later is ready for the next turn. A server that fails (refused, silent, erroring) is not tried again for
+1, 2, 4, 8 minutes (capped at 10), kept in process memory per server (file + name); a success resets it. The person
+is told when a server first fails and when it recovers, then only by one compact line. A failure's text never carries the values of the server's
 environment, headers or URL query (they are often credentials).
 """
 from __future__ import annotations
@@ -12,6 +14,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, wait
 from urllib.parse import urlsplit
 
@@ -25,13 +28,58 @@ DEFAULT_TIMEOUT_SECONDS = 3.0
 MAX_CACHE_ENTRIES = 256
 MAX_PARALLEL_DISCOVERY = 8
 
+BACKOFF_FIRST_SECONDS = 60.0
+BACKOFF_MAX_SECONDS = 600.0
+UNAVAILABLE_PREFIX = "unavailable (next retry in "
+
 _cache: dict[str, tuple[float, tuple[McpToolDescriptor, ...], str]] = {}
 _cache_lock = threading.Lock()
+
+
+@dataclass(slots=True)
+class _Backoff:
+    fingerprint: str
+    failures: int = 0
+    retry_at: float = 0.0
+    announced: bool = False  # the person was told it is failing
+    late: bool = False  # a timeout was recorded; the background attempt may still report
+
+
+_backoff: dict[str, _Backoff] = {}
 
 
 def clear_discovery_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _backoff.clear()
+
+
+def _identity(server: FileServer) -> str:
+    return f"{server.source}|{server.scope}|{server.name}"
+
+
+def backoff_seconds(failures: int) -> float:
+    return min(BACKOFF_MAX_SECONDS, BACKOFF_FIRST_SECONDS * 2 ** max(0, failures - 1))
+
+
+def _record_failure(server: FileServer, now: float, *, late: bool = False) -> None:
+    with _cache_lock:
+        entry = _backoff.get(_identity(server))
+        if entry is None or entry.fingerprint != server.fingerprint():
+            entry = _backoff[_identity(server)] = _Backoff(server.fingerprint())
+        if late and entry.late:  # the timeout already counted this attempt
+            entry.late = False
+            return
+        entry.failures += 1
+        entry.late = not late
+        entry.retry_at = now + backoff_seconds(entry.failures)
+
+
+def _record_success(server: FileServer) -> bool:
+    """True when the server had been announced as failing (it recovered)."""
+    with _cache_lock:
+        entry = _backoff.pop(_identity(server), None)
+        return bool(entry and entry.announced)
 
 
 def discovery_timeout(environ: Mapping[str, str] | None = None) -> float:
@@ -96,24 +144,34 @@ def _store(key: str, tools: tuple[McpToolDescriptor, ...], error: str) -> None:
         _cache[key] = (time.monotonic(), tools, error)
 
 
-def _discover_one(server: FileServer, config: McpServerConfig, secrets: Mapping[str, str], connect: Callable) -> tuple[tuple[McpToolDescriptor, ...], str]:
+def _discover_one(server: FileServer, config: McpServerConfig, secrets: Mapping[str, str], connect: Callable,
+                  clock: Callable[[], float] = time.monotonic) -> tuple[tuple[McpToolDescriptor, ...], str]:
     try:
         _version, tools = connect(config, secrets)
         result: tuple[tuple[McpToolDescriptor, ...], str] = (tuple(tools), "")
     except Exception as error:  # noqa: BLE001 - any failure is reported for this server only
         result = ((), _redacted(f"could not connect: {str(error) or type(error).__name__}", server)[:300])
-    _store(server.fingerprint(), *result)
+    if result[1]:
+        _record_failure(server, clock(), late=True)  # failures are held by the backoff, not by the cache
+    else:
+        _store(server.fingerprint(), *result)
     return result
 
 
 def connect_file_servers(servers: Iterable[FileServer], *, user_id: str, connect: Callable = discover,
-                         timeout: float | None = None) -> tuple[list[ServerBundle], list[tuple[str, str]]]:
-    """``(bundles with their tools, [(server name, why it is not available)])``, in the servers' order."""
+                         timeout: float | None = None, clock: Callable[[], float] = time.monotonic,
+                         recovered: list[str] | None = None) -> tuple[list[ServerBundle], list[tuple[str, str]]]:
+    """``(bundles with their tools, [(server name, why it is not available)])``, in the servers' order.
+
+    A server inside its backoff is not connected: it is listed as ``unavailable (next retry in N min)`` (see
+    ``format_failure_notes``). A first failure carries the real reason. Names of servers that came back after being
+    reported as failing are appended to ``recovered``. Only turns call this; tools that act on one server on the
+    person's request (ConfigureMcp, TestMcpServer, ...) connect directly and are never delayed by it."""
     ready: dict[str, ServerBundle] = {}
     failures: list[tuple[str, str]] = []
     todo: list[tuple[FileServer, McpServerConfig, Mapping[str, str]]] = []
     order: list[str] = []
-    now = time.monotonic()
+    now = clock()
     for server in servers:
         try:
             config, _, secrets = file_bundle(server, user_id=user_id)
@@ -122,35 +180,71 @@ def connect_file_servers(servers: Iterable[FileServer], *, user_id: str, connect
             continue
         order.append(server.name)
         cached = _cached(server.fingerprint(), now)
+        if cached is not None and not cached[1]:  # listed (e.g. by a late attempt): the backoff is over
+            if _record_success(server) and recovered is not None:
+                recovered.append(server.name)
+            ready[server.name] = (config, cached[0], secrets)
+            continue
+        with _cache_lock:
+            held = _backoff.get(_identity(server))
+        if held is not None and held.fingerprint == server.fingerprint() and now < held.retry_at:
+            failures.append((server.name, f"{UNAVAILABLE_PREFIX}{max(1, round((held.retry_at - now) / 60))} min)"))
+            continue
         if cached is None:
             todo.append((server, config, secrets))
-        elif cached[1]:
-            failures.append((server.name, cached[1]))
         else:
-            ready[server.name] = (config, cached[0], secrets)
+            failures.append((server.name, cached[1]))
     if todo:
         limit = discovery_timeout() if timeout is None else timeout
         pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_DISCOVERY, len(todo)), thread_name_prefix="orin-mcp-discovery")
         try:
-            futures = {pool.submit(_discover_one, server, config, secrets, connect): (server, config, secrets) for server, config, secrets in todo}
+            futures = {pool.submit(_discover_one, server, config, secrets, connect, clock): (server, config, secrets) for server, config, secrets in todo}
             done, _late = wait(futures, timeout=limit)
         finally:
             pool.shutdown(wait=False)  # a late server keeps starting in the background and is cached for the next turn
         for future, (server, config, secrets) in futures.items():
             if future not in done:
-                timeout_msg = f"did not answer within {limit:g} s; it is tried again next turn"
-                _store(server.fingerprint(), (), timeout_msg)
+                timeout_msg = f"did not answer within {limit:g} s; it is retried after a pause"
+                _record_failure(server, clock())
                 failures.append((server.name, timeout_msg))
                 continue
             tools, error = future.result()
             if error:
                 failures.append((server.name, error))
             else:
+                if _record_success(server) and recovered is not None:
+                    recovered.append(server.name)
                 ready[server.name] = (config, tools, secrets)
+    # The real reason is told once; afterwards a failing server is only "unavailable".
+    by_name = {server.name: server for server in servers}
+    reported: list[tuple[str, str]] = []
+    for name, why in failures:
+        entry = _backoff.get(_identity(by_name[name])) if name in by_name else None
+        if entry is not None and not why.startswith(UNAVAILABLE_PREFIX):
+            if entry.announced:
+                why = f"{UNAVAILABLE_PREFIX}{max(1, round((entry.retry_at - now) / 60))} min)"
+            else:
+                entry.announced = True
+        reported.append((name, why))
+    failures = reported
     return [ready[name] for name in order if name in ready], failures
+
+
+def format_failure_notes(failures: Iterable[tuple[str, str]]) -> list[str]:
+    """Prompt lines for ``failures``: real reasons one by one, the servers in backoff in one compact line."""
+    lines: list[str] = []
+    waiting: list[tuple[str, str]] = []
+    for name, why in failures:
+        if why.startswith(UNAVAILABLE_PREFIX):
+            waiting.append((name, why))
+        else:
+            lines.append(f"- {name}: {why}")
+    if waiting:
+        lines.append(f"- {', '.join(name for name, _ in waiting)}: {waiting[0][1]}")
+    return lines
 
 
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS", "DISCOVERY_TTL_SECONDS", "FAILURE_TTL_SECONDS", "clear_discovery_cache",
-    "connect_file_servers", "discovery_timeout", "file_bundle",
+    "connect_file_servers", "discovery_timeout", "file_bundle", "format_failure_notes",
 ]

@@ -222,9 +222,11 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
       expect(queuePosts(posted)[0].body).toContain('SQLite')
       expect(messagePosts(posted)).toHaveLength(0)
       await waitFor(() => expect(cards()[0]).toHaveAttribute('data-active', 'false'))
-      // No optimistic pending bubble on the live path: the answer shows once, from the delivered queued input.
-      await waitFor(() => expect(userBubbles()).toHaveLength(2), { timeout: 3000 })
-      expect(userBubbleTexts().filter((text) => text.includes('Seleção: SQLite'))).toHaveLength(1)
+      expect(cards()[0]).toHaveTextContent('SQLite') // the answer stays in the card
+      // A card answer is never a user bubble (it shows in the card / tool result): not optimistic, not from the delivered queued input.
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(userBubbles()).toHaveLength(1)
+      expect(userBubbleTexts().filter((text) => text.includes('Seleção: SQLite'))).toHaveLength(0)
 
       // A second ask_user arrives later in the same live turn, with a new event id.
       emit(scenario, makeActivity(scenario.activities.length + 1, 'tool.finished', 'Aguardando resposta para 1 pergunta', Q2))
@@ -241,9 +243,10 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
       expect(messagePosts(posted)).toHaveLength(0)
       await waitFor(() => expect(cards()[1]).toHaveAttribute('data-active', 'false'))
       expect(cards()[0]).toHaveAttribute('data-active', 'false')
-      await waitFor(() => expect(userBubbles()).toHaveLength(3), { timeout: 3000 })
-      expect(userBubbleTexts().filter((text) => text.includes('Seleção: SQLite'))).toHaveLength(1)
-      expect(userBubbleTexts().filter((text) => text.includes('Seleção: Redis'))).toHaveLength(1)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(userBubbles()).toHaveLength(1)
+      expect(userBubbleTexts().filter((text) => text.includes('Seleção: SQLite'))).toHaveLength(0)
+      expect(userBubbleTexts().filter((text) => text.includes('Seleção: Redis'))).toHaveLength(0)
     },
   )
 
@@ -273,7 +276,7 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
     expect(cards()[0]).toHaveAttribute('data-active', 'false')
   })
 
-  it('after a reload, an answered question stays closed and its answer shows once; a normal queued message does not close it', async () => {
+  it('after a reload, an answered question stays closed and its answer shows in no bubble; a normal queued message does not close it', async () => {
     const answer = 'Respostas às perguntas do agente:\n\nQual banco de dados usar?\nSeleção: Postgres'
     const scenario: Scenario = {
       turnState: 'running',
@@ -294,8 +297,8 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
     await waitFor(() => expect(cards()).toHaveLength(2))
     expect(cards()[0]).toHaveAttribute('data-active', 'false')
     expect(cards()[1]).toHaveAttribute('data-active', 'true')
-    expect(userBubbles()).toHaveLength(2)
-    expect(userBubbleTexts().filter((text) => text.includes('Seleção: Postgres'))).toHaveLength(1)
+    expect(userBubbles()).toHaveLength(1)
+    expect(userBubbleTexts().filter((text) => text.includes('Seleção: Postgres'))).toHaveLength(0)
     // The normal queued message renders as before: no bubble of its own.
     expect(userBubbleTexts().some((text) => text.includes('Lembrete'))).toBe(false)
   })
@@ -379,6 +382,7 @@ describe('ChatPage native ask_user: answers inside a live turn', () => {
     await waitFor(() => expect(messagePosts(posted)).toHaveLength(1))
     expect(messagePosts(posted)[0].body).toContain('SQLite')
     expect(queuePosts(posted)).toHaveLength(0)
-    expect(userBubbles()).toHaveLength(2)
+    expect(userBubbles()).toHaveLength(1)
+    expect(userBubbleTexts().some((text) => text.includes("Seleção"))).toBe(false)
   })
 })

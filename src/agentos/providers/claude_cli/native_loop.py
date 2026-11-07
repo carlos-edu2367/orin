@@ -68,6 +68,35 @@ def native_workdir(adapter_name: str = "claude") -> Path:
     return orin_paths().data / f"{slug}-cli" / "workdir"
 
 
+def isolated_cli_note(server_name: str) -> str:
+    """Tells the model that the CLI's own sandbox/cwd notes do not limit it.
+
+    Orin starts every CLI (Claude, Codex, Antigravity) in an empty folder with the CLI's built-in tools off, so each
+    CLI describes that folder, and Codex a read-only sandbox, as the environment. A model that believed it concluded
+    it could not change files ("read-only filesystem") although Orin's tools act on the real workspace with the
+    turn's permission mode: subagents on Codex and Antigravity never edited anything.
+    """
+    srv = str(server_name or "orin").strip() or "orin"
+    return (
+        "# Where you work\n"
+        "Orin runs this CLI from an empty, isolated folder with the CLI's own built-in tools (shell, file editing, "
+        "apply_patch, its sandbox) turned off. Any environment, sandbox or permission information the CLI itself adds "
+        "(current directory, workspace roots, read-only filesystem, permission profile, approval policy) describes "
+        "only that isolated folder and those disabled tools: it does not apply to you. Do all the work through the "
+        f"tools of the `{srv}` MCP server. They act on the working directory and with the permission mode stated in "
+        "these instructions, and they can write and edit files and run commands; use them for that instead of "
+        "concluding that you cannot."
+    )
+
+
+def with_isolated_cli_note(system_prompt: str, server_name: str) -> str:
+    note = isolated_cli_note(server_name)
+    base = str(system_prompt or "").rstrip()
+    if note in base:
+        return base
+    return f"{base}\n\n{note}" if base else note
+
+
 def find_forbidden_item_kind(
     forbidden: frozenset[str] | set[str] | Sequence[str],
     *,
@@ -928,7 +957,7 @@ def start_native_turn_for_provider(
         mcp_config_path = wiring.files[0] if wiring.files else None
 
         prompt_path = write_owner_only_temp(
-            request.system_prompt or "You are a helpful assistant.",
+            with_isolated_cli_note(request.system_prompt or "You are a helpful assistant.", request.server_name),
             prefix="orin-claude-sys-",
             suffix=".txt",
         )

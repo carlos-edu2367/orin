@@ -26,7 +26,7 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "project_map", "todo_write", "task_create", "task_update", "task_get", "task_list",
     "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification",
     "search_skills", "list_skills", "read_skill_resource", "recall", "check_subagent", "read_process_output",
-    "preview_logs", "search_mcp_tools", "inspect_mcp_server", "list_mcp_servers", "list_mcp_catalog",
+    "preview_logs", "preview_open", "search_mcp_tools", "inspect_mcp_server", "list_mcp_servers", "list_mcp_catalog",
     "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",
     "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
 })

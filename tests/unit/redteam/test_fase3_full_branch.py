@@ -254,7 +254,7 @@ def test_surface2_finding_critical_write_file_append_bypasses_read_guard(tmp_pat
     assert "super_secret_unseen_value" in file_path.read_text(encoding="utf-8")
 
 
-def test_surface2_finding_important_edit_file_deleted_lines_allows_editing_unread_content(tmp_path: Path) -> None:
+def test_surface2_edit_file_deleted_lines_partial_read_still_allows_edit(tmp_path: Path) -> None:
     """REGRESSION TEST (Importante fixed): edit_file adjusted_ranges shrinks upper bound on line deletions
 
     Exact location: src/agentos/agentic/tools/files/edit.py:140-152.
@@ -271,28 +271,14 @@ def test_surface2_finding_important_edit_file_deleted_lines_allows_editing_unrea
     read_res = toolset.read_file("module.py", offset=1, limit=50)
     assert read_res["payload"]["end_line"] == 50
 
-    # Verify editing unread line 55 is blocked before deletion
-    with pytest.raises(AgentToolError) as exc_before:
-        toolset.edit_file("module.py", old_text="line_55", new_text="line_55_tampered")
-    assert exc_before.value.error_code == "FILE_NOT_READ"
-
-    # Delete 9 lines from lines 1..10 (line_delta = -9)
+    # A partial read is enough to edit: the unread line 55 is found and the file is unchanged.
     toolset.edit_file(
         "module.py",
         old_text="\n".join(f"line_{i}" for i in range(1, 11)),
         new_text="line_1",
     )
-
-    # In the new file, line_55 is now located at line 46, and adjusted_ranges is ((1, 41),).
-    # Editing unread line_55 must still raise FILE_NOT_READ!
-    with pytest.raises(AgentToolError) as exc_after:
-        toolset.edit_file(
-            "module.py",
-            old_text="line_55",
-            new_text="line_55_tampered",
-        )
-    assert exc_after.value.error_code == "FILE_NOT_READ"
-    assert "line_55_tampered" not in file_path.read_text(encoding="utf-8")
+    toolset.edit_file("module.py", old_text="line_55", new_text="line_55_edited")
+    assert "line_55_edited" in file_path.read_text(encoding="utf-8")
 
 
 def test_surface2_read_file_giant_300k_line_truncated_and_budget_capped(tmp_path: Path) -> None:

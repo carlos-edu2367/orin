@@ -8,42 +8,44 @@
   </head>
   <body>
     <main class="splash-shell">
-      <section class="splash-card" aria-labelledby="title" data-phase="starting">
-        <div class="orb" aria-hidden="true">
-          <svg viewBox="0 0 120 120" class="orb-ring">
-            <circle class="orb-track" cx="60" cy="60" r="52" />
-            <circle id="orb-progress" class="orb-progress" cx="60" cy="60" r="52" />
-          </svg>
-          <span class="orb-mark">
-            <svg viewBox="0 0 160 160" width="38" height="38" fill="none" aria-hidden="true">
-              <defs>
-                <radialGradient id="splashMascotGrad" cx="36%" cy="30%" r="68%" fx="36%" fy="30%">
-                  <stop offset="0%" stop-color="#E6DFFF" />
-                  <stop offset="55%" stop-color="#B4A4EF" />
-                  <stop offset="100%" stop-color="#8E79DF" />
-                </radialGradient>
-              </defs>
-              <path d="M 55 46 C 48 29, 58 21, 68 35 C 74 14, 95 18, 87 37 C 115 38, 137 66, 139 96 C 142 125, 121 138, 81 139 C 42 140, 20 128, 21 102 C 22 77, 35 55, 55 46 Z" fill="url(#splashMascotGrad)" />
-              <ellipse cx="61" cy="88" rx="5" ry="11" fill="#282333" transform="rotate(-5 61 88)" />
-              <ellipse cx="101" cy="86" rx="5" ry="11" fill="#282333" transform="rotate(-5 101 86)" />
-              <path d="M 76 105 Q 81 112 87 104" fill="none" stroke="#282333" stroke-width="3.2" stroke-linecap="round" />
-            </svg>
-          </span>
+      <section class="splash" data-phase="starting">
+        <div class="stage" aria-hidden="true">
+          <div class="hero">
+            <div class="squash">
+              <div class="sway">
+                <svg viewBox="0 0 160 160" class="mascot" fill="none">
+                  <defs>
+                    <radialGradient id="splashMascotGrad" cx="36%" cy="30%" r="68%" fx="36%" fy="30%">
+                      <stop offset="0%" stop-color="#E6DFFF" />
+                      <stop offset="55%" stop-color="#B4A4EF" />
+                      <stop offset="100%" stop-color="#8E79DF" />
+                    </radialGradient>
+                  </defs>
+                  <path d="M 55 46 C 48 29, 58 21, 68 35 C 74 14, 95 18, 87 37 C 115 38, 137 66, 139 96 C 142 125, 121 138, 81 139 C 42 140, 20 128, 21 102 C 22 77, 35 55, 55 46 Z" fill="url(#splashMascotGrad)" />
+                  <g class="eye"><ellipse cx="61" cy="88" rx="5" ry="11" fill="#282333" transform="rotate(-5 61 88)" /></g>
+                  <g class="eye"><ellipse cx="101" cy="86" rx="5" ry="11" fill="#282333" transform="rotate(-5 101 86)" /></g>
+                  <path d="M 76 105 Q 81 112 87 104" fill="none" stroke="#282333" stroke-width="3.2" stroke-linecap="round" />
+                </svg>
+              </div>
+            </div>
+          </div>
+          <div class="shadow"></div>
         </div>
-        <p class="eyebrow">ORIN · AMBIENTE LOCAL</p>
-        <h1 id="title">Preparando seu ambiente</h1>
-        <p id="message" class="message" role="status">Conectando…</p>
-        <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progresso de inicialização">
-          <span id="progress-bar"></span>
-        </div>
-        <p class="percent"><span id="percent">0</span>%</p>
-        <ol id="steps" class="steps" aria-label="Etapas da inicialização"></ol>
-        <section id="failure-actions" class="failure-actions" hidden>
-          <button id="retry" class="button button-primary" type="button">Tentar novamente</button>
-          <button id="open-logs" class="button" type="button">Abrir logs</button>
-          <button id="close" class="button button-quiet" type="button">Fechar</button>
+
+        <p id="message" class="wait" role="status" aria-live="polite">
+          <span id="wait-label">Aguarde</span><span class="dots" aria-hidden="true"><i>.</i><i>.</i><i>.</i></span>
+        </p>
+
+        <section id="failure" class="failure" hidden>
+          <h1 id="title">Não foi possível iniciar o Orin</h1>
+          <div id="failure-actions" class="failure-actions">
+            <button id="retry" class="button button-primary" type="button">Tentar novamente</button>
+            <button id="open-logs" class="button" type="button">Abrir logs</button>
+            <button id="close" class="button button-quiet" type="button">Fechar</button>
+          </div>
+          <button id="toggle-details" class="details-toggle" type="button" aria-expanded="false" aria-controls="details">Ver detalhes</button>
+          <pre id="details" class="details" hidden></pre>
         </section>
-        <p class="tip" id="tip">Dica: ao fechar a janela, você pode manter o Orin em segundo plano para que as tarefas agendadas continuem rodando.</p>
       </section>
     </main>
     <script src="./splash.js"></script>

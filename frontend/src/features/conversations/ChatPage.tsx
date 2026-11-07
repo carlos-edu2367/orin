@@ -40,6 +40,8 @@ import {
   type CodeWorkbenchTerminalEntry,
   type CodeWorkbenchTab,
 } from './CodeWorkbenchPanel'
+import { normalizeWorkbenchPath } from './workbenchTreeModel'
+import { deriveFileChangeToken, derivePreviewFromEvents } from './workbenchPreview'
 import { CommandInfoDialog } from '../commands/CommandInfoDialog'
 import { useChatCommands, type InfoPanel } from '../commands/useChatCommands'
 import { OverviewPanel } from '../overview/OverviewPanel'
@@ -125,7 +127,7 @@ const RUNNING_STATES = new Set(['queued', 'starting', 'running', 'streaming', 'c
 
 /** How submitQuestionAnswers starts an answer; the native turn also reads a queued text with it as an answer. */
 const QUESTION_ANSWERS_HEADER = 'Respostas às perguntas do agente:'
-/** Id prefix of the user bubble shown for an ask_user answer a live turn read from the queue. */
+/** Id prefix of the user bubble shown for a free-text message a live turn read from the queue as the answer. */
 const QUEUED_ANSWER_MESSAGE_PREFIX = 'queued-answer-'
 
 function queuedInputId(event: ConversationActivityEvent): string | null {
@@ -142,6 +144,9 @@ function isQueuedInputEvent(event: ConversationActivityEvent): boolean {
 }
 
 const isQueuedAnswerMessage = (message: ConversationMessage) => message.message_id.startsWith(QUEUED_ANSWER_MESSAGE_PREFIX)
+
+/** An ask_user answer (built by submitQuestionAnswers): it shows once, in the question card / tool result, never as a bubble. */
+const isQuestionAnswerMessage = (message: ConversationMessage) => message.role === 'user' && message.content.trimStart().startsWith(QUESTION_ANSWERS_HEADER)
 
 function asProviderName(value: string): ProviderName | null {
   return PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null
@@ -876,7 +881,9 @@ export function ChatPage() {
   const answerDeliveryEventIds = useMemo(() => new Set(answerDeliveries.map((event) => event.eventId)), [answerDeliveries])
 
   const messages = useMemo(() => {
-    const base = (conversation?.messages ?? []).map((item) => {
+    // An ask_user answer is not a bubble (live or persisted): the question card / tool result already shows it.
+    // A message typed in the composer while a question is pending is an ordinary message and stays.
+    const base = (conversation?.messages ?? []).filter((item) => !isQuestionAnswerMessage(item)).map((item) => {
       if (item.role !== 'assistant') return item
       const streamed = streamedByMessage.get(item.message_id)
       if (streamed && streamed.length > (item.content?.length ?? 0)) {
@@ -884,15 +891,15 @@ export function ChatPage() {
       }
       return item
     })
-    // One bubble per answer a live turn read from the queue, right after that turn's assistant message (or at the
-    // end), unless the same turn already has that text persisted as a user message after its assistant message.
-    // An earlier message with the same text is not this answer.
+    // A free-text message the live turn read from the queue as the answer gets one bubble, right after that turn's
+    // assistant message (or at the end), unless the same turn already persisted that text after its assistant
+    // message. A card answer (QUESTION_ANSWERS_HEADER) never does: the card / tool result shows it.
     const lastAssistantIndexByTurn = new Map<string, number>()
     base.forEach((item, index) => { if (item.role === 'assistant' && item.turn_id) lastAssistantIndexByTurn.set(item.turn_id, index) })
     const answersByTurn = new Map<string, ConversationMessage[]>()
     for (const event of answerDeliveries) {
       const content = typeof event.payload?.queued_text === 'string' ? event.payload.queued_text.trim() : ''
-      if (!content || !event.turnId) continue
+      if (!content || !event.turnId || content.startsWith(QUESTION_ANSWERS_HEADER)) continue
       const turnId = event.turnId
       const anchor = lastAssistantIndexByTurn.get(turnId)
       const persisted = anchor !== undefined && base.slice(anchor + 1).some(
@@ -902,7 +909,7 @@ export function ChatPage() {
       const answer: ConversationMessage = {
         message_id: `${QUEUED_ANSWER_MESSAGE_PREFIX}${event.eventId}`, role: 'user', content, status: 'completed', retryable: false, attachments: [], command: null,
       }
-      answersByTurn.set(event.turnId, [...(answersByTurn.get(event.turnId) ?? []), answer])
+      answersByTurn.set(turnId, [...(answersByTurn.get(turnId) ?? []), answer])
     }
     const withAnswers: ConversationMessage[] = []
     base.forEach((item, index) => {
@@ -916,8 +923,8 @@ export function ChatPage() {
     // The optimistic echo is dropped as soon as the durable snapshot contains
     // the same text, so a re-render can never show the message twice.
     const alreadyDurable = pendingUserMessage !== null
-      && withAnswers.some((item) => item.role === 'user' && item.content.trim() === pendingUserMessage.content.trim())
-    return pendingUserMessage && !alreadyDurable ? [...withAnswers, pendingUserMessage] : withAnswers
+      && (conversation?.messages ?? []).some((item) => item.role === 'user' && item.content.trim() === pendingUserMessage.content.trim())
+    return pendingUserMessage && !alreadyDurable && !isQuestionAnswerMessage(pendingUserMessage) ? [...withAnswers, pendingUserMessage] : withAnswers
   }, [answerDeliveries, conversation?.messages, streamedByMessage, pendingUserMessage])
 
   if (
@@ -944,6 +951,9 @@ export function ChatPage() {
         lastTerminalLifecycleByTurn.set(event.turnId, event.eventId)
       }
     }
+    const persistedAnswerTexts = (conversation?.messages ?? []).filter(isQuestionAnswerMessage).map((message) => message.content)
+    const usedAnswers = new Set<number>()
+    const answerByAsk = new Map<string, number>()
     return activity.events
       .filter((event) => {
         // Speech events feed the Live voice, not the visible timeline.
@@ -960,7 +970,23 @@ export function ChatPage() {
         return true
       })
       .map((event): ConversationActivityEvent => {
-        if (event.questions && closedQuestionEventIds.has(event.eventId)) return { ...event, questionsAnswered: true }
+        if (event.questions) {
+          // The persisted answer is not a bubble (see isQuestionAnswerMessage): its card shows it, also after a
+          // reload. Answers are matched in order, so a question asked twice gets its own answer each time.
+          const firstQuestion = event.questions[0]?.question
+          const askKey = event.invocationId ?? event.eventId
+          let answerIndex = answerByAsk.get(askKey) ?? -1
+          if (!answerByAsk.has(askKey) && firstQuestion) {
+            answerIndex = persistedAnswerTexts.findIndex((text, index) => !usedAnswers.has(index) && text.includes(firstQuestion))
+            answerByAsk.set(askKey, answerIndex)
+            if (answerIndex >= 0) usedAnswers.add(answerIndex)
+          }
+          const answerText = answerIndex >= 0 ? persistedAnswerTexts[answerIndex] : undefined
+          const answered = closedQuestionEventIds.has(event.eventId)
+          if (answered || answerText) {
+            return { ...event, ...(answered ? { questionsAnswered: true } : {}), ...(answerText ? { questionsAnswerText: answerText } : {}) }
+          }
+        }
         const reqId = event.toolPermission?.requestId
         const resolvedState = reqId ? resolvedPermissionDecisions.get(reqId) : undefined
         if (!resolvedState || !event.toolPermission) return event
@@ -973,7 +999,7 @@ export function ChatPage() {
           },
         }
       })
-  }, [activity.events, cancelledTurnIds, closedQuestionEventIds, resolvedPermissionDecisions])
+  }, [activity.events, cancelledTurnIds, closedQuestionEventIds, conversation?.messages, resolvedPermissionDecisions])
 
   // Each assistant message gets its own text/action timeline, folded from the
   // turn it belongs to; a turn no message could claim (still running before
@@ -2160,7 +2186,7 @@ export function ChatPage() {
         )
 
       if (rawPath && (isWriteOrEdit || isRead)) {
-        const cleanPath = rawPath.trim().replace(/\\/g, '/').replace(/^\.\//, '')
+        const cleanPath = normalizeWorkbenchPath(rawPath, conversation?.workspace?.path)
         const isInternalArtifactPath =
           cleanPath === '.orin'
           || cleanPath.startsWith('.orin/')
@@ -2222,7 +2248,22 @@ export function ChatPage() {
       detectedPreviewUrl: previewUrl,
       latestFilePatchesByPath: patchesByPath,
     }
-  }, [activity.events])
+  }, [activity.events, conversation?.workspace?.path])
+
+  // PreviewStart / PreviewOpen results open the Bancada on the Preview tab while the agent works.
+  const workbenchPreview = useMemo(() => derivePreviewFromEvents(activity.events), [activity.events])
+  const workbenchFileChangeToken = useMemo(() => deriveFileChangeToken(activity.events), [activity.events])
+  const handledPreviewTokenRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    const token = workbenchPreview?.token ?? null
+    const firstObservation = handledPreviewTokenRef.current === undefined
+    if (token === handledPreviewTokenRef.current) return
+    handledPreviewTokenRef.current = token
+    // History (an idle conversation, or the first snapshot) never pops the panel open.
+    if (firstObservation || !running || !token || conversationMode !== 'code') return
+    setWorkbenchOpen(true)
+    setWorkbenchTab('preview')
+  }, [conversationMode, running, workbenchPreview?.token])
 
   return (
     <main className={conversationMode === 'code' && workbenchOpen ? 'chat chat--code-split' : 'chat'}>
@@ -3163,6 +3204,9 @@ export function ChatPage() {
           activeTab={workbenchTab}
           onTabChange={setWorkbenchTab}
           initialPreviewUrl={detectedPreviewUrl}
+          preview={workbenchPreview ?? null}
+          fileChangeToken={workbenchFileChangeToken}
+          rootName={conversation?.workspace?.folderName ?? conversation?.workspace?.path?.split(/[\\/]/).filter(Boolean).pop() ?? null}
           running={running}
           selectedFilePath={selectedWorkbenchFile}
           onSelectFile={setSelectedWorkbenchFile}

@@ -103,14 +103,13 @@ def test_desktop_splash_and_main_cjs_use_mascot_and_windows_app_id() -> None:
     main_cjs = (REPO_ROOT / "desktop" / "electron" / "main.cjs").read_text(encoding="utf-8")
     desktop_pkg = json.loads((REPO_ROOT / "desktop" / "package.json").read_text(encoding="utf-8"))
 
-    assert '<span class="orb-mark">O</span>' not in splash_html
-    assert "orb-mark" in splash_html
+    # The splash is only the animated mascot (inline SVG with blinking eyes) and a short "Aguarde" line.
     assert "M 55 46" in splash_html
-
-    # Extract inline SVG inside .orb-mark and verify it is well-formed XML
-    match = re.search(r'<span class="orb-mark">\s*(<svg[\s\S]*?</svg>)\s*</span>', splash_html)
+    match = re.search(r'(<svg[^>]*class="mascot"[\s\S]*?</svg>)', splash_html)
     assert match is not None
-    ET.fromstring(match.group(1))
+    svg = ET.fromstring(match.group(1))
+    assert len([el for el in svg.iter() if el.get("class") == "eye"]) == 2
+    assert "Aguarde" in splash_html
 
     app_id = desktop_pkg["build"]["appId"]
     assert app_id == "dev.orin.desktop"

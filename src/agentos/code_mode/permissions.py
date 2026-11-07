@@ -451,13 +451,22 @@ class ToolPermissionBroker:
         permission_mode: str | CodePermissionMode | CodeAutonomy = CodePermissionMode.ASK_PERMISSIONS,
         request_id: str | None = None,
         emit_request: Callable[[dict[str, Any]], None] | None = None,
+        sensitive: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Persist a pending permission request in ``.orin/permissions/<request_id>.json`` and emit an event."""
+        """Persist a pending permission request in ``.orin/permissions/<request_id>.json`` and emit an event.
+
+        ``sensitive`` marks a production action (deploy, publish, DB write, push): the card names what the command
+        does, and an approval is for this command only, never a saved allow rule.
+        """
         canonical = _canonical_tool_name(tool_name)
         args = dict(arguments or {})
         mode = normalize_permission_mode(permission_mode)
         req_id = str(request_id or f"perm_{uuid4().hex[:12]}")
-        suggested_rule = suggest_permission_rule(tool_name, args, workspace=self.workspace_root)
+        suggested_rule = None if sensitive else suggest_permission_rule(tool_name, args, workspace=self.workspace_root)
+        sensitive_info: dict[str, Any] | None = None
+        if sensitive:
+            labels = [str(label)[:200] for label in list(sensitive.get("labels") or [])[:8]]
+            sensitive_info = {"kinds": [str(kind)[:32] for kind in list(sensitive.get("kinds") or [])[:8]], "labels": labels}
         preview = _compute_preview_structured_patch(self.workspace_root, canonical, args)
 
         command_preview = str(args.get("command") or "") if canonical in {"run_command", "powershell"} else ""
@@ -481,6 +490,9 @@ class ToolPermissionBroker:
             # The call the request is for, when the caller runs in a toolset's thread (W6-R1).
             "invocation_id": current_invocation_id(),
         }
+        if sensitive_info is not None:
+            record["sensitive"] = sensitive_info
+            record["reason"] = "; ".join(sensitive_info["labels"])[:500]
         if preview is not None:
             record["structured_patch"] = preview["structured_patch"]
             record["added_lines"] = preview["added_lines"]
@@ -494,7 +506,9 @@ class ToolPermissionBroker:
 
         if callable(self.event_emitter):
             summary = (
-                f"Permissão necessária para executar `{command_preview[:80]}`"
+                f"Aprovação necessária: {record['reason'][:120]}"
+                if sensitive_info is not None
+                else f"Permissão necessária para executar `{command_preview[:80]}`"
                 if canonical in {"run_command", "powershell"} and command_preview
                 else f"Permissão necessária para editar `{path_preview}`"
                 if path_preview
@@ -525,6 +539,7 @@ class ToolPermissionBroker:
                     "structured_patch": record.get("structured_patch"),
                     "added_lines": record.get("added_lines"),
                     "removed_lines": record.get("removed_lines"),
+                    **({"sensitive": sensitive_info, "reason": record["reason"]} if sensitive_info is not None else {}),
                 },
             }
             if "structured_patch" in record:
@@ -611,6 +626,7 @@ class ToolPermissionBroker:
         cancelled: Callable[[], bool] | None = None,
         timeout_seconds: float | None = None,
         poll_interval_seconds: float | None = None,
+        sensitive: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a pending request and poll until resolved, cancelled, or timed out."""
         record = self.create_permission_request(
@@ -621,6 +637,7 @@ class ToolPermissionBroker:
             permission_mode=permission_mode,
             request_id=request_id,
             emit_request=emit_request,
+            sensitive=sensitive,
         )
         req_id = str(record["request_id"])
         check_cancelled = cancelled or self.cancelled

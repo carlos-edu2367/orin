@@ -2054,3 +2054,116 @@ def test_f07_codex_adapter_does_not_leave_stale_pending_tool_uses_on_complete(
 
 
 
+
+def _long_prior_history() -> list[dict[str, object]]:
+    history: list[dict[str, object]] = []
+    for idx in range(1, 31):
+        history.append({"role": "user", "content": f"Pedido {idx}: " + ("p" * 3_000), "_sequence": 2 * idx - 1})
+        history.append({"role": "assistant", "content": f"Resposta {idx}: " + ("r" * 3_000), "_sequence": 2 * idx})
+    history.append({"role": "user", "content": "Pedido atual", "_sequence": 61})
+    return history
+
+
+def _compaction_runtime(
+    tmp_path: Path, **kw: Any
+) -> tuple[AgenticTurnRuntime, FakeStore, FakeNativeProvider, list[dict[str, Any]]]:
+    store = FakeStore()
+    history = _long_prior_history()
+    store.history_for_turn = lambda turn: [dict(item) for item in history]  # type: ignore[method-assign]
+    boundaries: list[dict[str, Any]] = []
+    store.record_compact_boundary = lambda turn, **values: boundaries.append(dict(values))  # type: ignore[attr-defined]
+    provider = FakeNativeProvider()
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=_make_toolset(ConversationWorkspace(tmp_path, "c1")),
+        context_reporting=True,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+        **kw,
+    )
+    return runtime, store, provider, boundaries
+
+
+def test_native_turn_compacts_prior_history_over_the_cap_and_persists_the_boundary(tmp_path: Path) -> None:
+    from agentos.agentic.compaction import COMPACTION_HEADING
+
+    runtime, store, provider, boundaries = _compaction_runtime(tmp_path)
+
+    assert runtime.run("t1", turn=store.turn).state == "completed"
+
+    # Summarized and recorded, so the next turn starts from the summary instead of re-sending (and
+    # silently cutting) the same history again.
+    assert boundaries and boundaries[0]["kind"] == "compact" and boundaries[0]["summary"]
+    assert 0 < int(boundaries[0]["through_sequence"]) < 61
+    combined = "\n".join(str(block.get("text") or "") for block in provider.requests[0].user_content)
+    assert COMPACTION_HEADING in combined
+    assert "Pedido atual" in combined and "Resposta 30:" in combined
+    assert "Resposta 1: " not in combined and "Resposta 28: " in combined
+    assert "context_compacted" in [state for state, _ in store.states]
+    # The first meter reading already measures the compacted history.
+    first_ctx = next(payload for state, payload in store.states if state == "context_updated")
+    assert first_ctx["compaction_count"] == 1
+
+
+def test_native_turn_respects_autocompact_off(tmp_path: Path) -> None:
+    runtime, store, provider, boundaries = _compaction_runtime(tmp_path, autocompact=False)
+
+    assert runtime.run("t1", turn=store.turn).state == "completed"
+    assert boundaries == [] and provider.stream_calls == 0
+
+
+def test_cli_compaction_is_reported_to_the_ui(tmp_path: Path) -> None:
+    store = FakeStore()
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_compacted()
+        sink.on_text("ok")
+        return NativeTurnOutcome(result=_make_result(text="ok"), init=init, final_text="ok", exit_code=0)
+
+    provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=_make_toolset(ConversationWorkspace(tmp_path, "c1")),
+        context_reporting=True,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    assert runtime.run("t1", turn=store.turn).state == "completed"
+    compacted = [payload for state, payload in store.states if state == "context_compacted"]
+    assert compacted and compacted[0]["compaction_count"] == 1 and compacted[0]["source"] == "cli"
+
+
+def test_production_confirmation_refusals_do_not_end_the_native_turn(tmp_path: Path) -> None:
+    """Three refused production commands used to abort the turn and take every tool from the model mid-answer."""
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace, interactive_permissions=False)
+    texts: list[str] = []
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        for i in range(1, 5):
+            cid = f"toolu_prod_{i}"
+            args = {"command": f"vercel --prod --yes --name app{i}", "description": "ship"}
+            sink.on_tool_use_started(cid, "mcp__orin__Bash")
+            sink.on_tool_use_complete(cid, "mcp__orin__Bash", args)
+            res = req.executor.call_tool(
+                ToolCallRequest(name="Bash", arguments=args, meta={TOOL_USE_ID_META_KEY: cid, "message_id": f"msg_{i}"})
+            )
+            texts.append(res.text)
+        return NativeTurnOutcome(result=_make_result(text="Pedi confirmação."), init=init, final_text="Pedi confirmação.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store, provider=fake_provider, toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=20, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+    assert out.error_code != "REPEATED_TOOL_FAILURE"
+    assert all("Nada foi executado" in text for text in texts), texts
+    assert not any("turn stopped" in text for text in texts)

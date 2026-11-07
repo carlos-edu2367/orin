@@ -732,6 +732,8 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (typeof payload.elapsed_ms === 'number' && Number.isFinite(payload.elapsed_ms) && payload.elapsed_ms >= 0) {
     event.elapsedMs = payload.elapsed_ms
   }
+  const previewServer = parsePreviewServer(payload.preview)
+  if (previewServer) event.previewServer = previewServer
   const bashOutput = parseBashOutput(payload, toolKind, event.toolName, event.state, status, errorCode)
   if (bashOutput) {
     event.bashOutput = bashOutput
@@ -769,6 +771,22 @@ function isRedactedValue(value: unknown): boolean {
   const trimmed = value.trim()
   if (!trimmed) return false
   return trimmed === '[REDACTED]' || trimmed.replace(/\[REDACTED\]/g, '').trim() === ''
+}
+
+function parsePreviewServer(value: unknown): ConversationActivityEvent['previewServer'] | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const url = optionalText(raw.url, 2048)
+  const name = optionalText(raw.name, 200)
+  const serverStatus = optionalText(raw.status, 32)
+  if (url === undefined && name === undefined && serverStatus === undefined) return undefined
+  return {
+    ...(url !== undefined && !isRedactedValue(url) ? { url } : {}),
+    ...(name !== undefined ? { name } : {}),
+    ...(serverStatus !== undefined ? { status: serverStatus } : {}),
+    ...(typeof raw.hmr === 'boolean' ? { hmr: raw.hmr } : {}),
+    ...(typeof raw.exit_code === 'number' && Number.isInteger(raw.exit_code) ? { exitCode: raw.exit_code } : raw.exit_code === null ? { exitCode: null } : {}),
+  }
 }
 
 function parseBashOutput(
@@ -959,6 +977,15 @@ function parseToolPermissionRequest(
   const rawState = optionalText(source.state ?? payload.state, 32)
   const state: 'pending' | 'allowed' | 'denied' =
     rawState === 'allowed' || rawState === 'denied' ? rawState : 'pending'
+  const rawSensitive = source.sensitive ?? payload.sensitive
+  const sensitive = typeof rawSensitive === 'object' && rawSensitive !== null && !Array.isArray(rawSensitive)
+    ? {
+        kinds: (Array.isArray((rawSensitive as Record<string, unknown>).kinds) ? (rawSensitive as Record<string, unknown>).kinds as unknown[] : [])
+          .map((item) => optionalText(item, 32)).filter((item): item is string => Boolean(item)).slice(0, 8),
+        labels: (Array.isArray((rawSensitive as Record<string, unknown>).labels) ? (rawSensitive as Record<string, unknown>).labels as unknown[] : [])
+          .map((item) => optionalText(item, 200)).filter((item): item is string => Boolean(item)).slice(0, 8),
+      }
+    : undefined
   return {
     requestId,
     turnId: optionalText(source.turn_id, 255) ?? fallbackTurnId,
@@ -973,6 +1000,7 @@ function parseToolPermissionRequest(
     addedLines,
     removedLines,
     ...(planApproval ? { planApproval } : {}),
+    ...(sensitive && sensitive.labels.length > 0 ? { sensitive } : {}),
   }
 }
 

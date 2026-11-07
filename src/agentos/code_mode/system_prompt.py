@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from agentos.agentic.tools.public_names import public_name
+from agentos.host_python import environment_notes
 
 PROMPT_VERSION = "orin-code-w3.3"
 
@@ -127,7 +128,12 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
         extras.append(f"- {t('verify_project')} runs the project's checks and can scaffold a new project with the stack's official generator.")
     if has("preview_start"):
         stop = f"; stop it with {t('preview_stop')} when you are done" if has("preview_stop") else ""
-        extras.append(f"- {t('preview_start')} starts a local preview server you can inspect{stop}.")
+        extras.append(f"- {t('preview_start')} starts a local preview server you can inspect{stop}; it also opens it in the user's Bancada (Preview tab).")
+    if has("preview_open"):
+        extras.append(
+            f"- After starting a frontend dev server another way (e.g. a background shell command), call {t('preview_open')} with its URL "
+            "so the user sees the app live in the Bancada; do this whenever your frontend changes should be visible."
+        )
     if has("remember"):
         recall = f" Use {t('recall')} when you suspect you dealt with something before." if has("recall") else ""
         extras.append(f"- Save with {t('remember')} what stays true after this conversation: a correction from the user, a stated preference, an unwritten project convention.{recall}")
@@ -232,6 +238,7 @@ def render_code_turn_context(
     lines.append(
         f"- Python: {environment.get('python', 'unknown')}. Also on PATH: {environment.get('available', 'unknown')}."
     )
+    lines.extend(f"- {note}" for note in environment_notes(environment))
     if today:
         lines.append(f"- Today's date: {today}")
 

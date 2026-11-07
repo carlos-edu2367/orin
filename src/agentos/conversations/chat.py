@@ -134,6 +134,10 @@ def _repair_context_usage(payload: Mapping[str, object]) -> dict[str, object]:
     if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in components):
         return repaired
     inferred = int(used_tokens) - sum(int(value) for value in components)
+    memory_tokens = repaired.get("memory_tokens")
+    if isinstance(memory_tokens, (int, float)) and not isinstance(memory_tokens, bool):
+        # Memory is its own row in the breakdown; leaving it in the prompt row counted it twice.
+        inferred -= int(memory_tokens)
     if inferred >= 0:
         repaired["system_prompt_tokens"] = inferred
     return repaired
