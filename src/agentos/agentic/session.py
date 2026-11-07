@@ -19,11 +19,12 @@ import threading
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
+import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 from uuid import uuid4
@@ -52,6 +53,7 @@ from agentos.retrieval.factory import retrieval_service_for
 from agentos.retrieval.worker import IndexWorker
 
 from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
+from .background_agents import BACKGROUND_AGENTS, BackgroundAgentEntry
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
@@ -2456,6 +2458,10 @@ class TurnSession:
         if resumed_agent_id:
             with self._subagent_lock:
                 bg_entry = self._background_subagents.get(resumed_agent_id)
+            if bg_entry is None:
+                reg_bg = BACKGROUND_AGENTS.get(str(self.turn.get("conversation_id") or ""), resumed_agent_id)
+                if reg_bg is not None and reg_bg.future is not None:
+                    bg_entry = {"future": reg_bg.future, "agent_name": reg_bg.name}
             # A teammate reaching here was claimed while not busy: its previous run is only announcing that it is idle.
             if bg_entry is not None and not bg_entry["future"].done() and not teammate_name:
                 bg_name = str(bg_entry.get("agent_name") or resumed_agent_id)
@@ -2563,17 +2569,36 @@ class TurnSession:
             }
         definition = builtin_spec.get("definition") if builtin_spec is not None else None
         if run_in_background or (definition is not None and definition.background):
+            conv_id = str(self.turn.get("conversation_id") or "")
+            bg_caller = (
+                replace(caller, cancelled=lambda _t: False)
+                if caller is not None and caller.is_main
+                else caller
+            )
             with self._subagent_lock:
                 if self._bg_subagent_executor is None:
                     # A background agent holds a worker while it waits for a concurrency slot, and may wait for
                     # background agents it started: a small pool could leave those queued forever. Threads are
                     # created on demand, so a generous pool costs nothing; the semaphore bounds how many run.
-                    self._bg_subagent_executor = ThreadPoolExecutor(
+                    self._bg_subagent_executor = BACKGROUND_AGENTS.executor_for(
+                        conv_id,
                         max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
-                        thread_name_prefix="orin-bg-subagent",
                     )
                 cancel = threading.Event()
                 output_file = self._agent_output_file(agent_id)
+                reg_entry = BackgroundAgentEntry(
+                    agent_id=agent_id,
+                    conversation_id=conv_id,
+                    name=clean,
+                    output_file=output_file,
+                    status="running",
+                    started_at=time.monotonic(),
+                    finished_at=None,
+                    summary="",
+                    cancel=cancel,
+                    future=None,
+                )
+                BACKGROUND_AGENTS.register(reg_entry)
                 future = self._bg_subagent_executor.submit(
                     self._run_background_agent,
                     output_file,
@@ -2588,9 +2613,10 @@ class TurnSession:
                     task_text=task_text,
                     description=description,
                     resumed_agent_id=resumed_agent_id,
-                    caller=caller,
+                    caller=bg_caller,
                     **routing,
                 )
+                reg_entry.future = future
                 self._background_subagents[agent_id] = {
                     "future": future,
                     "agent_id": agent_id,
@@ -3141,12 +3167,14 @@ class TurnSession:
         """
         record = kwargs.get("record") or {}
         name = str(record.get("teammate_name") or "")
+        agent_id = str(kwargs.get("agent_id") or "")
+        cancel = kwargs.get("hook_cancel")
+        outcome: ToolOutcome | None = None
         try:
             outcome = self._execute_subagent_run(**kwargs)
             self._save_agent_report(output_file, outcome)
             if not name:
                 return outcome
-            cancel = kwargs.get("hook_cancel")
             unread = 0
             for delivery in range(MAX_TEAM_DELIVERIES + 1):
                 with self._team_lock:
@@ -3164,6 +3192,18 @@ class TurnSession:
             if name:
                 self._release_teammate(name)
             raise
+        finally:
+            if agent_id:
+                if (cancel is not None and cancel.is_set()) or (
+                    outcome is not None and outcome.error_code == "TURN_CANCELLED"
+                ):
+                    bg_status = "stopped"
+                elif outcome is not None and outcome.status == "succeeded":
+                    bg_status = "completed"
+                else:
+                    bg_status = "failed"
+                bg_summary = str((outcome.content or outcome.summary) if outcome is not None else "")
+                BACKGROUND_AGENTS.finish(agent_id, bg_status, bg_summary)
         self._teammate_idle(name, str(record.get("team_name") or "team"), outcome, unread=unread)
         return outcome
 
@@ -3343,8 +3383,19 @@ class TurnSession:
         refusal = self._ownership_refusal(str(agent_id), caller)
         if refusal is not None:
             return refusal
+        conv_id = str(self.turn.get("conversation_id") or "")
         with self._subagent_lock:
             entry = self._background_subagents.get(str(agent_id))
+        if entry is None:
+            reg_entry = BACKGROUND_AGENTS.get(conv_id, str(agent_id))
+            if reg_entry is not None:
+                entry = {
+                    "future": reg_entry.future,
+                    "agent_id": reg_entry.agent_id,
+                    "agent_name": reg_entry.name,
+                    "cancel": reg_entry.cancel,
+                    "output_file": reg_entry.output_file,
+                }
         if entry is None:
             return ToolOutcome(
                 "failed", "Agente não encontrado", f"No background agent '{str(agent_id)[:80]}' in this turn.",
@@ -3356,7 +3407,8 @@ class TurnSession:
         if cancel is not None:
             # Also when it already finished: the background agents it started watch this event and stop with it.
             cancel.set()
-        if entry["future"].done():
+        fut = entry.get("future")
+        if fut is None or fut.done():
             output["message"] = f"{name} had already finished; anything it started in the background is asked to stop."
             return ToolOutcome("succeeded", f"{name} já tinha terminado", output["message"], {"agent_id": agent_id, "tool_kind": "agent"}, data={"tool_output": output})
         output["message"] = f"Asked {name} to stop; it stops at its next step."
@@ -3366,9 +3418,49 @@ class TurnSession:
         refusal = self._ownership_refusal(str(agent_id), caller)
         if refusal is not None:
             return refusal
+        conv_id = str(self.turn.get("conversation_id") or "")
         with self._subagent_lock:
             entry = self._background_subagents.get(agent_id)
         if entry is None:
+            reg_entry = BACKGROUND_AGENTS.get(conv_id, str(agent_id))
+            if reg_entry is not None and reg_entry.future is not None:
+                entry = {
+                    "future": reg_entry.future,
+                    "agent_id": reg_entry.agent_id,
+                    "agent_name": reg_entry.name,
+                    "cancel": reg_entry.cancel,
+                    "output_file": reg_entry.output_file,
+                }
+        if entry is None:
+            record = self._find_subagent_record_by_id(str(agent_id))
+            output_file = self._agent_output_file(str(agent_id))
+            report_path = self.workspace.root / output_file
+            if record is not None or report_path.is_file():
+                agent_name = str((record or {}).get("name") or agent_id)
+                db_state = str((record or {}).get("state") or ("completed" if report_path.is_file() else "failed")).strip().lower()
+                report_text = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
+                if db_state in {"running", "working"}:
+                    status = "running"
+                elif db_state in {"idle", "completed", "succeeded"}:
+                    status = "completed"
+                else:
+                    status = "failed"
+                outcome_status = "succeeded" if status != "failed" else "failed"
+                return ToolOutcome(
+                    outcome_status,
+                    f"Relatório de {agent_name}",
+                    report_text or f"Subagent '{agent_name}' (agent_id=\"{agent_id}\") status: {status}.",
+                    {
+                        "agent_id": agent_id,
+                        "agent_name": agent_name,
+                        "status": status,
+                        "output_file": output_file,
+                        "background": True,
+                        "label": agent_name,
+                        "tool_kind": "agent",
+                    },
+                    None if outcome_status == "succeeded" else "SUBAGENT_FAILED",
+                )
             return ToolOutcome(
                 "failed",
                 f"Subagente {agent_id} não encontrado",
@@ -3531,21 +3623,19 @@ class TurnSession:
                         cancel_event.set()
                     except Exception:
                         pass
-        if executor is not None:
-            executor.shutdown(wait=not should_cancel, cancel_futures=should_cancel)
-        if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+                future = entry.get("future")
+                agent_id = str(entry.get("agent_id") or "")
+                if future is not None and hasattr(future, "cancel") and future.cancel() and agent_id:
+                    BACKGROUND_AGENTS.finish(agent_id, "stopped", "Cancelled")
+        if should_cancel and self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             for entry in bg_entries:
                 future = entry.get("future")
                 agent_id = str(entry.get("agent_id") or "")
-                if agent_id and (
-                    should_cancel
-                    or (future is not None and (not future.done() or future.cancelled()))
-                ):
-                    if future is None or not future.done() or future.cancelled():
-                        try:
-                            self.agents_store.set_state(agent_id, "cancelled")
-                        except Exception:
-                            pass
+                if agent_id and (future is None or not future.done() or future.cancelled()):
+                    try:
+                        self.agents_store.set_state(agent_id, "cancelled")
+                    except Exception:
+                        pass
 
     def _ask_agents(self, requests: list[Mapping[str, str]], *, caller: SubagentCaller | None = None) -> ToolOutcome:
         """Run several independent delegations at once.
