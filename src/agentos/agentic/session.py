@@ -2655,6 +2655,26 @@ class TurnSession:
                     "tool_kind": "agent",
                 },
             )
+        if (
+            hook_cancel is None
+            and (caller is None or caller.is_main)
+            and self._can_watch_queued_user_input()
+        ):
+            return self._run_foreground_subagent_watching_queue(
+                record=record,
+                agent_id=agent_id,
+                clean=clean,
+                builtin_key=builtin_key,
+                builtin_spec=builtin_spec,
+                child_model_id=child_model_id,
+                current_model_id=current_model_id,
+                task_text=task_text,
+                description=description,
+                resumed_agent_id=resumed_agent_id,
+                caller=caller,
+                max_depth=max_depth,
+                routing=routing,
+            )
         with self._lend_slot(caller):
             return self._execute_subagent_run(
                 hook_cancel=hook_cancel,
@@ -2671,6 +2691,207 @@ class TurnSession:
                 caller=caller,
                 **routing,
             )
+
+    def _can_watch_queued_user_input(self) -> bool:
+        for candidate in (getattr(self, "store", None), getattr(self, "chat_store", None)):
+            if candidate is None:
+                continue
+            if callable(getattr(candidate, "has_queued_inputs", None)):
+                return True
+            if getattr(candidate, "queued_inputs", None) is not None and callable(
+                getattr(candidate, "claim_queued_inputs", None)
+            ):
+                return True
+        return False
+
+    def _has_queued_user_input(self) -> bool:
+        for candidate in (getattr(self, "store", None), getattr(self, "chat_store", None)):
+            if candidate is None:
+                continue
+            checker = getattr(candidate, "has_queued_inputs", None)
+            if callable(checker):
+                try:
+                    if checker(self.turn):
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+            queued = getattr(candidate, "queued_inputs", None)
+            if callable(queued):
+                try:
+                    if queued(str(self.turn.get("conversation_id") or ""), str(self.turn.get("user_id") or "")):
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+            elif isinstance(queued, (list, tuple)) and queued:
+                return True
+        return False
+
+    def _claim_queued_user_inputs(self) -> list[str]:
+        from . import transcript
+
+        texts: list[str] = []
+        for candidate in (getattr(self, "store", None), getattr(self, "chat_store", None)):
+            if candidate is None:
+                continue
+            claim = getattr(candidate, "claim_queued_inputs", None)
+            if not callable(claim):
+                continue
+            try:
+                items = list(claim(self.turn) or ())
+            except Exception:  # noqa: BLE001
+                continue
+            if not items:
+                continue
+            for item in items:
+                text = str((item or {}).get("content") or "").strip()
+                queue_id = str((item or {}).get("queue_id") or "")
+                if not text:
+                    continue
+                texts.append(text)
+                recorder = getattr(candidate, "record_step", None)
+                if callable(recorder):
+                    try:
+                        recorder(self.turn, kind=transcript.STEP_QUEUED_INPUT, payload={"content": text})
+                    except Exception:  # noqa: BLE001
+                        pass
+                life = getattr(candidate, "lifecycle", None)
+                if callable(life):
+                    try:
+                        life(self.turn, "queued_input", queued_text=text[:2000], queue_id=queue_id)
+                    except Exception:  # noqa: BLE001
+                        pass
+            if texts:
+                break
+        return texts
+
+    def _run_foreground_subagent_watching_queue(
+        self,
+        *,
+        record: dict[str, object],
+        agent_id: str,
+        clean: str,
+        builtin_key: str,
+        builtin_spec: Mapping[str, object] | None,
+        child_model_id: str,
+        current_model_id: str,
+        task_text: str,
+        description: str,
+        resumed_agent_id: str | None,
+        caller: SubagentCaller | None,
+        max_depth: int,
+        routing: Mapping[str, Any],
+    ) -> ToolOutcome:
+        conv_id = str(self.turn.get("conversation_id") or "")
+        bg_caller = (
+            replace(caller, cancelled=lambda _t: False)
+            if caller is not None and caller.is_main
+            else caller
+        )
+        cancel = threading.Event()
+        promoted = threading.Event()
+        promote_lock = threading.Lock()
+        completed_unpromoted = False
+        output_file = self._agent_output_file(agent_id)
+
+        def _worker() -> ToolOutcome:
+            nonlocal completed_unpromoted
+            outcome: ToolOutcome | None = None
+            try:
+                with self._lend_slot(caller):
+                    outcome = self._execute_subagent_run(
+                        hook_cancel=cancel,
+                        record=dict(record),
+                        agent_id=agent_id,
+                        clean=clean,
+                        builtin_key=builtin_key,
+                        builtin_spec=builtin_spec,
+                        child_model_id=child_model_id,
+                        current_model_id=current_model_id,
+                        task_text=task_text,
+                        description=description,
+                        resumed_agent_id=resumed_agent_id,
+                        caller=bg_caller,
+                        **routing,
+                    )
+                return outcome
+            finally:
+                with promote_lock:
+                    is_promoted = promoted.is_set()
+                    if not is_promoted:
+                        completed_unpromoted = True
+                if is_promoted:
+                    if outcome is not None:
+                        self._save_agent_report(output_file, outcome)
+                    if cancel.is_set() or (outcome is not None and outcome.error_code == "TURN_CANCELLED"):
+                        bg_status = "stopped"
+                    elif outcome is not None and outcome.status == "succeeded":
+                        bg_status = "completed"
+                    else:
+                        bg_status = "failed"
+                    bg_summary = str((outcome.content or outcome.summary) if outcome is not None else "")
+                    BACKGROUND_AGENTS.finish(agent_id, bg_status, bg_summary)
+
+        with self._subagent_lock:
+            if self._bg_subagent_executor is None:
+                self._bg_subagent_executor = BACKGROUND_AGENTS.executor_for(
+                    conv_id,
+                    max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
+                )
+            future = self._bg_subagent_executor.submit(_worker)
+
+        while not future.done():
+            if self.cancelled(self.turn):
+                cancel.set()
+                break
+            if self._has_queued_user_input():
+                with promote_lock:
+                    if not completed_unpromoted and not future.done():
+                        texts = self._claim_queued_user_inputs()
+                        if texts:
+                            promoted.set()
+                            reg_entry = BackgroundAgentEntry(
+                                agent_id=agent_id,
+                                conversation_id=conv_id,
+                                name=clean,
+                                output_file=output_file,
+                                status="running",
+                                started_at=time.monotonic(),
+                                finished_at=None,
+                                summary="",
+                                cancel=cancel,
+                                future=future,
+                            )
+                            BACKGROUND_AGENTS.register(reg_entry)
+                            with self._subagent_lock:
+                                self._background_subagents[agent_id] = {
+                                    "future": future,
+                                    "agent_id": agent_id,
+                                    "agent_name": clean,
+                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                                    "cancel": cancel,
+                                    "output_file": output_file,
+                                }
+                            user_text = "\n\n".join(texts)
+                            return ToolOutcome(
+                                "succeeded",
+                                f"{clean} continua em segundo plano",
+                                f"{clean} continues in the background (agent_id={agent_id}). The user wrote: {user_text}",
+                                {
+                                    "agent_id": agent_id,
+                                    "agent_name": clean,
+                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                                    "status": "running",
+                                    "output_file": output_file,
+                                    "background": True,
+                                    "promoted_to_background": True,
+                                    "resumed": bool(resumed_agent_id),
+                                    "label": clean,
+                                    "tool_kind": "agent",
+                                },
+                            )
+            time.sleep(0.05)
+
+        return future.result()
 
     def _execute_subagent_run(self, **kwargs: Any) -> ToolOutcome:
         bus = self.lifecycle

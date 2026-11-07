@@ -2233,6 +2233,16 @@ class PostgresChatStore:
             ))
         return {"queue_id": queue_id, "state": "pending", "content": text}
 
+    def has_queued_inputs(self, turn: Mapping[str, object]) -> bool:
+        engine = getattr(self, "_engine", None) or self.store._engine
+        with engine.connect() as c:
+            pending = int(c.execute(select(func.count()).select_from(conversation_input_queue).where(
+                conversation_input_queue.c.conversation_id == str(turn["conversation_id"]),
+                conversation_input_queue.c.user_id == str(turn["user_id"]),
+                conversation_input_queue.c.state == "pending",
+            )).scalar() or 0)
+        return pending > 0
+
     def queued_inputs(self, conversation_id: str, user_id: str) -> list[dict[str, object]]:
         with self._engine.connect() as c:
             self._owned(c, conversation_id, user_id)
@@ -3186,6 +3196,16 @@ class ChatApplication:
             # The turn ended between the check and the insert: nothing would read the queue now.
             self.promote_queued_inputs(conversation_id, user_id)
         return {"queued": True, **item}
+
+    def has_queued_inputs(self, turn: Mapping[str, object]) -> bool:
+        engine = getattr(self, "_engine", None) or self.store._engine
+        with engine.connect() as c:
+            pending = int(c.execute(select(func.count()).select_from(conversation_input_queue).where(
+                conversation_input_queue.c.conversation_id == str(turn["conversation_id"]),
+                conversation_input_queue.c.user_id == str(turn["user_id"]),
+                conversation_input_queue.c.state == "pending",
+            )).scalar() or 0)
+        return pending > 0
 
     def queued_inputs(self, conversation_id: str, user_id: str) -> list[dict[str, object]]:
         return self.store.queued_inputs(conversation_id, user_id)

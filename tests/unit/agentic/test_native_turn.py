@@ -2428,3 +2428,179 @@ def test_production_confirmation_refusals_do_not_end_the_native_turn(tmp_path: P
     assert out.error_code != "REPEATED_TOOL_FAILURE"
     assert all("Nada foi executado" in text for text in texts), texts
     assert not any("turn stopped" in text for text in texts)
+
+
+def test_waiting_subagents_wakes_early_when_user_queues_message(tmp_path: Path) -> None:
+    import threading
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS, BackgroundAgentEntry
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    store = FakeStore()
+    store.queued_inputs = []  # type: ignore[attr-defined]
+
+    def _claim_queued(turn: Mapping[str, object]) -> list[dict[str, object]]:
+        items = list(store.queued_inputs)  # type: ignore[attr-defined]
+        store.queued_inputs.clear()  # type: ignore[attr-defined]
+        return items
+
+    store.claim_queued_inputs = _claim_queued  # type: ignore[attr-defined]
+
+    conv_id = str(store.turn["conversation_id"])
+    workspace = ConversationWorkspace(tmp_path, conv_id)
+    toolset = _make_toolset(workspace)
+
+    bg_entry = BackgroundAgentEntry(
+        agent_id="agent:c1:slow",
+        conversation_id=conv_id,
+        name="codex",
+        output_file=".orin/agent-outputs/codex.md",
+        status="running",
+        started_at=time.monotonic(),
+        finished_at=None,
+        summary="",
+        cancel=threading.Event(),
+        future=None,
+    )
+    BACKGROUND_AGENTS.register(bg_entry)
+
+    def _round_1(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_text("Aguardando codex.")
+        threading.Timer(
+            0.05,
+            lambda: store.queued_inputs.append(  # type: ignore[attr-defined]
+                {"queue_id": "q1", "content": "Mude a cor do botão para verde"}
+            ),
+        ).start()
+        return NativeTurnOutcome(
+            result=_make_result(text="Aguardando codex."),
+            init=init,
+            final_text="Aguardando codex.",
+            exit_code=0,
+        )
+
+    def _round_2(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        BACKGROUND_AGENTS.finish("agent:c1:slow", "completed", "Pronto.")
+        BACKGROUND_AGENTS.take_unnotified(conv_id)
+        sink.on_text("Recebi a mensagem do usuário.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Recebi a mensagem do usuário."),
+            init=_make_init(req.model),
+            final_text="Recebi a mensagem do usuário.",
+            exit_code=0,
+        )
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round_1, _round_2]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    try:
+        t0 = time.monotonic()
+        out = runtime.run("t1", turn=store.turn)
+        elapsed = time.monotonic() - t0
+        assert out.state == "completed"
+        assert elapsed < 2.0
+        handle = fake_provider.handles[0]
+        assert len(handle.sent_users) == 1
+        assert "Mude a cor do botão para verde" in str(handle.sent_users[0])
+    finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+
+
+def test_foreground_subagent_promotes_to_background_on_queued_user_input_and_t4_delivers_result(
+    tmp_path: Path,
+) -> None:
+    import threading
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS
+    from agentos.agentic.session import TurnSession
+    from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
+    from agentos.persistence.postgres.schema import metadata
+    from agentos.persistence.sqlite import create_local_engine
+    from tests.unit.agentic.test_parallel_and_background_subagents import (
+        TURN,
+        _RecordingStore,
+        _text_batch,
+    )
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 't6.db').as_posix()}")
+    metadata.create_all(engine)
+
+    child_gate = threading.Event()
+
+    class _SlowChild:
+        def stream(self, _request: Any):
+            child_gate.wait(timeout=5.0)
+            return iter(_text_batch("Relatório final do filho promovido."))
+
+    store = _RecordingStore()
+    store.queued_inputs = []  # type: ignore[attr-defined]
+
+    def _has_queued(_turn: Mapping[str, object]) -> bool:
+        return bool(store.queued_inputs)  # type: ignore[attr-defined]
+
+    def _claim_queued(_turn: Mapping[str, object]) -> list[dict[str, object]]:
+        items = list(store.queued_inputs)  # type: ignore[attr-defined]
+        store.queued_inputs.clear()  # type: ignore[attr-defined]
+        return items
+
+    store.has_queued_inputs = _has_queued  # type: ignore[attr-defined]
+    store.claim_queued_inputs = _claim_queued  # type: ignore[attr-defined]
+
+    session = TurnSession(
+        turn=dict(TURN),
+        store=store,
+        agents_store=ConversationAgentStore(
+            engine,
+            conversation_id=TURN["conversation_id"],
+            user_id=TURN["user_id"],
+        ),
+        memory_store=None,
+        provider_factory=lambda: _SlowChild(),
+        workspace_root=tmp_path,
+        child_provider_factory=lambda _model: _SlowChild(),
+    )
+
+    try:
+        threading.Timer(
+            0.1,
+            lambda: store.queued_inputs.append(  # type: ignore[attr-defined]
+                {"queue_id": "q_user_1", "content": "Use porta 4000 em vez de 3000"}
+            ),
+        ).start()
+
+        t0 = time.monotonic()
+        outcome = session._run_subagent(
+            subagent_type="general-purpose",
+            task="Implemente o servidor",
+            run_in_background=False,
+        )
+        elapsed = time.monotonic() - t0
+
+        assert elapsed < 2.0
+        assert outcome.status == "succeeded"
+        assert "continues in the background (agent_id=" in outcome.content
+        assert "The user wrote: Use porta 4000 em vez de 3000" in outcome.content
+        assert store.queued_inputs == []  # type: ignore[attr-defined]
+
+        # Now the promoted child is in BACKGROUND_AGENTS as running; release it and verify T4 receives it
+        conv_id = str(TURN["conversation_id"])
+        assert len(BACKGROUND_AGENTS.running(conv_id)) == 1
+        child_gate.set()
+        woke = BACKGROUND_AGENTS.wait_any(conv_id, timeout=3.0, cancelled=lambda: False)
+        assert woke is True
+        unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id)
+        assert len(unnotified) == 1
+        assert unnotified[0].status == "completed"
+        assert "Relatório final do filho promovido." in unnotified[0].summary
+    finally:
+        child_gate.set()
+        session.close_background_subagents()
+        BACKGROUND_AGENTS.clear_for_tests()
+        engine.dispose()
+

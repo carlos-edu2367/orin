@@ -456,6 +456,11 @@ class AgenticTurnRuntime:
             except Exception:  # noqa: BLE001
                 return False
         queued = getattr(self.store, "queued_inputs", None)
+        if callable(queued):
+            try:
+                return bool(queued(str(turn.get("conversation_id") or ""), str(turn.get("user_id") or "")))
+            except Exception:  # noqa: BLE001
+                return False
         if isinstance(queued, (list, tuple)):
             return bool(queued)
         return False

@@ -34,8 +34,11 @@ def extract_report_summary(text: str) -> str:
     """First useful non-empty line of a subagent report, capped at 300 characters."""
     for raw_line in str(text or "").splitlines():
         cleaned = raw_line.strip().lstrip("#").strip()
-        if cleaned:
-            return cleaned[:300]
+        if not cleaned:
+            continue
+        if re.fullmatch(r"[\w ._-]+ reported:", cleaned, flags=re.IGNORECASE):
+            continue
+        return cleaned[:300]
     return ""
 
 
