@@ -2843,9 +2843,18 @@ def _inspect_codex_cli_status() -> dict[str, object]:
     ver_tuple = codex_command.codex_version(binary) if binary is not None else None
     version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
     supported = codex_command.is_codex_version_supported(ver_tuple)
-    auth_path = Path(codex_catalog.resolve_codex_home()) / "auth.json"
+    codex_home = Path(codex_catalog.resolve_codex_home())
+    auth_path = codex_home / "auth.json"
     try:
-        authenticated = bool(not auth_path.is_symlink() and auth_path.is_file())
+        is_junc_home = bool(getattr(codex_home, "is_junction", lambda: False)())
+        is_junc_auth = bool(getattr(auth_path, "is_junction", lambda: False)())
+        authenticated = bool(
+            not codex_home.is_symlink()
+            and not is_junc_home
+            and not auth_path.is_symlink()
+            and not is_junc_auth
+            and auth_path.is_file()
+        )
     except OSError:
         authenticated = False
     return {
@@ -2868,9 +2877,13 @@ def _inspect_antigravity_cli_status() -> dict[str, object]:
     home_path = Path(antigravity_command.resolve_antigravity_home())
     state_path = home_path / "jetski_state.pbtxt"
     try:
+        is_junc_home = bool(getattr(home_path, "is_junction", lambda: False)())
+        is_junc_state = bool(getattr(state_path, "is_junction", lambda: False)())
         authenticated = bool(
             not home_path.is_symlink()
+            and not is_junc_home
             and not state_path.is_symlink()
+            and not is_junc_state
             and state_path.is_file()
         )
     except OSError:

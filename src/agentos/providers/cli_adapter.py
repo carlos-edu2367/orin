@@ -198,6 +198,7 @@ class CliModelInfo:
     display_name: str
     context_window: int
     supported_efforts: tuple[str, ...] = ()
+    input_modalities: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

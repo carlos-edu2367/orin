@@ -749,3 +749,99 @@ def test_settled_turn_filters_internal_orin_artifacts_and_caps_artifact_flood() 
     tools = [a for a in snapshot["activities"] if a["event_type"] == "tool.finished"]
     assert len(tools) == 1
     assert tools[0]["payload"]["command"] == "pytest"
+
+
+def test_passo3_review_fixes_no_cross_tool_contamination_and_monotonic_sequences() -> None:
+    """Verify Passo 3 final review fixes:
+    1. Domain events (e.g. filesystem.read) or a different tool's completion (inv-2) never consume or drop an orphan tool.started (inv-1).
+    2. Merging deltas across a surviving context.updated preserves monotonic sequences.
+    3. Pagination boundary oldest_activity_id includes absorbed tool.started _db_id so list_older_activities never resurrects an absorbed tool.started.
+    """
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+
+    receipt = store.create(
+        user_id="user-1",
+        message="Rode duas tools.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-passo3-review",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    # 1. Orphan tool.started (inv-1) followed by filesystem.read and another tool (inv-2)
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_STARTED,
+        "Executando comando órfão",
+        {
+            "tool_name": "run_command",
+            "tool_kind": "shell",
+            "command": "sleep 999",
+            "invocation_id": "inv-orphan-1",
+        },
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.FILESYSTEM_READ,
+        "Leu README.md",
+        {"path": "README.md", "tool_name": "read_file", "tool_kind": "filesystem"},
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_STARTED,
+        "Lendo main.py",
+        {
+            "tool_name": "read_file",
+            "tool_kind": "filesystem",
+            "path": "src/main.py",
+            "invocation_id": "inv-2",
+        },
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_FINISHED,
+        "Concluiu read_file",
+        {"tool_name": "read_file", "tool_kind": "filesystem", "invocation_id": "inv-2"},
+    )
+
+    # 2. Delta merged across surviving context.updated
+    store.delta(turn, "Início ")
+    store.record(
+        turn,
+        AgentActivityEventType.CONTEXT_UPDATED,
+        "Contexto atualizado",
+        {"used_tokens": 1200, "max_tokens": 128000},
+    )
+    store.delta(turn, "e fim.")
+    store.finish(turn)
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    acts = snapshot["activities"]
+
+    # Orphan tool.started (inv-orphan-1) must STILL be present, and inv-2 must be enriched with src/main.py (not sleep 999!)
+    orphan_started = [
+        a
+        for a in acts
+        if a["event_type"] == "tool.started"
+        and a["payload"].get("invocation_id") == "inv-orphan-1"
+    ]
+    assert len(orphan_started) == 1
+    assert orphan_started[0]["payload"]["command"] == "sleep 999"
+
+    finished_inv2 = [
+        a
+        for a in acts
+        if a["event_type"] == "tool.finished"
+        and a["payload"].get("invocation_id") == "inv-2"
+    ]
+    assert len(finished_inv2) == 1
+    assert finished_inv2[0]["payload"]["path"] == "src/main.py"
+    assert "command" not in finished_inv2[0]["payload"]
+
+    # Sequences across all compacted activities must be strictly increasing
+    seqs = [int(a["sequence"]) for a in acts]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == len(seqs)

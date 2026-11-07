@@ -596,6 +596,7 @@ class ClaudeCliProvider:
         stderr_chunks: list[str] = []
         stdout_thread: threading.Thread | None = None
         stderr_thread: threading.Thread | None = None
+        fallback_wiring = None
         parser = self.adapter.stream_translator()
         mono_started = time.monotonic()
         _ = self._clock()
@@ -632,6 +633,14 @@ class ClaudeCliProvider:
             mono_started = time.monotonic()
 
             prompt_file = self._ensure_prompt_file(system_prompt)
+            safe_cwd_path = ensure_isolated_cwd()
+            safe_cwd = str(safe_cwd_path)
+            wire_no_tools_fn = getattr(self.adapter, "wire_no_tools", None)
+            fallback_wiring = (
+                wire_no_tools_fn(safe_cwd_path, system_prompt_file=prompt_file)
+                if callable(wire_no_tools_fn)
+                else None
+            )
             facade = sys.modules.get("agentos.provider_catalog.claude_code")
             patched_build = (
                 getattr(facade, "_build_claude_cli_command", None)
@@ -656,8 +665,10 @@ class ClaudeCliProvider:
                         model=req_model or None,
                         effort=effort,
                         max_turns=1,
+                        tool_server_wiring=fallback_wiring,
                         capabilities=self.adapter.capabilities,
-                    )
+                    ),
+                    fallback_wiring,
                 )
             isolated_env = self.adapter.environment(
                 merge_with_system_env(self._env),
@@ -667,7 +678,6 @@ class ClaudeCliProvider:
             creationflags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            safe_cwd = str(ensure_isolated_cwd())
 
             encode_fn = getattr(self.adapter, "encode_user_turn", None)
             if callable(encode_fn):
@@ -1013,6 +1023,12 @@ class ClaudeCliProvider:
                 cost=zero_cost,
             )
         finally:
+            if fallback_wiring is not None:
+                for fpath in getattr(fallback_wiring, "files", ()) or ():
+                    try:
+                        Path(fpath).unlink(missing_ok=True)
+                    except Exception:
+                        pass
             exit_code_final: int | None = None
             if proc is not None:
                 if proc.poll() is None:

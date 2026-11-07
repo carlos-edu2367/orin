@@ -156,7 +156,7 @@ class ProviderModelCatalogService:
                 if not caps:
                     efforts = getattr(item, "supported_efforts", ())
                     caps = ("tools", "reasoning") if efforts else ("tools",)
-                in_mods = getattr(item, "input_modalities", None) or ("text", "image")
+                in_mods = getattr(item, "input_modalities", None) or ("text",)
                 out_mods = getattr(item, "output_modalities", None) or infer_output_modalities(model_id)
                 records.append(
                     ProviderModelRecord(

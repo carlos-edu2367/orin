@@ -1432,6 +1432,25 @@ class PostgresChatStore:
                     activity_cursor = cursor
                     if len(page.events) < 500:
                         break
+                activities = self._compact_snapshot_activities(
+                    [
+                        {
+                            "id": int(item.get("sequence", idx + 1)),
+                            "event_id": item["event_id"],
+                            "event_type": item["event_type"],
+                            "sequence": int(item["sequence"]),
+                            "summary": item["summary"],
+                            "payload": item.get("payload") or {},
+                            "created_at": item["occurred_at"],
+                            "turn_id": item["turn_id"],
+                            "execution_id": item["execution_id"],
+                            "agent_id": item["agent_id"],
+                            "parent_agent_id": item.get("parent_agent_id"),
+                        }
+                        for idx, item in enumerate(activities)
+                    ],
+                    turns,
+                )
         if context_usage is None:
             context_usage = next(
                 (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
@@ -1563,9 +1582,18 @@ class PostgresChatStore:
             return [], False, None
         has_older = len(compacted) > limit
         window = compacted[-limit:]
-        oldest_id = int(window[0]["_db_id"]) if has_older else None
+        if has_older:
+            boundary_ids = [int(window[0]["_db_id"])]
+            for item in window:
+                absorbed = item.get("_absorbed_started_db_id")
+                if isinstance(absorbed, int):
+                    boundary_ids.append(absorbed)
+            oldest_id: int | None = min(boundary_ids)
+        else:
+            oldest_id = None
         for item in window:
             item.pop("_db_id", None)
+            item.pop("_absorbed_started_db_id", None)
         return window, has_older, oldest_id
 
     @classmethod
@@ -1598,6 +1626,9 @@ class PostgresChatStore:
         settled_skip_events = {
             "tool.requested",
             "tool.progressed",
+            "code_mode.validation_started",
+            "code_mode.validation_finished",
+            "code_mode.stage_changed",
             "speak.block_started",
             "speak.delta",
             "speak.chunk_ready",
@@ -1620,16 +1651,8 @@ class PostgresChatStore:
         }
         tool_completion_events = {
             "tool.finished",
+            "tool.completed",
             "tool.failed",
-            "filesystem.read",
-            "filesystem.wrote",
-            "filesystem.patched",
-            "web.searched",
-            "web.fetched",
-            "mcp.tool_called",
-            "memory.read",
-            "memory.written",
-            "canvas.updated",
         }
         tool_enrich_keys = (
             "path",
@@ -1708,8 +1731,9 @@ class PostgresChatStore:
                         prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
                         chunk_content = str(payload.get("content") or payload.get("delta") or "")
                         prev_payload["content"] = prev_content + chunk_content
-                        prev_entry["sequence"] = int(row["sequence"])
-                        prev_entry["cursor"] = item_cursor
+                        if prev_idx == len(compacted) - 1:
+                            prev_entry["sequence"] = int(row["sequence"])
+                            prev_entry["cursor"] = item_cursor
                         prev_entry["occurred_at"] = occurred_at
                         continue
 
@@ -1725,8 +1749,9 @@ class PostgresChatStore:
                         merged = prev_content + chunk_content
                         prev_payload["content"] = merged
                         prev_payload["delta"] = merged
-                        prev_entry["sequence"] = int(row["sequence"])
-                        prev_entry["cursor"] = item_cursor
+                        if prev_idx == len(compacted) - 1:
+                            prev_entry["sequence"] = int(row["sequence"])
+                            prev_entry["cursor"] = item_cursor
                         prev_entry["occurred_at"] = occurred_at
                         continue
 
@@ -1734,6 +1759,7 @@ class PostgresChatStore:
                 last_assistant_delta_idx.pop(stream_key, None)
                 last_thought_delta_idx.pop(stream_key, None)
 
+            absorbed_started_db_id: int | None = None
             if t_id in settled_turns and ev_type in tool_completion_events:
                 open_list = open_tool_started_by_turn.get(stream_key)
                 if open_list:
@@ -1749,19 +1775,35 @@ class PostgresChatStore:
                     if matched_pos is None and t_name:
                         for pos, idx in enumerate(open_list):
                             sp = compacted[idx].get("payload")
-                            if isinstance(sp, dict) and str(sp.get("tool_name") or "") == t_name:
+                            if not isinstance(sp, dict):
+                                continue
+                            sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "")
+                            sp_t_name = str(sp.get("tool_name") or "")
+                            if inv_id and sp_inv_id and inv_id != sp_inv_id:
+                                continue
+                            if sp_t_name == t_name:
                                 matched_pos = pos
                                 break
-                    if matched_pos is None:
-                        matched_pos = 0
-                    matched_idx = open_list.pop(matched_pos)
-                    started_entry = compacted[matched_idx]
-                    started_payload = started_entry.get("payload")
-                    if isinstance(started_payload, dict):
-                        for k in tool_enrich_keys:
-                            if not payload.get(k) and started_payload.get(k):
-                                payload[k] = started_payload[k]
-                    started_entry["_drop_settled_started"] = True
+                    if matched_pos is None and not inv_id and not t_name:
+                        for pos, idx in enumerate(open_list):
+                            sp = compacted[idx].get("payload")
+                            sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "") if isinstance(sp, dict) else ""
+                            sp_t_name = str(sp.get("tool_name") or "") if isinstance(sp, dict) else ""
+                            if not sp_inv_id and not sp_t_name:
+                                matched_pos = pos
+                                break
+                    if matched_pos is not None:
+                        matched_idx = open_list.pop(matched_pos)
+                        started_entry = compacted[matched_idx]
+                        started_payload = started_entry.get("payload")
+                        if isinstance(started_payload, dict):
+                            for k in tool_enrich_keys:
+                                if not payload.get(k) and started_payload.get(k):
+                                    payload[k] = started_payload[k]
+                        started_entry["_drop_settled_started"] = True
+                        raw_started_db_id = started_entry.get("_db_id")
+                        if isinstance(raw_started_db_id, int):
+                            absorbed_started_db_id = raw_started_db_id
 
             entry: dict[str, object] = {
                 "event_id": str(row["event_id"]),
@@ -1778,6 +1820,8 @@ class PostgresChatStore:
             }
             if keep_db_id:
                 entry["_db_id"] = r_id
+                if absorbed_started_db_id is not None:
+                    entry["_absorbed_started_db_id"] = absorbed_started_db_id
             compacted.append(entry)
             new_idx = len(compacted) - 1
             if ev_type == AgentActivityEventType.ASSISTANT_DELTA.value:

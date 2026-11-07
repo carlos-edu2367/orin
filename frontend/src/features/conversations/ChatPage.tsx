@@ -2553,14 +2553,23 @@ export function ChatPage() {
             {loading && <p className="chat__placeholder" role="status">Carregando conversa…</p>}
             {!loading && messages.length === 0 && <p className="chat__placeholder">Esta conversa ainda não tem mensagens.</p>}
 
-            {!loadFailure && messages.map((item, itemIndex) => {
-              const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
-              const oldestTurnId = consolidatedEvents[0]?.turnId
-              const firstAssistantIdx = messages.findIndex((m) => m.role === 'assistant')
-              const matchingOldestIdx = oldestTurnId
-                ? messages.findIndex((m) => m.role === 'assistant' && m.turn_id === oldestTurnId)
+            {!loadFailure && (() => {
+              const oldestTurnIdWithActivity = consolidatedEvents.find((ev) => Boolean(ev.turnId))?.turnId
+              const matchingOldestIdx = oldestTurnIdWithActivity
+                ? messages.findIndex((m) => m.role === 'assistant' && m.turn_id === oldestTurnIdWithActivity)
                 : -1
-              const targetOlderIdx = matchingOldestIdx !== -1 ? matchingOldestIdx : firstAssistantIdx
+              const firstAssistantWithTimelineIdx = messages.findIndex(
+                (m) => m.role === 'assistant' && (timelinesByMessage.get(m.message_id)?.length ?? 0) > 0,
+              )
+              const firstAssistantIdx = messages.findIndex((m) => m.role === 'assistant')
+              const targetOlderIdx =
+                matchingOldestIdx !== -1
+                  ? matchingOldestIdx
+                  : firstAssistantWithTimelineIdx !== -1
+                    ? firstAssistantWithTimelineIdx
+                    : firstAssistantIdx
+              return messages.map((item, itemIndex) => {
+              const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
               const isEarliestPartialTurn = Boolean(
                 hasOlderActivities
                 && item.role === 'assistant'
@@ -2752,7 +2761,8 @@ export function ChatPage() {
                   </div>}
                 </motion.article>
               )
-            })}
+            })
+            })()}
 
             {!loadFailure && unclaimedEvents.length > 0 && (() => {
               const isUnclaimedTurnActive = openQuestionTurnIds.size > 0 && unclaimedEvents.some((ev) => ev.turnId && openQuestionTurnIds.has(ev.turnId))
@@ -2850,6 +2860,7 @@ export function ChatPage() {
                       type="button"
                       className="code-changed-files-card__btn"
                       data-testid="code-view-changes-button"
+                      aria-expanded={changedFilesExpanded}
                       onClick={() => {
                         setWorkbenchOpen(true)
                         setWorkbenchTab('files')
@@ -2862,6 +2873,7 @@ export function ChatPage() {
                   <button
                     type="button"
                     className="code-changed-files-card__chevron"
+                    aria-expanded={changedFilesExpanded}
                     aria-label={changedFilesExpanded ? 'Recolher arquivos alterados' : 'Expandir arquivos alterados'}
                     onClick={() => setChangedFilesExpanded((prev) => !prev)}
                   >

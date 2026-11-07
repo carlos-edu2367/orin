@@ -567,3 +567,179 @@ def test_redteam_bogus_risk_acknowledged_at_strings_rejected(
         )
         assert resp.status_code >= 400, f"Expected failure for bogus risk_acknowledged_at={bogus_str!r}, got {resp.status_code}: {resp.text}"
     assert cfg_port.calls == []
+
+
+def test_passo1_final_review_fixes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify all Passo 1 final review fixes:
+    1. _resolve_native_cwd POSIX UID suffix & Antigravity .git stability across Turn 1 -> Turn 2
+    2. ensure_isolated_cwd purges .agents, .codex, AGENTS.md, AGENTS.override.md, GEMINI.md
+    3. Catalog input_modalities == ('text',) for openai-codex and google-antigravity + encode_codex_user_turn rejects image blocks
+    4. PostgresProviderModelCatalog, KNOWN_PROVIDERS, and reasoning_supported include openai-codex and google-antigravity
+    5. ClaudeCliProvider.stream() with AntigravityCliAdapter applies wire_no_tools (--agent orin --settings) and cleans up
+    """
+    import os
+    from agentos.agentic.effort import reasoning_supported
+    from agentos.agentic.native_turn import _resolve_native_cwd
+    from agentos.cli_code.selection import KNOWN_PROVIDERS
+    from agentos.provider_catalog.resolver_catalog import (
+        AuthorizedModelListQuery,
+        PostgresProviderModelCatalog,
+    )
+    from agentos.providers.antigravity_cli.adapter import AntigravityCliAdapter
+    from agentos.providers.claude_cli.command import (
+        ensure_isolated_cwd,
+    )
+    from agentos.providers.codex_cli.adapter import CodexCliAdapter
+    from agentos.providers.codex_cli.command import encode_codex_user_turn
+
+    # 1a. Antigravity workdir with .git created on Turn 1 does not flip to /tmp on Turn 2
+    fake_orin_home = tmp_path / "orin_home_outside_git"
+    monkeypatch.setattr(
+        "agentos.agentic.native_turn.native_workdir",
+        lambda slug="claude": fake_orin_home / "data" / f"{slug}-cli" / "workdir",
+    )
+    turn1_cwd = _resolve_native_cwd("antigravity")
+    assert turn1_cwd == fake_orin_home / "data" / "antigravity-cli" / "workdir"
+    turn1_cwd.mkdir(parents=True, exist_ok=True)
+    (turn1_cwd / ".git").mkdir(exist_ok=True)
+    turn2_cwd = _resolve_native_cwd("antigravity")
+    assert turn2_cwd == turn1_cwd
+
+    # 1b. When inside a git repo on POSIX, non-claude adapters preserve UID in isolated cwd name
+    git_orin_home = tmp_path / "git_repo" / "orin_home"
+    (tmp_path / "git_repo" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        "agentos.agentic.native_turn.native_workdir",
+        lambda slug="claude": git_orin_home / "data" / f"{slug}-cli" / "workdir",
+    )
+    monkeypatch.setattr(
+        "agentos.agentic.native_turn.default_isolated_cwd",
+        lambda: tmp_path / "orin-claude-cli-cwd-4242",
+    )
+    assert _resolve_native_cwd("codex").name == "orin-codex-cli-cwd-4242-native"
+    assert _resolve_native_cwd("antigravity").name == "orin-antigravity-cli-cwd-4242-native"
+
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", "0" * 32)
+
+    # 2. ensure_isolated_cwd purges .agents, .codex, AGENTS.md, AGENTS.override.md, GEMINI.md
+    iso_dir = tmp_path / "iso_cwd"
+    iso_dir.mkdir(parents=True)
+    (iso_dir / ".agents" / "agents").mkdir(parents=True)
+    (iso_dir / ".agents" / "agents" / "orin.md").write_text("stale", encoding="utf-8")
+    (iso_dir / ".codex").mkdir(parents=True)
+    (iso_dir / "AGENTS.md").write_text("injected", encoding="utf-8")
+    (iso_dir / "AGENTS.override.md").write_text("injected", encoding="utf-8")
+    (iso_dir / "GEMINI.md").write_text("injected", encoding="utf-8")
+    ensure_isolated_cwd(iso_dir)
+    for entry in (".agents", ".codex", "AGENTS.md", "AGENTS.override.md", "GEMINI.md"):
+        assert not (iso_dir / entry).exists(), f"{entry} was not purged by ensure_isolated_cwd"
+
+    # 3. encode_codex_user_turn rejects image blocks & catalog stores input_modalities==("text",)
+    with pytest.raises(ValueError, match=r"(?i)(imagem|image|mídia|media|texto)"):
+        encode_codex_user_turn([{"type": "image", "source": {"type": "base64", "data": "AAAA"}}])
+
+    engine = _sqlite_engine()
+    cipher = _cipher()
+    config_adapter = PostgresProviderConfigurationAdapter(engine, cipher=cipher)
+    repo = PostgresProviderCatalogRepository(engine, cipher=cipher)
+    service = ProviderModelCatalogService(repo)
+    ctx = ProviderCatalogContext(user_id="user_1", purpose="provider.catalog")
+
+    monkeypatch.setitem(CLI_PROVIDERS, "openai-codex", CodexCliAdapter)
+    monkeypatch.setitem(CLI_PROVIDERS, "google-antigravity", AntigravityCliAdapter)
+
+    config_adapter.configure(
+        {
+            "provider": "openai-codex",
+            "user_id": "user_1",
+            "enabled": True,
+            "api_key": "",
+            "base_url": None,
+        }
+    )
+    config_adapter.configure(
+        {
+            "provider": "google-antigravity",
+            "user_id": "user_1",
+            "enabled": True,
+            "api_key": "",
+            "base_url": None,
+            "risk_acknowledged": True,
+        }
+    )
+    service.refresh(ctx, "openai-codex")
+    service.refresh(ctx, "google-antigravity")
+
+    codex_models = service.list(ctx, "openai-codex")
+    agy_models = service.list(ctx, "google-antigravity")
+    assert codex_models and all(m.input_modalities == ("text",) for m in codex_models)
+    assert agy_models and all(m.input_modalities == ("text",) for m in agy_models)
+
+    # 4. PostgresProviderModelCatalog, KNOWN_PROVIDERS, and reasoning_supported
+    assert "openai-codex" in KNOWN_PROVIDERS
+    assert "google-antigravity" in KNOWN_PROVIDERS
+    assert reasoning_supported("openai-codex", "gpt-5.4", ("tools", "reasoning")) is True
+    assert reasoning_supported("google-antigravity", "gemini-2.5-pro", ("tools", "reasoning")) is True
+
+    resolver_cat = PostgresProviderModelCatalog(engine)
+    page = resolver_cat.list_models(
+        AuthorizedModelListQuery(context=ctx)
+    )
+    providers_in_page = {str(item.provider_ref).rsplit(":", 1)[-1] for item in page.items}
+    assert "openai-codex" in providers_in_page
+    assert "google-antigravity" in providers_in_page
+
+    # 5. ClaudeCliProvider.stream() with AntigravityCliAdapter applies wire_no_tools (--agent orin --settings) and cleans up
+    from agentos.providers.claude_cli.provider import ClaudeCliProvider
+
+    captured_cmd: list[str] = []
+    captured_settings_exists_during_run: list[bool] = []
+    captured_settings_Paths: list[Path] = []
+
+    class _FakePopen:
+        def __init__(self, cmd: list[str], **kwargs: Any) -> None:
+            import io
+            captured_cmd.extend(cmd)
+            if "--settings" in cmd:
+                sp = Path(cmd[cmd.index("--settings") + 1])
+                captured_settings_Paths.append(sp)
+                captured_settings_exists_during_run.append(sp.is_file())
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO(
+                '{"event":"init","conversation_id":"s-1","init":{"model":"gemini-3.1-pro-high","tools":[]}}\n'
+                '{"event":"result","conversation_id":"s-1","result":{"status":"SUCCESS","finished_reason":"","response":"OK","usage":{"input_tokens":5,"output_tokens":2}}}\n'
+            )
+            self.stderr = io.StringIO("")
+            self.returncode = 0
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    agy_adapter = AntigravityCliAdapter()
+    monkeypatch.setattr(agy_adapter, "resolve_binary", lambda env=None: ("fake-agy", (1, 5, 2)))
+    prov = ClaudeCliProvider(
+        model="gemini-3.1-pro-high",
+        adapter=agy_adapter,
+        popen_factory=_FakePopen,
+    )
+    items = list(
+        prov.stream(
+            {
+                "model": "gemini-3.1-pro-high",
+                "system_prompt": "Custom fallback system prompt",
+                "messages": [{"role": "user", "content": "olá"}],
+            }
+        )
+    )
+    assert any(i.kind is StreamKind.TEXT and i.text == "OK" for i in items)
+    assert "--agent" in captured_cmd and "orin" in captured_cmd
+    assert "--settings" in captured_cmd
+    assert captured_settings_exists_during_run == [True]
+    assert all(not p.exists() for p in captured_settings_Paths)
+    prov.close()

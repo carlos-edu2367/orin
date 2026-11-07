@@ -138,11 +138,14 @@ def discover_antigravity_models(
     creationflags = (
         getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     )
-    cmd = (
-        [sys.executable, binary, "models"]
-        if str(binary).lower().endswith(".py")
-        else [binary, "models"]
-    )
+    low = str(binary).lower()
+    if low.endswith(".py"):
+        cmd = [sys.executable, str(binary), "models"]
+    elif os.name == "nt" and low.endswith((".cmd", ".bat")):
+        comspec = isolated_env.get("COMSPEC") or os.environ.get("COMSPEC") or "cmd.exe"
+        cmd = [comspec, "/d", "/s", "/c", str(binary), "models"]
+    else:
+        cmd = [str(binary), "models"]
     try:
         completed = subprocess.run(
             cmd,

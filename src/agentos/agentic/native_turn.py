@@ -72,17 +72,21 @@ NATIVE_CWD: Path = native_workdir("claude")
 def _resolve_native_cwd(adapter_name: str = "claude") -> Path:
     """Orin's own workdir, unless it sits inside a git checkout (the development layout): then the CLI
     would walk up into the repository (CLAUDE.md, git), so it gets the per-user isolated folder instead."""
+    import os
+
     workdir = native_workdir(adapter_name)
     try:
         resolved = workdir.resolve()
     except OSError:
         resolved = workdir
-    if any((ancestor / ".git").exists() for ancestor in (resolved, *resolved.parents)):
+    slug = str(adapter_name or "claude").strip() or "claude"
+    ancestors = resolved.parents if slug == "antigravity" else (resolved, *resolved.parents)
+    if any((ancestor / ".git").exists() for ancestor in ancestors):
         base = default_isolated_cwd()
-        slug = str(adapter_name or "claude").strip() or "claude"
         if slug == "claude":
             return base.with_name(base.name + "-native")
-        return base.with_name(f"orin-{slug}-cli-cwd-native")
+        uid_suffix = base.name.removeprefix("orin-claude-cli-cwd")
+        return base.with_name(f"orin-{slug}-cli-cwd{uid_suffix}-native")
     return workdir
 
 

@@ -5979,7 +5979,7 @@ progress.orin-progress::-moz-progress-bar,
   padding: 6px 11px;
   border-radius: 9px;
   border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.06));
-  background: rgba(255, 255, 255, 0.022);
+  background: var(--orin-surface-translucent, rgba(255, 255, 255, 0.022));
   width: fit-content;
   max-width: 100%;
   transition: background 140ms ease, border-color 140ms ease;
@@ -5989,7 +5989,7 @@ progress.orin-progress::-moz-progress-bar,
   width: 100%;
   max-width: 520px;
   padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--orin-surface-translucent-strong, rgba(255, 255, 255, 0.03));
 }
 
 .code-changed-files-card__header {
@@ -6011,7 +6011,7 @@ progress.orin-progress::-moz-progress-bar,
 .code-changed-files-card__icon {
   display: inline-flex;
   align-items: center;
-  color: var(--orin-text-tertiary, #7A7888);
+  color: var(--orin-text-muted, #7A7888);
 }
 
 .code-changed-files-card__count {
@@ -6026,6 +6026,7 @@ progress.orin-progress::-moz-progress-bar,
 .code-changed-files-card__btn {
   border: 0;
   padding: 0;
+  border-radius: 4px;
   background: transparent;
   color: var(--orin-accent, #B4A4EF);
   font: inherit;
@@ -6036,6 +6037,13 @@ progress.orin-progress::-moz-progress-bar,
 
 .code-changed-files-card__btn:hover {
   text-decoration: underline;
+}
+
+.code-changed-files-card__btn:focus-visible,
+.code-changed-files-card__chevron:focus-visible,
+.code-changed-files-card__file-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--orin-focus-ring, 0 0 0 2px var(--orin-accent, #B4A4EF));
 }
 
 .code-changed-files-card__chevron {
@@ -6052,7 +6060,7 @@ progress.orin-progress::-moz-progress-bar,
 }
 
 .code-changed-files-card__chevron:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--orin-surface-hover, rgba(255, 255, 255, 0.05));
   color: var(--orin-text-primary, #F4F3F8);
 }
 
@@ -6083,15 +6091,24 @@ progress.orin-progress::-moz-progress-bar,
 }
 
 .code-changed-files-card__file-btn:hover {
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--orin-surface-hover, rgba(255, 255, 255, 0.045));
+}
+
+.code-changed-files-card__file-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
 }
 
 .code-changed-files-card__file-badge {
+  flex-shrink: 0;
   font-family: var(--sans, inherit);
   font-size: 10.5px;
   padding: 1px 6px;
   border-radius: 999px;
-  background: rgba(180, 164, 239, 0.12);
+  background: var(--orin-accent-bg, rgba(180, 164, 239, 0.12));
   color: var(--orin-accent, #B4A4EF);
 }
 

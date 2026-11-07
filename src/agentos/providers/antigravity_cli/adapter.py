@@ -18,6 +18,7 @@ from agentos.providers.antigravity_cli.command import (
     is_antigravity_version_supported,
     redact_antigravity_argv,
     resolve_antigravity_binary,
+    wire_antigravity_no_tools,
     wire_antigravity_tool_server,
 )
 from agentos.providers.antigravity_cli.errors import classify_antigravity_error
@@ -77,6 +78,13 @@ class AntigravityCliAdapter:
         server_name = getattr(handle, "server_name", "orin") or "orin"
         return wire_antigravity_tool_server(
             handle, directory, server_name=server_name
+        )
+
+    def wire_no_tools(
+        self, directory: Path, *, system_prompt_file: Path | None = None
+    ) -> ToolServerWiring:
+        return wire_antigravity_no_tools(
+            directory, system_prompt_file=system_prompt_file
         )
 
     def build_command(

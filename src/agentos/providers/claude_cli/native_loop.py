@@ -997,7 +997,6 @@ def start_native_turn_for_provider(
         creationflags = (
             getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         )
-        ensure_isolated_cwd(request.cwd)
         encode_fn = getattr(adapter, "encode_user_turn", None)
         if callable(encode_fn):
             initial_payload = encode_fn(request.user_content).decode("utf-8")

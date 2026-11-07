@@ -275,11 +275,23 @@ def is_antigravity_version_supported(
     )
 
 
-def _write_owner_only_file(path: Path, content: str) -> Path:
+def _is_symlink_or_junction(path: Path) -> bool:
     if path.is_symlink():
+        return True
+    is_junc = getattr(path, "is_junction", None)
+    if callable(is_junc):
+        try:
+            return bool(is_junc())
+        except OSError:
+            return False
+    return False
+
+
+def _write_owner_only_file(path: Path, content: str) -> Path:
+    if _is_symlink_or_junction(path):
         raise ValueError(f"Refusing to write to symlink: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(str(path), flags, 0o600)
     try:
         try:
@@ -405,16 +417,16 @@ def wire_antigravity_tool_server(
 
     _validate_path_arg(directory, "directory")
     workdir = Path(directory)
-    if workdir.is_symlink():
+    if _is_symlink_or_junction(workdir):
         raise ValueError(f"Refusing symlinked working directory: {workdir}")
     workdir.mkdir(parents=True, exist_ok=True)
     for doc_name in ("AGENTS.md", "GEMINI.md"):
         doc_candidate = workdir / doc_name
-        if doc_candidate.is_symlink():
+        if _is_symlink_or_junction(doc_candidate):
             raise ValueError(f"Refusing symlinked {doc_name}: {doc_candidate}")
 
     git_dir = workdir / ".git"
-    if git_dir.is_symlink():
+    if _is_symlink_or_junction(git_dir):
         raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
     git_dir.mkdir(exist_ok=True)
 
@@ -434,10 +446,10 @@ def wire_antigravity_tool_server(
                 pass
 
     agents_dir = workdir / ".agents"
-    if agents_dir.is_symlink():
+    if _is_symlink_or_junction(agents_dir):
         raise ValueError(f"Refusing symlinked .agents directory: {agents_dir}")
     agents_subdir = agents_dir / "agents"
-    if agents_subdir.is_symlink():
+    if _is_symlink_or_junction(agents_subdir):
         raise ValueError(
             f"Refusing symlinked .agents/agents directory: {agents_subdir}"
         )
@@ -502,6 +514,100 @@ def wire_antigravity_tool_server(
         for fpath in wiring_files:
             try:
                 if not fpath.is_symlink():
+                    fpath.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+
+    return ToolServerWiring(
+        argv=("--agent", "orin", "--settings", str(settings_file)),
+        env={},
+        files=wiring_files,
+    )
+
+
+def wire_antigravity_no_tools(
+    directory: Path,
+    *,
+    system_prompt_file: Path | None = None,
+) -> ToolServerWiring:
+    """Create locked-down `.agents/agents/orin.md` and `.agents/orin_settings.json` with zero tools for non-native stream fallback."""
+    _validate_path_arg(directory, "directory")
+    workdir = Path(directory)
+    if _is_symlink_or_junction(workdir):
+        raise ValueError(f"Refusing symlinked working directory: {workdir}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    git_dir = workdir / ".git"
+    if _is_symlink_or_junction(git_dir):
+        raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
+    git_dir.mkdir(exist_ok=True)
+
+    sys_prompt = "You are a helpful assistant."
+    if system_prompt_file is not None:
+        sys_file_path = Path(system_prompt_file)
+        if _is_symlink_or_junction(sys_file_path):
+            raise ValueError(f"Refusing symlinked system_prompt_file: {sys_file_path}")
+        if sys_file_path.is_file():
+            try:
+                read_sys = sys_file_path.read_text(encoding="utf-8").strip()
+                if read_sys:
+                    sys_prompt = read_sys
+            except Exception:
+                pass
+
+    agents_dir = workdir / ".agents"
+    if _is_symlink_or_junction(agents_dir):
+        raise ValueError(f"Refusing symlinked .agents directory: {agents_dir}")
+    agents_subdir = agents_dir / "agents"
+    if _is_symlink_or_junction(agents_subdir):
+        raise ValueError(f"Refusing symlinked .agents/agents directory: {agents_subdir}")
+    agent_md_path = agents_subdir / "orin.md"
+    settings_file = agents_dir / "orin_settings.json"
+    wiring_files = (agent_md_path, settings_file)
+
+    try:
+        agent_md_content = (
+            "---\n"
+            "name: orin\n"
+            "description: Orin isolated CLI agent\n"
+            "mainAgent: true\n"
+            "excludeDefaultComponents: true\n"
+            "inheritMcp: false\n"
+            "tools: []\n"
+            "---\n\n"
+            "# Instructions\n\n"
+            f"{sys_prompt.strip()}\n"
+        )
+        _write_owner_only_file(agent_md_path, agent_md_content)
+        try:
+            resolved_workdir = str(workdir.resolve())
+        except OSError:
+            resolved_workdir = str(workdir.absolute())
+        settings_payload = {
+            "trustedWorkspaces": [resolved_workdir],
+            "allowNonWorkspaceAccess": False,
+            "enableTerminalSandbox": True,
+            "disableSlashCommands": True,
+            "permissions": {
+                "allow": [],
+                "deny": [
+                    "command(*)",
+                    "read_file(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "unsandboxed(*)",
+                ],
+            },
+        }
+        _write_owner_only_file(
+            settings_file,
+            json.dumps(settings_payload, ensure_ascii=True, indent=2) + "\n",
+        )
+    except Exception:
+        for fpath in wiring_files:
+            try:
+                if not _is_symlink_or_junction(fpath):
                     fpath.unlink(missing_ok=True)
             except Exception:
                 pass

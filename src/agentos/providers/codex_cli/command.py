@@ -498,13 +498,25 @@ def encode_codex_user_turn(content: list[dict[str, Any]] | str) -> bytes:
         parts: list[str] = []
         for block in content:
             if isinstance(block, Mapping):
-                btype = block.get("type")
-                if btype in (None, "text", "input_text") and "text" in block:
+                btype = str(block.get("type") or "text").strip().lower()
+                if btype not in ("text", "input_text") or any(
+                    k in block for k in ("image", "image_url", "input_image", "audio", "video", "source")
+                ):
+                    raise ValueError(
+                        "O Codex CLI aceita apenas blocos de texto no stdin; "
+                        "envio de imagens ou mídia não é suportado."
+                    )
+                if "text" in block:
                     text_val = block.get("text")
                     if text_val is not None:
                         parts.append(str(text_val))
             elif isinstance(block, str):
                 parts.append(block)
+            else:
+                raise ValueError(
+                    "O Codex CLI aceita apenas blocos de texto no stdin; "
+                    "envio de imagens ou mídia não é suportado."
+                )
         raw_text = "\n".join(parts)
 
     single_line = (

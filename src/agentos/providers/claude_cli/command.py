@@ -374,7 +374,19 @@ def write_owner_only_temp(
 
 
 # Entries the CLI would read as project configuration from its cwd.
-_RESERVED_CWD_ENTRIES = frozenset({".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"})
+_RESERVED_CWD_ENTRIES = frozenset(
+    {
+        ".claude",
+        "CLAUDE.md",
+        "CLAUDE.local.md",
+        ".mcp.json",
+        ".agents",
+        ".codex",
+        "AGENTS.md",
+        "AGENTS.override.md",
+        "GEMINI.md",
+    }
+)
 
 
 def default_isolated_cwd() -> Path:
@@ -386,7 +398,7 @@ def default_isolated_cwd() -> Path:
     return tmp / f"orin-claude-cli-cwd-{getuid()}"
 
 
-_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md")
+_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md")
 
 
 def _refuse_planted_parent_memory(root: Path) -> None:
