@@ -7,6 +7,7 @@ finishes after the turn closed (T5), or inspect its result in a later turn via
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -36,6 +37,24 @@ def extract_report_summary(text: str) -> str:
         if cleaned:
             return cleaned[:300]
     return ""
+
+
+def format_subagent_notifications(
+    finished: Sequence[BackgroundAgentEntry],
+    *,
+    still_running: Sequence[BackgroundAgentEntry] = (),
+) -> str:
+    blocks: list[str] = []
+    for entry in finished:
+        summary_line = entry.summary or f"Status: {entry.status}"
+        blocks.append(
+            f'<subagent-finished agent_id="{entry.agent_id}" name="{entry.name}" status="{entry.status}">'
+            f"{summary_line}\nRelatório: {entry.output_file}</subagent-finished>"
+        )
+    if still_running:
+        names = ", ".join(f"{e.name} ({e.agent_id})" for e in still_running)
+        blocks.append(f"Subagents still running in the background: {names}.")
+    return "\n\n".join(blocks)
 
 
 def _normalize_status(status: str) -> BackgroundAgentStatus:

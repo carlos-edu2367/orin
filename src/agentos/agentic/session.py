@@ -1764,6 +1764,16 @@ class TurnSession:
                 agent_id=actor,
             )
             return
+        if state == "waiting_subagents":
+            agents_list = [str(a) for a in (payload.get("agents") or ()) if str(a).strip()]
+            names_str = ", ".join(agents_list) or "subagentes"
+            self._record(
+                AgentActivityEventType.TURN_STARTED,
+                f"Aguardando {names_str}",
+                {**base, "waiting_subagents": True, "agents": agents_list},
+                agent_id=actor,
+            )
+            return
         if state == "model_switched":
             self._record(
                 AgentActivityEventType.TURN_STARTED,

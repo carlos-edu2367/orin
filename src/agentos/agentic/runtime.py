@@ -116,6 +116,7 @@ CLOSING_INSTRUCTION = (
 MAX_VERIFY_REPAIR_ROUNDS = 3
 # How many times a Stop hook may send the model back to work in one turn.
 MAX_STOP_CONTINUATIONS = 5
+MAX_BACKGROUND_CONTINUATIONS = 12
 # A reply cut by the output limit is continued (text) or retried with a larger cap (a cut tool call),
 # at most this many times per turn.
 MAX_OUTPUT_RECOVERIES = 3
@@ -334,6 +335,7 @@ class AgenticTurnRuntime:
         self._prompt_renderer = prompt_renderer
         self._stop_hook_active = False
         self._stop_continuations = 0
+        self._bg_continuations = 0
         self._max_tokens_recoveries = 0
         self._reminder_requests = 0
         # Raised for the rest of the turn after a tool call was cut by the output limit.
@@ -444,6 +446,18 @@ class AgenticTurnRuntime:
 
     def _labels(self, *internals: str) -> str:
         return ", ".join(self._label(name) for name in internals)
+
+    def _has_queued_inputs(self, turn: Mapping[str, object]) -> bool:
+        checker = getattr(self.store, "has_queued_inputs", None)
+        if callable(checker):
+            try:
+                return bool(checker(turn))
+            except Exception:  # noqa: BLE001
+                return False
+        queued = getattr(self.store, "queued_inputs", None)
+        if isinstance(queued, (list, tuple)):
+            return bool(queued)
+        return False
 
     def _inject_queued_inputs(self, turn: dict[str, object], messages: list[dict[str, object]]) -> None:
         """Text the person queued while tools ran joins the conversation now, through UserPromptSubmit."""
@@ -706,6 +720,7 @@ class AgenticTurnRuntime:
         self._life(turn, "running")
         self._stop_hook_active = False
         self._stop_continuations = 0
+        self._bg_continuations = 0
         self._max_tokens_recoveries = 0
         self._output_cap = None
         self._queued_turn_count = 0
@@ -1355,6 +1370,50 @@ class AgenticTurnRuntime:
                     messages.append({"role": "user", "content": f"[Hook Stop] {stop_decision.reason or 'continue working'}"})
                     self._life(turn, "running")
                     continue
+                from .background_agents import BACKGROUND_AGENTS, format_subagent_notifications
+
+                conv_id = str(turn.get("conversation_id") or "")
+                if (
+                    not is_subagent
+                    and not bool(turn.get("is_subagent"))
+                    and not final_iteration
+                    and conv_id
+                    and (BACKGROUND_AGENTS.running(conv_id) or BACKGROUND_AGENTS.has_unnotified(conv_id))
+                    and self._bg_continuations < MAX_BACKGROUND_CONTINUATIONS
+                ):
+                    self._bg_continuations += 1
+                    self._life(
+                        turn,
+                        "waiting_subagents",
+                        agents=[e.name for e in BACKGROUND_AGENTS.running(conv_id)],
+                    )
+                    rem_sec = max(0.1, (deadline - self.clock()).total_seconds())
+                    BACKGROUND_AGENTS.wait_any(
+                        conv_id,
+                        timeout=rem_sec,
+                        cancelled=lambda: self.cancelled(turn),
+                        extra_wake=lambda: self._has_queued_inputs(turn),
+                    )
+                    if self.cancelled(turn):
+                        return self._cancel(turn, iteration, action_count)
+                    unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id)
+                    notif_text = format_subagent_notifications(
+                        unnotified,
+                        still_running=BACKGROUND_AGENTS.running(conv_id),
+                    )
+                    if notif_text or self._has_queued_inputs(turn):
+                        self._effect_finished(
+                            turn, provider_effect_id, state="APPLIED",
+                            result_ref=f"conversation-turn:{turn_id}:bg-subagent:{iteration}",
+                            private_result={"outcome": "background_subagent_continuation"},
+                        )
+                        if has_text:
+                            messages.append({"role": "assistant", "content": "".join(text_parts)})
+                        if notif_text:
+                            messages.append({"role": "user", "content": notif_text})
+                        self._inject_queued_inputs(turn, messages)
+                        self._life(turn, "running")
+                        continue
                 self._effect_finished(
                     turn, provider_effect_id, state="APPLIED",
                     result_ref=f"conversation-message:{turn['assistant_message_id']}",

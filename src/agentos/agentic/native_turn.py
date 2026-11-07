@@ -2227,6 +2227,109 @@ class NativeTurnRunner:
                         next_process = True
                         break
 
+                    from .background_agents import (
+                        BACKGROUND_AGENTS,
+                        format_subagent_notifications,
+                    )
+                    from .runtime import MAX_BACKGROUND_CONTINUATIONS
+
+                    conv_id = str(self.turn.get("conversation_id") or "")
+                    is_subagent_turn = bool(self.turn.get("is_subagent")) or (
+                        hasattr(self.runtime.store, "text")
+                        and hasattr(self.runtime.store, "agent_id")
+                    )
+                    if (
+                        not closing_sent
+                        and not turns_used
+                        and not is_subagent_turn
+                        and conv_id
+                        and (
+                            BACKGROUND_AGENTS.running(conv_id)
+                            or BACKGROUND_AGENTS.has_unnotified(conv_id)
+                        )
+                        and self.runtime._bg_continuations < MAX_BACKGROUND_CONTINUATIONS
+                    ):
+                        self.runtime._bg_continuations += 1
+                        self.runtime._life(
+                            self.turn,
+                            "waiting_subagents",
+                            agents=[
+                                e.name for e in BACKGROUND_AGENTS.running(conv_id)
+                            ],
+                        )
+                        rem_timeout = max(
+                            0.1,
+                            self._remaining_deadline_monotonic() - time.monotonic(),
+                        )
+                        BACKGROUND_AGENTS.wait_any(
+                            conv_id,
+                            timeout=rem_timeout,
+                            cancelled=lambda: self.runtime.cancelled(self.turn),
+                            extra_wake=lambda: self.runtime._has_queued_inputs(
+                                self.turn
+                            ),
+                        )
+                        if self.runtime.cancelled(self.turn):
+                            self.runtime._effect_finished(
+                                self.turn,
+                                provider_effect_id,
+                                state="UNKNOWN",
+                                error_code="PROVIDER_CANCELLED_DURING_EFFECT",
+                            )
+                            return self.runtime._cancel(
+                                self.turn, process_count, executor.action_count
+                            )
+                        unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id)
+                        notif_parts: list[str] = []
+                        notif_body = format_subagent_notifications(
+                            unnotified,
+                            still_running=BACKGROUND_AGENTS.running(conv_id),
+                        )
+                        if notif_body:
+                            notif_parts.append(notif_body)
+                        queued_now = executor._claim_queued_texts()
+                        if queued_now:
+                            notif_parts.append(
+                                "The user sent a message while you were waiting:\n"
+                                + "\n\n".join(queued_now)
+                            )
+                        bg_msg = "\n\n".join(notif_parts).strip()
+                        if bg_msg:
+                            if persistent_stdin:
+                                handle.send_user([{"type": "text", "text": bg_msg}])
+                                sink.reset_for_new_message()
+                                self.runtime._life(self.turn, "running")
+                                continue
+                            self.runtime._effect_finished(
+                                self.turn,
+                                provider_effect_id,
+                                state="APPLIED",
+                                private_result={
+                                    "outcome": "background_subagent_continuation"
+                                },
+                            )
+                            if supports_session_resume and resume_session_id:
+                                user_content = [{"type": "text", "text": bg_msg}]
+                            else:
+                                assistant_text = "".join(sink.text_parts).strip()
+                                if assistant_text:
+                                    self.messages.append(
+                                        {
+                                            "role": "assistant",
+                                            "content": assistant_text,
+                                        }
+                                    )
+                                self.messages.append(
+                                    {"role": "user", "content": bg_msg}
+                                )
+                                user_content = self._build_initial_user_content(
+                                    tool_schemas
+                                )
+                            sink.reset_for_new_message()
+                            self.runtime._life(self.turn, "running")
+                            next_process = True
+                            break
+
                     self.runtime._effect_finished(
                         self.turn,
                         provider_effect_id,

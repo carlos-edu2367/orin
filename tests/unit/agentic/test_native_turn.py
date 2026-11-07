@@ -542,6 +542,81 @@ def test_stop_hook_block_sends_follow_up_on_same_handle(tmp_path: Path) -> None:
     assert "Run tests before stopping" in str(handle.sent_users[0])
 
 
+def test_waiting_subagents_continues_turn_when_background_agent_finishes(tmp_path: Path) -> None:
+    import threading
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS, BackgroundAgentEntry
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    store = FakeStore()
+    conv_id = str(store.turn["conversation_id"])
+    workspace = ConversationWorkspace(tmp_path, conv_id)
+    toolset = _make_toolset(workspace)
+
+    bg_entry = BackgroundAgentEntry(
+        agent_id="agent:c1:antigravity",
+        conversation_id=conv_id,
+        name="antigravity",
+        output_file=".orin/agent-outputs/antigravity.md",
+        status="running",
+        started_at=time.monotonic(),
+        finished_at=None,
+        summary="",
+        cancel=threading.Event(),
+        future=None,
+    )
+    BACKGROUND_AGENTS.register(bg_entry)
+
+    def _round_1(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_text("Iniciei o Antigravity, aguardando.")
+        threading.Timer(
+            0.05,
+            lambda: BACKGROUND_AGENTS.finish(
+                "agent:c1:antigravity", "completed", "Lógica implementada com sucesso."
+            ),
+        ).start()
+        return NativeTurnOutcome(
+            result=_make_result(text="Iniciei o Antigravity, aguardando."),
+            init=init,
+            final_text="Iniciei o Antigravity, aguardando.",
+            exit_code=0,
+        )
+
+    def _round_2(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        sink.on_text("Recebi o relatório e concluí.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Recebi o relatório e concluí."),
+            init=_make_init(req.model),
+            final_text="Recebi o relatório e concluí.",
+            exit_code=0,
+        )
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round_1, _round_2]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    try:
+        out = runtime.run("t1", turn=store.turn)
+        assert out.state == "completed"
+        waiting_events = [p for s, p in store.states if s == "waiting_subagents"]
+        assert len(waiting_events) == 1
+        assert waiting_events[0]["agents"] == ["antigravity"]
+        handle = fake_provider.handles[0]
+        assert len(handle.sent_users) == 1
+        sent_text = str(handle.sent_users[0])
+        assert '<subagent-finished agent_id="agent:c1:antigravity" name="antigravity" status="completed">' in sent_text
+        assert "Lógica implementada com sucesso." in sent_text
+        assert "Relatório: .orin/agent-outputs/antigravity.md" in sent_text
+        assert "</subagent-finished>" in sent_text
+    finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+
+
 def test_max_turns_gets_one_closing_follow_up_then_iteration_limit(tmp_path: Path) -> None:
     store = FakeStore()
     workspace = ConversationWorkspace(tmp_path, "c1")
