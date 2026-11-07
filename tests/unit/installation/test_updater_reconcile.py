@@ -200,3 +200,33 @@ def test_reconcile_preserves_failed_attempt_when_current_not_yet_switched(tmp_pa
     assert state["last_attempt"]["version"] == "0.12.1"
     assert state["last_attempt"]["message"] == "Acesso negado"
 
+
+def test_reconcile_preserves_rolled_back_attempt_when_restored_version_matches_active(tmp_path: Path) -> None:
+    root = tmp_path / "Orin"
+    v_old = _install_version(root, "0.11.6")
+    point_current(root, v_old)
+
+    (root / PREPARED_FILE).write_text(
+        json.dumps({"version": "0.11.6", "sha256": "a" * 64}),
+        encoding="utf-8",
+    )
+    rolled_back_attempt = {"status": "rolled_back", "version": "0.12.1", "restored": "0.11.6"}
+    (root / STATE_FILE).write_text(
+        json.dumps(
+            {
+                "previous": "0.12.1",
+                "current": "0.11.6",
+                "last_attempt": rolled_back_attempt,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    updater = Updater(versions_root=root, current_version="0.11.6")
+    updater.reconcile()
+
+    assert not (root / PREPARED_FILE).exists()
+    state = json.loads((root / STATE_FILE).read_text(encoding="utf-8"))
+    assert state["current"] == "0.11.6"
+    assert state["last_attempt"]["status"] == "rolled_back"
+    assert state["last_attempt"]["restored"] == "0.11.6"

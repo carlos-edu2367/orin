@@ -390,7 +390,8 @@ def command_update(
         except Exception as error:  # noqa: BLE001 - unexpected apply errors must be recorded and still reopen Orin
             logging.getLogger("orin.update").exception("update failed with unexpected exception")
             message = f"Erro inesperado durante a atualização ({type(error).__name__})."
-            updater.record_failure(target_version, message)
+            if apply and prepared is not None:
+                updater.record_failure(target_version, message)
             wrapped = UpdateError(message, step="activate", hint="Tente de novo.")
             if json_out is not None:
                 json_out.failed(wrapped)

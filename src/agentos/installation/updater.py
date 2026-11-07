@@ -279,10 +279,15 @@ class Updater:
             else:
                 existing_prev = state.get("previous")
                 previous = existing_prev if isinstance(existing_prev, str) and SEMVER.fullmatch(existing_prev) else None
+            preserved_rolled_back = (
+                isinstance(last_attempt, dict)
+                and last_attempt.get("status") == "rolled_back"
+                and last_attempt.get("restored") == active
+            )
             self._write_state(
                 previous=previous,
                 current=active,
-                attempt={"status": "updated", "version": active},
+                attempt=last_attempt if preserved_rolled_back else {"status": "updated", "version": active},
             )
 
     def apply_prepared(self) -> UpdateResult:
