@@ -423,7 +423,7 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
     # Emit 180 distinct tool events plus multi-token delta segments, then finish the turn
     for tok in ("Iniciando ", "varredura ", "de arquivos."):
         store.delta(turn, tok)
-    for idx in range(180):
+    for idx in range(330):
         store.record(
             turn,
             AgentActivityEventType.FILESYSTEM_READ,
@@ -435,7 +435,7 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
     store.finish(turn)
 
     snapshot = store.get(receipt.conversation_id, "user-1")
-    assert len(snapshot["activities"]) <= 150
+    assert len(snapshot["activities"]) <= 300
     assert snapshot["has_older_activities"] is True
     assert isinstance(snapshot["oldest_activity_id"], int)
     # Settled turns compact consecutive assistant.delta tokens into a single segment event
@@ -447,7 +447,7 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
         receipt.conversation_id,
         "user-1",
         before_id=snapshot["oldest_activity_id"],
-        limit=150,
+        limit=300,
     )
     assert len(older_page["activities"]) > 0
     assert older_page["has_older_activities"] is False
@@ -587,3 +587,261 @@ def test_a_prompt_blocked_by_a_hook_never_reaches_a_later_turn() -> None:
     with engine.connect() as c:
         stored = c.execute(_select(conversation_messages.c.content).where(conversation_messages.c.message_id == turn["user_message_id"])).scalar()
     assert "hunter2" not in str(stored)
+
+
+def test_settled_turn_excludes_speak_events_and_merges_deltas_across_context_updates() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+    receipt = store.create(
+        user_id="user-1",
+        message="Explique a arquitetura.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-speak-compaction",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    from types import SimpleNamespace
+    ctx = SimpleNamespace(conversation_id=receipt.conversation_id, turn_id=receipt.turn_id)
+    store.lifecycle(ctx, "thinking_delta", delta="Analisando ", iteration=1)
+    store.record(
+        turn,
+        AgentActivityEventType.CONTEXT_UPDATED,
+        "Contexto atualizado",
+        {"used_tokens": 500, "max_tokens": 128000},
+    )
+    store.lifecycle(ctx, "thinking_delta", delta="os módulos.", iteration=1)
+    store.record(
+        turn,
+        AgentActivityEventType.FILESYSTEM_READ,
+        "Leu src/main.py",
+        {"path": "src/main.py", "tool_name": "read_file", "tool_kind": "filesystem"},
+    )
+    store.delta(turn, "Parte 1 ")
+    store.record(turn, AgentActivityEventType.SPEAK_BLOCK_STARTED, "Fala iniciada", {"block_index": 0})
+    store.record(turn, AgentActivityEventType.SPEAK_DELTA, "Parte 1", {"delta": "Parte 1 "})
+    store.record(
+        turn,
+        AgentActivityEventType.CONTEXT_UPDATED,
+        "Contexto atualizado",
+        {"used_tokens": 600, "max_tokens": 128000},
+    )
+    store.delta(turn, "e Parte 2.")
+    store.record(turn, AgentActivityEventType.SPEAK_FINISHED, "Fala concluída", {"block_index": 0})
+    store.finish(turn)
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    event_types = [item["event_type"] for item in snapshot["activities"]]
+    assert not any(et.startswith("speak.") for et in event_types)
+
+    thoughts = [item for item in snapshot["activities"] if item["event_type"] == "agent.thought_delta"]
+    assert len(thoughts) == 1
+    assert thoughts[0]["payload"]["content"] == "Analisando os módulos."
+
+    deltas = [item for item in snapshot["activities"] if item["event_type"] == "assistant.delta"]
+    assert len(deltas) == 1
+    assert deltas[0]["payload"]["content"] == "Parte 1 e Parte 2."
+
+
+def test_settled_turn_merges_tool_started_metadata_and_keeps_orphan_tool_started_on_cancelled_turn() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+
+    # Turn 1: cancelled while a command is still running (tool.started with no tool.finished)
+    r1 = store.create(
+        user_id="user-1",
+        message="Clone o repositório.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-orphan-tool-1",
+    )
+    t1 = store.claim(r1.turn_id)
+    assert t1 is not None
+    store.record(
+        t1,
+        AgentActivityEventType.TOOL_STARTED,
+        "Executando git clone",
+        {"tool_name": "run_command", "tool_kind": "shell", "command": "git clone https://example.com/repo.git", "invocation_id": "inv-1"},
+    )
+    store.finish(t1, failed=True, code="TURN_CANCELLED")
+
+    # Turn 2: completed turn where tool.started has path/command/description and tool.finished omits them
+    r2 = store.create(
+        user_id="user-1",
+        conversation_id=r1.conversation_id,
+        message="Liste o diretório.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-orphan-tool-2",
+    )
+    t2 = store.claim(r2.turn_id)
+    assert t2 is not None
+    store.record(
+        t2,
+        AgentActivityEventType.TOOL_STARTED,
+        "Listando src",
+        {"tool_name": "list_directory", "tool_kind": "filesystem", "path": "src", "description": "Listar arquivos de src", "invocation_id": "inv-2"},
+    )
+    store.record(
+        t2,
+        AgentActivityEventType.TOOL_FINISHED,
+        "Executou list_directory",
+        {"tool_name": "list_directory", "tool_kind": "filesystem", "invocation_id": "inv-2"},
+    )
+    store.finish(t2)
+
+    snapshot = store.get(r1.conversation_id, "user-1")
+    t1_tools = [a for a in snapshot["activities"] if a["turn_id"] == r1.turn_id and a["event_type"] == "tool.started"]
+    assert len(t1_tools) == 1
+    assert t1_tools[0]["payload"]["command"] == "git clone https://example.com/repo.git"
+
+    t2_tools = [a for a in snapshot["activities"] if a["turn_id"] == r2.turn_id and a["event_type"].startswith("tool.")]
+    assert len(t2_tools) == 1
+    assert t2_tools[0]["event_type"] == "tool.finished"
+    assert t2_tools[0]["payload"]["path"] == "src"
+    assert t2_tools[0]["payload"]["description"] == "Listar arquivos de src"
+
+
+def test_settled_turn_filters_internal_orin_artifacts_and_caps_artifact_flood() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+    receipt = store.create(
+        user_id="user-1",
+        message="Rode os comandos.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-artifact-flood",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_FINISHED,
+        "Executou pytest",
+        {"tool_name": "run_command", "tool_kind": "shell", "command": "pytest"},
+    )
+    # 50 internal .orin state artifacts + 200 external cloned files
+    for i in range(50):
+        store.record(
+            turn,
+            AgentActivityEventType.ARTIFACT_CREATED,
+            "Novo arquivo no workspace: .orin/state/cwd.json",
+            {"path": ".orin/state/cwd.json"},
+        )
+    for i in range(200):
+        store.record(
+            turn,
+            AgentActivityEventType.ARTIFACT_CREATED,
+            f"Novo arquivo no workspace: repo/file_{i}.py",
+            {"path": f"repo/file_{i}.py"},
+        )
+    store.finish(turn)
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    artifacts = [a for a in snapshot["activities"] if a["event_type"] == "artifact.created"]
+    assert not any(".orin/" in str(a["payload"].get("path", "")) for a in artifacts)
+    assert len(artifacts) <= 10
+    tools = [a for a in snapshot["activities"] if a["event_type"] == "tool.finished"]
+    assert len(tools) == 1
+    assert tools[0]["payload"]["command"] == "pytest"
+
+
+def test_passo3_review_fixes_no_cross_tool_contamination_and_monotonic_sequences() -> None:
+    """Verify Passo 3 final review fixes:
+    1. Domain events (e.g. filesystem.read) or a different tool's completion (inv-2) never consume or drop an orphan tool.started (inv-1).
+    2. Merging deltas across a surviving context.updated preserves monotonic sequences.
+    3. Pagination boundary oldest_activity_id includes absorbed tool.started _db_id so list_older_activities never resurrects an absorbed tool.started.
+    """
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, "test-cursor-secret"))
+
+    receipt = store.create(
+        user_id="user-1",
+        message="Rode duas tools.",
+        provider="openrouter",
+        model_id="model-a",
+        idempotency_key="request-passo3-review",
+    )
+    turn = store.claim(receipt.turn_id)
+    assert turn is not None
+
+    # 1. Orphan tool.started (inv-1) followed by filesystem.read and another tool (inv-2)
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_STARTED,
+        "Executando comando órfão",
+        {
+            "tool_name": "run_command",
+            "tool_kind": "shell",
+            "command": "sleep 999",
+            "invocation_id": "inv-orphan-1",
+        },
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.FILESYSTEM_READ,
+        "Leu README.md",
+        {"path": "README.md", "tool_name": "read_file", "tool_kind": "filesystem"},
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_STARTED,
+        "Lendo main.py",
+        {
+            "tool_name": "read_file",
+            "tool_kind": "filesystem",
+            "path": "src/main.py",
+            "invocation_id": "inv-2",
+        },
+    )
+    store.record(
+        turn,
+        AgentActivityEventType.TOOL_FINISHED,
+        "Concluiu read_file",
+        {"tool_name": "read_file", "tool_kind": "filesystem", "invocation_id": "inv-2"},
+    )
+
+    # 2. Delta merged across surviving context.updated
+    store.delta(turn, "Início ")
+    store.record(
+        turn,
+        AgentActivityEventType.CONTEXT_UPDATED,
+        "Contexto atualizado",
+        {"used_tokens": 1200, "max_tokens": 128000},
+    )
+    store.delta(turn, "e fim.")
+    store.finish(turn)
+
+    snapshot = store.get(receipt.conversation_id, "user-1")
+    acts = snapshot["activities"]
+
+    # Orphan tool.started (inv-orphan-1) must STILL be present, and inv-2 must be enriched with src/main.py (not sleep 999!)
+    orphan_started = [
+        a
+        for a in acts
+        if a["event_type"] == "tool.started"
+        and a["payload"].get("invocation_id") == "inv-orphan-1"
+    ]
+    assert len(orphan_started) == 1
+    assert orphan_started[0]["payload"]["command"] == "sleep 999"
+
+    finished_inv2 = [
+        a
+        for a in acts
+        if a["event_type"] == "tool.finished"
+        and a["payload"].get("invocation_id") == "inv-2"
+    ]
+    assert len(finished_inv2) == 1
+    assert finished_inv2[0]["payload"]["path"] == "src/main.py"
+    assert "command" not in finished_inv2[0]["payload"]
+
+    # Sequences across all compacted activities must be strictly increasing
+    seqs = [int(a["sequence"]) for a in acts]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == len(seqs)

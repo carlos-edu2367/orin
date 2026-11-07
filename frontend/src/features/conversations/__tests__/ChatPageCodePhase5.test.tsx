@@ -279,12 +279,9 @@ describe('Phase 5 Task 4: routes (/projects) and ChatPage Orin Code Split Workbe
     expect(mainEl).not.toHaveClass('chat--code-split')
     expect(workbenchToggleBtn).toHaveAttribute('aria-pressed', 'false')
 
-    // 6. Steps checklist card shows completed checkmarks and in_progress status
-    const checklistCard = screen.getByTestId('code-steps-checklist-card')
-    expect(checklistCard).toHaveTextContent('Criando estrutura da página')
-    expect(checklistCard).toHaveTextContent('Aplicando estilos e componentes')
-    expect(checklistCard).toHaveTextContent('Testando navegação...')
-    expect(within(checklistCard).getByText('Em andamento')).toBeInTheDocument()
+    // 6. Tasks are not duplicated in the middle of the message stream; they stay in TodoBar near the input
+    expect(screen.queryByTestId('code-steps-checklist-card')).toBeNull()
+    expect(screen.getByTestId('todo-bar')).toBeInTheDocument()
 
     // 7. Clicking "Ver alterações" expands the card AND opens CodeWorkbenchPanel on the "Arquivos" tab
     const viewChangesBtn = screen.getByTestId('code-view-changes-button')
@@ -443,4 +440,5 @@ describe('Phase 5 Task 4: routes (/projects) and ChatPage Orin Code Split Workbe
     expect(screen.getByTestId('workbench-tab-preview')).toHaveAttribute('aria-selected', 'true')
     expect(screen.getByTestId('workbench-preview-empty')).toBeInTheDocument()
   })
+
 })

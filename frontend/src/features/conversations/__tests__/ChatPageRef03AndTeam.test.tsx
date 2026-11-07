@@ -7,6 +7,9 @@ import { ChatPage } from '../ChatPage'
 type Snapshot = {
   state: string
   mode?: 'chat' | 'code'
+  has_older_activities?: boolean
+  oldest_activity_id?: number | null
+  turns?: Array<Record<string, unknown>>
   messages: Array<Record<string, unknown>>
   activities: Array<Record<string, unknown>>
 }
@@ -49,6 +52,8 @@ function snapshotBody(snapshot: Snapshot) {
     ],
     activities: snapshot.activities,
     activity_cursor: 'a.9',
+    has_older_activities: snapshot.has_older_activities ?? false,
+    oldest_activity_id: snapshot.oldest_activity_id ?? null,
     workspace: { kind: 'managed', path: null, folder_name: null, scope: 'chat', project_name: null },
   }
 }
@@ -237,19 +242,15 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     expect(assistantBubble).toBeTruthy()
     expect(within(assistantBubble).getByTestId('assistant-turn-mascot')).toBeInTheDocument()
 
-    const liveCard = await screen.findByTestId('live-work-progress-card')
-    expect(liveCard).toBeInTheDocument()
+    expect(screen.queryByTestId('live-work-progress-card')).toBeNull()
 
-    const viewDetailsBtn = within(liveCard).getByTestId('live-work-view-details')
-    expect(viewDetailsBtn).toHaveTextContent('Ver detalhes')
-    await user.click(viewDetailsBtn)
+    const teamToggleBtn = screen.getByTestId('chat-team-view-toggle')
+    await user.click(teamToggleBtn)
 
     expect(await screen.findByTestId('team-activity-view')).toBeInTheDocument()
     await user.click(screen.getByTestId('team-back-to-chat-button'))
 
-    const liveCardAfterReturn = await screen.findByTestId('live-work-progress-card')
-    const stopBtn = within(liveCardAfterReturn).getByTestId('live-work-stop-button')
-    expect(stopBtn).toHaveTextContent('Parar')
+    const stopBtn = await screen.findByRole('button', { name: 'Parar execução' })
     await user.click(stopBtn)
     expect(cancelCalled).toBe(true)
   })
@@ -297,5 +298,37 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     const composerInput = screen.getByRole('textbox', { name: 'Mensagem' }) as HTMLTextAreaElement
     expect(composerInput.value).toBe('Incluir também empresas da América Latina')
     expect(screen.queryByTestId('queue-edit-button-q-edit-1')).not.toBeInTheDocument()
+  })
+
+  it('rehydrates TurnTimeline tool calls across settled turns, preserves >16KB compacted deltas, and shows load-older-activities when oldest event is turn.started', async () => {
+    const longThought = 'Pensamento detalhado '.repeat(900) // ~18,900 chars (> 16,000)
+    const longNarration = 'Explicação completa '.repeat(900) // ~18,000 chars (> 16,000)
+    globalThis.fetch = stubFetch(() => ({
+      state: 'completed',
+      mode: 'code',
+      has_older_activities: true,
+      oldest_activity_id: 10,
+      turns: [
+        { turn_id: 'turn-1', state: 'completed', created_at: '2026-08-10T20:00:00Z', started_at: '2026-08-10T20:00:01Z', finished_at: '2026-08-10T20:00:10Z' },
+      ],
+      messages: [
+        { message_id: 'u-1', role: 'user', content: 'Inspecione o repositório', status: 'completed', retryable: false, turn_id: 'turn-1' },
+        { message_id: 'a-1', role: 'assistant', content: longNarration, status: 'completed', retryable: false, turn_id: 'turn-1' },
+      ],
+      activities: [
+        activity(10, 'turn.started', 'Execução iniciada', {}),
+        activity(11, 'agent.thought_delta', 'Pensando', { content: longThought, delta: longThought }),
+        activity(12, 'tool.finished', 'Listou arquivos de src', { tool_name: 'list_directory', tool_kind: 'filesystem', path: 'src', status: 'succeeded' }),
+        activity(13, 'assistant.delta', 'Resposta em andamento', { content: longNarration }),
+      ],
+    }))
+
+    renderChat()
+
+    expect(await screen.findByText('Inspecione o repositório')).toBeInTheDocument()
+    expect(await screen.findByTestId('turn-timeline')).toBeInTheDocument()
+    expect(screen.getByTestId('code-tool-call-block')).toBeInTheDocument()
+    expect(screen.getByTestId('thought-block-completed')).toBeInTheDocument()
+    expect(screen.getByTestId('load-older-activities')).toBeInTheDocument()
   })
 })

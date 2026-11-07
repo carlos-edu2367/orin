@@ -287,9 +287,16 @@ def log_cli_run(
     stderr_tail: str,
     mode: Literal["text", "native"],
     usage: Any = None,
+    loggable_command: Callable[[Sequence[str]], Sequence[str]] | None = None,
 ) -> None:
-    """Log one structured diagnostic line per `claude -p` execution with redacted paths."""
-    redacted_argv = redact_argv(argv)
+    """Log one structured diagnostic line per CLI execution with redacted paths and secrets."""
+    pre_redacted: Sequence[str] = argv
+    if callable(loggable_command):
+        try:
+            pre_redacted = loggable_command(argv)
+        except Exception:
+            pre_redacted = argv
+    redacted_argv = redact_argv(pre_redacted)
     actual_model = (
         (init.model if init is not None and init.model else None)
         or requested_model
@@ -357,14 +364,14 @@ def _extract_stable_system_text(messages: Sequence[Mapping[str, Any]]) -> str:
 
 
 class ClaudeCliProvider:
-    """First-class Orin provider for the local `claude -p` subscription."""
+    """First-class Orin provider for local subscription CLI adapters."""
 
     provider = "anthropic"
 
     def __init__(
         self,
         *,
-        base_url: str = DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+        base_url: str | None = DEFAULT_CLAUDE_CLI_BRIDGE_URL,
         model: str = "",
         binary: str | None = None,
         popen_factory: Callable[..., Any] | None = None,
@@ -437,9 +444,13 @@ class ClaudeCliProvider:
     def native_turn_available(self, turn: Mapping[str, object]) -> bool:
         if not self.adapter.capabilities.native_tool_loop:
             return False
+        is_claude = getattr(self.adapter, "name", "claude") == "claude"
         if self._binary:
             binary: str | None = self._binary
-            version = claude_cli_version(binary, env=self._env)
+            if is_claude:
+                version: Any = claude_cli_version(binary, env=self._env)
+            else:
+                _, version = self.adapter.resolve_binary(self._env)
         else:
             binary, version = self.adapter.resolve_binary(self._env)
         if not binary:
@@ -448,6 +459,12 @@ class ClaudeCliProvider:
             return False
         if not self.adapter.version_supported(version):
             return False
+        if not is_claude:
+            if is_code_mode_value(turn.get("code_mode")):
+                effective_mode = "code"
+            else:
+                effective_mode = str(turn.get("conversation_mode") or "").strip().lower()
+            return bool(NATIVE_LOOP_VALIDATED and effective_mode in NATIVE_MODES)
         return native_tools_enabled(
             conversation_mode=str(turn.get("conversation_mode") or ""),
             code_mode=is_code_mode_value(turn.get("code_mode")),
@@ -579,6 +596,7 @@ class ClaudeCliProvider:
         stderr_chunks: list[str] = []
         stdout_thread: threading.Thread | None = None
         stderr_thread: threading.Thread | None = None
+        fallback_wiring = None
         parser = self.adapter.stream_translator()
         mono_started = time.monotonic()
         _ = self._clock()
@@ -615,6 +633,14 @@ class ClaudeCliProvider:
             mono_started = time.monotonic()
 
             prompt_file = self._ensure_prompt_file(system_prompt)
+            safe_cwd_path = ensure_isolated_cwd()
+            safe_cwd = str(safe_cwd_path)
+            wire_no_tools_fn = getattr(self.adapter, "wire_no_tools", None)
+            fallback_wiring = (
+                wire_no_tools_fn(safe_cwd_path, system_prompt_file=prompt_file)
+                if callable(wire_no_tools_fn)
+                else None
+            )
             facade = sys.modules.get("agentos.provider_catalog.claude_code")
             patched_build = (
                 getattr(facade, "_build_claude_cli_command", None)
@@ -639,7 +665,10 @@ class ClaudeCliProvider:
                         model=req_model or None,
                         effort=effort,
                         max_turns=1,
-                    )
+                        tool_server_wiring=fallback_wiring,
+                        capabilities=self.adapter.capabilities,
+                    ),
+                    fallback_wiring,
                 )
             isolated_env = self.adapter.environment(
                 merge_with_system_env(self._env),
@@ -649,7 +678,19 @@ class ClaudeCliProvider:
             creationflags = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             )
-            safe_cwd = str(ensure_isolated_cwd())
+
+            encode_fn = getattr(self.adapter, "encode_user_turn", None)
+            if callable(encode_fn):
+                encoded_turn = encode_fn(content_blocks).decode("utf-8")
+            else:
+                user_envelope = {
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": content_blocks,
+                    },
+                }
+                encoded_turn = json.dumps(user_envelope, ensure_ascii=False) + "\n"
 
             if self._popen_factory is not None:
                 try:
@@ -717,18 +758,9 @@ class ClaudeCliProvider:
             stdout_thread.start()
             stderr_thread.start()
 
-            user_envelope = {
-                "type": "user",
-                "message": {
-                    "role": "user",
-                    "content": content_blocks,
-                },
-            }
             if getattr(proc, "stdin", None) is not None:
                 try:
-                    proc.stdin.write(
-                        json.dumps(user_envelope, ensure_ascii=False) + "\n"
-                    )
+                    proc.stdin.write(encoded_turn)
                     proc.stdin.flush()
                 except Exception:
                     pass
@@ -791,10 +823,33 @@ class ClaudeCliProvider:
                 deadline = min(
                     hard_deadline, time.monotonic() + effective_timeout
                 )
+                from agentos.providers.claude_cli.native_loop import (
+                    find_forbidden_item_kind,
+                )
+
+                bad_raw_kind = find_forbidden_item_kind(
+                    self.adapter.capabilities.forbidden_item_kinds,
+                    raw_line=raw_line,
+                )
+                if bad_raw_kind is not None:
+                    kill_process_tree(proc)
+                    raise CliSecurityAbort(
+                        f"CLI emitted forbidden item kind '{bad_raw_kind}' (native tools must remain disabled)."
+                    )
                 cli_events = parser.feed_line(raw_line)
                 should_break = False
 
                 for ev in cli_events:
+                    bad_ev_kind = find_forbidden_item_kind(
+                        self.adapter.capabilities.forbidden_item_kinds,
+                        raw=ev.raw if isinstance(ev.raw, Mapping) else None,
+                        tool_name=ev.tool_name,
+                    )
+                    if bad_ev_kind is not None:
+                        kill_process_tree(proc)
+                        raise CliSecurityAbort(
+                            f"CLI emitted forbidden item kind '{bad_ev_kind}' (native tools must remain disabled)."
+                        )
                     if ev.kind == CliEventKind.INIT:
                         if parser.init is not None:
                             api_key_source = parser.init.api_key_source.strip()
@@ -968,6 +1023,12 @@ class ClaudeCliProvider:
                 cost=zero_cost,
             )
         finally:
+            if fallback_wiring is not None:
+                for fpath in getattr(fallback_wiring, "files", ()) or ():
+                    try:
+                        Path(fpath).unlink(missing_ok=True)
+                    except Exception:
+                        pass
             exit_code_final: int | None = None
             if proc is not None:
                 if proc.poll() is None:
@@ -1004,6 +1065,7 @@ class ClaudeCliProvider:
                     duration_s=max(0.0, time.monotonic() - mono_started),
                     stderr_tail="".join(stderr_chunks),
                     mode="text",
+                    loggable_command=getattr(self.adapter, "loggable_command", None),
                 )
             if ticket is not None:
                 ticket.release()

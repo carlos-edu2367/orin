@@ -1157,6 +1157,7 @@ class ChatWorker:
                     provider_configurations.c.base_url,
                     provider_configurations.c.enabled,
                     provider_configurations.c.key_cooldown_seconds,
+                    provider_configurations.c.risk_acknowledged_at,
                 ).where(
                     provider_configurations.c.user_id == resolved_user_id,
                     provider_configurations.c.provider == provider,
@@ -1164,6 +1165,26 @@ class ChatWorker:
             ).mappings().first()
         if credential is None or not credential["enabled"]:
             raise ValueError("provider unavailable")
+        if provider == "google-antigravity" and not credential.get("risk_acknowledged_at"):
+            raise ValueError("provider unavailable")
+        if provider in {"openai-codex", "google-antigravity"}:
+            from agentos.providers.claude_cli.provider import ClaudeCliProvider
+            from agentos.providers.cli_registry import cli_adapter_for
+
+            cli_adapter = cli_adapter_for(
+                provider,
+                str(credential.get("base_url") or "") or None,
+                risk_acknowledged_at=credential.get("risk_acknowledged_at")
+                if provider == "google-antigravity"
+                else None,
+            )
+            if cli_adapter is None:
+                raise ValueError("provider unavailable")
+            return ClaudeCliProvider(
+                base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+                model=resolved_model_id,
+                adapter=cli_adapter,
+            )
         keys = PostgresProviderApiKeyAdapter(
             self.store._engine,
             cipher=ProviderSecretCipher.from_environment(required=True),
@@ -1210,11 +1231,36 @@ class ChatWorker:
         model_id = str(turn["model_id"])
         with self.store._engine.connect() as c:
             config = c.execute(
-                select(provider_configurations.c.base_url, provider_configurations.c.enabled, provider_configurations.c.key_cooldown_seconds)
+                select(
+                    provider_configurations.c.base_url,
+                    provider_configurations.c.enabled,
+                    provider_configurations.c.key_cooldown_seconds,
+                    provider_configurations.c.risk_acknowledged_at,
+                )
                 .where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)
             ).mappings().first()
         if config is None or not config["enabled"]:
             raise ValueError("provider unavailable")
+        if provider == "google-antigravity" and not config.get("risk_acknowledged_at"):
+            raise ValueError("provider unavailable")
+        if provider in {"openai-codex", "google-antigravity"}:
+            from agentos.providers.claude_cli.provider import ClaudeCliProvider
+            from agentos.providers.cli_registry import cli_adapter_for
+
+            cli_adapter = cli_adapter_for(
+                provider,
+                str(config.get("base_url") or "") or None,
+                risk_acknowledged_at=config.get("risk_acknowledged_at")
+                if provider == "google-antigravity"
+                else None,
+            )
+            if cli_adapter is None:
+                raise ValueError("provider unavailable")
+            return ClaudeCliProvider(
+                base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+                model=model_id,
+                adapter=cli_adapter,
+            )
         keys = PostgresProviderApiKeyAdapter(self.store._engine, cipher=ProviderSecretCipher.from_environment(required=True))
         first_key = keys.next_available_key(user_id, provider)
         base_url = self._base_url_for(provider, {"base_url": config["base_url"], "api_key": first_key.plaintext if first_key is not None else ""})
@@ -1248,13 +1294,18 @@ class ChatWorker:
         allowed = {str(turn.get("provider") or "")}
         try:
             enabled_rows = connection.execute(
-                select(provider_configurations.c.provider).where(
+                select(
+                    provider_configurations.c.provider,
+                    provider_configurations.c.risk_acknowledged_at,
+                ).where(
                     provider_configurations.c.user_id == turn["user_id"],
                     provider_configurations.c.enabled.is_(True),
                 )
             ).all()
             for row in enabled_rows:
                 prov = str(getattr(row, "provider", "") or "")
+                if prov == "google-antigravity" and getattr(row, "risk_acknowledged_at", None) is None:
+                    continue
                 if prov:
                     allowed.add(prov)
         except Exception:
@@ -1411,14 +1462,20 @@ class ChatWorker:
         try:
             with self.store._engine.connect() as connection:
                 enabled_rows = connection.execute(
-                    select(provider_configurations.c.provider).where(
+                    select(
+                        provider_configurations.c.provider,
+                        provider_configurations.c.risk_acknowledged_at,
+                    ).where(
                         provider_configurations.c.user_id == user_id,
                         provider_configurations.c.enabled.is_(True),
                     )
                 ).all()
                 for erow in enabled_rows:
                     if erow.provider:
-                        enabled_providers.add(str(erow.provider).strip().lower())
+                        prov = str(erow.provider).strip().lower()
+                        if prov == "google-antigravity" and getattr(erow, "risk_acknowledged_at", None) is None:
+                            continue
+                        enabled_providers.add(prov)
 
                 try:
                     default_rows = connection.execute(

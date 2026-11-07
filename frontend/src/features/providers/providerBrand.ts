@@ -24,6 +24,11 @@ export type ProviderBrand = {
   mark: string
   logoUrl: string
   keyPlaceholder: string
+
+
+  tagline?: string
+  keyHint?: string
+  docsLabel?: string
   docsUrl?: string
   supportsBaseUrl?: boolean
   keyOptional?: boolean
@@ -43,6 +48,36 @@ export const BRANDS: Record<ProviderName, ProviderBrand> = {
     docsUrl: 'https://platform.openai.com/api-keys',
     supportsBaseUrl: false,
     keyOptional: false,
+  },
+  'openai-codex': {
+    id: 'openai-codex',
+    name: 'Codex (Assinatura)',
+    label: 'Codex (Assinatura)',
+    tagline: 'Use sua assinatura ChatGPT Plus, Pro, Business, Edu ou Enterprise via Codex CLI local.',
+    accent: '#10a37f',
+    keyHint: 'Sem chave de API (login via codex login)',
+    keyPlaceholder: 'Sem chave de API (login via codex login)',
+    docsLabel: 'Documentação do Codex CLI',
+    docsUrl: 'https://developers.openai.com/codex/cli',
+    logoUrl: openaiLogo,
+    mark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 10l2.5 2L7 14"/><path d="M11.5 14H15"/></svg>',
+    supportsBaseUrl: false,
+    keyOptional: true,
+  },
+  'google-antigravity': {
+    id: 'google-antigravity',
+    name: 'Google Antigravity (Assinatura)',
+    label: 'Google Antigravity (Assinatura)',
+    tagline: 'Use sua assinatura Google via Antigravity CLI (agy) local.',
+    accent: '#4285f4',
+    keyHint: 'Sem chave de API (login via agy)',
+    keyPlaceholder: 'Sem chave de API (login via agy)',
+    docsLabel: 'FAQ oficial do Antigravity',
+    docsUrl: 'https://antigravity.google/docs/faq/',
+    logoUrl: '',
+    mark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l6.5 16h-2.8l-1.5-3.8H9.8L8.3 19H5.5L12 3z"/><path d="M10.7 12.6h2.6"/><circle cx="12" cy="19.5" r="1"/></svg>',
+    supportsBaseUrl: false,
+    keyOptional: true,
   },
   anthropic: {
     id: 'anthropic',

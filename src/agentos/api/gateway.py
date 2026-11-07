@@ -39,7 +39,11 @@ from .contracts import (
     ResourceApplication,
     SecurityService,
 )
-from agentos.provider_catalog.models import PROVIDERS_WITH_OPTIONAL_KEY, ProviderCatalogContext
+from agentos.provider_catalog.models import (
+    PROVIDERS_WITH_OPTIONAL_KEY,
+    SUBSCRIPTION_CLI_PROVIDERS,
+    ProviderCatalogContext,
+)
 from agentos.provider_catalog.claude_code import is_claude_cli_bridge_url
 from agentos.provider_catalog.service import ProviderCatalogUnavailable
 from .events import CursorError, InMemoryClientEventStream
@@ -149,6 +153,8 @@ class ProviderSetupRequest(_RequestModel):
     base_url: str | None = Field(default=None, min_length=8, max_length=2048)
     enabled: bool = True
     purpose: str = Field(default="provider.configure", min_length=1, max_length=128)
+    risk_acknowledged: bool | None = None
+    risk_acknowledged_at: datetime | str | None = None
 
 
 class ProviderApiKeyCreateRequest(_RequestModel):
@@ -2154,10 +2160,21 @@ def create_app(services: ApiServices) -> FastAPI:
     @app.put("/v1/providers/{provider}")
     async def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
-        if provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
+        if provider_name not in SUBSCRIPTION_CLI_PROVIDERS and provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
             raise ValueError("API key is required for this provider")
         if provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)) and payload.api_key is None:
             raise ValueError("API key is required for this provider")
+        if provider_name == "google-antigravity" and payload.enabled:
+            has_valid_ack_at = (
+                isinstance(payload.risk_acknowledged_at, datetime)
+                or (
+                    isinstance(payload.risk_acknowledged_at, str)
+                    and bool(payload.risk_acknowledged_at.strip())
+                    and __import__("agentos.providers.cli_registry", fromlist=["_is_valid_risk_acknowledgement"])._is_valid_risk_acknowledgement(payload.risk_acknowledged_at)
+                )
+            )
+            if payload.risk_acknowledged is False or (not payload.risk_acknowledged and not has_valid_ack_at):
+                raise ValueError("É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity.")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.configure", resource_id=provider_name, purpose=payload.purpose)
@@ -2167,6 +2184,8 @@ def create_app(services: ApiServices) -> FastAPI:
             "purpose": payload.purpose, "enabled": payload.enabled,
             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "", "idempotency_key": _idempotency(request),
             "base_url": payload.base_url,
+            **({"risk_acknowledged": payload.risk_acknowledged} if payload.risk_acknowledged is not None else {}),
+            **({"risk_acknowledged_at": payload.risk_acknowledged_at} if payload.risk_acknowledged_at is not None else {}),
         }
         result = _require_port(services.provider_configuration).configure(command)
         return JSONResponse(_provider_public(result))
@@ -2326,6 +2345,29 @@ def create_app(services: ApiServices) -> FastAPI:
              "base_url": payload.base_url},
         )
         return JSONResponse(_connection_test_public(result))
+
+    @app.get("/v1/providers/openai-codex/status")
+    @app.get("/v1/providers/codex-cli/status")
+    async def codex_cli_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="provider.inspect", resource_id="openai-codex", purpose="provider.inspect")
+        status = await run_in_threadpool(_inspect_codex_cli_status)
+        return JSONResponse(status)
+
+    @app.get("/v1/providers/google-antigravity/status")
+    @app.get("/v1/providers/antigravity-cli/status")
+    async def antigravity_cli_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="provider.inspect", resource_id="google-antigravity", purpose="provider.inspect")
+        status = await run_in_threadpool(_inspect_antigravity_cli_status)
+        return JSONResponse(status)
+
+    @app.get("/v1/providers/claude-cli/status")
+    async def claude_cli_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="provider.inspect", resource_id="anthropic", purpose="provider.inspect")
+        status = await run_in_threadpool(_inspect_claude_cli_status)
+        return JSONResponse(status)
 
     @app.post("/v1/providers/nvidia/test")
     async def test_nvidia_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
@@ -2793,9 +2835,105 @@ def _is_loopback_client(host: str | None) -> bool:
         return False
 
 
+def _inspect_codex_cli_status() -> dict[str, object]:
+    from agentos.providers.codex_cli import catalog as codex_catalog, command as codex_command
+
+    binary = codex_command.resolve_codex_binary()
+    installed = binary is not None
+    ver_tuple = codex_command.codex_version(binary) if binary is not None else None
+    version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
+    supported = codex_command.is_codex_version_supported(ver_tuple)
+    codex_home = Path(codex_catalog.resolve_codex_home())
+    auth_path = codex_home / "auth.json"
+    try:
+        is_junc_home = bool(getattr(codex_home, "is_junction", lambda: False)())
+        is_junc_auth = bool(getattr(auth_path, "is_junction", lambda: False)())
+        authenticated = bool(
+            not codex_home.is_symlink()
+            and not is_junc_home
+            and not auth_path.is_symlink()
+            and not is_junc_auth
+            and auth_path.is_file()
+        )
+    except OSError:
+        authenticated = False
+    return {
+        "installed": installed,
+        "version": version_str,
+        "supported": supported,
+        "authenticated": authenticated,
+        "login_command": "codex login",
+    }
+
+
+def _inspect_antigravity_cli_status() -> dict[str, object]:
+    from agentos.providers.antigravity_cli import command as antigravity_command
+
+    binary = antigravity_command.resolve_antigravity_binary()
+    installed = binary is not None
+    ver_tuple = antigravity_command.antigravity_version(binary) if binary is not None else None
+    version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
+    supported = antigravity_command.is_antigravity_version_supported(ver_tuple)
+    home_path = Path(antigravity_command.resolve_antigravity_home())
+    state_path = home_path / "jetski_state.pbtxt"
+    try:
+        is_junc_home = bool(getattr(home_path, "is_junction", lambda: False)())
+        is_junc_state = bool(getattr(state_path, "is_junction", lambda: False)())
+        authenticated = bool(
+            not home_path.is_symlink()
+            and not is_junc_home
+            and not state_path.is_symlink()
+            and not is_junc_state
+            and state_path.is_file()
+        )
+    except OSError:
+        authenticated = False
+    return {
+        "installed": installed,
+        "version": version_str,
+        "supported": supported,
+        "authenticated": authenticated,
+        "login_command": "agy",
+    }
+
+
+def _inspect_claude_cli_status() -> dict[str, object]:
+    from agentos.providers.claude_cli import command as claude_command
+
+    binary = claude_command.resolve_claude_binary()
+    installed = binary is not None
+    ver_tuple = claude_command.claude_cli_version(binary) if binary is not None else None
+    version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
+    supported = claude_command.is_version_validated(ver_tuple)
+    authenticated = False
+    if binary is not None:
+        try:
+            claude_command.check_claude_cli_status(binary=binary)
+            authenticated = True
+        except Exception:
+            authenticated = False
+    return {
+        "installed": installed,
+        "version": version_str,
+        "supported": supported,
+        "authenticated": authenticated,
+        "login_command": "claude auth login",
+    }
+
+
 def _provider_name(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama", "nvidia"}:
+    if normalized not in {
+        "openai",
+        "anthropic",
+        "openrouter",
+        "opencode",
+        "omniroute",
+        "ollama",
+        "nvidia",
+        "openai-codex",
+        "google-antigravity",
+    }:
         raise ValueError("unsupported provider")
     return normalized
 

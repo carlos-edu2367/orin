@@ -39,6 +39,8 @@ type LaunchedSessionRecord = {
 
 const PROVIDER_DISPLAY_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
+  'openai-codex': 'OpenAI Codex (Assinatura)',
+  'google-antigravity': 'Google Antigravity (Assinatura)',
   anthropic: 'Anthropic',
   openrouter: 'OpenRouter',
   nvidia: 'NVIDIA NIM',
@@ -49,6 +51,8 @@ const PROVIDER_DISPLAY_LABELS: Record<ProviderName, string> = {
 
 const FALLBACK_MODELS_BY_PROVIDER: Record<ProviderName, string[]> = {
   openai: ['gpt-5', 'gpt-4.1', 'o4-mini'],
+  'openai-codex': ['gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.6-sol'],
+  'google-antigravity': ['gemini-4-argon-medium', 'gemini-3.8-flash-high', 'claude-sonnet-5-5-medium'],
   anthropic: ['claude-sonnet-4-5', 'claude-opus-4-1', 'claude-haiku-3-5'],
   openrouter: ['anthropic/claude-sonnet-4.5', 'openai/gpt-5', 'deepseek/deepseek-r1'],
   nvidia: ['meta/llama-3.3-70b-instruct', 'deepseek-ai/deepseek-r1', 'nvidia/llama-3.1-nemotron-70b-instruct'],

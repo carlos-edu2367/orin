@@ -396,6 +396,11 @@ function isNonBreakingDeltaSeparator(event: ConversationActivityEvent): boolean 
   return (
     event.type === 'context.updated' ||
     event.type === 'CONTEXT_UPDATED' ||
+    event.type === 'context.compacted' ||
+    event.type === 'CONTEXT_COMPACTED' ||
+    event.type === 'code_mode.validation_started' ||
+    event.type === 'code_mode.validation_finished' ||
+    event.type === 'code_mode.stage_changed' ||
     event.type.startsWith('speak.')
   )
 }

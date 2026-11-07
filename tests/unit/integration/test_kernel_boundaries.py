@@ -2,10 +2,10 @@ from pathlib import Path
 
 
 # Provider adapters are explicit composition edges: the HTTP adapter, the
-# legacy-runtime adapter and the Claude CLI adapter packages (spec R2.2 puts
+# legacy-runtime adapter and the CLI adapter packages (spec R2.2 puts
 # them under providers/). The provider model/ports remain infrastructure-free.
-_PROVIDER_EDGE_FILES = {"http.py", "compat.py"}
-_PROVIDER_EDGE_PACKAGES = {"claude_cli", "cli_tools_mcp"}
+_PROVIDER_EDGE_FILES = {"http.py", "compat.py", "cli_registry.py"}
+_PROVIDER_EDGE_PACKAGES = {"claude_cli", "codex_cli", "antigravity_cli", "cli_tools_mcp"}
 
 
 def _is_provider_edge(root: Path, path: Path) -> bool:
@@ -21,7 +21,7 @@ def _source(package: str) -> str:
 
 def test_provider_kernel_does_not_import_its_adapter_edges():
     kernel = _source("providers")
-    for edge in ("providers.http", "providers.compat", *(f"providers.{name}" for name in _PROVIDER_EDGE_PACKAGES)):
+    for edge in ("providers.http", "providers.compat", "providers.cli_registry", *(f"providers.{name}" for name in _PROVIDER_EDGE_PACKAGES)):
         assert edge not in kernel, edge
     for name in _PROVIDER_EDGE_PACKAGES:
         assert f"from .{name}" not in kernel and f"from . import {name}" not in kernel, name

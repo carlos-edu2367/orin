@@ -374,7 +374,19 @@ def write_owner_only_temp(
 
 
 # Entries the CLI would read as project configuration from its cwd.
-_RESERVED_CWD_ENTRIES = frozenset({".claude", "CLAUDE.md", "CLAUDE.local.md", ".mcp.json"})
+_RESERVED_CWD_ENTRIES = frozenset(
+    {
+        ".claude",
+        "CLAUDE.md",
+        "CLAUDE.local.md",
+        ".mcp.json",
+        ".agents",
+        ".codex",
+        "AGENTS.md",
+        "AGENTS.override.md",
+        "GEMINI.md",
+    }
+)
 
 
 def default_isolated_cwd() -> Path:
@@ -386,7 +398,7 @@ def default_isolated_cwd() -> Path:
     return tmp / f"orin-claude-cli-cwd-{getuid()}"
 
 
-_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md")
+_MEMORY_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "AGENTS.override.md", "GEMINI.md")
 
 
 def _refuse_planted_parent_memory(root: Path) -> None:
@@ -475,18 +487,56 @@ def _validate_path_arg(value: str | Path, label: str) -> str:
     return text
 
 
+_SENSITIVE_CONFIG_TERMS = (
+    "token",
+    "key",
+    "secret",
+    "password",
+    "bearer",
+    "authorization",
+    "model_instructions_file",
+    "system_prompt",
+)
+
+
 def redact_argv(argv: Sequence[str]) -> list[str]:
-    """Redact temporary file paths (`--mcp-config`, `--system-prompt-file`) before logging."""
+    """Redact temporary file paths (`--mcp-config`, `--system-prompt-file`) and sensitive `-c`/`--config` overrides before logging."""
     redacted: list[str] = []
     skip_next = False
+    check_c_next = False
     for item in argv:
+        text = str(item)
         if skip_next:
             redacted.append("<redacted>")
             skip_next = False
             continue
-        redacted.append(str(item))
-        if item in {"--mcp-config", "--system-prompt-file"}:
+        if check_c_next:
+            check_c_next = False
+            lowered = text.lower()
+            if any(term in lowered for term in _SENSITIVE_CONFIG_TERMS):
+                redacted.append("<redacted>")
+            else:
+                redacted.append(text)
+            continue
+        if text in {"--mcp-config", "--system-prompt-file"}:
+            redacted.append(text)
             skip_next = True
+            continue
+        if text.startswith(("--mcp-config=", "--system-prompt-file=")):
+            prefix = text.split("=", 1)[0]
+            redacted.append(f"{prefix}=<redacted>")
+            continue
+        if text in {"-c", "--config"}:
+            redacted.append(text)
+            check_c_next = True
+            continue
+        if text.startswith(("-c=", "--config=")) and any(
+            term in text.lower() for term in _SENSITIVE_CONFIG_TERMS
+        ):
+            prefix = text.split("=", 1)[0]
+            redacted.append(f"{prefix}=<redacted>")
+            continue
+        redacted.append(text)
     return redacted
 
 

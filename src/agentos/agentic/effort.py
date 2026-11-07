@@ -35,8 +35,16 @@ def reasoning_supported(provider: str, model_id: str, capabilities: Iterable[str
         return "reasoning" in names or bool(_OPENAI_REASONING_MODEL.match(model))
     if name == "anthropic":
         return any("thinking" in item for item in names) or bool(_ANTHROPIC_THINKING_MODEL.search(model))
-    if name == "openai":
-        return bool(_OPENAI_REASONING_MODEL.match(model))
+    if name in {"openai", "openai-codex"}:
+        return "reasoning" in names or bool(_OPENAI_REASONING_MODEL.match(model))
+    if name == "google-antigravity":
+        return (
+            "reasoning" in names
+            or any("thinking" in item for item in names)
+            or bool(_ANTHROPIC_THINKING_MODEL.search(model))
+            or bool(_OPENAI_REASONING_MODEL.match(model))
+            or model.startswith("gemini-")
+        )
     return False
 
 

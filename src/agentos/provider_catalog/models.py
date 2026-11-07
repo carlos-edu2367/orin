@@ -84,3 +84,4 @@ class RefreshReceipt:
 # runtime, since only their local mode is keyless.
 PROVIDERS_WITH_BASE_URL = frozenset({"omniroute", "ollama", "opencode", "nvidia", "anthropic"})
 PROVIDERS_WITH_OPTIONAL_KEY = frozenset({"omniroute", "ollama", "opencode", "nvidia", "anthropic"})
+SUBSCRIPTION_CLI_PROVIDERS = frozenset({"openai-codex", "google-antigravity"})

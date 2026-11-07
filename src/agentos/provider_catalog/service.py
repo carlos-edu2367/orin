@@ -9,7 +9,14 @@ import httpx
 
 from .context_reference import ContextWindowLookup, context_window_from_id
 from .modalities import VALID_OUTPUT_MODALITIES, infer_output_modalities
-from .models import PROVIDERS_WITH_OPTIONAL_KEY, PricingSummary, ProviderCatalogContext, ProviderModelRecord, RefreshReceipt
+from .models import (
+    PROVIDERS_WITH_OPTIONAL_KEY,
+    SUBSCRIPTION_CLI_PROVIDERS,
+    PricingSummary,
+    ProviderCatalogContext,
+    ProviderModelRecord,
+    RefreshReceipt,
+)
 from .nvidia import (
     DEFAULT_NVIDIA_BASE_URL,
     NvidiaAuthenticationError,
@@ -112,6 +119,8 @@ class ProviderModelCatalogService:
         api_key: str,
         base_url_raw: object,
         refreshed_at: datetime,
+        *,
+        risk_acknowledged_at: object = None,
     ) -> list[ProviderModelRecord]:
         if normalized_provider == "nvidia":
             base_url = normalize_nvidia_base_url(str(base_url_raw or DEFAULT_NVIDIA_BASE_URL))
@@ -126,6 +135,44 @@ class ProviderModelCatalogService:
                 raw_payload = self._nvidia_client.fetch_models(api_key, base_url=base_url)
             return self._fill_context_windows(self._normalize("nvidia", raw_payload, refreshed_at))
 
+        if normalized_provider in {"openai-codex", "google-antigravity"} and normalized_provider not in self._upstreams:
+            from agentos.providers.cli_registry import cli_adapter_for
+
+            adapter = cli_adapter_for(
+                normalized_provider,
+                str(base_url_raw or "") or None,
+                risk_acknowledged_at=risk_acknowledged_at if normalized_provider == "google-antigravity" else None,
+            )
+            if adapter is None:
+                raise ProviderCatalogUnavailable("provider catalog is not supported")
+            records: list[ProviderModelRecord] = []
+            for item in adapter.models():
+                model_id = str(getattr(item, "id", None) or getattr(item, "model_id", "")).strip()
+                if not model_id:
+                    continue
+                display_name = str(getattr(item, "display_name", "") or model_id).strip()
+                context_window = getattr(item, "context_window", None)
+                caps = getattr(item, "capabilities", None)
+                if not caps:
+                    efforts = getattr(item, "supported_efforts", ())
+                    caps = ("tools", "reasoning") if efforts else ("tools",)
+                in_mods = getattr(item, "input_modalities", None) or ("text",)
+                out_mods = getattr(item, "output_modalities", None) or infer_output_modalities(model_id)
+                records.append(
+                    ProviderModelRecord(
+                        provider=normalized_provider,
+                        model_id=model_id,
+                        display_name=display_name,
+                        context_window=int(context_window) if isinstance(context_window, int) and context_window > 0 else None,
+                        capabilities=tuple(str(c) for c in caps),
+                        input_modalities=tuple(str(m) for m in in_mods),
+                        output_modalities=tuple(str(m) for m in out_mods),
+                        pricing=None,
+                        refreshed_at=refreshed_at,
+                    )
+                )
+            return self._fill_context_windows(records)
+
         upstream = self._upstreams.get(normalized_provider)
         if upstream is None:
             raise ProviderCatalogUnavailable("provider catalog is not supported")
@@ -138,8 +185,16 @@ class ProviderModelCatalogService:
         credential = self._repository.credential(context, normalized_provider)
         if credential is None or credential.get("enabled") is not True:
             raise ProviderCatalogUnavailable("provider is not configured")
+        if normalized_provider == "google-antigravity" and not credential.get("risk_acknowledged_at"):
+            raise ProviderCatalogUnavailable(
+                "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
+            )
         api_key = credential.get("api_key")
-        if not isinstance(api_key, str) or (not api_key and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY):
+        if not isinstance(api_key, str) or (
+            not api_key
+            and normalized_provider not in PROVIDERS_WITH_OPTIONAL_KEY
+            and normalized_provider not in SUBSCRIPTION_CLI_PROVIDERS
+        ):
             raise ProviderCatalogUnavailable("provider credential is unavailable")
 
         base_url_raw = credential.get("base_url")
@@ -149,7 +204,7 @@ class ProviderModelCatalogService:
             normalized_base = normalize_nvidia_base_url(str(base_url_raw or DEFAULT_NVIDIA_BASE_URL))
             if is_nvidia_cloud(normalized_base) and not api_key.strip():
                 raise ValueError("provider API key is required for NVIDIA NIM Cloud")
-        elif normalized_provider not in self._upstreams:
+        elif normalized_provider not in self._upstreams and normalized_provider not in {"openai-codex", "google-antigravity"}:
             raise ProviderCatalogUnavailable("provider catalog is not supported")
 
         refreshed_at = self._now()
@@ -167,6 +222,7 @@ class ProviderModelCatalogService:
                         current_key.plaintext,
                         base_url_raw,
                         refreshed_at,
+                        risk_acknowledged_at=credential.get("risk_acknowledged_at"),
                     )
                     mark_active_fn = getattr(self._repository, "mark_active", None)
                     if callable(mark_active_fn):
@@ -195,7 +251,13 @@ class ProviderModelCatalogService:
                     current_key = next_key
         else:
             try:
-                records = self._fetch_provider_records(normalized_provider, api_key, base_url_raw, refreshed_at)
+                records = self._fetch_provider_records(
+                    normalized_provider,
+                    api_key,
+                    base_url_raw,
+                    refreshed_at,
+                    risk_acknowledged_at=credential.get("risk_acknowledged_at"),
+                )
             except ProviderCatalogUnavailable:
                 raise
             except Exception as error:
@@ -255,10 +317,22 @@ class ProviderModelCatalogService:
 
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         normalized_provider = _provider(provider)
+        if normalized_provider == "google-antigravity":
+            credential = self._repository.credential(context, normalized_provider)
+            if not isinstance(credential, Mapping) or credential.get("enabled") is not True or not credential.get("risk_acknowledged_at"):
+                return []
         items = self._repository.list(context, normalized_provider, favorites_only)
         if normalized_provider == "anthropic" and (not items or (not favorites_only and len(items) < 5)):
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True and is_claude_cli_bridge_url(str(credential.get("base_url") or "")):
+                try:
+                    self.refresh(context, normalized_provider)
+                    items = self._repository.list(context, normalized_provider, favorites_only)
+                except Exception:
+                    pass
+        if normalized_provider in {"openai-codex", "google-antigravity"} and not items and not favorites_only:
+            credential = self._repository.credential(context, normalized_provider)
+            if isinstance(credential, Mapping) and credential.get("enabled") is True:
                 try:
                     self.refresh(context, normalized_provider)
                     items = self._repository.list(context, normalized_provider, favorites_only)
@@ -322,7 +396,17 @@ class ProviderModelCatalogService:
 
 def _provider(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"openai", "anthropic", "openrouter", "opencode", "omniroute", "ollama", "nvidia"}:
+    if normalized not in {
+        "openai",
+        "anthropic",
+        "openrouter",
+        "opencode",
+        "omniroute",
+        "ollama",
+        "nvidia",
+        "openai-codex",
+        "google-antigravity",
+    }:
         raise ProviderCatalogUnavailable("unsupported provider")
     return normalized
 

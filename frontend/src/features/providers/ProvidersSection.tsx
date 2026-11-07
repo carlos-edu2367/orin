@@ -26,6 +26,8 @@ type CuratedModelOption = {
 
 const BASE_PRIMARY_PROVIDERS: ReadonlyArray<PrimaryProviderOption> = [
   { id: 'openai', label: 'OpenAI' },
+  { id: 'openai-codex', label: 'OpenAI Codex (Assinatura)' },
+  { id: 'google-antigravity', label: 'Google Antigravity (Assinatura)' },
   { id: 'anthropic', label: 'Anthropic' },
   { id: 'google', label: 'Google Gemini' },
   { id: 'openrouter', label: 'OpenRouter' },
@@ -36,6 +38,14 @@ const CURATED_MODELS_BY_PROVIDER: Record<string, ReadonlyArray<CuratedModelOptio
   openai: [
     { id: 'gpt-5.4', label: 'GPT-5.4 · Recomendado' },
     { id: 'gpt-4.1', label: 'GPT-4.1' },
+  ],
+  'openai-codex': [
+    { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol (Assinatura Codex) · Recomendado' },
+    { id: 'gpt-6-luna', label: 'GPT-6-Luna (Assinatura Codex)' },
+  ],
+  'google-antigravity': [
+    { id: 'gemini-3.1-pro-high', label: 'gemini-3.1-pro-high (Assinatura Antigravity) · Recomendado' },
+    { id: 'claude-sonnet-4-6', label: 'claude-sonnet-4-6 (Assinatura Antigravity)' },
   ],
   anthropic: [
     { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 · Recomendado' },
@@ -66,6 +76,8 @@ const FALLBACK_OPTIONS: ReadonlyArray<CuratedModelOption> = [
 
 const PROVIDER_DISPLAY_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
+  'openai-codex': 'OpenAI Codex (Assinatura)',
+  'google-antigravity': 'Google Antigravity (Assinatura)',
   anthropic: 'Anthropic',
   openrouter: 'OpenRouter',
   nvidia: 'NVIDIA NIM',

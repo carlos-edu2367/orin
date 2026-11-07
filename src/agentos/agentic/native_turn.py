@@ -30,6 +30,7 @@ from agentos.providers.claude_cli.native_loop import (
     NativeTurnHandle,
     NativeTurnOutcome,
     NativeTurnRequest,
+    native_workdir,
 )
 from agentos.providers.claude_cli.stream import CliInit, CliUsage
 from agentos.providers.claude_cli.text_protocol import (
@@ -65,19 +66,27 @@ BATCH_GATHER_SECONDS: float = 0.1
 CLI_PARALLEL_MCP: bool = True
 CLI_PARALLEL_NEEDS_READONLY_HINT: bool = True
 SESSION_BRANCH: str = "B"
-NATIVE_CWD: Path = orin_paths().data / "claude-cli" / "workdir"
+NATIVE_CWD: Path = native_workdir("claude")
 
 
-def _resolve_native_cwd() -> Path:
+def _resolve_native_cwd(adapter_name: str = "claude") -> Path:
     """Orin's own workdir, unless it sits inside a git checkout (the development layout): then the CLI
     would walk up into the repository (CLAUDE.md, git), so it gets the per-user isolated folder instead."""
-    workdir = orin_paths().data / "claude-cli" / "workdir"
+    import os
+
+    workdir = native_workdir(adapter_name)
     try:
         resolved = workdir.resolve()
     except OSError:
         resolved = workdir
-    if any((ancestor / ".git").exists() for ancestor in (resolved, *resolved.parents)):
-        return default_isolated_cwd().with_name(default_isolated_cwd().name + "-native")
+    slug = str(adapter_name or "claude").strip() or "claude"
+    ancestors = resolved.parents if slug == "antigravity" else (resolved, *resolved.parents)
+    if any((ancestor / ".git").exists() for ancestor in ancestors):
+        base = default_isolated_cwd()
+        if slug == "claude":
+            return base.with_name(base.name + "-native")
+        uid_suffix = base.name.removeprefix("orin-claude-cli-cwd")
+        return base.with_name(f"orin-{slug}-cli-cwd{uid_suffix}-native")
     return workdir
 
 
@@ -1425,7 +1434,7 @@ class _RunnerSink:
 
 
 class NativeTurnRunner:
-    """Executes an entire turn inside `claude -p`'s native MCP tool loop."""
+    """Executes an entire turn inside a CLI adapter's native MCP tool loop."""
 
     def __init__(
         self,
@@ -1553,13 +1562,26 @@ class NativeTurnRunner:
                 self._executor.close()
 
     def _run(self) -> AgenticRunResult | None:
-        adapter_caps = getattr(
-            getattr(self.provider, "adapter", None), "capabilities", None
-        )
+        adapter = getattr(self.provider, "adapter", None)
+        adapter_name = str(getattr(adapter, "name", "claude") or "claude")
+        adapter_caps = getattr(adapter, "capabilities", None)
         allow_deferral = bool(
             getattr(adapter_caps, "tool_list_changed", True)
             if adapter_caps is not None
             else True
+        )
+        persistent_stdin = bool(
+            PERSISTENT_STDIN_OK
+            and (
+                getattr(adapter_caps, "persistent_stdin", True)
+                if adapter_caps is not None
+                else True
+            )
+        )
+        supports_session_resume = bool(
+            getattr(adapter_caps, "supports_session_resume", not persistent_stdin)
+            if adapter_caps is not None
+            else False
         )
         raw_schemas = self.runtime._tool_schemas(
             self.turn, allow_deferral=allow_deferral
@@ -1630,7 +1652,7 @@ class NativeTurnRunner:
         self._executor = executor
         sink = _RunnerSink(self, executor)
 
-        native_cwd = _resolve_native_cwd()
+        native_cwd = _resolve_native_cwd(adapter_name)
         try:
             ensure_isolated_cwd(native_cwd)
         except CliSecurityAbort:
@@ -1660,6 +1682,7 @@ class NativeTurnRunner:
         process_count = 0
         verify_gate_attempts = 0
         closing_sent = False
+        resume_session_id: str | None = None
 
         while True:
             self.runtime.counters.note_iteration()
@@ -1718,6 +1741,7 @@ class NativeTurnRunner:
                 fallback_model=fallback_model,
                 max_output_tokens=max_output,
                 autocompact=autocompact,
+                resume_session_id=resume_session_id,
                 conversation_id=str(self.turn.get("conversation_id") or ""),
                 on_waiting_slot=_on_waiting_slot,
             )
@@ -1746,6 +1770,13 @@ class NativeTurnRunner:
                                 executor.action_count,
                             )
                         raise
+                    if supports_session_resume:
+                        sid = (
+                            (outcome.init.session_id if outcome.init else "")
+                            or (outcome.result.session_id if outcome.result else "")
+                        )
+                        if sid:
+                            resume_session_id = sid
                     sink.flush_thinking_buffer()
                     if not sink._emitted_text_in_turn and outcome.final_text:
                         sink.on_text(outcome.final_text)
@@ -1847,7 +1878,7 @@ class NativeTurnRunner:
                                 handle.send_user(
                                     [{"type": "text", "text": CLOSING_INSTRUCTION}]
                                 )
-                            except RuntimeError:
+                            except (RuntimeError, NativeLoopUnavailable):
                                 self.runtime._effect_finished(
                                     self.turn,
                                     provider_effect_id,
@@ -1898,13 +1929,25 @@ class NativeTurnRunner:
                                 phase=str(self.runtime.phases.current),
                                 previous_phase=str(previous_phase),
                             )
-                        if PERSISTENT_STDIN_OK:
+                        if persistent_stdin:
                             handle.send_user(
                                 [{"type": "text", "text": VERIFY_REQUIRED_MESSAGE}]
                             )
                             sink.reset_for_new_message()
                             self.runtime._life(self.turn, "running")
                             continue
+                        if supports_session_resume and resume_session_id:
+                            self.runtime._effect_finished(
+                                self.turn,
+                                provider_effect_id,
+                                state="APPLIED",
+                                private_result={"outcome": "verify_continuation"},
+                            )
+                            user_content = [{"type": "text", "text": VERIFY_REQUIRED_MESSAGE}]
+                            sink.reset_for_new_message()
+                            self.runtime._life(self.turn, "running")
+                            next_process = True
+                            break
 
                     stop_decision = self.runtime._emit(
                         HookEvent.STOP,
@@ -1923,11 +1966,23 @@ class NativeTurnRunner:
                         self.runtime._stop_continuations += 1
                         self.runtime._stop_hook_active = True
                         hook_msg = f"[Hook Stop] {stop_decision.reason or 'continue working'}"
-                        if PERSISTENT_STDIN_OK:
+                        if persistent_stdin:
                             handle.send_user([{"type": "text", "text": hook_msg}])
                             sink.reset_for_new_message()
                             self.runtime._life(self.turn, "running")
                             continue
+                        if supports_session_resume and resume_session_id:
+                            self.runtime._effect_finished(
+                                self.turn,
+                                provider_effect_id,
+                                state="APPLIED",
+                                private_result={"outcome": "stop_hook_continuation"},
+                            )
+                            user_content = [{"type": "text", "text": hook_msg}]
+                            sink.reset_for_new_message()
+                            self.runtime._life(self.turn, "running")
+                            next_process = True
+                            break
 
                     self.runtime._effect_finished(
                         self.turn,
@@ -2115,5 +2170,6 @@ __all__ = [
     "TOOL_USE_ID_META_KEY",
     "ToolBatchCollector",
     "history_digest",
+    "native_workdir",
     "prompt_digest",
 ]

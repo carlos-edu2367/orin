@@ -32,6 +32,7 @@ class CliUsage:
     output_tokens: int = 0
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
+    reasoning_tokens: int | None = None
 
     @property
     def context_tokens(self) -> int:
@@ -48,7 +49,7 @@ class CliUsage:
             output_tokens=self.output_tokens,
             total_tokens=total_in + self.output_tokens,
             cached_input_tokens=self.cache_read_input_tokens,
-            reasoning_tokens=None,
+            reasoning_tokens=self.reasoning_tokens,
             measurement=Measurement.CONFIRMED,
             cache_read_input_tokens=self.cache_read_input_tokens,
             cache_creation_input_tokens=self.cache_creation_input_tokens,
@@ -196,6 +197,15 @@ class CliModelInfo:
     id: str
     display_name: str
     context_window: int
+    supported_efforts: tuple[str, ...] = ()
+    input_modalities: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolServerWiring:
+    argv: tuple[str, ...] = ()
+    env: Mapping[str, str] = field(default_factory=dict)
+    files: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +214,8 @@ class CliCapabilities:
     tool_list_changed: bool = False
     images_in_tool_results: bool = False
     persistent_stdin: bool = False
+    reports_tool_inventory: bool = True
+    forbidden_item_kinds: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,10 +228,33 @@ class CliTurnRequest:
     max_turns: int = 1
     tool_server_config_file: Path | None = None
     tool_server_name: str = "orin"
+    tool_server_wiring: ToolServerWiring | None = None
+    wiring: ToolServerWiring | None = None
     autocompact: str | int | None = None
     session_id: str | None = None
     resume_session_id: str | None = None
     persist_session: bool = False
+    capabilities: CliCapabilities = field(default_factory=CliCapabilities)
+    prompt_via_stdin_once: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "prompt_via_stdin_once",
+            not bool(self.capabilities.persistent_stdin),
+        )
+        if self.tool_server_wiring is None and self.wiring is not None:
+            object.__setattr__(self, "tool_server_wiring", self.wiring)
+        elif self.wiring is None and self.tool_server_wiring is not None:
+            object.__setattr__(self, "wiring", self.tool_server_wiring)
+        if (
+            self.tool_server_config_file is None
+            and self.tool_server_wiring is not None
+            and self.tool_server_wiring.files
+        ):
+            object.__setattr__(
+                self, "tool_server_config_file", self.tool_server_wiring.files[0]
+            )
 
 
 class CliStreamTranslator(Protocol):
@@ -257,9 +292,13 @@ class CliAgentAdapter(Protocol):
 
     def build_command(self, request: CliTurnRequest) -> list[str]: ...
 
-    def write_tool_server_config(
+    def wire_tool_server(
         self, handle: Any, directory: Path
-    ) -> Path: ...
+    ) -> ToolServerWiring: ...
+
+    def encode_user_turn(
+        self, content: list[dict[str, Any]]
+    ) -> bytes: ...
 
     def loggable_command(self, argv: Sequence[str]) -> list[str]: ...
 
@@ -297,4 +336,5 @@ __all__ = [
     "CliUsage",
     "RateLimitState",
     "StreamUsage",
+    "ToolServerWiring",
 ]

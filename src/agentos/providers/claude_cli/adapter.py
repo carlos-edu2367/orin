@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from agentos.providers.claude_cli import catalog as catalog_mod
 from agentos.providers.claude_cli import command as cmd_mod
@@ -16,6 +16,7 @@ from agentos.providers.cli_adapter import (
     CliStreamTranslator,
     CliTurnRequest,
     RateLimitState,
+    ToolServerWiring,
 )
 
 if TYPE_CHECKING:
@@ -34,6 +35,8 @@ class ClaudeCliAdapter:
         tool_list_changed=True,
         images_in_tool_results=True,
         persistent_stdin=PERSISTENT_STDIN_OK,
+        reports_tool_inventory=True,
+        forbidden_item_kinds=frozenset(),
     )
 
     def resolve_binary(
@@ -50,7 +53,15 @@ class ClaudeCliAdapter:
     ) -> bool:
         return cmd_mod.is_version_validated(version)
 
-    def build_command(self, request: CliTurnRequest) -> list[str]:
+    def build_command(
+        self,
+        request: CliTurnRequest,
+        wiring: ToolServerWiring | None = None,
+    ) -> list[str]:
+        eff_wiring = wiring or request.tool_server_wiring or request.wiring
+        mcp_config_file = request.tool_server_config_file
+        if mcp_config_file is None and eff_wiring is not None and eff_wiring.files:
+            mcp_config_file = eff_wiring.files[0]
         return cmd_mod.build_claude_command(
             binary=request.binary,
             system_prompt_file=request.system_prompt_file,
@@ -58,7 +69,7 @@ class ClaudeCliAdapter:
             effort=request.effort,
             fallback_model=request.fallback_model,
             max_turns=request.max_turns,
-            mcp_config_file=request.tool_server_config_file,
+            mcp_config_file=mcp_config_file,
             mcp_server_name=request.tool_server_name,
             autocompact=request.autocompact,
             session_id=request.session_id,
@@ -75,6 +86,19 @@ class ClaudeCliAdapter:
             suffix=".json",
             directory=directory,
         )
+
+    def wire_tool_server(
+        self, handle: TurnToolServerHandle, directory: Path
+    ) -> ToolServerWiring:
+        cfg = self.write_tool_server_config(handle, directory)
+        return ToolServerWiring(
+            argv=("--mcp-config", str(cfg)),
+            env={},
+            files=(cfg,),
+        )
+
+    def encode_user_turn(self, content: list[dict[str, Any]]) -> bytes:
+        return cmd_mod.user_event_line(content).encode("utf-8")
 
     def loggable_command(self, argv: Sequence[str]) -> list[str]:
         return cmd_mod.redact_argv(argv)

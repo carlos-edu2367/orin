@@ -25,6 +25,8 @@ export type ProviderState = {
   setBaseUrl: (value: string) => void
   enabled: boolean
   setEnabled: (value: boolean) => void
+  riskAcknowledged: boolean
+  setRiskAcknowledged: (value: boolean) => void
   ollamaMode: 'local' | 'cloud'
   setOllamaMode: (value: 'local' | 'cloud') => void
   opencodeMode: 'local' | 'cloud'
@@ -70,6 +72,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
             : 'http://localhost:20128/v1',
   )
   const [enabled, setEnabled] = useState(true)
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false)
   const [ollamaMode, setOllamaMode] = useState<'local' | 'cloud'>('local')
   const [opencodeMode, setOpencodeMode] = useState<'local' | 'cloud'>('local')
   const [anthropicMode, setAnthropicMode] = useState<'local' | 'cloud'>('local')
@@ -94,6 +97,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       if (signal?.aborted) return
       setLoad({ status: 'loaded', state })
       if (state.enabled !== null) setEnabled(state.enabled)
+      if (provider === 'google-antigravity' && typeof state.extra.risk_acknowledged_at === 'string' && state.extra.risk_acknowledged_at.trim().length > 0) setRiskAcknowledged(true)
       if (provider === 'omniroute' && typeof state.extra.base_url === 'string') setBaseUrl(state.extra.base_url)
       if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
@@ -129,6 +133,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       if (controller.signal.aborted || mutationRevision.current > 0) return
       setLoad({ status: 'loaded', state })
       if (state.enabled !== null) setEnabled(state.enabled)
+      if (provider === 'google-antigravity' && typeof state.extra.risk_acknowledged_at === 'string' && state.extra.risk_acknowledged_at.trim().length > 0) setRiskAcknowledged(true)
       if (provider === 'omniroute' && typeof state.extra.base_url === 'string') setBaseUrl(state.extra.base_url)
       if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
         setBaseUrl(state.extra.base_url)
@@ -176,6 +181,8 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const canRevoke = load.status === 'loaded' && load.state.enabled === true
   const requiresApiKey =
     provider !== 'omniroute' &&
+    provider !== 'openai-codex' &&
+    provider !== 'google-antigravity' &&
     !(provider === 'ollama' && ollamaMode === 'local') &&
     !(provider === 'opencode' && opencodeMode === 'local') &&
     !(provider === 'anthropic' && anthropicMode === 'local') &&
@@ -194,13 +201,14 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
           apiKey,
           enabled,
           ...(provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'nvidia' || provider === 'anthropic' ? { baseUrl } : {}),
+          ...(provider === 'google-antigravity' ? { riskAcknowledged } : {}),
         },
         intentFor('configure'),
       )
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
-      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'anthropic') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'anthropic' || provider === 'openai-codex' || provider === 'google-antigravity') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')
@@ -316,7 +324,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   }
 
   return {
-    load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled,
+    load, action, apiKey, setApiKey, baseUrl, setBaseUrl, enabled, setEnabled, riskAcknowledged, setRiskAcknowledged,
     ollamaMode, setOllamaMode, opencodeMode, setOpencodeMode, anthropicMode, setAnthropicMode, nvidiaMode, setNvidiaMode, nvidiaTestResult,
     connection, installed, models, catalog, catalogLoading, canRevoke, requiresApiKey,
     reload: () => reload(), configure, revoke, refreshModels, loadModels, setFavorite, addCustomModel, removeCustomModel, testConnection, install,

@@ -13,6 +13,7 @@ from agentos.providers.cli_adapter import (
     CliEventKind,
     CliStreamTranslator,
     CliTurnRequest,
+    ToolServerWiring,
 )
 
 
@@ -96,9 +97,15 @@ class CliAdapterConformance:
         fx = self.get_fixtures()
         sys_file = tmp_path / "sys.txt"
         sys_file.write_text("TOP_SECRET_SYSTEM_PROMPT", encoding="utf-8")
-        cfg = fx.adapter.write_tool_server_config(
-            FakeToolServerHandle(), tmp_path
-        )
+        wire_fn = getattr(fx.adapter, "wire_tool_server", None)
+        if callable(wire_fn):
+            wiring = wire_fn(FakeToolServerHandle(), tmp_path)
+            cfg = wiring.files[0] if wiring.files else None
+        else:
+            wiring = None
+            cfg = fx.adapter.write_tool_server_config(  # type: ignore[attr-defined]
+                FakeToolServerHandle(), tmp_path
+            )
         req = CliTurnRequest(
             binary="/usr/bin/fake-cli",
             system_prompt_file=sys_file,
@@ -113,7 +120,42 @@ class CliAdapterConformance:
         assert "TOP_SECRET_SYSTEM_PROMPT" not in " ".join(logged)
         assert FakeToolServerHandle.token not in " ".join(logged)
         assert str(sys_file) not in " ".join(logged)
-        assert str(cfg) not in " ".join(logged)
+        if cfg is not None:
+            assert str(cfg) not in " ".join(logged)
+
+    def test_wiring_never_puts_secret_in_argv(self, tmp_path: Path) -> None:
+        fx = self.get_fixtures()
+        sys_file = tmp_path / "sys.txt"
+        sys_file.write_text("TOP_SECRET_SYSTEM_PROMPT", encoding="utf-8")
+        handle = FakeToolServerHandle()
+        wiring = fx.adapter.wire_tool_server(handle, tmp_path)
+        assert isinstance(wiring, ToolServerWiring)
+        assert handle.token not in " ".join(wiring.argv)
+        req = CliTurnRequest(
+            binary="/usr/bin/fake-cli",
+            system_prompt_file=sys_file,
+            model=fx.adapter.models()[0].id,
+            max_turns=4,
+            tool_server_config_file=wiring.files[0] if wiring.files else None,
+            tool_server_wiring=wiring,
+            capabilities=fx.adapter.capabilities,
+        )
+        argv = fx.adapter.build_command(req)
+        assert handle.token not in " ".join(argv)
+        logged = fx.adapter.loggable_command(argv)
+        assert handle.token not in " ".join(logged)
+        for fpath in wiring.files:
+            assert str(fpath) not in " ".join(logged)
+
+    def test_encode_user_turn_is_single_line_utf8(self) -> None:
+        fx = self.get_fixtures()
+        encoded = fx.adapter.encode_user_turn(
+            [{"type": "text", "text": "olá\nmundo"}]
+        )
+        assert isinstance(encoded, bytes)
+        decoded = encoded.decode("utf-8")
+        assert decoded.endswith("\n")
+        assert "\n" not in decoded[:-1]
 
     def test_environment_strips_cloud_api_keys(self) -> None:
         fx = self.get_fixtures()

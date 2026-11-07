@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a1b332-0328-7b73-848c-bad78a321689"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"orin","tool":"echo","arguments":{"text":"hello-from-codex"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"orin","tool":"echo","arguments":{"text":"hello-from-codex"},"result":{"content":[{"type":"text","text":"ECHO_OK:hello-from-codex"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"ECHO_OK:hello-from-codex"}}
+{"type":"turn.completed","usage":{"input_tokens":24601,"cached_input_tokens":16000,"cache_write_input_tokens":0,"output_tokens":90,"reasoning_output_tokens":0}}

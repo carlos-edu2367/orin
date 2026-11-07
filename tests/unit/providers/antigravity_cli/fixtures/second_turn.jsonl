@@ -1,0 +1,5 @@
+{"event":"step_update","step_update":{"conversation_id":"14140a4a-4bab-4165-ab52-ee036a3ab56a","step_index":2,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"14140a4a-4bab-4165-ab52-ee036a3ab56a","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"PONG_AG"}}
+{"event":"step_update","step_update":{"conversation_id":"14140a4a-4bab-4165-ab52-ee036a3ab56a","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"Y_T2"}}
+{"event":"step_update","step_update":{"conversation_id":"14140a4a-4bab-4165-ab52-ee036a3ab56a","step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"\n","duration_seconds":3.8582212,"usage":{"input_tokens":629,"output_tokens":8,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":637}}}
+{"event":"result","result":{"conversation_id":"14140a4a-4bab-4165-ab52-ee036a3ab56a","status":"SUCCESS","response":"PONG_AGY_T2\n","duration_seconds":5.2310348,"num_turns":2,"usage":{"input_tokens":1172,"output_tokens":13,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":1185}}}

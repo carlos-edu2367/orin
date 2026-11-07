@@ -1,7 +1,7 @@
 import { createBrowserApiClient, type ApiClient, type MutationIntent } from './client'
 import { invalidResponseError } from './errors'
 
-export const PROVIDER_NAMES = ['openai', 'anthropic', 'openrouter', 'nvidia', 'opencode', 'omniroute', 'ollama'] as const
+export const PROVIDER_NAMES = ['openai', 'openai-codex', 'anthropic', 'google-antigravity', 'openrouter', 'nvidia', 'opencode', 'omniroute', 'ollama'] as const
 export type ProviderName = (typeof PROVIDER_NAMES)[number]
 
 /**
@@ -24,6 +24,7 @@ export type ConfigureProviderInput = {
   apiKey: string
   enabled?: boolean
   baseUrl?: string
+  riskAcknowledged?: boolean
 }
 
 export type ProviderApiKeyState = {
@@ -172,6 +173,7 @@ export function configureProvider(
       api_key: input.apiKey,
       ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
       ...(input.baseUrl === undefined ? {} : { base_url: input.baseUrl }),
+      ...(input.riskAcknowledged === undefined ? {} : { risk_acknowledged: input.riskAcknowledged }),
     },
     intent,
     parse: parseProviderPublicState,
@@ -340,6 +342,66 @@ export function testNvidiaConnection(
       ...(input.baseUrl !== undefined && input.baseUrl !== '' ? { base_url: input.baseUrl } : {}),
     },
     parse: parseNvidiaTestResult,
+  })
+}
+
+export type CodexCliStatus = {
+  installed: boolean
+  version: string | null
+  supported: boolean
+  authenticated: boolean
+  login_command: string
+}
+
+function parseCodexCliStatus(value: unknown): CodexCliStatus {
+  const data = record(value)
+  if (typeof data.installed !== 'boolean') throw invalidResponseError()
+  if (typeof data.supported !== 'boolean') throw invalidResponseError()
+  if (typeof data.authenticated !== 'boolean') throw invalidResponseError()
+  return {
+    installed: data.installed,
+    version: nullableString(data.version),
+    supported: data.supported,
+    authenticated: data.authenticated,
+    login_command: typeof data.login_command === 'string' && data.login_command.length > 0 ? data.login_command : 'codex login',
+  }
+}
+
+export function getCodexCliStatus(client: ApiClient, signal?: AbortSignal): Promise<CodexCliStatus> {
+  return client.request({
+    path: `${providerPath('openai-codex')}/status`,
+    signal,
+    parse: parseCodexCliStatus,
+  })
+}
+
+export type AntigravityCliStatus = {
+  installed: boolean
+  version: string | null
+  supported: boolean
+  authenticated: boolean
+  login_command: string
+}
+
+function parseAntigravityCliStatus(value: unknown): AntigravityCliStatus {
+  const data = record(value)
+  if (typeof data.installed !== 'boolean') throw invalidResponseError()
+  if (typeof data.supported !== 'boolean') throw invalidResponseError()
+  if (typeof data.authenticated !== 'boolean') throw invalidResponseError()
+  return {
+    installed: data.installed,
+    version: nullableString(data.version),
+    supported: data.supported,
+    authenticated: data.authenticated,
+    login_command: typeof data.login_command === 'string' && data.login_command.length > 0 ? data.login_command : 'agy',
+  }
+}
+
+export function getAntigravityCliStatus(client: ApiClient, signal?: AbortSignal): Promise<AntigravityCliStatus> {
+  return client.request({
+    path: `${providerPath('google-antigravity')}/status`,
+    signal,
+    parse: parseAntigravityCliStatus,
   })
 }
 

@@ -34,14 +34,23 @@ class PostgresProviderCatalogRepository:
     def credential(self, context: ProviderCatalogContext, provider: str) -> dict[str, object] | None:
         with self._engine.connect() as connection:
             row = connection.execute(
-                select(provider_configurations.c.enabled, provider_configurations.c.base_url).where(
+                select(
+                    provider_configurations.c.enabled,
+                    provider_configurations.c.base_url,
+                    provider_configurations.c.risk_acknowledged_at,
+                ).where(
                     provider_configurations.c.user_id == context.user_id,
                     provider_configurations.c.provider == provider,
                 )
             ).mappings().first()
         if row is None:
             return None
-        value = dict(row)
+        value: dict[str, object] = {
+            "enabled": row["enabled"],
+            "base_url": row["base_url"],
+        }
+        if provider == "google-antigravity" or row["risk_acknowledged_at"] is not None:
+            value["risk_acknowledged_at"] = row["risk_acknowledged_at"]
         # Credentials are stored exclusively in provider_api_keys.  The old
         # configuration-table columns were removed when key rotation/fallback
         # was introduced; reading them here made every catalog refresh fail
@@ -86,12 +95,16 @@ class PostgresProviderCatalogRepository:
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
             configuration = connection.execute(select(
-                provider_configurations.c.enabled, provider_configurations.c.base_url,
+                provider_configurations.c.enabled,
+                provider_configurations.c.base_url,
+                provider_configurations.c.risk_acknowledged_at,
             ).where(
                 provider_configurations.c.user_id == context.user_id,
                 provider_configurations.c.provider == provider,
             )).mappings().first()
             if configuration is None or configuration["enabled"] is not True:
+                raise LookupError("provider is not enabled")
+            if provider == "google-antigravity" and configuration.get("risk_acknowledged_at") is None:
                 raise LookupError("provider is not enabled")
             base_url = configuration["base_url"]
             if provider == "opencode" and base_url is None and self._keys.next_available_key(context.user_id, provider) is None:
@@ -151,6 +164,10 @@ class PostgresProviderCatalogRepository:
             provider_model_catalog.c.user_id == context.user_id,
             provider_model_catalog.c.provider == provider,
             provider_configurations.c.enabled.is_(True),
+            (
+                (provider_configurations.c.provider != "google-antigravity")
+                | provider_configurations.c.risk_acknowledged_at.is_not(None)
+            ),
             (
                 provider_model_catalog.c.is_custom.is_(True)
                 | provider_configurations.c.catalog_refreshed_at.is_not(None)
@@ -215,12 +232,16 @@ class PostgresProviderCatalogRepository:
         now = datetime.now(UTC)
         with self._engine.begin() as connection:
             configuration = connection.execute(select(
-                provider_configurations.c.enabled, provider_configurations.c.base_url,
+                provider_configurations.c.enabled,
+                provider_configurations.c.base_url,
+                provider_configurations.c.risk_acknowledged_at,
             ).where(
                 provider_configurations.c.user_id == context.user_id,
                 provider_configurations.c.provider == provider,
             )).mappings().first()
             if configuration is None or configuration["enabled"] is not True:
+                raise LookupError("provider is not enabled")
+            if provider == "google-antigravity" and configuration.get("risk_acknowledged_at") is None:
                 raise LookupError("provider is not enabled")
             base_url = configuration["base_url"]
             if provider == "opencode" and base_url is None and self._keys.next_available_key(context.user_id, provider) is None:

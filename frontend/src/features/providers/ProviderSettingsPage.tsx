@@ -4,6 +4,8 @@ import { readBrowserSessionBootstrap, type BrowserSessionBootstrap } from '../..
 import { ApiError, isAuthenticationError, isCsrfAuthorizationError } from '../../api/errors'
 import { configureProvider, inspectProvider, revokeProvider, refreshProviderModels, listProviderModels, setProviderModelFavorite, testAnthropicConnection, testNvidiaConnection, testOmniRouteConnection, testOllamaConnection, installOmniRoute, getOmniRouteInstallationStatus, getOmniRouteRuntime, setOmniRouteAutoStart, controlOmniRoute, PROVIDER_NAMES, type NvidiaTestResult, type OmniRouteRuntime, type ProviderModel, type ProviderName, type ProviderPublicState } from '../../api/providers'
 import { AnthropicSetup } from './AnthropicSetup'
+import { AntigravitySetup } from './AntigravitySetup'
+import { CodexSetup } from './CodexSetup'
 import { NvidiaSetup } from './NvidiaSetup'
 import { OMNIROUTE_FREE_PROVIDER_GUIDES } from './omnirouteFreeProviders'
 import { MediaModelsSetting } from './MediaModelsSetting'
@@ -72,6 +74,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         : 'http://localhost:20128/v1',
   )
   const [enabled, setEnabled] = useState(true)
+  const [riskAcknowledged, setRiskAcknowledged] = useState(false)
   const [omniOpen, setOmniOpen] = useState(provider !== 'omniroute')
   // Ollama's mode is not stored: it is read back from the saved URL's host,
   // exactly as the backend derives it. One source, so the two cannot disagree.
@@ -94,6 +97,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       .then((state) => {
         setLoad({ status: 'loaded', state })
         if (state.enabled !== null) setEnabled(state.enabled)
+        if (provider === 'google-antigravity' && typeof state.extra.risk_acknowledged_at === 'string' && state.extra.risk_acknowledged_at.trim().length > 0) setRiskAcknowledged(true)
         if (provider === 'omniroute' && state.enabled === true) setOmniOpen(true)
         if (provider === 'omniroute' && typeof state.extra.base_url === 'string') setBaseUrl(state.extra.base_url)
         if (provider === 'ollama' && typeof state.extra.base_url === 'string') {
@@ -173,6 +177,8 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   // Cloud modes narrow back to requiring one (unless already configured), same as other providers.
   const requiresApiKey =
     provider !== 'omniroute' &&
+    provider !== 'openai-codex' &&
+    provider !== 'google-antigravity' &&
     !(provider === 'ollama' && ollamaMode === 'local') && !(provider === 'anthropic' && anthropicMode === 'local') &&
     !(provider === 'nvidia' && (nvidiaMode === 'self-hosted' || canRevoke))
 
@@ -189,6 +195,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
           apiKey,
           enabled,
           ...(provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' || provider === 'anthropic' ? { baseUrl } : {}),
+          ...(provider === 'google-antigravity' ? { riskAcknowledged } : {}),
         },
         intent,
       )
@@ -201,7 +208,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       // setup. Fetching the catalog here is what actually finishes the flow.
       // A refresh failure is reported on the catalog, never as a failed save:
       // the credential is already stored at this point.
-      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' || provider === 'anthropic') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'nvidia' || provider === 'opencode' || provider === 'anthropic' || provider === 'openai-codex' || provider === 'google-antigravity') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')
@@ -333,6 +340,8 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
   const isOllama = provider === 'ollama'
   const isAnthropic = provider === 'anthropic'
   const isNvidia = provider === 'nvidia'
+  const isCodex = provider === 'openai-codex'
+  const isAntigravity = provider === 'google-antigravity'
 
   return (
     <article className="provider-panel" aria-labelledby={`provider-${provider}-title`}>
@@ -418,7 +427,9 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
         onEnabledChange={setEnabled}
       />}
 
-      {!isOmniRoute && !isOllama && !isAnthropic && !isNvidia && <form className="provider-panel__form" onSubmit={onSave}>
+      {isCodex && <CodexSetup client={client} enabled={enabled} action={action} canRevoke={canRevoke} bootstrap={bootstrap} onSave={onSave} onRevoke={onRevoke} onEnabledChange={setEnabled} />}
+      {isAntigravity && <AntigravitySetup client={client} enabled={enabled} riskAcknowledged={riskAcknowledged} action={action} canRevoke={canRevoke} bootstrap={bootstrap} onSave={onSave} onRevoke={onRevoke} onEnabledChange={setEnabled} onRiskAcknowledgedChange={setRiskAcknowledged} />}
+      {!isOmniRoute && !isOllama && !isAnthropic && !isNvidia && !isCodex && !isAntigravity && <form className="provider-panel__form" onSubmit={onSave}>
         <label htmlFor={`${provider}-api-key`}>Chave de API</label>
         <input
           id={`${provider}-api-key`}
@@ -459,7 +470,7 @@ function ProviderPanel({ provider, client, bootstrap }: { provider: ProviderName
       </form>}
       {isOmniRoute && omniOpen && <OmniRouteFreeSetup />}
       {canRevoke && <section className="provider-panel__catalog" aria-label={`Modelos de ${providerLabel(provider)}`}>
-        {(isOmniRoute || isOllama || isAnthropic || isNvidia) && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
+        {(isOmniRoute || isOllama || isAnthropic || isNvidia || isCodex || isAntigravity) && <button type="button" className="button button--secondary" disabled={action.pending || bootstrap.status === 'missing_csrf'} onClick={onRefresh}>
           {action.pending && action.kind === 'refresh' ? 'Atualizando…' : 'Atualizar catálogo'}
         </button>}
         <button type="button" className="button button--secondary" disabled={catalogLoading} onClick={loadModels}>
@@ -495,6 +506,10 @@ function OmniRouteRuntimePanel({ client, bootstrap }: { client: ApiClient; boots
 
 function providerLabel(provider: ProviderName): string {
   switch (provider) {
+    case 'openai-codex':
+      return 'OpenAI Codex (Assinatura)'
+    case 'google-antigravity':
+      return 'Google Antigravity (Assinatura)'
     case 'openai':
       return 'OpenAI'
     case 'anthropic':

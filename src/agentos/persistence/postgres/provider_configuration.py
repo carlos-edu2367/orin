@@ -48,7 +48,11 @@ from agentos.api.contracts import ApplicationNotFoundError, ProviderCredentialRe
 from .schema import provider_configurations
 from .provider_api_keys import PostgresProviderApiKeyAdapter
 from agentos.persistence.provider_secrets import ProviderSecretCipher
-from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL, PROVIDERS_WITH_OPTIONAL_KEY
+from agentos.provider_catalog.models import (
+    PROVIDERS_WITH_BASE_URL,
+    PROVIDERS_WITH_OPTIONAL_KEY,
+    SUBSCRIPTION_CLI_PROVIDERS,
+)
 from agentos.provider_catalog.nvidia import (
     DEFAULT_NVIDIA_BASE_URL,
     NvidiaAuthenticationError,
@@ -86,7 +90,19 @@ from agentos.provider_catalog.claude_code import (
 from agentos.provider_catalog.http import AnthropicModelCatalogClient
 
 
+def _utc_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if isinstance(value, str) and value.strip():
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+    return None
+
+
 def _public(row) -> dict[str, object]:
+    ack_at = _utc_datetime(row.get("risk_acknowledged_at"))
     return {
         "provider": str(row["provider"]),
         "enabled": bool(row["enabled"]),
@@ -95,6 +111,7 @@ def _public(row) -> dict[str, object]:
         "key_cooldown_seconds": int(row["key_cooldown_seconds"]),
         "catalog_refreshed_at": row.get("catalog_refreshed_at"),
         **({"base_url": row["base_url"]} if str(row["provider"]) in PROVIDERS_WITH_BASE_URL and row.get("base_url") else {}),
+        **({"risk_acknowledged_at": ack_at} if str(row["provider"]) == "google-antigravity" or ack_at is not None else {}),
     }
 
 
@@ -134,13 +151,32 @@ class PostgresProviderConfigurationAdapter:
                     provider_configurations.c.provider == provider,
                 )
             ).mappings().first()
+            existing_ack = _utc_datetime(existing.get("risk_acknowledged_at")) if existing else None
+            raw_ack_at = _utc_datetime(command.get("risk_acknowledged_at"))
+            if "risk_acknowledged" in command and command.get("risk_acknowledged") is False:
+                risk_acknowledged_at: datetime | None = None
+            elif raw_ack_at is not None:
+                risk_acknowledged_at = raw_ack_at
+            elif command.get("risk_acknowledged") is True:
+                risk_acknowledged_at = existing_ack or now
+            elif "risk_acknowledged" in command and not command.get("risk_acknowledged"):
+                risk_acknowledged_at = None
+            else:
+                risk_acknowledged_at = existing_ack
+
+            if provider == "google-antigravity" and enabled and risk_acknowledged_at is None:
+                raise ValueError(
+                    "É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity."
+                )
+
             if existing is None:
                 secret_ref = f"provider-secret:{uuid4().hex}"
                 connection.execute(
                     insert(provider_configurations).values(
                         user_id=user_id, provider=provider, enabled=enabled,
                         base_url=base_url, secret_ref=secret_ref, key_cooldown_seconds=60,
-                        catalog_refreshed_at=None, created_at=now, updated_at=now,
+                        catalog_refreshed_at=None, risk_acknowledged_at=risk_acknowledged_at,
+                        created_at=now, updated_at=now,
                     )
                 )
                 row = {
@@ -151,11 +187,13 @@ class PostgresProviderConfigurationAdapter:
                     "has_secret": bool(api_key or existing_keys),
                     "key_cooldown_seconds": 60,
                     "catalog_refreshed_at": None,
+                    "risk_acknowledged_at": risk_acknowledged_at,
                 }
             else:
                 connection.execute(
                     update(provider_configurations).where(provider_configurations.c.id == existing["id"]).values(
-                        enabled=enabled, base_url=base_url, catalog_refreshed_at=None, updated_at=now,
+                        enabled=enabled, base_url=base_url, catalog_refreshed_at=None,
+                        risk_acknowledged_at=risk_acknowledged_at, updated_at=now,
                     )
                 )
                 row = {
@@ -166,6 +204,7 @@ class PostgresProviderConfigurationAdapter:
                     "has_secret": bool(api_key or existing_keys),
                     "key_cooldown_seconds": existing["key_cooldown_seconds"],
                     "catalog_refreshed_at": None,
+                    "risk_acknowledged_at": risk_acknowledged_at,
                 }
             # Sharing this connection/transaction with the key write below
             # means the provider_configurations row and its principal key
@@ -334,7 +373,7 @@ def _api_key(provider: str, value: object, base_url: str | None = None, *, has_e
     api_key = str(value or "").strip()
     if api_key and len(api_key) < 4:
         raise ValueError("provider API key is required")
-    optional = provider in PROVIDERS_WITH_OPTIONAL_KEY
+    optional = provider in PROVIDERS_WITH_OPTIONAL_KEY or provider in SUBSCRIPTION_CLI_PROVIDERS
     # Local Ollama, Local OpenCode Bridge, and Self-Hosted NVIDIA NIM need no
     # credential; their hosted cloud services always do.
     if provider == "ollama" and base_url is not None and is_ollama_cloud(base_url):
