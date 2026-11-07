@@ -651,4 +651,52 @@ def test_forbidden_item_kinds_detected_across_lifecycle_and_nested_shapes(
     )
 
 
+def test_mcp_tool_calls_read_then_write_carry_no_message_id() -> None:
+    tr = CodexJsonlTranslator()
+    lines = [
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "call_read_1",
+                    "type": "mcp_tool_call",
+                    "server": "orin",
+                    "tool": "read_file",
+                    "arguments": {"path": "a.py"},
+                    "result": {"content": [{"type": "text", "text": "x = 1\n"}]},
+                    "status": "completed",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "call_write_1",
+                    "type": "mcp_tool_call",
+                    "server": "orin",
+                    "tool": "write_file",
+                    "arguments": {"path": "a.py", "content": "x = 2\n"},
+                    "result": {"content": [{"type": "text", "text": "ok"}]},
+                    "status": "completed",
+                },
+            }
+        ),
+    ]
+    events = _run_lines(tr, lines)
+    tool_events = [
+        ev
+        for ev in events
+        if ev.kind
+        in (
+            CliEventKind.TOOL_USE_START,
+            CliEventKind.TOOL_USE_END,
+            CliEventKind.TOOL_RESULT,
+        )
+    ]
+    assert len(tool_events) >= 4
+    assert all(ev.message_id is None for ev in tool_events)
+
+
+
 
