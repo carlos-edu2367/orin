@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Callable
 
 from agentos.provider_catalog.claude_code import is_claude_cli_bridge_url
+from agentos.providers.antigravity_cli.adapter import AntigravityCliAdapter
 from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
 from agentos.providers.cli_adapter import CliAgentAdapter
 from agentos.providers.codex_cli.adapter import CodexCliAdapter
@@ -13,6 +14,7 @@ from agentos.providers.codex_cli.adapter import CodexCliAdapter
 CLI_PROVIDERS: dict[str, Callable[[], CliAgentAdapter]] = {
     "anthropic-cli": ClaudeCliAdapter,
     "openai-codex": CodexCliAdapter,
+    "google-antigravity": AntigravityCliAdapter,
 }
 
 

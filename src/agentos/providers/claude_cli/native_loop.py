@@ -93,6 +93,12 @@ def find_forbidden_item_kind(
         if isinstance(item_obj, Mapping):
             candidates.append(item_obj.get("type"))
             candidates.append(item_obj.get("kind"))
+        step_obj = payload.get("step_update")
+        if isinstance(step_obj, Mapping) and step_obj.get("step_type") == "tool":
+            candidates.append(step_obj.get("tool_name"))
+            tool_info = step_obj.get("tool_info")
+            if isinstance(tool_info, Mapping):
+                candidates.append(tool_info.get("name"))
         candidates.append(payload.get("type"))
         candidates.append(payload.get("kind"))
     if tool_name:
@@ -819,11 +825,17 @@ def start_native_turn_for_provider(
         bg_server = BackgroundTurnToolServer.start(
             TurnToolServer(wrapped_executor, server_name=request.server_name)
         )
+        ensure_isolated_cwd(request.cwd)
         wire_fn = getattr(adapter, "wire_tool_server", None)
         if callable(wire_fn):
+            wiring_dir = (
+                request.cwd
+                if getattr(adapter, "name", "") == "antigravity"
+                else Path(tempfile.gettempdir())
+            )
             wiring = wire_fn(
                 bg_server.handle,
-                Path(tempfile.gettempdir()),
+                wiring_dir,
             )
         else:
             mcp_cfg = adapter.write_tool_server_config(
