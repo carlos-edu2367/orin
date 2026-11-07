@@ -52,6 +52,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "media_model_selections",
             "agent_memories",
             "user_friend_personas",
+            "user_agents",
             "skills",
             "skill_versions",
             "agent_skills",

@@ -51,6 +51,10 @@ class AgentDefinition:
     tools: tuple[str, ...] | None = None  # None: every tool the parent may publish
     disallowed_tools: tuple[str, ...] = ()
     model: str | None = None  # None or "inherit": the parent's model
+    # Orin: the provider the agent runs on (None: the parent's) and the models it may run on, the first being the
+    # default. An agent with either set has its model pinned: it never falls back to the parent's model.
+    provider: str | None = None
+    models: tuple[str, ...] = ()
     permission_mode: str | None = None
     max_turns: int | None = None
     skills: tuple[str, ...] = ()
@@ -96,6 +100,46 @@ def _list(value: object) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))[:128]
 
 
+_PROVIDER = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+_MODEL_ID = re.compile(r"^[\w.:/@~+-]{1,200}$")
+MAX_AGENT_MODELS = 16
+
+
+def _provider_and_models(meta: Mapping[str, Any]) -> tuple[str | None, tuple[str, ...]]:
+    """``provider`` and ``models`` of a definition (Orin keys; Claude Code ignores them). ``models`` is a list or a
+    comma-separated text; without it, a ``model`` other than ``inherit`` is the only one when a provider is set."""
+    raw_provider = meta.get("provider")
+    provider = None
+    if raw_provider not in (None, ""):
+        provider = str(raw_provider).strip().lower()
+        if not _PROVIDER.fullmatch(provider):
+            raise ValueError("provider must be a provider id such as openai-codex")
+    raw_models = meta.get("models")
+    if isinstance(raw_models, str):
+        items = [part.strip() for part in raw_models.split(",")]
+    elif isinstance(raw_models, (list, tuple)):
+        items = [str(part).strip() for part in raw_models if isinstance(part, (str, int, float))]
+    elif raw_models in (None, ""):
+        items = []
+    else:
+        raise ValueError("models must be a list of model ids")
+    models = tuple(dict.fromkeys(item for item in items if item))
+    bad = [item for item in models if not _MODEL_ID.fullmatch(item)]
+    if bad:
+        raise ValueError(f"'{bad[0][:80]}' is not a model id")
+    if len(models) > MAX_AGENT_MODELS:
+        raise ValueError(f"at most {MAX_AGENT_MODELS} models")
+    if provider and not models:
+        single = _text(meta.get("model"), 120)
+        if not single or single.lower() == "inherit":
+            raise ValueError("an agent with a provider needs at least one model (models or model)")
+        models = (single,)
+    return provider, models
+
+
+provider_and_models = _provider_and_models  # also validates the agents a person makes in the interface
+
+
 def _flag(value: object) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() in {"true", "yes", "1"})
 
@@ -120,10 +164,11 @@ def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
     tools = _list(meta.get("tools")) if meta.get("tools") not in (None, "", "*") else None
     turns = meta.get("maxTurns")
     max_turns = int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None
+    provider, models = _provider_and_models(meta)
     return AgentDefinition(
         name=name, description=description, prompt=body.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin, path=path,
         tools=tools, disallowed_tools=_list(meta.get("disallowedTools")),
-        model=_text(meta.get("model"), 120), permission_mode=_text(meta.get("permissionMode"), 40),
+        model=_text(meta.get("model"), 120), provider=provider, models=models, permission_mode=_text(meta.get("permissionMode"), 40),
         max_turns=max_turns, skills=_list(meta.get("skills")), background=_flag(meta.get("background")),
         omit_claude_md=_flag(meta.get("omitClaudeMd")), isolation=_text(meta.get("isolation"), 20),
         effort=_text(meta.get("effort"), 20), color=_text(meta.get("color"), 20),
@@ -158,9 +203,15 @@ def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[Agent
             continue
         tools = _list(value.get("tools")) if value.get("tools") not in (None, "", "*") else None
         turns = value.get("maxTurns")
+        try:
+            provider, models = _provider_and_models(value)
+        except ValueError as error:
+            errors.append((name, str(error)[:200]))
+            continue
         found.append(AgentDefinition(
             name=name, description=description, prompt=prompt.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin,
             tools=tools, disallowed_tools=_list(value.get("disallowedTools")), model=_text(value.get("model"), 120),
+            provider=provider, models=models,
             permission_mode=_text(value.get("permissionMode"), 40),
             max_turns=int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None,
             skills=_list(value.get("skills")),

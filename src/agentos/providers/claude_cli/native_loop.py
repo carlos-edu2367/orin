@@ -975,6 +975,7 @@ def start_native_turn_for_provider(
                 tool_server_config_file=mcp_config_path,
                 tool_server_name=request.server_name,
                 tool_server_wiring=wiring,
+                tool_timeout_ms=mcp_tool_timeout_ms,
                 capabilities=adapter.capabilities,
                 autocompact=request.autocompact,
                 session_id=session_kwargs.get("session_id"),

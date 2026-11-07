@@ -314,8 +314,8 @@ def test_subagent_lifecycle_sets_failed_state_in_finally_on_unhandled_exception_
     session._subagent_prompt = lambda _rec, text, _tools: text
     session._subagent_limits = lambda **_kw: MagicMock()
     session._subagent_accounting = lambda *_a, **_kw: {}
-    session._child_cancelled = lambda _ev: (lambda _t: False)
-    session._definition_effort = lambda _def, _m: None
+    session._child_cancelled = lambda _ev, _caller=None: (lambda _t: False)
+    session._definition_effort = lambda _def, _m, _provider=None: None
 
     fake_toolset = MagicMock()
     fake_toolset.definitions.return_value = []

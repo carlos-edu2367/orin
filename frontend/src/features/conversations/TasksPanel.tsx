@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import type { ApiClient } from '../../api/client'
 import { getConversationOverview } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { listTasks, stopTask, type ShellTask } from '../../api/sessionTools'
 import { useKeybindingHandlers } from '../keybindings/engine'
+import { orderAgentTree } from './agentTree'
 
-export type BackgroundAgent = { agentId: string; name: string; role: string; state: string }
+/** `depth` is 0 for an agent the main agent started, 1 for one that agent started, and so on. */
+export type BackgroundAgent = { agentId: string; name: string; role: string; state: string; parentAgentId: string | null; depth: number }
 
 const SHELL_STATE: Record<ShellTask['state'], string> = { running: 'rodando', finished: 'terminado', unknown: 'estado desconhecido' }
 const AGENT_STATE: Record<string, string> = {
@@ -58,8 +60,12 @@ export function TasksPanel({ client, conversationId, onClose }: { client: ApiCli
           setError('Não foi possível ler os processos em segundo plano.')
         }
         if (overview.status === 'fulfilled') {
-          setAgents(overview.value.agents.filter((agent) => agent.parent_agent_id !== null)
-            .map((agent) => ({ agentId: agent.agent_id, name: agent.name, role: agent.role, state: agent.state })))
+          const subagents = overview.value.agents.filter((agent) => agent.parent_agent_id !== null)
+          setAgents(orderAgentTree(subagents, (agent) => agent.agent_id, (agent) => agent.parent_agent_id)
+            .map(({ item: agent, depth }) => ({
+              agentId: agent.agent_id, name: agent.name, role: agent.role, state: agent.state,
+              parentAgentId: agent.parent_agent_id, depth,
+            })))
         }
       })
     }
@@ -129,7 +135,12 @@ export function TasksPanel({ client, conversationId, onClose }: { client: ApiCli
               <h3>Agentes</h3>
               <ul className="tasks-panel__list">
                 {agents.map((agent) => (
-                  <li key={agent.agentId} className="tasks-panel__item">
+                  <li
+                    key={agent.agentId}
+                    className={agent.depth > 0 ? 'tasks-panel__item tasks-panel__item--nested' : 'tasks-panel__item'}
+                    style={{ '--agent-depth': agent.depth } as CSSProperties}
+                    data-depth={agent.depth}
+                  >
                     <div className="tasks-panel__row">
                       <span className="tasks-panel__command">{agent.name}</span>
                       <span className="tasks-panel__state">{AGENT_STATE[agent.state] ?? agent.state}{agent.role ? ` · ${agent.role}` : ''}</span>

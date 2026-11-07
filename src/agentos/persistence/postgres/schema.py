@@ -953,6 +953,29 @@ user_friend_personas = Table(
     Column("orb_theme", String(24), nullable=False, server_default="aurora"),
 )
 
+# A person's own subagents (specialised agents), made in the interface: what the Agent tool can start besides
+# Orin's builtins and the agents defined in files. ``provider`` null means the parent's provider; ``models_json``
+# lists the models it may run on, the first being the default.
+user_agents = Table(
+    "user_agents", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("name", String(64), nullable=False),
+    Column("description", Text, nullable=False),
+    Column("prompt", Text, nullable=False),
+    Column("provider", String(64), nullable=True),
+    Column("models_json", JSON, nullable=False, default=list),
+    Column("tools_json", JSON, nullable=True),
+    Column("disallowed_tools_json", JSON, nullable=False, default=list),
+    Column("effort", String(16), nullable=True),
+    Column("permission_mode", String(32), nullable=True),
+    Column("max_turns", Integer, nullable=True),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "name", name="uq_user_agents_user_name"),
+)
+
 # Agent Skills are procedural packages.  Keep identity, immutable published
 # versions and execution evidence distinct: a current version may move while
 # an execution must still explain exactly what it loaded.
@@ -1200,6 +1223,7 @@ __all__ = [
     "workspace_roots",
     "agent_memories",
     "user_friend_personas",
+    "user_agents",
     "skills",
     "skill_versions",
     "agent_skills",

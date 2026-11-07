@@ -31,7 +31,7 @@ from agentos.providers.codex_cli.command import (
     wire_codex_tool_server,
 )
 from agentos.providers.codex_cli.errors import classify_codex_error
-from agentos.providers.codex_cli.stream import CodexJsonlTranslator
+from agentos.providers.codex_cli.stream import FORBIDDEN_CODEX_ITEM_KINDS, CodexJsonlTranslator
 
 
 class CodexCliAdapter:
@@ -44,9 +44,7 @@ class CodexCliAdapter:
         images_in_tool_results=True,
         persistent_stdin=False,
         reports_tool_inventory=False,
-        forbidden_item_kinds=frozenset(
-            {"command_execution", "file_change", "web_search"}
-        ),
+        forbidden_item_kinds=FORBIDDEN_CODEX_ITEM_KINDS,
     )
 
     def resolve_binary(

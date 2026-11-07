@@ -255,6 +255,23 @@ def tools_for(phase: Phase, toolkits: frozenset[str] | None = None) -> frozenset
     return frozenset(names)
 
 
+def toolkit_hint(tool: str, phase: Phase) -> str:
+    """How to unlock a refused tool that a toolkit adds (empty when no contract can unlock it in this phase).
+
+    Without it a model sees only the allowed list and may give up on, say, delegating, instead of revising the
+    contract.
+    """
+    if phase not in (Phase.ORIENT, Phase.EXECUTE):
+        return ""
+    kits = sorted(kit for kit, names in TOOLKIT_TOOLS.items() if tool in names)
+    if not kits:
+        return ""
+    return (
+        f". It belongs to the tool family '{kits[0]}': call write_contract with toolkits including '{kits[0]}' "
+        f"(if you already wrote one, keep its families), then call {tool} again."
+    )
+
+
 def kinds_for(toolkits: frozenset[str] | None, *, phase: Phase | None = None) -> frozenset[str]:
     """Tool *kinds* the contract opened up, for families discovered at runtime."""
     kinds: set[str] = set()
@@ -267,5 +284,5 @@ def kinds_for(toolkits: frozenset[str] | None, *, phase: Phase | None = None) ->
 
 __all__ = [
     "DEFAULT_PHASE_BUDGETS", "PHASE_INSTRUCTIONS", "PHASE_TOOLS", "Phase", "PhaseBudget",
-    "PhaseController", "TOOLKIT_KINDS", "TOOLKIT_TOOLS", "kinds_for", "tools_for",
+    "PhaseController", "TOOLKIT_KINDS", "TOOLKIT_TOOLS", "kinds_for", "toolkit_hint", "tools_for",
 ]

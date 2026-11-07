@@ -2753,6 +2753,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_conversation_routes(app, services, principal_for, conversation_root)
     from .friend_routes import register_friend_routes
     register_friend_routes(app, services, principal_for)
+    from .custom_agent_routes import register_custom_agent_routes
+    register_custom_agent_routes(app, services, principal_for)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
 

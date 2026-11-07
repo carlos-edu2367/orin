@@ -16,8 +16,11 @@ import re
 import shutil
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
+from functools import partial
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
@@ -52,7 +55,7 @@ from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .contract import parse as parse_contract
 from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
-from .loop_settings import BudgetMeter, bypass_disabled
+from .loop_settings import BudgetMeter, bypass_disabled, positive_int, restricted_minimum
 from .read_state import copy_read_state, prepare_carried_state
 from .reminders import ReminderQueue, system_reminder
 from .tools.interaction.notify import NotificationBudget
@@ -68,6 +71,9 @@ logger = logging.getLogger(__name__)
 _MCP_MENTION = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9-]{0,31}):(\S+)")
 _RESOURCE_CLOSE = re.compile(r"</\s*mcp-resource", re.IGNORECASE)  # W7: a resource cannot end its own wrapper
 MAX_MCP_MENTIONS = 5
+# `@agent-name` in the person's message: they ask for that agent (a defined one) in this task.
+_AGENT_MENTION = re.compile(r"(?<![\w@/.\\-])@([a-z0-9][a-z0-9_-]{0,63})(?![\w./\\:-])")
+MAX_AGENT_MENTIONS = 5
 MCP_MENTION_CHARS = 20_000
 
 
@@ -160,6 +166,10 @@ def _env_optional_positive_int(name: str) -> int | None:
 
 MAX_CONCURRENT_SUBAGENTS = max(1, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
 MAX_SUBAGENTS_PER_TURN: int | None = _env_optional_positive_int("ORIN_MAX_SUBAGENTS_PER_TURN")
+# How many levels of subagents may sit below the main agent (its children are level 1). A subagent at the
+# last level gets no delegation tools. `subagentMaxDepth` sets it; a repository may only lower it.
+DEFAULT_SUBAGENT_MAX_DEPTH = 3
+SUBAGENT_MAX_DEPTH_CAP = 6
 PREVIEW_CHARS = 400
 # A manifest at the workspace root names the stack a project is built with —
 # npm vs. pip vs. cargo, which is exactly what a weak model otherwise has to
@@ -740,6 +750,100 @@ def _skill_prompt_tokens(skill_catalog: tuple[object, ...]) -> int:
     return max(1, len(text) // 4)
 
 
+class _SubagentSlot:
+    """One running subagent's place in the turn's concurrency semaphore.
+
+    While the subagent waits for a subagent it called (synchronously, in a batch or through a wait on a
+    background one), it lends its place out, so a chain of delegations never waits on itself, even with a
+    single slot. Several tool calls of the same subagent may wait at once: the place goes back to the
+    semaphore with the first and is taken again after the last.
+    """
+
+    def __init__(self, semaphore: BoundedSemaphore) -> None:
+        self._semaphore = semaphore
+        self._cond = threading.Condition()
+        self._held = False
+        self._waiting = 0
+        self._reacquiring = False
+
+    def acquire(self) -> None:
+        self._semaphore.acquire()
+        with self._cond:
+            self._held = True
+
+    def release(self) -> None:
+        with self._cond:
+            while self._reacquiring:
+                self._cond.wait()
+            if self._held:
+                self._held = False
+                self._semaphore.release()
+
+    @property
+    def held(self) -> bool:
+        with self._cond:
+            return self._held
+
+    @contextmanager
+    def lent(self) -> Iterator[None]:
+        with self._cond:
+            while self._reacquiring:
+                self._cond.wait()
+            self._waiting += 1
+            if self._held:
+                self._held = False
+                self._semaphore.release()
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._waiting -= 1
+                take_back = not self._waiting and not self._held
+                if take_back:
+                    self._reacquiring = True
+            if take_back:
+                acquired = False
+                try:
+                    self._semaphore.acquire()
+                    acquired = True
+                finally:
+                    with self._cond:
+                        self._held = acquired
+                        self._reacquiring = False
+                        self._cond.notify_all()
+
+
+@dataclass(frozen=True)
+class _PinnedModels:
+    """An agent definition that names its provider and/or models: it runs only on them (never the parent's model)."""
+
+    provider: str  # the definition's provider, or the turn's when the definition names none
+    models: tuple[str, ...]
+
+
+@dataclass(eq=False)
+class SubagentCaller:
+    """Who is delegating: the main agent (depth 0) or a running subagent.
+
+    A subagent's delegation tools are bound to its own caller, so whatever it starts records it as the
+    parent, inherits its restrictions and stops with it.
+    """
+
+    agent_id: str
+    name: str
+    depth: int
+    permission_mode: str
+    read_only: bool = False
+    cancelled: Callable[[dict[str, object]], bool] | None = None
+    history: Callable[[], list[dict[str, Any]]] | None = None
+    toolset: Any = None
+    slot: _SubagentSlot | None = None
+
+    @property
+    def is_main(self) -> bool:
+        return self.depth == 0
+
+
 class _SubagentStore:
     """Turn-store view for a subagent run.
 
@@ -974,6 +1078,7 @@ class TurnSession:
         vision_reader_factory: Callable[[], object] | None = None,
         child_model_ids: tuple[str, ...] = (),
         child_model_authorizer: Callable[[str], bool] | None = None,
+        agent_model_authorizer: Callable[[str, str], bool] | None = None,
         child_provider_factory: Callable[[str], object] | None = None,
         mcp_provider=None,
         mcp_service=None,
@@ -989,6 +1094,7 @@ class TurnSession:
         media_client=None,
         max_subagents_per_turn: int | None = MAX_SUBAGENTS_PER_TURN,
         max_concurrent_subagents: int = MAX_CONCURRENT_SUBAGENTS,
+        subagent_max_depth: int | None = None,
         lifecycle: LifecycleBus | None = None,
         catalog_pricing: Mapping[str, object] | None = None,
         fallback_provider_factory: Callable[[str], object] | None = None,
@@ -1087,7 +1193,9 @@ class TurnSession:
             model_id.strip() for model_id in child_model_ids if isinstance(model_id, str) and model_id.strip()
         ))
         self._child_model_authorizer = child_model_authorizer or (lambda model_id: model_id in self.child_model_ids)
-        self._child_provider_factory = child_provider_factory or (lambda _model_id: self.provider_factory())
+        self._child_provider_factory = child_provider_factory or (lambda _model_id, **_routing: self.provider_factory())
+        # An agent with pinned models: (model_id, provider) -> whether this person may run it there now.
+        self._agent_model_authorizer = agent_model_authorizer
         # Best-effort: a store that does not expose attachments (most test
         # doubles) simply means this turn carries none for the pre-read path.
         attachments_reader = getattr(store, "attachments_for_turn", None)
@@ -1121,6 +1229,9 @@ class TurnSession:
         self._max_subagents_per_turn: int | None = max_subagents_per_turn
         self._max_concurrent_subagents: int = max(1, int(max_concurrent_subagents))
         self._subagent_semaphore = BoundedSemaphore(self._max_concurrent_subagents)
+        # The tree of this turn's delegations: agent_id -> the agent that started it (the main agent or a subagent).
+        self._agent_parents: dict[str, str] = {}
+        self._subagent_max_depth_override: int | None = subagent_max_depth
         self._builtin_type_counts: dict[str, int] = {}
         # W5 agent teams: the roster (name -> agent_id, team_name, type, busy), guarded by its own lock.
         self._team_lock = Lock()
@@ -1289,7 +1400,7 @@ class TurnSession:
                     "iteration": payload.get("iteration"),
                 },
                 agent_id=actor,
-                parent_agent_id=self.main_agent_id if is_subagent else None,
+                parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             return
         if state == "generating_tool_call":
@@ -1308,7 +1419,7 @@ class TurnSession:
                     "bytes_received": int(payload.get("bytes_received") or 0),
                 },
                 agent_id=actor,
-                parent_agent_id=self.main_agent_id if is_subagent else None,
+                parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             return
         if state == "context_updated":
@@ -1345,7 +1456,7 @@ class TurnSession:
                 self._started_summary(name, started_payload),
                 started_payload,
                 agent_id=actor,
-                parent_agent_id=self.main_agent_id if is_subagent else None,
+                parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             if self.turn.get("code_mode") == "code":
                 if name == "verify_project" or (
@@ -1372,7 +1483,7 @@ class TurnSession:
                     "elapsed_ms": int(payload.get("elapsed_ms") or 0),
                 },
                 agent_id=actor,
-                parent_agent_id=self.main_agent_id if is_subagent else None,
+                parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             return
         if state == "tool_finished":
@@ -1399,7 +1510,7 @@ class TurnSession:
                     "error_code": payload.get("error_code"),
                 },
                 agent_id=actor,
-                parent_agent_id=self.main_agent_id if is_subagent else None,
+                parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             ledger = getattr(self.store, "record_tool_call", None)
             tool_arguments: dict[str, Any] = {}
@@ -1605,7 +1716,7 @@ class TurnSession:
                     wait_summary,
                     wait_payload,
                     agent_id=actor,
-                    parent_agent_id=self.main_agent_id,
+                    parent_agent_id=self._parent_of(actor),
                 )
             else:
                 self._record(
@@ -1622,7 +1733,7 @@ class TurnSession:
                     f"{agent_name or 'Subagente'} tentando novamente",
                     {**base, "attempt": payload.get("attempt")},
                     agent_id=actor,
-                    parent_agent_id=self.main_agent_id,
+                    parent_agent_id=self._parent_of(actor),
                 )
             else:
                 self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
@@ -1664,7 +1775,7 @@ class TurnSession:
                 f"{agent_name or 'Subagente'} trabalhando",
                 base,
                 agent_id=actor,
-                parent_agent_id=self.main_agent_id if is_subagent else None,
+                parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             return
         if state in {
@@ -1682,6 +1793,96 @@ class TurnSession:
             return
 
     # -- subagents ------------------------------------------------------
+
+    def _agent_tree(self) -> dict[str, str]:
+        """agent_id -> the agent that started it in this turn."""
+        tree = getattr(self, "_agent_parents", None)
+        if tree is None:
+            tree = self._agent_parents = {}
+        return tree
+
+    def _parent_of(self, agent_id: str) -> str:
+        """The agent that started ``agent_id`` in this turn; the main agent when nobody is recorded."""
+        return self._agent_tree().get(agent_id) or self.main_agent_id
+
+    def _subagent_max_depth(self) -> int:
+        """How many levels of subagents may sit below the main agent (``subagentMaxDepth``, a repository only lowers it)."""
+        override = getattr(self, "_subagent_max_depth_override", None)
+        if override is not None:
+            value = override
+        else:
+            value = restricted_minimum(
+                getattr(self, "effective_settings", None), "subagentMaxDepth", positive_int, DEFAULT_SUBAGENT_MAX_DEPTH,
+            )
+        try:
+            depth = int(value)
+        except (TypeError, ValueError):
+            depth = DEFAULT_SUBAGENT_MAX_DEPTH
+        return max(1, min(SUBAGENT_MAX_DEPTH_CAP, depth))
+
+    def _main_caller(self) -> SubagentCaller:
+        """The main agent as a delegating caller (depth 0)."""
+
+        def history() -> list[dict[str, Any]]:
+            reader = getattr(self.store, "history_for_turn", None)
+            return [dict(item) for item in reader(self.turn)] if callable(reader) else []
+
+        return SubagentCaller(
+            agent_id=self.main_agent_id, name="Main", depth=0, permission_mode=self.permission_mode,
+            cancelled=self.cancelled, history=history,
+        )
+
+    def _adopt_subagent(self, record: Mapping[str, object], parent_agent_id: str) -> None:
+        """Record who started this run of ``record``, also in the store when the saved parent is another agent."""
+        agent_id = str(record.get("agent_id") or "")
+        if not agent_id:
+            return
+        self._agent_tree()[agent_id] = parent_agent_id
+        if str(record.get("parent_agent_id") or "") == parent_agent_id:
+            return
+        setter = getattr(self.agents_store, "set_parent", None)
+        if callable(setter):
+            try:
+                setter(agent_id, parent_agent_id)
+            except Exception:  # noqa: BLE001 - the in-turn tree is already right; the saved parent is best effort
+                logger.debug("parent of %s could not be saved", agent_id, exc_info=True)
+
+    def _is_descendant(self, agent_id: str, ancestor_id: str) -> bool:
+        """True when ``agent_id`` was started, directly or through other subagents, by ``ancestor_id``."""
+        if not agent_id or agent_id == ancestor_id:
+            return False
+        if ancestor_id == self.main_agent_id:
+            return True
+        current, seen = agent_id, set()
+        while current and current not in seen and len(seen) < 64:
+            seen.add(current)
+            parent = self._agent_tree().get(current)
+            if parent is None:
+                record = self._find_subagent_record_by_id(current)
+                parent = str(record.get("parent_agent_id") or "") if record is not None else ""
+            if parent == ancestor_id:
+                return True
+            if not parent or parent == self.main_agent_id:
+                return False
+            current = parent
+        return False
+
+    def _ownership_refusal(self, agent_id: str, caller: SubagentCaller | None) -> ToolOutcome | None:
+        """Why ``caller`` may not inspect, resume or stop ``agent_id`` (None when it may: the main agent sees every agent)."""
+        if caller is None or caller.is_main or self._is_descendant(agent_id, caller.agent_id):
+            return None
+        return ToolOutcome(
+            "failed", "Agente fora do seu alcance",
+            f"Agent '{str(agent_id)[:80]}' was not started by you or by a subagent you started; "
+            "you can only inspect, resume or stop your own subagents.",
+            {"agent_id": str(agent_id), "tool_kind": "agent"}, "AGENT_NOT_OWNED",
+        )
+
+    @staticmethod
+    def _lend_slot(caller: SubagentCaller | None):
+        """While a subagent waits for one it called, its concurrency slot goes to the work it waits for."""
+        slot = caller.slot if caller is not None else None
+        return slot.lent() if slot is not None else nullcontext()
 
     def _current_model_id(self) -> str:
         return str(self.turn.get("model_id") or "").strip()
@@ -1714,7 +1915,8 @@ class TurnSession:
         current_model_id = self._current_model_id()
         return bool(model_id) and ((allow_current and model_id == current_model_id) or self._child_model_authorizer(model_id))
 
-    def _create_agent(self, name: str, role: str, model_id: str | None = None) -> ToolOutcome:
+    def _create_agent(self, name: str, role: str, model_id: str | None = None, *, caller: SubagentCaller | None = None) -> ToolOutcome:
+        parent_agent_id = caller.agent_id if caller is not None else self.main_agent_id
         requested_model_id = str(model_id).strip() if model_id is not None else ""
         selected_model_id = self._resolve_child_model(requested_model_id or None)
         if not selected_model_id or not self._child_model_allowed(selected_model_id, allow_current=True):
@@ -1729,7 +1931,7 @@ class TurnSession:
         record = self.agents_store.create(
             clean,
             str(role),
-            parent_agent_id=self.main_agent_id,
+            parent_agent_id=parent_agent_id,
             provider=str(self.turn.get("provider") or ""),
             model_id=selected_model_id,
         )
@@ -1738,8 +1940,9 @@ class TurnSession:
             f"Criou o agente {clean}",
             {"agent_name": clean, "role": str(role)[:200], "label": clean, "created": bool(record.get("created", True)),
              "provider": str(record.get("provider") or ""), "model_id": str(record.get("model_id") or "")},
-            agent_id=str(record["agent_id"]), parent_agent_id=self.main_agent_id,
+            agent_id=str(record["agent_id"]), parent_agent_id=parent_agent_id,
         )
+        self._adopt_subagent(record, parent_agent_id)
         return ToolOutcome(
             "succeeded", f"Criou o agente {clean}",
             f"Subagent '{clean}' is ready. Send it work with ask_agent(name=\"{clean}\", task=...).",
@@ -1752,7 +1955,11 @@ class TurnSession:
         model_id: str | None = None,
         *,
         instance_name: str | None = None,
+        parent_agent_id: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, object] | None:
+        parent_agent_id = parent_agent_id or self.main_agent_id
+        record_provider = provider or str(self.turn.get("provider") or "")
         key = subagent_type.strip().lower()
         if key == "general-purpose":
             key = "general"
@@ -1773,8 +1980,8 @@ class TurnSession:
                     created = self.agents_store.create(
                         target_name,
                         str(spec["role"]),
-                        parent_agent_id=self.main_agent_id,
-                        provider=str(self.turn.get("provider") or ""),
+                        parent_agent_id=parent_agent_id,
+                        provider=record_provider,
                         model_id=selected_model_id,
                         force_new=(target_name != key),
                     )
@@ -1782,8 +1989,8 @@ class TurnSession:
                     created = self.agents_store.create(
                         target_name,
                         str(spec["role"]),
-                        parent_agent_id=self.main_agent_id,
-                        provider=str(self.turn.get("provider") or ""),
+                        parent_agent_id=parent_agent_id,
+                        provider=record_provider,
                         model_id=selected_model_id,
                     )
                 merged = dict(created)
@@ -1795,7 +2002,7 @@ class TurnSession:
             "agent_id": f"agent:{target_name}",
             "name": target_name,
             "role": str(spec["role"]),
-            "provider": str(self.turn.get("provider") or ""),
+            "provider": record_provider,
             "model_id": selected_model_id,
             "builtin_type": key,
         }
@@ -1820,14 +2027,14 @@ class TurnSession:
             }
         return _BUILTIN_SUBAGENT_SPECS.get(str(key or "").strip().lower())
 
-    def _definition_effort(self, definition: object, model_id: str) -> str | None:
+    def _definition_effort(self, definition: object, model_id: str, provider: str | None = None) -> str | None:
         """W5 deviation 9: an agent file's ``effort``, when its model takes a reasoning control (else nothing)."""
         from .effort import normalize_effort, reasoning_supported
 
         level = normalize_effort(getattr(definition, "effort", None)) if definition is not None else None
         if level is None:
             return None
-        provider = str(self.turn.get("provider") or "")
+        provider = provider or str(self.turn.get("provider") or "")
         return level if reasoning_supported(provider, str(model_id or ""), self.model_capabilities) else None
 
     def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
@@ -1852,6 +2059,88 @@ class TurnSession:
             return resolved
         logger.info("%s asks for model %s, which is not allowed here; it runs on the parent's model", who, wanted)
         return None
+
+    def _pinned_models(self, spec: Mapping[str, object] | None) -> _PinnedModels | None:
+        """The provider and models an agent definition pins it to (aliases through ``modelAliases``), or None."""
+        definition = spec.get("definition") if isinstance(spec, Mapping) else None
+        if definition is None or not (getattr(definition, "models", ()) or getattr(definition, "provider", None)):
+            return None
+        from .agent_definitions import resolve_agent_model
+        from .loop_settings import operator_value
+
+        aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
+        aliases = aliases if isinstance(aliases, Mapping) else None
+        models = tuple(dict.fromkeys(resolve_agent_model(item, aliases) or item for item in definition.models))
+        return _PinnedModels(provider=definition.provider or str(self.turn.get("provider") or ""), models=models)
+
+    def _pinned_model_allowed(self, model_id: str, provider: str) -> bool:
+        """Whether this person may run ``model_id`` on ``provider`` now (enabled provider, model in its catalog).
+        Without an authorizer only the turn's own provider is known: its favorites and current model."""
+        authorizer = getattr(self, "_agent_model_authorizer", None)
+        if authorizer is not None:
+            try:
+                return bool(authorizer(model_id, provider))
+            except Exception:  # noqa: BLE001 - an authorizer that breaks allows nothing
+                logger.warning("agent model authorizer failed for %s on %s", model_id, provider, exc_info=True)
+                return False
+        return provider == str(self.turn.get("provider") or "") and self._child_model_allowed(model_id, allow_current=True)
+
+    def _choose_pinned_model(
+        self, pinned: _PinnedModels, requested: str, previous: str | None, who: str,
+    ) -> tuple[str, tuple[str, ...]] | ToolOutcome:
+        """The model a pinned agent runs on, and the order to try the others if it cannot start.
+
+        A requested model must be one of the agent's. Without one: the model of the run being resumed, the only
+        available model, or a refusal listing them so the caller chooses (the agent never runs on the caller's model).
+        """
+        from .agent_definitions import resolve_agent_model
+        from .loop_settings import operator_value
+
+        available = [item for item in pinned.models if self._pinned_model_allowed(item, pinned.provider)]
+        payload: dict[str, object] = {
+            "agent_name": who, "label": who, "tool_kind": "agent", "provider": pinned.provider,
+            "models": list(pinned.models), "available_models": available,
+        }
+        listed = f"{pinned.provider}: {', '.join(pinned.models)}"
+        if requested:
+            aliases = operator_value(getattr(self, "effective_settings", None), "modelAliases")
+            wanted = resolve_agent_model(requested, aliases if isinstance(aliases, Mapping) else None) or requested
+            match = next((item for item in pinned.models if item.lower() == wanted.lower()), None)
+            if match is None:
+                return ToolOutcome(
+                    "failed", f"Modelo de {who} nao permitido",
+                    f"Agent '{who}' runs only on its own models ({listed}). Pass one of them as model_id"
+                    + (" or omit model_id." if len(available) == 1 else "."),
+                    payload, "CHILD_MODEL_NOT_ALLOWED",
+                )
+            if match not in available:
+                return ToolOutcome(
+                    "failed", f"Modelo {match} indisponivel",
+                    f"Model '{match}' of agent '{who}' is not available now: the provider {pinned.provider} is off, "
+                    "not logged in, or does not list it."
+                    + (f" Available: {', '.join(available)}." if available else ""),
+                    payload, "CHILD_MODEL_NOT_AVAILABLE",
+                )
+            chosen = match
+        elif previous and previous in available:
+            chosen = previous  # a resumed agent keeps the model it ran on
+        elif len(available) == 1:
+            chosen = available[0]
+        elif not available:
+            return ToolOutcome(
+                "failed", f"Nenhum modelo de {who} disponivel",
+                f"None of the models of agent '{who}' ({listed}) is available now: the provider is off, not logged "
+                "in, or does not list them. It does not run on your model; do this work yourself or tell the person.",
+                payload, "CHILD_MODEL_NOT_AVAILABLE",
+            )
+        else:
+            return ToolOutcome(
+                "failed", f"Escolha o modelo de {who}",
+                f"Agent '{who}' runs on several models ({pinned.provider}: {', '.join(available)}). "
+                "Call it again with model_id set to the one that fits this task.",
+                payload, "CHILD_MODEL_REQUIRED",
+            )
+        return chosen, (chosen, *[item for item in available if item != chosen])
 
     def _defined_agents_hint(self) -> str:
         catalog = getattr(self, "_agent_definitions", None)
@@ -1909,6 +2198,16 @@ class TurnSession:
         except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
             logger.exception("agent definitions could not be read")
             return AgentCatalog()
+        for definition in self._user_agent_definitions():
+            # The agents the person made in the interface: above their own files and plugins, below a repository's
+            # and a managed policy's (those keep the name).
+            previous = catalog.agents.get(definition.name)
+            if previous is not None and previous.origin in {"managed", "project"}:
+                catalog.shadowed.append((definition.name, "orin", previous.origin))
+                continue
+            if previous is not None:
+                catalog.shadowed.append((definition.name, previous.origin, "orin"))
+            catalog.agents[definition.name] = definition
         if self.cli_options is not None and self.cli_options.agents:
             from .agent_definitions import agents_from_mapping
 
@@ -1924,23 +2223,56 @@ class TurnSession:
             logger.warning("agent definition %s ignored: %s", path, reason)
         return catalog
 
-    def _announce_defined_agents(self) -> None:
-        """A reminder naming the agents the Agent tool can start besides Orin's builtins (W5)."""
+    def _user_agent_definitions(self) -> list[Any]:
+        """The enabled agents this Orin user made in the interface (``user_agents``); none when there is no database."""
+        user_id = str(self.turn.get("user_id") or "").strip()
+        if not user_id:
+            return []
+        store = getattr(self, "user_agent_store", None)
+        if store is None:
+            engine = getattr(getattr(self, "chat_store", None), "_engine", None)
+            if engine is None:
+                return []
+            from agentos.persistence.postgres.user_agents import UserAgentStore
+
+            store = self.user_agent_store = UserAgentStore(engine)
+        try:
+            return list(store.definitions(user_id))
+        except Exception:  # noqa: BLE001 - a missing table or a broken row never stops a turn
+            logger.warning("the person's own agents could not be read", exc_info=True)
+            return []
+
+    def _defined_agents_text(self) -> str:
+        """The agents the Agent tool can start besides Orin's builtins, with the models a pinned agent runs on."""
         catalog = getattr(self, "_agent_definitions", None)
         if catalog is None:
-            return
-        lines, used = [], 0
+            return ""
+        lines, used, any_pinned = [], 0, False
         for definition in sorted(catalog.agents.values(), key=lambda item: item.name):
-            line = f"- {definition.name}: {' '.join(definition.description.split())[:200]}"
+            pinned = self._pinned_models({"definition": definition})
+            tag = f" [{pinned.provider}: {' | '.join(pinned.models)}]" if pinned is not None else ""
+            any_pinned = any_pinned or pinned is not None
+            line = f"- {definition.name}{tag}: {' '.join(definition.description.split())[:200]}"
             if used + len(line) > 4_000:
                 break
             lines.append(line)
             used += len(line)
-        if lines:
-            self._reminders.add(
-                "agents", "Besides Explore, Plan and general-purpose, the Agent tool can start these agents (subagent_type = name):\n" + "\n".join(lines),
-                key="defined-agents",
+        if not lines:
+            return ""
+        text = "Besides Explore, Plan and general-purpose, the Agent tool can start these agents (subagent_type = name):\n" + "\n".join(lines)
+        if any_pinned:
+            text += (
+                "\nAn agent with [provider: models] runs only on those models, never on yours. When it lists more than "
+                "one, pass model_id with the one that fits the task (a call without it is refused)."
             )
+        return text
+
+    def _announce_defined_agents(self, reminders: ReminderQueue | None = None) -> None:
+        """A reminder naming the agents the Agent tool can start besides Orin's builtins (W5); a subagent that may
+        delegate gets it in its own queue."""
+        text = self._defined_agents_text()
+        if text:
+            (reminders if reminders is not None else self._reminders).add("agents", text, key="defined-agents")
 
     def _find_subagent_record_by_id(self, agent_id: str) -> dict[str, object] | None:
         with self._subagent_lock:
@@ -1972,11 +2304,18 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        caller: SubagentCaller | None = None,
     ) -> ToolOutcome:
+        if teammate_name and caller is not None and not caller.is_main:
+            return ToolOutcome(
+                "failed", "Colegas de equipe só no agente principal",
+                "Only the main agent can start teammates (agent teams). Run this subagent without teammate_name.",
+                {"tool_kind": "agent"}, "TEAMMATE_NOT_ALLOWED",
+            )
         if not teammate_name:
             return self._start_subagent(
                 subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
-                run_in_background=run_in_background, hook_cancel=hook_cancel,
+                run_in_background=run_in_background, hook_cancel=hook_cancel, caller=caller,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
         if refusal is not None:
@@ -2006,6 +2345,7 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        caller: SubagentCaller | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -2038,6 +2378,7 @@ class TurnSession:
             hook_cancel=hook_cancel,
             teammate_name=str(teammate_name).strip().lower() if teammate_name else None,
             team_name=str(team_name or "").strip()[:64] or None,
+            caller=caller,
         )
 
     def _ask_agent(
@@ -2052,7 +2393,20 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        caller: SubagentCaller | None = None,
     ) -> ToolOutcome:
+        caller = caller if caller is not None else self._main_caller()
+        max_depth = self._subagent_max_depth()
+        if caller.depth + 1 > max_depth:
+            return ToolOutcome(
+                "failed", "Limite de profundidade de subagentes",
+                f"Subagents may be nested at most {max_depth} level(s) below the main agent; do this work yourself.",
+                {"tool_kind": "agent", "depth": caller.depth + 1, "max_depth": max_depth}, "SUBAGENT_DEPTH_LIMIT",
+            )
+        if resumed_agent_id:
+            refusal = self._ownership_refusal(str(resumed_agent_id), caller)
+            if refusal is not None:
+                return refusal
         if teammate_name and resumed_agent_id is None:
             # W5: naming an existing teammate gives it the new task (its history is kept for this turn).
             known = self._team_roster().get(teammate_name)
@@ -2066,7 +2420,14 @@ class TurnSession:
         builtin_spec = self._subagent_spec(builtin_key)
         explicit_model = str(requested_model_id).strip() if requested_model_id else ""
         resolved_explicit: str | None = None
-        if explicit_model:
+        pinned = self._pinned_models(builtin_spec)
+        pinned_choice: tuple[str, tuple[str, ...]] | None = None
+        if pinned is not None and not resumed_agent_id:
+            choice = self._choose_pinned_model(pinned, explicit_model, None, clean)
+            if isinstance(choice, ToolOutcome):
+                return choice
+            pinned_choice, resolved_explicit = choice, choice[0]
+        elif explicit_model and pinned is None:
             resolved_explicit = self._resolve_child_model(explicit_model)
             if not resolved_explicit or not self._child_model_allowed(resolved_explicit, allow_current=True):
                 return ToolOutcome(
@@ -2114,9 +2475,15 @@ class TurnSession:
                 builtin_key,
                 model_id=resolved_explicit,
                 instance_name=instance_name,
+                parent_agent_id=caller.agent_id,
+                provider=pinned.provider if pinned is not None else None,
             )
         else:
             record = self.agents_store.find(clean) if self.agents_store is not None else None
+            if record is not None:
+                refusal = self._ownership_refusal(str(record.get("agent_id") or ""), caller)
+                if refusal is not None:
+                    return refusal
         if record is None:
             return ToolOutcome("failed", f"Agente {clean} não existe", f"No subagent named '{clean}'. Create it first with create_agent.", {"tool_kind": "agent"}, "AGENT_NOT_FOUND")
         if teammate_name:
@@ -2132,26 +2499,42 @@ class TurnSession:
         # Legacy conversation-agent rows predate provider/model snapshots.
         # Treat their absent values exactly as an omitted model_id: use the
         # current turn model, never an arbitrary catalog model.
+        if pinned is None and resumed_agent_id:
+            pinned = self._pinned_models(builtin_spec)  # the definition was found through the resumed record
+        if pinned is not None and pinned_choice is None:
+            choice = self._choose_pinned_model(pinned, explicit_model, str(record.get("model_id") or "").strip() or None, clean)
+            if isinstance(choice, ToolOutcome):
+                return choice
+            pinned_choice = choice
         child_provider = str(record.get("provider") or self.turn.get("provider") or "")
         current_model_id = self._current_model_id()
-        if builtin_spec is not None:
+        if pinned is not None and pinned_choice is not None:
+            # A pinned agent: its own provider and models only, already authorized by the choice above.
+            child_provider, child_model_id = pinned.provider, pinned_choice[0]
+        elif builtin_spec is not None:
             child_model_id = resolved_explicit or self._definition_model(builtin_spec) or current_model_id
         else:
             raw_record_model = str(record.get("model_id") or "").strip()
             child_model_id = resolved_explicit or (self._resolve_child_model(raw_record_model) if raw_record_model else current_model_id) or raw_record_model
 
-        provider_mismatch = child_provider != str(self.turn.get("provider") or "") and not self._child_model_allowed(child_model_id, allow_current=False)
-        if provider_mismatch or not self._child_model_allowed(child_model_id, allow_current=not explicit_model or child_model_id == current_model_id):
-            return ToolOutcome(
-                "failed", f"Modelo de {clean} nao permitido",
-                "This subagent is not configured with the current model or a current favorite model for this provider." + self._allowed_child_models_hint(),
-                {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
-            )
+        if pinned_choice is None:
+            provider_mismatch = child_provider != str(self.turn.get("provider") or "") and not self._child_model_allowed(child_model_id, allow_current=False)
+            if provider_mismatch or not self._child_model_allowed(child_model_id, allow_current=not explicit_model or child_model_id == current_model_id):
+                return ToolOutcome(
+                    "failed", f"Modelo de {clean} nao permitido",
+                    "This subagent is not configured with the current model or a current favorite model for this provider." + self._allowed_child_models_hint(),
+                    {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
+                )
+        routing: dict[str, object] = (
+            {"child_provider": pinned.provider, "model_chain": pinned_choice[1]}
+            if pinned is not None and pinned_choice is not None else {}
+        )
         with self._subagent_lock:
             if self._max_subagents_per_turn is not None and self._subagent_runs >= self._max_subagents_per_turn:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
             self._subagent_runs += 1
         agent_id, task_text = str(record["agent_id"]), str(task)
+        self._adopt_subagent(record, caller.agent_id)
         if builtin_spec is not None and record.get("model_id") != child_model_id:
             record["model_id"] = child_model_id
             update_model = getattr(self.agents_store, "set_model", None)
@@ -2166,8 +2549,10 @@ class TurnSession:
         if run_in_background or (definition is not None and definition.background):
             with self._subagent_lock:
                 if self._bg_subagent_executor is None:
+                    # A background subagent may wait for one it started in the background: the pool leaves room
+                    # for every level, and the semaphore still bounds how many actually run.
                     self._bg_subagent_executor = ThreadPoolExecutor(
-                        max_workers=self._max_concurrent_subagents,
+                        max_workers=self._max_concurrent_subagents * max_depth,
                         thread_name_prefix="orin-bg-subagent",
                     )
                 cancel = threading.Event()
@@ -2186,6 +2571,8 @@ class TurnSession:
                     task_text=task_text,
                     description=description,
                     resumed_agent_id=resumed_agent_id,
+                    caller=caller,
+                    **routing,
                 )
                 self._background_subagents[agent_id] = {
                     "future": future,
@@ -2215,19 +2602,22 @@ class TurnSession:
                     "tool_kind": "agent",
                 },
             )
-        return self._execute_subagent_run(
-            hook_cancel=hook_cancel,
-            record=record,
-            agent_id=agent_id,
-            clean=clean,
-            builtin_key=builtin_key,
-            builtin_spec=builtin_spec,
-            child_model_id=child_model_id,
-            current_model_id=current_model_id,
-            task_text=task_text,
-            description=description,
-            resumed_agent_id=resumed_agent_id,
-        )
+        with self._lend_slot(caller):
+            return self._execute_subagent_run(
+                hook_cancel=hook_cancel,
+                record=record,
+                agent_id=agent_id,
+                clean=clean,
+                builtin_key=builtin_key,
+                builtin_spec=builtin_spec,
+                child_model_id=child_model_id,
+                current_model_id=current_model_id,
+                task_text=task_text,
+                description=description,
+                resumed_agent_id=resumed_agent_id,
+                caller=caller,
+                **routing,
+            )
 
     def _execute_subagent_run(self, **kwargs: Any) -> ToolOutcome:
         bus = self.lifecycle
@@ -2280,9 +2670,15 @@ class TurnSession:
         description: str,
         resumed_agent_id: str | None = None,
         hook_cancel: threading.Event | None = None,
+        caller: SubagentCaller | None = None,
+        child_provider: str | None = None,
+        model_chain: tuple[str, ...] = (),
     ) -> ToolOutcome:
-        with self._subagent_semaphore:
-            if self.cancelled(self.turn):
+        caller = caller if caller is not None else self._main_caller()
+        slot = _SubagentSlot(self._subagent_semaphore)
+        slot.acquire()
+        try:
+            if self._child_cancelled(hook_cancel, caller)(self.turn):
                 if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
                     self.agents_store.set_state(agent_id, "cancelled")
                 self._record(
@@ -2291,12 +2687,12 @@ class TurnSession:
                     {
                         "agent_name": clean,
                         "sender_name": clean,
-                        "recipient_name": "Main",
+                        "recipient_name": caller.name,
                         "label": clean,
                         "error_code": "TURN_CANCELLED",
                     },
                     agent_id=agent_id,
-                    parent_agent_id=self.main_agent_id,
+                    parent_agent_id=caller.agent_id,
                 )
                 return ToolOutcome(
                     "failed",
@@ -2317,7 +2713,13 @@ class TurnSession:
                 description=description,
                 resumed_agent_id=resumed_agent_id,
                 hook_cancel=hook_cancel,
+                caller=caller,
+                slot=slot,
+                child_provider=child_provider,
+                model_chain=model_chain,
             )
+        finally:
+            slot.release()
 
     def _subagent_limits(self, *, max_iterations: int | None, max_actions: int | None, code_mode: bool) -> AgenticLimits:
         """A subagent's limits. In Code mode it shares the turn's deadline, retries and budget (W3-R7); Chat keeps its own."""
@@ -2338,14 +2740,15 @@ class TurnSession:
             **common,
         )
 
-    def _subagent_accounting(self, model_id: str, *, code_mode: bool) -> dict[str, object]:
+    def _subagent_accounting(self, model_id: str, *, code_mode: bool, provider: str | None = None) -> dict[str, object]:
         """A Code-mode subagent prices its calls for its own model and spends from the turn's meter."""
         if not code_mode:
             return {}
         primary = str(self.turn.get("model_id") or "")
-        pricing = _TurnPricing(
-            str(self.turn.get("provider") or ""), model_id, self.catalog_pricing if model_id == primary else None,
-        )
+        turn_provider = str(self.turn.get("provider") or "")
+        provider = provider or turn_provider
+        same = model_id == primary and provider == turn_provider
+        pricing = _TurnPricing(provider, model_id, self.catalog_pricing if same else None)
         return {"cost_estimator": pricing, "budget_meter": self._budget_meter}
 
     def _execute_subagent_run_unlocked(
@@ -2362,39 +2765,69 @@ class TurnSession:
         description: str,
         resumed_agent_id: str | None = None,
         hook_cancel: threading.Event | None = None,
+        caller: SubagentCaller | None = None,
+        slot: _SubagentSlot | None = None,
+        child_provider: str | None = None,
+        model_chain: tuple[str, ...] = (),
     ) -> ToolOutcome:
-        active_model_id = child_model_id
-        try:
-            child_provider_instance = self._child_provider_factory(active_model_id)
-        except Exception as error:
-            if active_model_id == current_model_id:
-                raise
-            # The requested favorite failed before the child could run or
-            # invoke a tool. Falling back here is safe; retrying after a run
-            # begins could duplicate side effects.
-            active_model_id = current_model_id
-            try:
-                child_provider_instance = self._child_provider_factory(active_model_id)
-            except Exception:
-                raise error
+        caller = caller if caller is not None else self._main_caller()
+        parent_agent_id = caller.agent_id
+        # A pinned agent tries its own models in order and never the parent's; any other falls back to the parent's.
+        pinned = bool(model_chain)
+        chain = list(model_chain) if pinned else [child_model_id] + (
+            [current_model_id] if current_model_id and current_model_id != child_model_id else []
+        )
+        provider_name = child_provider or str(self.turn.get("provider") or "")
+
+        def make_provider(model: str) -> object:
+            if child_provider:
+                return self._child_provider_factory(model, provider=child_provider)
+            return self._child_provider_factory(model)
+
+        def note_fallback(failed: str, fallback: str, reason: str) -> None:
             update_model = getattr(self.agents_store, "set_model", None)
             if callable(update_model):
-                update_model(agent_id, active_model_id)
+                update_model(agent_id, fallback)
             self._record(
                 AgentActivityEventType.MODEL_ROUTING_STARTED,
-                f"Modelo de {clean} indisponivel; usando o modelo atual",
-                {"agent_name": clean, "requested_model_id": child_model_id, "fallback_model_id": active_model_id,
-                 "reason": type(error).__name__},
-                agent_id=agent_id, parent_agent_id=self.main_agent_id,
+                f"Modelo {failed} de {clean} indisponivel; usando {fallback}" if pinned
+                else f"Modelo de {clean} indisponivel; usando o modelo atual",
+                {"agent_name": clean, "requested_model_id": failed, "fallback_model_id": fallback, "reason": reason,
+                 **({"provider": provider_name} if pinned else {})},
+                agent_id=agent_id, parent_agent_id=parent_agent_id,
             )
+
+        position = 0
+        first_error: Exception | None = None
+        skipped: list[tuple[str, str]] = []
+        while True:
+            try:
+                child_provider_instance = make_provider(chain[position])
+                break
+            except Exception as error:
+                # It failed before the child could run or invoke a tool, so another model is safe to try; retrying
+                # after a run begins could duplicate side effects.
+                first_error = first_error or error
+                if position + 1 >= len(chain):
+                    if not pinned:
+                        raise first_error
+                    return self._pinned_models_failed(
+                        clean, agent_id, caller, provider_name, chain, type(first_error).__name__,
+                    )
+                skipped.append((chain[position], type(error).__name__))
+                position += 1
+        for index, (failed, reason) in enumerate(skipped):
+            note_fallback(failed, chain[index + 1], reason)
+        active_model_id = chain[position]
         is_code_mode = str(self.turn.get("code_mode") or "").strip().lower() == "code"
-        subagent_turn = {**self.turn, "model_id": active_model_id, "is_subagent": True}
+        subagent_turn = {**self.turn, "model_id": active_model_id, "provider": provider_name, "is_subagent": True}
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
-            {"agent_name": clean, "recipient_name": clean, "sender_name": "Main", "label": description[:120] or clean,
+            {"agent_name": clean, "recipient_name": clean, "sender_name": caller.name, "label": description[:120] or clean,
              "content": task_text[:PREVIEW_CHARS], "to_agent_id": agent_id, "tool_kind": "agent"},
-            agent_id=self.main_agent_id,
+            agent_id=parent_agent_id,
+            parent_agent_id=None if caller.is_main else self._parent_of(parent_agent_id),
         )
         if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             self.agents_store.set_state(agent_id, "working")
@@ -2402,7 +2835,8 @@ class TurnSession:
         delegation_settled = False
         subagent_tools: AgentToolset | None = None
         try:
-            read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only"))
+            # A read-only caller only starts read-only subagents.
+            read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only")) or caller.read_only
             definition = builtin_spec.get("definition") if builtin_spec is not None else None
             inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
             initial_history: list[dict[str, Any]] | None = None
@@ -2411,9 +2845,10 @@ class TurnSession:
                     saved_history = self._subagent_histories.get(resumed_agent_id)
                     if saved_history:
                         initial_history = [dict(item) for item in saved_history]
-            if initial_history is None and inherit_context and hasattr(self.store, "history_for_turn"):
+            if initial_history is None and inherit_context and caller.history is not None:
+                # A fork inherits the conversation of whoever started it (the main agent's, or a subagent's own).
                 try:
-                    initial_history = [dict(item) for item in self.store.history_for_turn(self.turn)]
+                    initial_history = [dict(item) for item in caller.history()]
                 except Exception:
                     initial_history = None
             enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition}
@@ -2429,10 +2864,23 @@ class TurnSession:
 
             # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
             requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
-            sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(self.permission_mode, requested_mode)
+            sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(caller.permission_mode, requested_mode)
             sub_reminders = ReminderQueue()
+            sub_cancelled = self._child_cancelled(hook_cancel, caller)
+            child_depth = caller.depth + 1
+            # A subagent may delegate in turn while it is above the deepest level; read-only ones (Explore, Plan) never do.
+            can_delegate = bool(getattr(self, "enable_subagents", True)) and not read_only_subagent and child_depth < self._subagent_max_depth()
+            store_cell = [sub_store]
+            child_caller = SubagentCaller(
+                agent_id=agent_id, name=clean, depth=child_depth, permission_mode=sub_permission_mode,
+                read_only=read_only_subagent, cancelled=sub_cancelled,
+                history=lambda: [dict(item) for item in store_cell[0].history_for_turn(store_cell[0].load(""))],
+                slot=slot,
+            )
             subagent_tools = self._toolset(
-                subagents=False,
+                subagents=can_delegate,
+                caller=child_caller if can_delegate else None,
+                share_read_state=False,
                 browser_agent_key=agent_id,
                 code_mode_active=is_code_mode,
                 permission_broker=getattr(self, "_active_permission_broker", None),
@@ -2445,6 +2893,9 @@ class TurnSession:
                 # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
                 reminders=sub_reminders,
             )
+            child_caller.toolset = subagent_tools
+            if can_delegate:
+                self._announce_defined_agents(sub_reminders)
             # W4-R9 still holds: a monitor the subagent starts sinks into the running parent turn, not into a wake.
             subagent_tools._monitor_sink = self._reminders
             if record.get("teammate_name"):
@@ -2480,40 +2931,37 @@ class TurnSession:
                 hook_engine=self.hook_engine,
                 phase_controller=None,
                 reminders=sub_reminders,
-                cancelled=self._child_cancelled(hook_cancel),
-                effort=self._definition_effort(definition, active_model_id),
-                **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
+                cancelled=sub_cancelled,
+                effort=self._definition_effort(definition, active_model_id, provider_name),
+                **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
             )
             result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
-            if (
-                active_model_id != current_model_id
-                and current_model_id
-                and result.state == "failed"
-                and result.actions == 0
-                and result.error_code in {"PROVIDER_STREAM_FAILED", "PROVIDER_RETRY_EXHAUSTED", "PROVIDER_STREAM_NOT_STARTED"}
-            ):
-                failed_model_id = active_model_id
-                active_model_id = current_model_id
-                try:
-                    fallback_provider_instance = self._child_provider_factory(active_model_id)
-                except Exception:
-                    fallback_provider_instance = self.provider_factory()
-                update_model = getattr(self.agents_store, "set_model", None)
-                if callable(update_model):
-                    update_model(agent_id, active_model_id)
-                self._record(
-                    AgentActivityEventType.MODEL_ROUTING_STARTED,
-                    f"Modelo de {clean} indisponivel; usando o modelo atual",
-                    {
-                        "agent_name": clean,
-                        "requested_model_id": failed_model_id,
-                        "fallback_model_id": active_model_id,
-                        "reason": str(result.error_code or "PROVIDER_STREAM_FAILED"),
-                    },
-                    agent_id=agent_id,
-                    parent_agent_id=self.main_agent_id,
+
+            def failed_before_acting(outcome: Any) -> bool:
+                return (
+                    outcome.state == "failed"
+                    and outcome.actions == 0
+                    and outcome.error_code in {"PROVIDER_STREAM_FAILED", "PROVIDER_RETRY_EXHAUSTED", "PROVIDER_STREAM_NOT_STARTED"}
                 )
-                subagent_turn = {**self.turn, "model_id": active_model_id, "is_subagent": True}
+
+            while failed_before_acting(result) and position + 1 < len(chain):
+                failed_model_id, reason = active_model_id, str(result.error_code or "PROVIDER_STREAM_FAILED")
+                fallback_provider_instance = None
+                while position + 1 < len(chain):
+                    position += 1
+                    try:
+                        fallback_provider_instance = make_provider(chain[position])
+                        break
+                    except Exception:
+                        if not pinned:
+                            fallback_provider_instance = self.provider_factory()
+                            break
+                        # A pinned agent skips a model that cannot start either and tries the next one.
+                if fallback_provider_instance is None:
+                    break  # a pinned agent whose remaining models cannot start either
+                active_model_id = chain[position]
+                note_fallback(failed_model_id, active_model_id, reason)
+                subagent_turn = {**self.turn, "model_id": active_model_id, "provider": provider_name, "is_subagent": True}
                 sub_store = _SubagentStore(
                     self,
                     subagent_turn,
@@ -2522,6 +2970,7 @@ class TurnSession:
                     self._subagent_task(enriched_record, task_text),
                     initial_history=initial_history,
                 )
+                store_cell[0] = sub_store
                 runtime = AgenticTurnRuntime(
                     store=sub_store,
                     provider=fallback_provider_instance,
@@ -2532,10 +2981,19 @@ class TurnSession:
                     hook_engine=self.hook_engine,
                     phase_controller=None,
                     reminders=sub_reminders,
-                    cancelled=self._child_cancelled(hook_cancel),
-                    **self._subagent_accounting(active_model_id, code_mode=is_code_mode),
+                    cancelled=sub_cancelled,
+                    effort=self._definition_effort(definition, active_model_id, provider_name),
+                    **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
                 )
                 result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
+            if pinned and failed_before_acting(result):
+                # Every model of a pinned agent failed before acting; it does not fall back to the parent's model.
+                delegation_settled = True
+                final_agent_state = "failed"
+                return self._pinned_models_failed(
+                    clean, agent_id, caller, provider_name, chain, str(result.error_code or "PROVIDER_STREAM_FAILED"),
+                    set_state=False,
+                )
             answer = sub_store.final_answer()
             prior_transcript = [dict(item) for item in initial_history] if initial_history else []
             prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
@@ -2554,8 +3012,8 @@ class TurnSession:
                 delegation_settled = True
                 self._record(
                     AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
-                    {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": reason},
-                    agent_id=agent_id, parent_agent_id=self.main_agent_id,
+                    {"agent_name": clean, "sender_name": clean, "recipient_name": caller.name, "label": clean, "error_code": reason},
+                    agent_id=agent_id, parent_agent_id=parent_agent_id,
                 )
                 return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"}, reason)
             final_agent_state = "completed"
@@ -2563,9 +3021,9 @@ class TurnSession:
             self._record(
                 AgentActivityEventType.AGENT_MESSAGE_RECEIVED,
                 f"Recebeu a resposta de {clean}",
-                {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean,
+                {"agent_name": clean, "sender_name": clean, "recipient_name": caller.name, "label": clean,
                  "content": answer[:PREVIEW_CHARS], "from_agent_id": agent_id, "tool_kind": "agent"},
-                agent_id=agent_id, parent_agent_id=self.main_agent_id,
+                agent_id=agent_id, parent_agent_id=parent_agent_id,
             )
             payload: dict[str, object] = {
                 "agent_id": agent_id,
@@ -2594,7 +3052,8 @@ class TurnSession:
             return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
         finally:
             if subagent_tools is not None and getattr(subagent_tools, "_changed_paths", None):
-                parent_tools = getattr(self, "toolset", None)
+                # Changes go up one level; the caller hands them on when it finishes.
+                parent_tools = caller.toolset if caller.toolset is not None else getattr(self, "toolset", None)
                 if parent_tools is not None and hasattr(parent_tools, "_changed_paths"):
                     had_unverified_parent_changes = bool(
                         parent_tools._changed_paths and not getattr(parent_tools, "_code_mode_verified", False)
@@ -2616,11 +3075,36 @@ class TurnSession:
                 try:
                     self._record(
                         AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
-                        {"agent_name": clean, "sender_name": clean, "recipient_name": "Main", "label": clean, "error_code": "RUNTIME_EXCEPTION"},
-                        agent_id=agent_id, parent_agent_id=self.main_agent_id,
+                        {"agent_name": clean, "sender_name": clean, "recipient_name": caller.name, "label": clean, "error_code": "RUNTIME_EXCEPTION"},
+                        agent_id=agent_id, parent_agent_id=parent_agent_id,
                     )
                 except Exception:
                     pass
+
+    def _pinned_models_failed(
+        self, clean: str, agent_id: str, caller: SubagentCaller, provider: str, tried: Sequence[str], reason: str,
+        *, set_state: bool = True,
+    ) -> ToolOutcome:
+        """A pinned agent none of whose models could run: a clear failure, never the parent's model."""
+        if set_state and self.agents_store is not None and hasattr(self.agents_store, "set_state"):
+            try:
+                self.agents_store.set_state(agent_id, "failed")
+            except Exception:  # noqa: BLE001
+                pass
+        self._record(
+            AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
+            {"agent_name": clean, "sender_name": clean, "recipient_name": caller.name, "label": clean,
+             "error_code": "CHILD_MODELS_UNAVAILABLE", "provider": provider, "models": list(tried)},
+            agent_id=agent_id, parent_agent_id=caller.agent_id,
+        )
+        return ToolOutcome(
+            "failed", f"Nenhum modelo de {clean} respondeu",
+            f"Subagent '{clean}' could not run on any of its models ({provider}: {', '.join(tried)}; last error: "
+            f"{reason}). It does not fall back to your model: do the work yourself, or tell the person to check that "
+            f"{provider} is enabled and logged in.",
+            {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent", "provider": provider, "models": list(tried)},
+            "CHILD_MODELS_UNAVAILABLE",
+        )
 
     @staticmethod
     def _agent_output_file(agent_id: str) -> str:
@@ -2835,8 +3319,11 @@ class TurnSession:
         )
         self._reminders.add("teammate", f"Teammate {name} is idle.{waiting} Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
 
-    def _stop_background_subagent(self, agent_id: str) -> ToolOutcome:
-        """TaskStop for a background agent: it stops at its next step (W5)."""
+    def _stop_background_subagent(self, agent_id: str, *, caller: SubagentCaller | None = None) -> ToolOutcome:
+        """TaskStop for a background agent: it stops at its next step, and so does everything it started (W5)."""
+        refusal = self._ownership_refusal(str(agent_id), caller)
+        if refusal is not None:
+            return refusal
         with self._subagent_lock:
             entry = self._background_subagents.get(str(agent_id))
         if entry is None:
@@ -2855,7 +3342,10 @@ class TurnSession:
         output["message"] = f"Asked {name} to stop; it stops at its next step."
         return ToolOutcome("succeeded", f"Parou {name}", output["message"], {"agent_id": agent_id, "status": "stopping", "tool_kind": "agent"}, data={"tool_output": output})
 
-    def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0) -> ToolOutcome:
+    def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0, caller: SubagentCaller | None = None) -> ToolOutcome:
+        refusal = self._ownership_refusal(str(agent_id), caller)
+        if refusal is not None:
+            return refusal
         with self._subagent_lock:
             entry = self._background_subagents.get(agent_id)
         if entry is None:
@@ -2869,10 +3359,11 @@ class TurnSession:
         future = entry["future"]
         agent_name = str(entry.get("agent_name") or agent_id)
         if not future.done() and wait_seconds > 0:
-            try:
-                future.result(timeout=float(wait_seconds))
-            except Exception:
-                pass
+            with self._lend_slot(caller):
+                try:
+                    future.result(timeout=float(wait_seconds))
+                except Exception:
+                    pass
         if not future.done():
             return ToolOutcome(
                 "succeeded",
@@ -3036,7 +3527,7 @@ class TurnSession:
                         except Exception:
                             pass
 
-    def _ask_agents(self, requests: list[Mapping[str, str]]) -> ToolOutcome:
+    def _ask_agents(self, requests: list[Mapping[str, str]], *, caller: SubagentCaller | None = None) -> ToolOutcome:
         """Run several independent delegations at once.
 
         Each subagent already has its own store view and its own agent id, so
@@ -3050,13 +3541,14 @@ class TurnSession:
             if not isinstance(item, Mapping) or not str(item.get("name") or "").strip() or not str(item.get("task") or "").strip():
                 return ToolOutcome("failed", "Tarefa inválida", f"tasks[{index}] must be an object with a non-blank name and task.", {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
             pending.append((str(item["name"]), str(item["task"])))
+        bound = {"caller": caller} if caller is not None else {}
         if len(pending) == 1:
-            return self._ask_agent(*pending[0])
+            return self._ask_agent(*pending[0], **bound)
 
         def run_request(entry: tuple[str, str]) -> ToolOutcome:
             name, task = entry
             try:
-                return self._ask_agent(name, task)
+                return self._ask_agent(name, task, **bound)
             except Exception as error:
                 return ToolOutcome(
                     "failed",
@@ -3141,6 +3633,12 @@ class TurnSession:
             "Request every independent tool call in the same response instead of one at a time.\n"
             "In your final response, share relevant file paths (`path:line`) and do NOT create summary/report .md files unless explicitly requested."
         )
+        if getattr(toolset, "_run_subagent", None) is not None:
+            # A subagent above the deepest level may delegate in turn.
+            prompt += (
+                "\nYou may hand a self-contained part of this task to a subagent of your own with `run_subagent`; its report "
+                "comes back to you, not to the main agent. Do small work yourself."
+            )
         try:
             environment = environment_facts()
         except Exception:
@@ -3370,19 +3868,28 @@ class TurnSession:
         reminders: ReminderQueue | None = None,
         non_interactive_ask: str = "allow",
         share_read_state: bool | None = None,
+        caller: SubagentCaller | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
         effective_perm_mode = str(permission_mode or self.permission_mode)
+
+        def bound(method: Callable[..., ToolOutcome]) -> Callable[..., ToolOutcome] | None:
+            # A subagent's delegation tools carry it as the caller; the main agent's stay the plain methods.
+            if not subagents:
+                return None
+            return partial(method, caller=caller) if caller is not None else method
+
+        is_main_toolset = subagents and caller is None
         toolset = AgentToolset(
             self.workspace,
             memory=self.memory,
-            create_agent=self._create_agent if subagents else None,
-            delegate=self._ask_agent if subagents else None,
-            delegate_batch=self._ask_agents if subagents else None,
-            run_subagent=self._run_subagent if subagents else None,
-            check_subagent=self._check_subagent if subagents else None,
-            on_close=self.close_background_subagents if subagents else None,
+            create_agent=bound(self._create_agent),
+            delegate=bound(self._ask_agent),
+            delegate_batch=bound(self._ask_agents),
+            run_subagent=bound(self._run_subagent),
+            check_subagent=bound(self._check_subagent),
+            on_close=self.close_background_subagents if is_main_toolset else None,
             on_tool_progress=lambda tool_name, summary, progress_payload: self.emit_lifecycle(
                 self.turn,
                 "tool_progressed",
@@ -3433,7 +3940,7 @@ class TurnSession:
             conversation_id=str(self.turn.get("conversation_id") or "") or None,
             read_file_state=(
                 self._read_file_state
-                if (subagents if share_read_state is None else share_read_state)
+                if (is_main_toolset if share_read_state is None else share_read_state)
                 else (copy_read_state(self._read_file_state) if inherit_context else {})
             ),
             todos_state=self._todos_state,
@@ -3459,10 +3966,13 @@ class TurnSession:
         # W5 deviation 4: a forked skill's `model`, resolved as an agent file's is.
         toolset._skill_model_for = lambda requested: self._allowed_requested_model(requested, "a skill")
         toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
-        if subagents:
+        if is_main_toolset:
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
             toolset._team_sender = "lead"  # W5: the lead of any agent team this turn starts
             toolset._send_team_message = self._send_team_message
+        elif subagents:
+            # A delegating subagent stops only what it started; agent teams stay with the main agent (v1).
+            toolset._stop_subagent = partial(self._stop_background_subagent, caller=caller)
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
             toolset._interactive_permissions = bool(interactive_permissions)
@@ -3758,11 +4268,14 @@ class TurnSession:
             self._hook_agent_running = False
             self._hook_agent_guard.release()
 
-    def _child_cancelled(self, hook_cancel: threading.Event | None):
-        """The cancel predicate of a subagent: the turn's own cancel, plus its verifier's timeout when it is one."""
+    def _child_cancelled(self, hook_cancel: threading.Event | None, caller: SubagentCaller | None = None):
+        """The cancel predicate of a subagent: its caller's (the turn's own cancel for the main agent), plus its
+        own stop event (a background agent's TaskStop or a verifier's timeout). Stopping an agent stops everything
+        it started."""
+        parent = caller.cancelled if caller is not None and caller.cancelled is not None else self.cancelled
         if hook_cancel is None:
-            return self.cancelled
-        return lambda turn: bool(self.cancelled(turn)) or hook_cancel.is_set()
+            return parent
+        return lambda turn: bool(parent(turn)) or hook_cancel.is_set()
 
     def _close_hook_dispatcher(self) -> None:
         relay, self._sdk_relay = getattr(self, "_sdk_relay", None), None
@@ -4025,6 +4538,33 @@ class TurnSession:
             bus.emit(HookEvent.NOTIFICATION, message=str(summary)[:500], title="Orin", notification_type="permission_prompt")
         except Exception:  # noqa: BLE001 - a notification never stops a turn
             logger.exception("Notification hooks failed")
+
+    def _apply_agent_mentions(self, task: str) -> None:
+        """`@agent-name`: the person asks for one of the agents defined here, so the model is told to delegate to it.
+        Only a name that is a defined agent counts (anything else stays text, e.g. a file mention); at most five."""
+        catalog = getattr(self, "_agent_definitions", None)
+        if catalog is None or not getattr(self, "enable_subagents", True):
+            return
+        found: list[str] = []
+        for match in _AGENT_MENTION.finditer(str(task or "")):
+            name = match.group(1).lower()
+            definition = catalog.agents.get(name)
+            if definition is None or definition.name in found:
+                continue
+            found.append(definition.name)
+            if len(found) >= MAX_AGENT_MENTIONS:
+                break
+        for name in found:
+            pinned = self._pinned_models({"definition": catalog.agents[name]})
+            choice = ""
+            if pinned is not None and len(pinned.models) > 1:
+                choice = f" It runs on {pinned.provider}: {', '.join(pinned.models)}; pass model_id with the one that fits."
+            self._reminders.add(
+                "agents",
+                f"The person asked for the agent '{name}' in this message (@{name}). Delegate the part of the task "
+                f"it is for with run_subagent(subagent_type=\"{name}\") instead of doing it yourself.{choice}",
+                key=f"agent-mention:{name}",
+            )
 
     def _apply_mcp_mentions(self, task: str) -> None:
         """`@server:uri` (W7): each mentioned resource of a connected MCP server joins the turn as data. Only a name
@@ -4689,6 +5229,7 @@ class TurnSession:
         if task and not prompt_blocked:
             self._apply_user_command(task, toolset)
             self._apply_mcp_mentions(task)
+            self._apply_agent_mentions(task)
         try:
             toolset._extra_env.update(self._hook_extra_env())
         except Exception:  # noqa: BLE001 - hook env never stops a turn

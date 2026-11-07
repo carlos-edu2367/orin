@@ -324,6 +324,11 @@ def wire_codex_tool_server(
         f'mcp_servers.{srv}.bearer_token_env_var="{ORIN_MCP_TOKEN_ENV}"',
         "-c",
         f"mcp_servers.{srv}.required=true",
+        # Orin asks for permission itself, inside each tool (the turn's permission broker), as it does for Claude
+        # (--allowedTools) and Antigravity (permissions.allow). Left to Codex, a tool not marked read-only needs an
+        # approval that approval_policy="never" turns into a refusal.
+        "-c",
+        f'mcp_servers.{srv}.default_tools_approval_mode="approve"',
     )
     return ToolServerWiring(
         argv=argv,
@@ -383,6 +388,8 @@ def build_codex_command(
         "features.shell_tool=false",
         'web_search="disabled"',
         "features.view_image=false",
+        # Codex's own subagents would bypass Orin's tree, budget and permissions: delegation goes through Agent.
+        "features.multi_agent=false",
         'sandbox_mode="read-only"',
         'approval_policy="never"',
     ]
@@ -402,6 +409,7 @@ def build_codex_command(
         "features.shell_tool",
         "web_search",
         "features.view_image",
+        "features.multi_agent",
         "sandbox_mode",
         "approval_policy",
     }
@@ -435,6 +443,17 @@ def build_codex_command(
                 raise ValueError(
                     f"ToolServerWiring for Codex CLI only permits '-c key=val' pairs, got: {token!r}"
                 )
+        server = str(request.tool_server_name or "orin").strip()
+        timeout_ms = request.tool_timeout_ms
+        if (
+            isinstance(timeout_ms, int)
+            and not isinstance(timeout_ms, bool)
+            and timeout_ms > 0
+            and _SAFE_SERVER_NAME_RE.fullmatch(server)
+        ):
+            # Codex cuts an MCP call at ~60 s by default; an Agent call (a whole subagent) may take the rest of the
+            # turn, as Claude's MCP_TOOL_TIMEOUT allows.
+            cmd.extend(["-c", f"mcp_servers.{server}.tool_timeout_sec={max(1, -(-timeout_ms // 1000))}"])
 
     cmd.append("-")
     return cmd

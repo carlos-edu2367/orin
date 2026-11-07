@@ -9,6 +9,7 @@ import {
   type FriendPersonaState, type FriendMemoryEntry,
 } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
+import { listCustomAgents } from '../../api/customAgents'
 import { approveMcpServer } from '../../api/mcp'
 import { createProject, listProjects, type Project } from '../../api/projects'
 import { approvePlugin, listPluginCommands, type PluginCommand } from '../../api/plugins'
@@ -55,6 +56,7 @@ import {
 } from './CodePermissionDock'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import { Composer } from './Composer'
+import type { MentionAgent } from './FileMentionPicker'
 import { FriendSoulDrawer } from './FriendSoulDrawer'
 import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
 import { LiveVoiceStage, type LiveVoiceTranscriptItem } from './LiveVoiceStage'
@@ -559,6 +561,20 @@ export function ChatPage() {
     (query: string) => fetchWorkspaceFiles(query, 20),
     [fetchWorkspaceFiles],
   )
+
+  // The person's own agents (Biblioteca › Agentes), offered by the `@` picker: `@name` asks for that agent.
+  const [mentionAgents, setMentionAgents] = useState<MentionAgent[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    listCustomAgents(client, controller.signal)
+      .then((agents) => {
+        if (!controller.signal.aborted) {
+          setMentionAgents(agents.filter((agent) => agent.enabled).map((agent) => ({ name: agent.name, description: agent.description })))
+        }
+      })
+      .catch(() => { /* no agents to offer; the picker still lists files */ })
+    return () => controller.abort()
+  }, [client])
 
   const toggleWorktreeIsolation = useCallback((nextIsolated: boolean) => {
     setWorktreeIsolated(nextIsolated)
@@ -3117,6 +3133,7 @@ export function ChatPage() {
           todos={todosHidden ? [] : activity.todos}
           history={sentHistory}
           onSearchWorkspaceFiles={searchWorkspaceFiles}
+          mentionAgents={mentionAgents}
           worktreeIsolated={worktreeIsolated}
           onWorktreeIsolatedChange={toggleWorktreeIsolation}
           worktreeBranch={worktreeBranch}

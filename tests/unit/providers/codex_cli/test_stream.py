@@ -495,7 +495,7 @@ def test_multi_turn_reuse_of_item_ids_after_reset_or_turn_started() -> None:
 
 @pytest.mark.parametrize(
     "forbidden_type",
-    ["command_execution", "file_change", "web_search"],
+    ["command_execution", "file_change", "web_search", "collab_tool_call"],
 )
 def test_all_forbidden_item_kinds_preserve_raw_type(
     forbidden_type: str,

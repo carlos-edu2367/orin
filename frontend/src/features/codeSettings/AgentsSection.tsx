@@ -1,4 +1,5 @@
 import { useCallback, useState, type FormEvent } from 'react'
+import { Link } from 'react-router-dom'
 import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft } from '../../api/settings'
 import { SettingsSection } from '../settings/SettingsSection'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation, useLoaded, useSettingsClient } from './shared'
@@ -6,7 +7,7 @@ import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation, us
 export const AGENT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'auto'] as const
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
-const ORIGIN: Record<string, string> = { user: 'usuário', project: 'projeto', plugin: 'plugin', builtin: 'do Orin', cli: 'linha de comando' }
+const ORIGIN: Record<string, string> = { user: 'usuário', project: 'projeto', plugin: 'plugin', builtin: 'do Orin', cli: 'linha de comando', orin: 'Biblioteca' }
 
 type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string }
 
@@ -143,6 +144,10 @@ export function AgentsSection() {
             <p className="code-settings__muted">Ignorados por terem o mesmo nome: {data.shadowed.map((item) => `${item.name} (${item.ignored}; vale ${item.kept})`).join(', ')}.</p>
           )}
           <ErrorNote error={form ? null : error} />
+          <p className="code-settings__muted">
+            Para criar agentes que valem também no chat, sem pasta, e escolher o provedor e os modelos de cada um, use{' '}
+            <Link to="/library/agents">Biblioteca › Agentes</Link>.
+          </p>
         </Card>
       )}
       {form && (

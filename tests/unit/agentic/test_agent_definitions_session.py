@@ -88,7 +88,7 @@ def test_a_custom_agent_runs_with_its_own_tools_mode_turns_and_instructions(sess
     session._disk_skills = load_disk_skills(workspace_root=None, trusted=False)
     outcome = session._run_subagent(subagent_type="code-reviewer", task="Review the change", description="review")
     assert outcome.status == "succeeded", outcome.content
-    child = [build for build in builds if build.get("subagents") is False][-1]
+    child = [build for build in builds if build.get("browser_agent_key")][-1]
     published = {item.name for item in child["toolset"].definitions()}
     assert "read_file" in published and "search_files" in published and "glob_files" in published
     assert "edit_file" not in published and "write_file" not in published and "run_command" not in published
@@ -104,7 +104,7 @@ def test_the_verifier_builtin_cannot_edit(session_and_builds) -> None:
     session._agent_definitions = load_agent_definitions(workspace_root=None, trusted=False)
     outcome = session._run_subagent(subagent_type="verifier", task="Check the tests pass")
     assert outcome.status == "succeeded", outcome.content
-    published = {item.name for item in [b for b in builds if b.get("subagents") is False][-1]["toolset"].definitions()}
+    published = {item.name for item in [b for b in builds if b.get("browser_agent_key")][-1]["toolset"].definitions()}
     assert "read_file" in published and not {"edit_file", "write_file", "notebook_edit"} & published
 
 

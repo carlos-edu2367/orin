@@ -10,7 +10,7 @@ import type { CodeModeChoice, ConversationMode } from '../../api/conversations'
 import type { TodoItem } from './activityTypes'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, slashItems } from './CommandPicker'
-import { applyFileMention, detectFileMention, FileMentionPicker } from './FileMentionPicker'
+import { applyFileMention, detectFileMention, FileMentionPicker, matchingAgents, type MentionAgent } from './FileMentionPicker'
 import { TodoBar } from './TodoBar'
 import {
   GitBranchIcon,
@@ -92,6 +92,8 @@ export type ComposerProps = {
   workspaceFiles?: string[]
   /** Optional async lookup for workspace files matching the typed `@query`. */
   onSearchWorkspaceFiles?: (query: string) => Promise<string[]>
+  /** The person's agents, offered by the `@` picker before the files (`@name` asks for that agent). */
+  mentionAgents?: MentionAgent[]
   /** Whether Git Worktree isolation is active for this Code session. */
   worktreeIsolated?: boolean
   onWorktreeIsolatedChange?: (isolated: boolean) => void
@@ -124,7 +126,7 @@ export function Composer({
   mode,
   codeMode = 'auto', onCodeModeChange, modeSwitch, sessionContext, hideCodeModeToggle = false, conversationMode,
   codePermissionMode, onCodePermissionModeChange, todos,
-  workspaceFiles = [], onSearchWorkspaceFiles,
+  workspaceFiles = [], onSearchWorkspaceFiles, mentionAgents = [],
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
   isLiveVoiceActive = false, onToggleLiveVoice,
 }: ComposerProps) {
@@ -245,7 +247,7 @@ export function Composer({
   const fetchedFiles = fetchedMentionResult?.query === mentionQuery ? fetchedMentionResult.items : []
   const availableMentionFiles = onSearchWorkspaceFiles && fetchedFiles.length > 0 ? fetchedFiles : workspaceFiles
   const mentionHasMatches = mentionQuery !== null && (
-    mentionLoading || availableMentionFiles.some((file) => {
+    mentionLoading || matchingAgents(mentionAgents, mentionQuery).length > 0 || availableMentionFiles.some((file) => {
       const needle = mentionQuery.trim().toLowerCase()
       return !needle || file.toLowerCase().includes(needle)
     })
@@ -481,6 +483,7 @@ export function Composer({
         {mentionPickerOpen && activeMention && (
           <FileMentionPicker
             files={availableMentionFiles}
+            agents={mentionAgents}
             query={activeMention.query}
             loading={mentionLoading}
             onSelect={(filePath) => {
