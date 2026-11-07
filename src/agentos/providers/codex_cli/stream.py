@@ -344,7 +344,7 @@ class CodexJsonlTranslator:
         if pkt_type == "thread.started":
             thread_id = _str_field(packet, "thread_id", "session_id")
             pkt_model = _str_field(packet, "model").strip()
-            resolved_model = pkt_model or self._model or "codex"
+            resolved_model = pkt_model or self._model or ""
             self.init = CliInit(
                 session_id=thread_id,
                 model=resolved_model,
@@ -528,7 +528,7 @@ class CodexJsonlTranslator:
             model_id = (
                 self.init.model
                 if self.init is not None and self.init.model
-                else (self._model or "codex")
+                else (self._model or "")
             )
             self.result = CliResult(
                 subtype="success",
@@ -540,7 +540,7 @@ class CodexJsonlTranslator:
                 session_id=self._session_id(packet),
                 api_error_status=None,
                 usage=usage,
-                model_usage={model_id: usage},
+                model_usage={model_id: usage} if model_id else {},
             )
             return [
                 CliEvent(

@@ -530,7 +530,7 @@ def test_adversarial_usage_and_non_string_fields() -> None:
     assert len(ev_init) == 1
     assert tr.init is not None
     assert tr.init.session_id == ""
-    assert tr.init.model == "codex"
+    assert tr.init.model == ""
 
     # cached_input_tokens > input_tokens and boolean/negative values in usage
     ev_turn = tr.feed_line(
@@ -696,6 +696,15 @@ def test_mcp_tool_calls_read_then_write_carry_no_message_id() -> None:
     ]
     assert len(tool_events) >= 4
     assert all(ev.message_id is None for ev in tool_events)
+
+
+def test_thread_started_without_model_produces_empty_init_model() -> None:
+    tr = CodexJsonlTranslator()
+    events = tr.feed_line('{"type":"thread.started","thread_id":"th_no_model"}')
+    assert len(events) == 1
+    assert tr.init is not None
+    assert tr.init.model == ""
+
 
 
 

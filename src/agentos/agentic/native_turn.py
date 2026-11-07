@@ -1245,6 +1245,8 @@ class _RunnerSink:
 
     def on_init(self, init: CliInit) -> None:
         reported = str(init.model or "").strip()
+        if reported.lower() in {"codex", "claude", "antigravity", "gemini"}:
+            return
         current = str(self._runner.turn.get("model_id") or "").strip()
         if reported and reported != current:
             self._runner.turn["model_id"] = reported

@@ -399,6 +399,35 @@ def test_cli_reported_model_replaces_turn_model(tmp_path: Path) -> None:
     assert model_switch_events[0]["reason"] == "cli_reported"
 
 
+def test_on_init_ignores_placeholder_provider_model_names(tmp_path: Path) -> None:
+    store = FakeStore(model_id="gpt-6.1-terra")
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    switched_models: list[str] = []
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init("codex")
+        sink.on_init(init)
+        sink.on_text("Ok.")
+        return NativeTurnOutcome(result=_make_result(text="Ok."), init=init, final_text="Ok.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        model_switched=switched_models.append,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+
+    res = runtime.run("t1", turn=store.turn)
+    assert res.state == "completed"
+    assert store.turn["model_id"] == "gpt-6.1-terra"
+    assert switched_models == []
+    model_switch_events = [p for s, p in store.states if s == "model_switched"]
+    assert model_switch_events == []
+
+
 def test_context_meter_uses_cli_usage_and_catalog_window(tmp_path: Path) -> None:
     store = FakeStore()
     workspace = ConversationWorkspace(tmp_path, "c1")
