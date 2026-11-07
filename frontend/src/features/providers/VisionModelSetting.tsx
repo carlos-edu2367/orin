@@ -114,6 +114,8 @@ function splitValue(value: string): { provider: ProviderName; modelId: string } 
 
 function providerLabel(provider: ProviderName): string {
   switch (provider) {
+    case 'openai-codex':
+      return 'OpenAI Codex (Assinatura)'
     case 'openai':
       return 'OpenAI'
     case 'anthropic':

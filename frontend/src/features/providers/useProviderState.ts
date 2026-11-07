@@ -176,6 +176,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
   const canRevoke = load.status === 'loaded' && load.state.enabled === true
   const requiresApiKey =
     provider !== 'omniroute' &&
+    provider !== 'openai-codex' &&
     !(provider === 'ollama' && ollamaMode === 'local') &&
     !(provider === 'opencode' && opencodeMode === 'local') &&
     !(provider === 'anthropic' && anthropicMode === 'local') &&
@@ -200,7 +201,7 @@ export function useProviderState(client: ApiClient = createBrowserApiClient(), p
       intents.current.delete('configure')
       setLoad({ status: 'loaded', state })
       setApiKey('')
-      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'anthropic') && state.enabled === true) {
+      if ((provider === 'omniroute' || provider === 'ollama' || provider === 'opencode' || provider === 'anthropic' || provider === 'openai-codex') && state.enabled === true) {
         try {
           await refreshProviderModels(client, provider, intentFor('refresh'))
           intents.current.delete('refresh')

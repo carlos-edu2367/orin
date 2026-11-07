@@ -2346,6 +2346,21 @@ def create_app(services: ApiServices) -> FastAPI:
         )
         return JSONResponse(_connection_test_public(result))
 
+    @app.get("/v1/providers/openai-codex/status")
+    @app.get("/v1/providers/codex-cli/status")
+    async def codex_cli_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="provider.inspect", resource_id="openai-codex", purpose="provider.inspect")
+        status = await run_in_threadpool(_inspect_codex_cli_status)
+        return JSONResponse(status)
+
+    @app.get("/v1/providers/claude-cli/status")
+    async def claude_cli_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="provider.inspect", resource_id="anthropic", purpose="provider.inspect")
+        status = await run_in_threadpool(_inspect_claude_cli_status)
+        return JSONResponse(status)
+
     @app.post("/v1/providers/nvidia/test")
     async def test_nvidia_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
@@ -2810,6 +2825,52 @@ def _is_loopback_client(host: str | None) -> bool:
         return ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _inspect_codex_cli_status() -> dict[str, object]:
+    from agentos.providers.codex_cli import catalog as codex_catalog, command as codex_command
+
+    binary = codex_command.resolve_codex_binary()
+    installed = binary is not None
+    ver_tuple = codex_command.codex_version(binary) if binary is not None else None
+    version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
+    supported = codex_command.is_codex_version_supported(ver_tuple)
+    auth_path = Path(codex_catalog.resolve_codex_home()) / "auth.json"
+    try:
+        authenticated = bool(auth_path.is_file() and not auth_path.is_symlink())
+    except OSError:
+        authenticated = False
+    return {
+        "installed": installed,
+        "version": version_str,
+        "supported": supported,
+        "authenticated": authenticated,
+        "login_command": "codex login",
+    }
+
+
+def _inspect_claude_cli_status() -> dict[str, object]:
+    from agentos.providers.claude_cli import command as claude_command
+
+    binary = claude_command.resolve_claude_binary()
+    installed = binary is not None
+    ver_tuple = claude_command.claude_cli_version(binary) if binary is not None else None
+    version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
+    supported = claude_command.is_version_validated(ver_tuple)
+    authenticated = False
+    if binary is not None:
+        try:
+            claude_command.check_claude_cli_status(binary=binary)
+            authenticated = True
+        except Exception:
+            authenticated = False
+    return {
+        "installed": installed,
+        "version": version_str,
+        "supported": supported,
+        "authenticated": authenticated,
+        "login_command": "claude auth login",
+    }
 
 
 def _provider_name(value: str) -> str:
