@@ -156,18 +156,19 @@ def resolve_codex_binary(
         override_dir = source_env.get("ORIN_WINDOWS_APPS_DIR", "").strip()
         if override_dir:
             candidate_roots.append(Path(override_dir))
-        prog_files = source_env.get("ProgramFiles", "").strip()
-        if prog_files:
-            candidate_roots.append(Path(prog_files) / "WindowsApps")
-        local_appdata = source_env.get("LOCALAPPDATA", "").strip()
-        if local_appdata:
-            candidate_roots.append(
-                Path(local_appdata) / "Microsoft" / "WindowsApps"
-            )
-        if os.name == "nt":
-            default_win_apps = Path(r"C:\Program Files\WindowsApps")
-            if default_win_apps not in candidate_roots:
-                candidate_roots.append(default_win_apps)
+        else:
+            prog_files = source_env.get("ProgramFiles", "").strip()
+            if prog_files:
+                candidate_roots.append(Path(prog_files) / "WindowsApps")
+            local_appdata = source_env.get("LOCALAPPDATA", "").strip()
+            if local_appdata:
+                candidate_roots.append(
+                    Path(local_appdata) / "Microsoft" / "WindowsApps"
+                )
+            if env is None and os.name == "nt":
+                default_win_apps = Path(r"C:\Program Files\WindowsApps")
+                if default_win_apps not in candidate_roots:
+                    candidate_roots.append(default_win_apps)
 
     matches: list[tuple[tuple[int, ...], float, str]] = []
     for root in candidate_roots:
@@ -396,6 +397,14 @@ def build_codex_command(
         if effort in VALID_EFFORT_LEVELS and allowed_by_model:
             base_c_values.append(f'model_reasoning_effort="{effort}"')
 
+    locked_c_keys: set[str] = {
+        "model_instructions_file",
+        "features.shell_tool",
+        "web_search",
+        "features.view_image",
+        "sandbox_mode",
+        "approval_policy",
+    }
     seen_c_values: set[str] = set()
     for c_val in base_c_values:
         cmd.extend(["-c", c_val])
@@ -413,13 +422,19 @@ def build_codex_command(
             token = str(wiring_argv[idx])
             if token == "-c" and idx + 1 < len(wiring_argv):
                 val = str(wiring_argv[idx + 1])
+                c_key = val.split("=", 1)[0].strip()
+                if c_key in locked_c_keys and val not in seen_c_values:
+                    raise ValueError(
+                        f"ToolServerWiring cannot override locked Codex config key: {c_key!r}"
+                    )
                 if val not in seen_c_values:
                     cmd.extend(["-c", val])
                     seen_c_values.add(val)
                 idx += 2
             else:
-                cmd.append(token)
-                idx += 1
+                raise ValueError(
+                    f"ToolServerWiring for Codex CLI only permits '-c key=val' pairs, got: {token!r}"
+                )
 
     cmd.append("-")
     return cmd
@@ -433,6 +448,16 @@ def redact_codex_argv(argv: Sequence[str]) -> list[str]:
 
     for item in argv:
         text = str(item)
+        if text in {"--mcp-config", "--system-prompt-file"}:
+            redacted.append(text)
+            skip_next = True
+            check_c_next = False
+            continue
+        if text in {"-c", "--config"}:
+            redacted.append(text)
+            check_c_next = True
+            skip_next = False
+            continue
         if skip_next:
             redacted.append("<redacted>")
             skip_next = False
@@ -445,23 +470,20 @@ def redact_codex_argv(argv: Sequence[str]) -> list[str]:
             else:
                 redacted.append(text)
             continue
-        if text in {"--mcp-config", "--system-prompt-file"}:
-            redacted.append(text)
-            skip_next = True
-            continue
         if text.startswith(("--mcp-config=", "--system-prompt-file=")):
             prefix = text.split("=", 1)[0]
             redacted.append(f"{prefix}=<redacted>")
-            continue
-        if text in {"-c", "--config"}:
-            redacted.append(text)
-            check_c_next = True
             continue
         if text.startswith(("-c=", "--config=")):
             lowered = text.lower()
             if any(term in lowered for term in _SENSITIVE_CONFIG_TERMS):
                 prefix = text.split("=", 1)[0]
                 redacted.append(f"{prefix}=<redacted>")
+                continue
+        if text.startswith("-c") and len(text) > 2 and "=" in text:
+            lowered = text.lower()
+            if any(term in lowered for term in _SENSITIVE_CONFIG_TERMS):
+                redacted.append("-c<redacted>")
                 continue
         redacted.append(text)
 

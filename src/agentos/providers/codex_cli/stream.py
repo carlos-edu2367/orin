@@ -18,6 +18,41 @@ FORBIDDEN_CODEX_ITEM_KINDS: frozenset[str] = frozenset(
     {"command_execution", "file_change", "web_search"}
 )
 
+_FORBIDDEN_INSPECT_KEYS: tuple[str, ...] = (
+    "type",
+    "kind",
+    "item_type",
+    "tool",
+    "tool_name",
+)
+
+
+def _find_nested_forbidden_kind(
+    node: Any,
+    depth: int = 0,
+) -> tuple[str, str] | None:
+    if depth > 8:
+        return None
+    if isinstance(node, Mapping):
+        for key in _FORBIDDEN_INSPECT_KEYS:
+            val = node.get(key)
+            if isinstance(val, str) and val in FORBIDDEN_CODEX_ITEM_KINDS:
+                raw_id = node.get("id")
+                item_id = raw_id if isinstance(raw_id, str) and raw_id else val
+                return val, item_id
+        for val in node.values():
+            if isinstance(val, (Mapping, list, tuple)):
+                found = _find_nested_forbidden_kind(val, depth + 1)
+                if found is not None:
+                    return found
+    elif isinstance(node, (list, tuple)):
+        for elem in node:
+            if isinstance(elem, (Mapping, list, tuple)):
+                found = _find_nested_forbidden_kind(elem, depth + 1)
+                if found is not None:
+                    return found
+    return None
+
 
 def _str_field(mapping: Mapping[str, Any], *keys: str) -> str:
     for key in keys:
@@ -292,12 +327,14 @@ class CodexJsonlTranslator:
 
         pkt_type = _str_field(packet, "type", "kind")
 
-        if pkt_type in FORBIDDEN_CODEX_ITEM_KINDS:
+        forbidden_hit = _find_nested_forbidden_kind(packet)
+        if forbidden_hit is not None:
+            bad_kind, bad_id = forbidden_hit
             return [
                 CliEvent(
                     kind=CliEventKind.TOOL_USE_START,
-                    tool_use_id=_str_field(packet, "id") or pkt_type,
-                    tool_name=pkt_type,
+                    tool_use_id=bad_id,
+                    tool_name=bad_kind,
                     raw=packet,
                 )
             ]

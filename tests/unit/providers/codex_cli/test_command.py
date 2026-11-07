@@ -477,3 +477,72 @@ def test_build_isolated_codex_env_rejects_control_chars_in_mcp_token() -> None:
     with pytest.raises(ValueError):
         build_isolated_codex_env({"PATH": "/bin"}, mcp_token="bad\ntoken")
 
+
+def test_redact_codex_argv_handles_chained_flags_and_attached_c_values() -> None:
+    raw = [
+        "codex",
+        "exec",
+        "-c",
+        "-c",
+        "mcp_servers.orin.token=SECRET_TOKEN_VALUE",
+        "--mcp-config",
+        "--system-prompt-file",
+        "/tmp/secret_prompt.txt",
+        "-cmcp_servers.orin.bearer_token_env_var=ORIN_MCP_TOKEN",
+        '-cmodel_instructions_file="/tmp/secret_prompt.txt"',
+    ]
+    redacted = redact_codex_argv(raw)
+    joined = " ".join(redacted)
+    assert "SECRET_TOKEN_VALUE" not in joined
+    assert "/tmp/secret_prompt.txt" not in joined
+    assert "ORIN_MCP_TOKEN" not in joined
+    assert redacted == [
+        "codex",
+        "exec",
+        "-c",
+        "-c",
+        "<redacted>",
+        "--mcp-config",
+        "--system-prompt-file",
+        "<redacted>",
+        "-c<redacted>",
+        "-c<redacted>",
+    ]
+
+
+@pytest.mark.parametrize(
+    "bad_wiring_argv",
+    [
+        ("-c", "features.shell_tool=true"),
+        ("-c", 'sandbox_mode="danger-full-access"'),
+        ("-c", 'approval_policy="on-request"'),
+        ("-c", 'web_search="enabled"'),
+        ("-c", "features.view_image=true"),
+        ("-c", 'model_instructions_file="/etc/passwd"'),
+        ("--dangerously-bypass-approvals-and-sandbox",),
+        ("--full-auto",),
+    ],
+)
+def test_build_codex_command_rejects_wiring_overriding_locked_keys_or_raw_flags(
+    tmp_path: Path, bad_wiring_argv: tuple[str, ...]
+) -> None:
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("prompt", encoding="utf-8")
+    req = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        tool_server_wiring=ToolServerWiring(argv=bad_wiring_argv),
+    )
+    with pytest.raises(ValueError):
+        build_codex_command(req)
+
+
+def test_resolve_codex_binary_isolated_env_does_not_leak_host_windows_apps(
+    tmp_path: Path,
+) -> None:
+    empty_dir = tmp_path / "empty_bin"
+    empty_dir.mkdir()
+    assert resolve_codex_binary({"PATH": str(empty_dir)}) is None
+
+

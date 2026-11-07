@@ -106,7 +106,7 @@ def discover_codex_models(
     home = codex_home if codex_home is not None else resolve_codex_home()
     cache_path = Path(home) / "models_cache.json"
     try:
-        if not cache_path.is_file():
+        if cache_path.is_symlink() or not cache_path.is_file():
             return FALLBACK_CODEX_MODELS
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
     except Exception:

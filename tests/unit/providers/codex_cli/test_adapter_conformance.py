@@ -549,4 +549,78 @@ def test_adapter_resolve_binary_and_version_gate(
     assert binary == FAKE_CODEX_SCRIPT
     assert ver == (0, 167, 0)
     assert adapter.version_supported(ver) is True
+    assert adapter.binary_version(FAKE_CODEX_SCRIPT) == (0, 167, 0)
+
+
+def test_codex_adapter_never_opens_auth_json_or_writes_config_toml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import builtins
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        '{"access_token":"TOP_SECRET_OAUTH"}', encoding="utf-8"
+    )
+    (codex_home / "config.toml").write_text(
+        'model = "gpt-5.4"\n', encoding="utf-8"
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    real_open = builtins.open
+    real_path_open = Path.open
+    real_read_text = Path.read_text
+    real_write_text = Path.write_text
+
+    def _guard(path_obj: Any) -> None:
+        lower = str(path_obj).lower()
+        if "auth.json" in lower or "config.toml" in lower:
+            raise AssertionError(f"Forbidden access to {path_obj}")
+
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda f, *a, **kw: (_guard(f), real_open(f, *a, **kw))[1],
+    )
+    monkeypatch.setattr(
+        Path,
+        "open",
+        lambda self, *a, **kw: (_guard(self), real_path_open(self, *a, **kw))[1],
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda self, *a, **kw: (_guard(self), real_read_text(self, *a, **kw))[1],
+    )
+    monkeypatch.setattr(
+        Path,
+        "write_text",
+        lambda self, *a, **kw: (_guard(self), real_write_text(self, *a, **kw))[1],
+    )
+
+    adapter = CodexCliAdapter()
+    models = adapter.models()
+    assert len(models) > 0
+    assert adapter.context_window("gpt-6.1-sol") == 500_000
+
+    class _Handle:
+        url = "http://127.0.0.1:43123/mcp"
+        token = "mcp-secret-tok"
+        server_name = "orin"
+
+    wiring = adapter.wire_tool_server(_Handle(), tmp_path)
+    sys_file = tmp_path / "sys.txt"
+    real_write_text(sys_file, "sys", encoding="utf-8")
+    argv = adapter.build_command(
+        CliTurnRequest(
+            binary="codex",
+            system_prompt_file=sys_file,
+            model="gpt-6.1-sol",
+            tool_server_wiring=wiring,
+        )
+    )
+    logged = adapter.loggable_command(argv)
+    assert "mcp-secret-tok" not in " ".join(logged)
+    assert (codex_home / "config.toml").exists()
+
 

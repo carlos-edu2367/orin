@@ -2837,7 +2837,7 @@ def _inspect_codex_cli_status() -> dict[str, object]:
     supported = codex_command.is_codex_version_supported(ver_tuple)
     auth_path = Path(codex_catalog.resolve_codex_home()) / "auth.json"
     try:
-        authenticated = bool(auth_path.is_file() and not auth_path.is_symlink())
+        authenticated = bool(not auth_path.is_symlink() and auth_path.is_file())
     except OSError:
         authenticated = False
     return {

@@ -58,6 +58,13 @@ class CodexCliAdapter:
         version = codex_version(binary, env=env)
         return binary, version
 
+    def binary_version(
+        self,
+        binary: str,
+        env: Mapping[str, str] | None = None,
+    ) -> tuple[int, int, int] | None:
+        return codex_version(binary, env=env)
+
     def version_supported(
         self, version: tuple[int, int, int] | None
     ) -> bool:

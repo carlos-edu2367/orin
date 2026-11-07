@@ -181,6 +181,31 @@ def test_resolve_codex_home_uses_env_or_userprofile(tmp_path: Path) -> None:
         resolve_codex_home({"USERPROFILE": str(tmp_path)})
         == tmp_path / ".codex"
     )
+    assert resolve_codex_home({"HOME": str(tmp_path)}) == tmp_path / ".codex"
+
+
+def test_discover_codex_models_refuses_symlinked_models_cache(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    cache_file = tmp_path / "models_cache.json"
+    cache_file.write_text(
+        json.dumps(_sample_models_cache_payload()), encoding="utf-8"
+    )
+    real_is_symlink = Path.is_symlink
+
+    def fake_is_symlink(self: Path) -> bool:
+        if self.name == "models_cache.json":
+            return True
+        return real_is_symlink(self)
+
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    try:
+        mp.setattr(Path, "is_symlink", fake_is_symlink)
+        assert discover_codex_models(tmp_path) == FALLBACK_CODEX_MODELS
+    finally:
+        mp.undo()
 
 
 def test_discover_codex_models_handles_adversarial_and_edge_case_entries(

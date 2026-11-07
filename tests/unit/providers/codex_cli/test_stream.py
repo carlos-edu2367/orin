@@ -582,3 +582,73 @@ def test_resume_fixture_and_error_followed_by_turn_failed_variants() -> None:
     assert tr_diff.result.result_text == "refined final error"
 
 
+@pytest.mark.parametrize(
+    "packet,expected_forbidden",
+    [
+        (
+            {
+                "type": "item.updated",
+                "item": {"id": "item_u1", "type": "command_execution"},
+            },
+            "command_execution",
+        ),
+        (
+            {
+                "type": "item.completed",
+                "item": {"id": "item_c1", "type": "file_change"},
+            },
+            "file_change",
+        ),
+        (
+            {
+                "type": "item.delta",
+                "item": {"id": "item_d1", "type": "web_search"},
+            },
+            "web_search",
+        ),
+        (
+            {
+                "type": "event_msg",
+                "payload": {"item": {"id": "item_p1", "type": "command_execution"}},
+            },
+            "command_execution",
+        ),
+        (
+            {
+                "type": "turn.updated",
+                "turn": {"items": [{"id": "item_t1", "kind": "file_change"}]},
+            },
+            "file_change",
+        ),
+        (
+            {
+                "type": "item.updated",
+                "item": {
+                    "id": "item_m1",
+                    "type": "mcp_tool_call",
+                    "tool": "web_search",
+                },
+            },
+            "web_search",
+        ),
+    ],
+)
+def test_forbidden_item_kinds_detected_across_lifecycle_and_nested_shapes(
+    packet: dict[str, object], expected_forbidden: str
+) -> None:
+    tr = CodexJsonlTranslator()
+    events = tr.feed_line(json.dumps(packet))
+    assert len(events) == 1
+    assert events[0].kind == CliEventKind.TOOL_USE_START
+    assert events[0].tool_name == expected_forbidden
+    assert (
+        find_forbidden_item_kind(
+            frozenset({"command_execution", "file_change", "web_search"}),
+            raw=events[0].raw,
+            tool_name=events[0].tool_name,
+        )
+        == expected_forbidden
+    )
+
+
+
