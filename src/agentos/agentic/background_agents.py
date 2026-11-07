@@ -91,6 +91,7 @@ class BackgroundAgentRegistry:
         self._by_conv: dict[str, dict[str, BackgroundAgentEntry]] = {}
         self._by_id: dict[str, BackgroundAgentEntry] = {}
         self._callbacks: dict[str, list[Callable[[BackgroundAgentEntry], None]]] = {}
+        self._active_waiters: dict[str, int] = {}
         self._executors: dict[str, ThreadPoolExecutor] = {}
 
     def executor_for(self, conversation_id: str, *, max_workers: int = 32) -> ThreadPoolExecutor:
@@ -126,7 +127,11 @@ class BackgroundAgentRegistry:
             entry.status = _normalize_status(status)
             entry.finished_at = time.monotonic()
             entry.summary = extract_report_summary(summary)
-            if not entry.callback_fired:
+            if (
+                not entry.callback_fired
+                and not entry.notified
+                and self._active_waiters.get(entry.conversation_id, 0) <= 0
+            ):
                 callbacks_to_run = list(self._callbacks.get(entry.conversation_id, ()))
                 if callbacks_to_run:
                     entry.callback_fired = True
@@ -152,7 +157,12 @@ class BackgroundAgentRegistry:
             conv_map = self._by_conv.get(conv_id, {})
             return [entry for entry in conv_map.values() if entry.status == "running"]
 
-    def take_unnotified(self, conversation_id: str) -> list[BackgroundAgentEntry]:
+    def take_unnotified(
+        self,
+        conversation_id: str,
+        *,
+        since_monotonic: float | None = None,
+    ) -> list[BackgroundAgentEntry]:
         conv_id = str(conversation_id or "")
         with self._lock:
             conv_map = self._by_conv.get(conv_id, {})
@@ -160,17 +170,44 @@ class BackgroundAgentRegistry:
             for entry in conv_map.values():
                 if entry.status != "running" and not entry.notified:
                     entry.notified = True
-                    taken.append(entry)
+                    if (
+                        since_monotonic is None
+                        or entry.started_at >= since_monotonic
+                        or (entry.finished_at is not None and entry.finished_at >= since_monotonic)
+                    ):
+                        taken.append(entry)
             return taken
 
-    def has_unnotified(self, conversation_id: str) -> bool:
+    def has_unnotified(
+        self,
+        conversation_id: str,
+        *,
+        since_monotonic: float | None = None,
+    ) -> bool:
         conv_id = str(conversation_id or "")
         with self._lock:
             conv_map = self._by_conv.get(conv_id, {})
             return any(
-                entry.status != "running" and not entry.notified
+                entry.status != "running"
+                and not entry.notified
+                and (
+                    since_monotonic is None
+                    or entry.started_at >= since_monotonic
+                    or (entry.finished_at is not None and entry.finished_at >= since_monotonic)
+                )
                 for entry in conv_map.values()
             )
+
+    def mark_notified(self, conversation_id: str, agent_id: str) -> None:
+        conv_id = str(conversation_id or "")
+        clean_id = str(agent_id or "")
+        with self._lock:
+            conv_map = self._by_conv.get(conv_id)
+            if not conv_map:
+                return
+            entry = conv_map.get(clean_id)
+            if entry is not None:
+                entry.notified = True
 
     def wait_any(
         self,
@@ -181,19 +218,29 @@ class BackgroundAgentRegistry:
     ) -> bool:
         conv_id = str(conversation_id or "")
         deadline = time.monotonic() + max(0.0, float(timeout))
-        while True:
-            if cancelled() or (extra_wake is not None and extra_wake()):
-                return True
+        with self._cond:
+            self._active_waiters[conv_id] = self._active_waiters.get(conv_id, 0) + 1
+        try:
+            while True:
+                if cancelled() or (extra_wake is not None and extra_wake()):
+                    return True
+                with self._cond:
+                    conv_map = self._by_conv.get(conv_id, {})
+                    if any(e.status != "running" and not e.notified for e in conv_map.values()):
+                        return True
+                    if not any(e.status == "running" for e in conv_map.values()):
+                        return True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._cond.wait(timeout=min(POLL_WAIT_SECONDS, remaining))
+        finally:
             with self._cond:
-                conv_map = self._by_conv.get(conv_id, {})
-                if any(e.status != "running" and not e.notified for e in conv_map.values()):
-                    return True
-                if not any(e.status == "running" for e in conv_map.values()):
-                    return True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._cond.wait(timeout=min(POLL_WAIT_SECONDS, remaining))
+                cur = self._active_waiters.get(conv_id, 0)
+                if cur <= 1:
+                    self._active_waiters.pop(conv_id, None)
+                else:
+                    self._active_waiters[conv_id] = cur - 1
 
     def on_finish(
         self,
@@ -203,16 +250,27 @@ class BackgroundAgentRegistry:
         conv_id = str(conversation_id or "")
         if not conv_id:
             return
+        pending_entries: list[BackgroundAgentEntry] = []
         with self._cond:
-            cbs = self._callbacks.setdefault(conv_id, [])
-            if callback not in cbs:
-                cbs.append(callback)
+            self._callbacks[conv_id] = [callback]
+            if self._active_waiters.get(conv_id, 0) <= 0:
+                conv_map = self._by_conv.get(conv_id, {})
+                for entry in conv_map.values():
+                    if entry.status != "running" and not entry.notified and not entry.callback_fired:
+                        entry.callback_fired = True
+                        pending_entries.append(entry)
+        for entry in pending_entries:
+            try:
+                callback(entry)
+            except Exception:  # noqa: BLE001
+                logger.warning("background agent on_finish callback failed for %s", entry.agent_id, exc_info=True)
 
     def clear_for_tests(self) -> None:
         with self._cond:
             self._by_conv.clear()
             self._by_id.clear()
             self._callbacks.clear()
+            self._active_waiters.clear()
             self._cond.notify_all()
 
 

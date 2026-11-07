@@ -27,7 +27,7 @@ RULES = frozenset({"once", "hourly", "daily", "weekly", "cron"})
 # the run queues behind it as before, so "queued" does not defer.
 BUSY_TURN_STATES = ("waiting_user", "running")
 # W7 (W4): the schedules a tool made (wakeups, monitor wakes) are deleted a week after they finish; the person's are kept.
-TOOL_SCHEDULE_SOURCES = frozenset({"wakeup", "monitor"})
+TOOL_SCHEDULE_SOURCES = frozenset({"wakeup", "monitor", "subagent"})
 FINAL_SCHEDULE_STATES = ("EXPIRED", "CANCELLED")
 TOOL_SCHEDULE_RETENTION = timedelta(days=7)
 TOOL_SCHEDULE_PRUNE_EVERY = timedelta(hours=1)
@@ -290,7 +290,7 @@ class ScheduledChatService:
             rule = dict(row["rule"] or {})
             source = str(rule.get("source") or "user")
             # A wakeup or monitor wake that already ran is an implementation detail; pending ones stay cancellable here.
-            if source in {"wakeup", "monitor"} and row["state"] != "ACTIVE":
+            if source in TOOL_SCHEDULE_SOURCES and row["state"] != "ACTIVE":
                 continue
             items.append({
                 **self._public(row), "project_id": row["project_id"], "message": row["message"], "provider": row["provider"],

@@ -3517,6 +3517,7 @@ class TurnSession:
                 },
                 "SUBAGENT_EXCEPTION",
             )
+        BACKGROUND_AGENTS.mark_notified(conv_id, str(agent_id))
         merged_payload = {
             **dict(outcome.payload),
             "agent_id": agent_id,
@@ -3618,13 +3619,35 @@ class TurnSession:
             executor = self._bg_subagent_executor
             self._bg_subagent_executor = None
             bg_entries = list(self._background_subagents.values())
+        conv_id = str((self.turn or {}).get("conversation_id") or "")
+        keep_subagents = bool((self.turn or {}).get("keep_subagents"))
+        if not keep_subagents:
+            store_obj = getattr(self, "store", None)
+            chat_store_obj = getattr(self, "chat_store", None)
+            keep_checker = getattr(store_obj, "keep_subagents_requested", None) or getattr(chat_store_obj, "keep_subagents_requested", None)
+            if callable(keep_checker):
+                try:
+                    keep_subagents = bool(keep_checker(str((self.turn or {}).get("turn_id") or "")))
+                except Exception:
+                    pass
         is_cancelled = False
         try:
             is_cancelled = bool(self.cancelled(self.turn))
         except Exception:
             pass
         turn_state = str((self.turn or {}).get("state") or "").strip().lower()
-        should_cancel = is_cancelled or turn_state in {"failed", "cancelled", "cancelling"}
+        turn_code = str((self.turn or {}).get("error_code") or (self.turn or {}).get("code") or "").strip().upper()
+        limit_or_deadline = turn_code in {
+            "TURN_DEADLINE_EXCEEDED",
+            "ITERATION_LIMIT",
+            "MAX_TURNS",
+            "ACTION_LIMIT",
+            "SAFETY_TOOL_ROUNDS",
+        }
+        should_cancel = (
+            (is_cancelled or (turn_state in {"failed", "cancelled", "cancelling"} and not limit_or_deadline))
+            and not keep_subagents
+        )
         if should_cancel:
             for entry in bg_entries:
                 cancel_event = entry.get("cancel")
@@ -3646,6 +3669,10 @@ class TurnSession:
                         self.agents_store.set_state(agent_id, "cancelled")
                     except Exception:
                         pass
+        if not should_cancel and conv_id and (
+            BACKGROUND_AGENTS.running(conv_id) or BACKGROUND_AGENTS.has_unnotified(conv_id)
+        ):
+            BACKGROUND_AGENTS.on_finish(conv_id, self._subagent_waker(conv_id))
 
     def _ask_agents(self, requests: list[Mapping[str, str]], *, caller: SubagentCaller | None = None) -> ToolOutcome:
         """Run several independent delegations at once.
@@ -4252,13 +4279,51 @@ class TurnSession:
         cached = getattr(self, "_scheduler_service", None)
         if cached is not None:
             return cached
-        engine = getattr(self.chat_store, "_engine", None)
+        engine = (
+            getattr(self.chat_store, "_engine", None)
+            or getattr(self.agents_store, "_engine", None)
+            or getattr(self.store, "_engine", None)
+        )
         if engine is None:
             return None
         from agentos.scheduler.scheduled_chats import ScheduledChatService
 
         self._scheduler_service = ScheduledChatService(engine)
         return self._scheduler_service
+
+    def _subagent_waker(self, conversation_id: str) -> Callable[[BackgroundAgentEntry], None]:
+        scheduler = self._turn_scheduler()
+        context = self._schedule_context()
+
+        def wake(entry: BackgroundAgentEntry) -> None:
+            if scheduler is None or entry.notified:
+                return
+            from .background_agents import format_subagent_notifications
+            from agentos.scheduler.scheduled_chats import ScheduledChatInput
+
+            message = format_subagent_notifications(
+                [entry],
+                still_running=BACKGROUND_AGENTS.running(conversation_id),
+            )
+            if not message:
+                return
+            request = ScheduledChatInput(
+                message,
+                context["provider"],
+                context["model_id"],
+                str(context.get("timezone") or "UTC"),
+                "once",
+                fire_at=datetime.now(UTC) + timedelta(seconds=2),
+                conversation_id=conversation_id,
+                source="subagent",
+            )
+            scheduler.create(
+                context["user_id"],
+                request,
+                idempotency_key=f"subagent:{entry.agent_id}",
+            )
+
+        return wake
 
     def _schedule_context(self) -> dict[str, str]:
         """Who a job made in this turn runs as, on which model, and in which timezone (W4)."""

@@ -2238,6 +2238,7 @@ class NativeTurnRunner:
                         hasattr(self.runtime.store, "text")
                         and hasattr(self.runtime.store, "agent_id")
                     )
+                    since_mono = getattr(self.runtime, "_started_mono", None)
                     if (
                         not closing_sent
                         and not turns_used
@@ -2245,7 +2246,7 @@ class NativeTurnRunner:
                         and conv_id
                         and (
                             BACKGROUND_AGENTS.running(conv_id)
-                            or BACKGROUND_AGENTS.has_unnotified(conv_id)
+                            or BACKGROUND_AGENTS.has_unnotified(conv_id, since_monotonic=since_mono)
                         )
                         and self.runtime._bg_continuations < MAX_BACKGROUND_CONTINUATIONS
                     ):
@@ -2279,7 +2280,7 @@ class NativeTurnRunner:
                             return self.runtime._cancel(
                                 self.turn, process_count, executor.action_count
                             )
-                        unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id)
+                        unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id, since_monotonic=since_mono)
                         notif_parts: list[str] = []
                         notif_body = format_subagent_notifications(
                             unnotified,

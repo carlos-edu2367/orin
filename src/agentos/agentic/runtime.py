@@ -336,6 +336,7 @@ class AgenticTurnRuntime:
         self._stop_hook_active = False
         self._stop_continuations = 0
         self._bg_continuations = 0
+        self._started_mono = time.monotonic()
         self._max_tokens_recoveries = 0
         self._reminder_requests = 0
         # Raised for the rest of the turn after a tool call was cut by the output limit.
@@ -721,6 +722,7 @@ class AgenticTurnRuntime:
         self._stop_hook_active = False
         self._stop_continuations = 0
         self._bg_continuations = 0
+        self._started_mono = time.monotonic()
         self._max_tokens_recoveries = 0
         self._output_cap = None
         self._queued_turn_count = 0
@@ -1373,12 +1375,13 @@ class AgenticTurnRuntime:
                 from .background_agents import BACKGROUND_AGENTS, format_subagent_notifications
 
                 conv_id = str(turn.get("conversation_id") or "")
+                since_mono = getattr(self, "_started_mono", None)
                 if (
                     not is_subagent
                     and not bool(turn.get("is_subagent"))
                     and not final_iteration
                     and conv_id
-                    and (BACKGROUND_AGENTS.running(conv_id) or BACKGROUND_AGENTS.has_unnotified(conv_id))
+                    and (BACKGROUND_AGENTS.running(conv_id) or BACKGROUND_AGENTS.has_unnotified(conv_id, since_monotonic=since_mono))
                     and self._bg_continuations < MAX_BACKGROUND_CONTINUATIONS
                 ):
                     self._bg_continuations += 1
@@ -1396,7 +1399,7 @@ class AgenticTurnRuntime:
                     )
                     if self.cancelled(turn):
                         return self._cancel(turn, iteration, action_count)
-                    unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id)
+                    unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id, since_monotonic=since_mono)
                     notif_text = format_subagent_notifications(
                         unnotified,
                         still_running=BACKGROUND_AGENTS.running(conv_id),

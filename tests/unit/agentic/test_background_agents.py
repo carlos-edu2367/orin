@@ -301,3 +301,127 @@ def test_session_b_check_subagent_reads_completed_agent_from_session_a(tmp_path:
         session_a.close_background_subagents()
         engine.dispose()
 
+
+def test_subagent_finishing_after_turn_closes_schedules_continuation_once(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+    from sqlalchemy import insert, select
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS, BackgroundAgentEntry
+    from agentos.persistence.postgres.schema import (
+        conversations,
+        provider_configurations,
+        provider_model_catalog,
+        scheduled_chat_tasks,
+        schedules,
+    )
+    from agentos.scheduler.scheduled_chats import ScheduledChatService, TOOL_SCHEDULE_SOURCES
+
+    assert "subagent" in TOOL_SCHEDULE_SOURCES
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    now = datetime.now(UTC)
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 't5.db').as_posix()}")
+    metadata.create_all(engine)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                insert(conversations).values(
+                    conversation_id=TURN["conversation_id"],
+                    user_id=TURN["user_id"],
+                    provider=TURN["provider"],
+                    model_id=TURN["model_id"],
+                    state="active",
+                    title="T5 test",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                insert(provider_model_catalog).values(
+                    user_id=TURN["user_id"],
+                    provider=TURN["provider"],
+                    model_id=TURN["model_id"],
+                    display_name="Model",
+                    capabilities=[],
+                    input_modalities=[],
+                    output_modalities=[],
+                    refreshed_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            conn.execute(
+                insert(provider_configurations).values(
+                    user_id=TURN["user_id"],
+                    provider=TURN["provider"],
+                    enabled=True,
+                    model=None,
+                    base_url=None,
+                    secret_ref="test",
+                    key_cooldown_seconds=60,
+                    catalog_refreshed_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        session = TurnSession(
+            turn=dict(TURN),
+            store=_RecordingStore(),
+            agents_store=ConversationAgentStore(engine, conversation_id=TURN["conversation_id"], user_id=TURN["user_id"]),
+            memory_store=None,
+            provider_factory=lambda: _QuickChild(),
+            workspace_root=tmp_path,
+            child_provider_factory=lambda _model: _QuickChild(),
+        )
+        session._scheduler_service = ScheduledChatService(engine)
+
+        bg_entry = BackgroundAgentEntry(
+            agent_id="agent:conv-par-1:antigravity",
+            conversation_id=TURN["conversation_id"],
+            name="antigravity",
+            output_file=".orin/agent-outputs/antigravity.md",
+            status="running",
+            started_at=time.monotonic(),
+            finished_at=None,
+            summary="",
+            cancel=threading.Event(),
+            future=None,
+        )
+        BACKGROUND_AGENTS.register(bg_entry)
+
+        # Turn closes while subagent is still running
+        session.close_background_subagents()
+
+        # Subagent finishes after the turn closed
+        BACKGROUND_AGENTS.finish(
+            "agent:conv-par-1:antigravity",
+            "completed",
+            "Implementação concluída com sucesso.",
+        )
+        # Second finish for the same agent must not create another schedule
+        BACKGROUND_AGENTS.finish(
+            "agent:conv-par-1:antigravity",
+            "completed",
+            "Implementação concluída com sucesso.",
+        )
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(schedules, scheduled_chat_tasks.c.message)
+                .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
+                .where(schedules.c.user_id == TURN["user_id"])
+            ).mappings().all()
+
+        subagent_schedules = [
+            r for r in rows if str(dict(r["rule"] or {}).get("source") or "") == "subagent"
+        ]
+        assert len(subagent_schedules) == 1
+        msg = str(subagent_schedules[0]["message"])
+        assert '<subagent-finished agent_id="agent:conv-par-1:antigravity" name="antigravity" status="completed">' in msg
+        assert "Implementação concluída com sucesso." in msg
+        assert ".orin/agent-outputs/antigravity.md" in msg
+    finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+        engine.dispose()
+
+
