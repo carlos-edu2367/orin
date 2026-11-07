@@ -72,7 +72,8 @@ _MCP_MENTION = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9-]{0,31}):(\S+)")
 _RESOURCE_CLOSE = re.compile(r"</\s*mcp-resource", re.IGNORECASE)  # W7: a resource cannot end its own wrapper
 MAX_MCP_MENTIONS = 5
 # `@agent-name` in the person's message: they ask for that agent (a defined one) in this task.
-_AGENT_MENTION = re.compile(r"(?<![\w@/.\\-])@([a-z0-9][a-z0-9_-]{0,63})(?![\w./\\:-])")
+# A trailing "." or ":" ends the sentence ("use @revisor."), but not a path ("@main.py", "@c:/x").
+_AGENT_MENTION = re.compile(r"(?<![\w@/.\\-])@([a-z0-9][a-z0-9_-]{0,63})(?![\w/\\-])(?![.:]\S)")
 MAX_AGENT_MENTIONS = 5
 MCP_MENTION_CHARS = 20_000
 
@@ -166,6 +167,7 @@ def _env_optional_positive_int(name: str) -> int | None:
 
 MAX_CONCURRENT_SUBAGENTS = max(1, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
 MAX_SUBAGENTS_PER_TURN: int | None = _env_optional_positive_int("ORIN_MAX_SUBAGENTS_PER_TURN")
+MAX_BACKGROUND_SUBAGENT_THREADS = 256
 # How many levels of subagents may sit below the main agent (its children are level 1). A subagent at the
 # last level gets no delegation tools. `subagentMaxDepth` sets it; a repository may only lower it.
 DEFAULT_SUBAGENT_MAX_DEPTH = 3
@@ -765,6 +767,7 @@ class _SubagentSlot:
         self._held = False
         self._waiting = 0
         self._reacquiring = False
+        self._closed = False
 
     def acquire(self) -> None:
         self._semaphore.acquire()
@@ -772,9 +775,12 @@ class _SubagentSlot:
             self._held = True
 
     def release(self) -> None:
+        """The run is over: give the place back, and never take it again (a tool call of this run may still be
+        waiting inside ``lent``; taking a place back after the run ended would keep it for the rest of the turn)."""
         with self._cond:
             while self._reacquiring:
                 self._cond.wait()
+            self._closed = True
             if self._held:
                 self._held = False
                 self._semaphore.release()
@@ -798,7 +804,7 @@ class _SubagentSlot:
         finally:
             with self._cond:
                 self._waiting -= 1
-                take_back = not self._waiting and not self._held
+                take_back = not self._waiting and not self._held and not self._closed
                 if take_back:
                     self._reacquiring = True
             if take_back:
@@ -2549,10 +2555,11 @@ class TurnSession:
         if run_in_background or (definition is not None and definition.background):
             with self._subagent_lock:
                 if self._bg_subagent_executor is None:
-                    # A background subagent may wait for one it started in the background: the pool leaves room
-                    # for every level, and the semaphore still bounds how many actually run.
+                    # A background agent holds a worker while it waits for a concurrency slot, and may wait for
+                    # background agents it started: a small pool could leave those queued forever. Threads are
+                    # created on demand, so a generous pool costs nothing; the semaphore bounds how many run.
                     self._bg_subagent_executor = ThreadPoolExecutor(
-                        max_workers=self._max_concurrent_subagents * max_depth,
+                        max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
                         thread_name_prefix="orin-bg-subagent",
                     )
                 cancel = threading.Event()
@@ -3333,12 +3340,13 @@ class TurnSession:
             )
         name = str(entry.get("agent_name") or agent_id)
         output = {"message": "", "task_id": str(agent_id), "task_type": "local_agent"}
-        if entry["future"].done():
-            output["message"] = f"{name} had already finished."
-            return ToolOutcome("succeeded", f"{name} já tinha terminado", output["message"], {"agent_id": agent_id, "tool_kind": "agent"}, data={"tool_output": output})
         cancel = entry.get("cancel")
         if cancel is not None:
+            # Also when it already finished: the background agents it started watch this event and stop with it.
             cancel.set()
+        if entry["future"].done():
+            output["message"] = f"{name} had already finished; anything it started in the background is asked to stop."
+            return ToolOutcome("succeeded", f"{name} já tinha terminado", output["message"], {"agent_id": agent_id, "tool_kind": "agent"}, data={"tool_output": output})
         output["message"] = f"Asked {name} to stop; it stops at its next step."
         return ToolOutcome("succeeded", f"Parou {name}", output["message"], {"agent_id": agent_id, "status": "stopping", "tool_kind": "agent"}, data={"tool_output": output})
 

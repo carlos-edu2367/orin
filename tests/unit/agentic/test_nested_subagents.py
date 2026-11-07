@@ -280,3 +280,45 @@ def test_the_store_saves_a_new_parent(agents_store) -> None:
     record = agents_store.create("revisor", "Revisa", parent_agent_id=MAIN_ID)
     agents_store.set_parent(str(record["agent_id"]), "agent:a1")
     assert agents_store.get(str(record["agent_id"]))["parent_agent_id"] == "agent:a1"
+
+
+def test_a_slot_given_back_while_a_tool_still_waits_is_never_taken_again() -> None:
+    semaphore = BoundedSemaphore(1)
+    slot = _SubagentSlot(semaphore)
+    slot.acquire()
+    waiting = slot.lent()
+    waiting.__enter__()  # a tool call of the run is waiting for its child
+    slot.release()  # the run ends (deadline, cancel) before that call returns
+    waiting.__exit__(None, None, None)
+    assert not slot.held
+    assert semaphore.acquire(blocking=False), "the place went back to the turn"
+    semaphore.release()
+
+
+def test_stopping_a_finished_background_agent_still_stops_what_it_started(tmp_path: Path, agents_store) -> None:
+    from concurrent.futures import Future
+
+    session = _session(tmp_path, _TreeStore(), agents_store, _Scripted([]), _Scripted([]))
+    done: Future = Future()
+    done.set_result(None)
+    cancel = threading.Event()
+    session._background_subagents["agent:a1"] = {"future": done, "agent_id": "agent:a1", "agent_name": "a1", "cancel": cancel}
+    grandchild_cancelled = session._child_cancelled(
+        threading.Event(),
+        SubagentCaller(agent_id="agent:a1", name="a1", depth=1, permission_mode="accept_edits",
+                       cancelled=session._child_cancelled(cancel)),
+    )
+    assert grandchild_cancelled(session.turn) is False
+    assert session._stop_background_subagent("agent:a1").status == "succeeded"
+    assert grandchild_cancelled(session.turn) is True
+
+
+@pytest.mark.parametrize(("text", "names"), [
+    ("use o @revisor.", ["revisor"]),
+    ("@revisor: revise", ["revisor"]),
+    ("abra @main.py e @c:/x e dev@x.com", []),
+])
+def test_agent_mentions_allow_punctuation_but_not_paths(text: str, names: list[str]) -> None:
+    from agentos.agentic.session import _AGENT_MENTION
+
+    assert [match.group(1) for match in _AGENT_MENTION.finditer(text)] == names

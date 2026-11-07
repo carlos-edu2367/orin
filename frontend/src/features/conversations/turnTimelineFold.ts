@@ -309,7 +309,7 @@ export function buildTurnTimeline(
     (event) => !event.parentAgentId && TERMINAL_TURN_EVENT_TYPES.has(event.type),
   )
   const isTurnCompleted = explicitTurnCompleted || hasTerminalTurnEvent
-  const settled = computeSettledEventIds(turnEvents, isTurnCompleted)
+  const settled = computeSettledEventIds(turnEvents, isTurnCompleted, { keepOpenToolProgress: true })
 
   const primaryAgentId = turnEvents.find(
     (event) => !event.parentAgentId && event.type !== 'agent.created' && event.agentId,

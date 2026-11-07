@@ -60,7 +60,7 @@ export function TasksPanel({ client, conversationId, onClose }: { client: ApiCli
           setError('Não foi possível ler os processos em segundo plano.')
         }
         if (overview.status === 'fulfilled') {
-          const subagents = overview.value.agents.filter((agent) => agent.parent_agent_id !== null)
+          const subagents = overview.value.agents.filter((agent) => agent.parent_agent_id != null)
           setAgents(orderAgentTree(subagents, (agent) => agent.agent_id, (agent) => agent.parent_agent_id)
             .map(({ item: agent, depth }) => ({
               agentId: agent.agent_id, name: agent.name, role: agent.role, state: agent.state,

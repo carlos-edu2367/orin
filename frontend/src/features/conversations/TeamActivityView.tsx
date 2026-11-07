@@ -170,7 +170,8 @@ function deriveAgentsFromEvents(
     bucket.push(ev)
     grouped.set(id, bucket)
     const parent = sanitizeText(ev.parentAgentId)
-    if (parent && !parents.has(id)) parents.set(id, sanitizeAgentId(parent, ''))
+    // The latest parent wins: an agent resumed by another subagent sits under that one now.
+    if (parent) parents.set(id, sanitizeAgentId(parent, ''))
   }
 
   const cards: TeamAgentCardData[] = []

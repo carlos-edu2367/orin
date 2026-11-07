@@ -285,6 +285,11 @@ const TERMINAL_TURN_TYPES = new Set([
 export function computeSettledEventIds(
   events: ConversationActivityEvent[],
   turnCompleted = false,
+  /**
+   * The turn timeline shows a finished turn's last progress of a tool that never reported its end (a PowerShell
+   * run with its output) as completed, so it keeps it; only the "Preparando…" rows of arguments are hidden.
+   */
+  { keepOpenToolProgress = false }: { keepOpenToolProgress?: boolean } = {},
 ): Set<string> {
   const settled = new Set<string>()
   const openByTurn = new Map<string, ConversationActivityEvent[]>()
@@ -371,6 +376,7 @@ export function computeSettledEventIds(
   if (effectiveTurnCompleted) {
     for (const list of openByTurn.values()) {
       for (const openEvent of list) {
+        if (keepOpenToolProgress && openEvent.type === 'tool.progressed') continue
         if (openEvent.eventId) settled.add(openEvent.eventId)
       }
     }
