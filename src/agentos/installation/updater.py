@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass
 import errno
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -39,6 +40,7 @@ MANIFEST_ATTEMPTS = 3
 DOWNLOAD_ATTEMPTS = 2
 NETWORK_TIMEOUT = 20.0
 SMOKE_TIMEOUT = 30.0
+_log = logging.getLogger("orin.update")
 
 #: The visible stages, in order. ``index`` in an event is a position in this list.
 STEPS: tuple[tuple[str, str], ...] = (
@@ -245,6 +247,44 @@ class Updater:
             return None
         return release
 
+    def reconcile(self) -> None:
+        """Clean up prepared/state artifacts after an apply interrupted mid-switch."""
+        active = self.active_version()
+        if active is None:
+            return
+        cleared_prepared = False
+        prepared_path = self.root / PREPARED_FILE
+        if prepared_path.is_file():
+            try:
+                data = json.loads(prepared_path.read_text(encoding="utf-8"))
+                prepared_version = str(data.get("version") or "")
+            except (OSError, ValueError, TypeError, AttributeError):
+                prepared_version = ""
+            if SEMVER.fullmatch(prepared_version) and version_key(active) >= version_key(prepared_version):
+                self._clear_prepared()
+                cleared_prepared = True
+        state = self._read_state()
+        recorded_current = state.get("current")
+        last_attempt = state.get("last_attempt")
+        stale_failed_attempt = (
+            isinstance(last_attempt, dict)
+            and last_attempt.get("status") == "failed"
+            and isinstance(last_attempt.get("version"), str)
+            and bool(SEMVER.fullmatch(last_attempt["version"]))
+            and version_key(active) >= version_key(last_attempt["version"])
+        )
+        if (recorded_current != active and (recorded_current is not None or cleared_prepared)) or stale_failed_attempt:
+            if recorded_current != active and isinstance(recorded_current, str) and SEMVER.fullmatch(recorded_current):
+                previous: str | None = recorded_current
+            else:
+                existing_prev = state.get("previous")
+                previous = existing_prev if isinstance(existing_prev, str) and SEMVER.fullmatch(existing_prev) else None
+            self._write_state(
+                previous=previous,
+                current=active,
+                attempt={"status": "updated", "version": active},
+            )
+
     def apply_prepared(self) -> UpdateResult:
         """Activate the prepared release (stops the running Orin first, via ``before_activate``)."""
         self._started = self._clock()
@@ -253,8 +293,21 @@ class Updater:
             raise UpdateError("Não há uma atualização preparada para instalar.", step="activate", hint="Rode `orin update` para baixar a versão mais recente.")
         ready = self.root / f"{release.version}{READY_SUFFIX}"
         try:
-            self._run_version_check(ready / runtime_relative_path(self._platform), release.version, step="validate")
+            validate_started = self._clock()
+            try:
+                self._run_version_check(ready / runtime_relative_path(self._platform), release.version, step="validate")
+            except BaseException as error:
+                _log.error("step=validate outcome=failed duration=%.3fs error=%s", self._clock() - validate_started, error)
+                raise
+            _log.info("step=validate outcome=ok duration=%.3fs", self._clock() - validate_started)
             self._activate(release, ready, self.root / release.version)
+        except UpdateError as error:
+            if not error.rolled_back:
+                self.record_failure(release.version, error.message)
+            raise
+        except Exception as error:
+            self.record_failure(release.version, f"Erro inesperado ao ativar a versão {release.version} ({type(error).__name__}).")
+            raise
         finally:
             # ``_activate`` consumes the ready directory (a rename). If it is still
             # there, activation never started (e.g. the running Orin could not be
@@ -262,6 +315,16 @@ class Updater:
             if not ready.exists():
                 self._clear_prepared()
         return self._result("updated", release)
+
+    def record_failure(self, version: str, message: str) -> None:
+        state = self._read_state()
+        active = self.active_version() or self.current_version
+        previous = state.get("previous") if isinstance(state.get("previous"), str) else None
+        self._write_state(
+            previous=previous,
+            current=active,
+            attempt={"status": "failed", "version": version, "message": message},
+        )
 
     def last_attempt(self) -> dict[str, Any] | None:
         attempt = self._read_state().get("last_attempt")
@@ -423,21 +486,59 @@ class Updater:
         self._step("validate", "done", label="A nova versão responde corretamente")
 
     def _activate(self, release: Release, staging: Path, target: Path) -> None:
+        stop_started = self._clock()
         if self._before_activate is not None:
-            self._before_activate()
+            try:
+                self._before_activate()
+            except BaseException as error:
+                _log.error("step=stop outcome=failed duration=%.3fs error=%s", self._clock() - stop_started, error)
+                raise
+        _log.info("step=stop outcome=ok duration=%.3fs", self._clock() - stop_started)
         self._step("activate", "start", label=f"Ativando a versão {release.version}")
         previous = self.active_version()
         previous_target = (self.root / previous) if previous else None
+        activate_started = self._clock()
         if target.exists():
             # A leftover from an interrupted run or an earlier rollback; the
             # staged copy was just verified, so it supersedes it.
             shutil.rmtree(target, ignore_errors=True)
             if target.exists():
+                _log.error("step=activate outcome=failed duration=%.3fs error=target directory still exists", self._clock() - activate_started)
                 raise UpdateError(f"Não foi possível substituir a pasta da versão {release.version}.", step="activate", hint="Feche o Orin por completo e tente de novo.")
-        os.replace(staging, target)
+        last_replace_error: OSError | None = None
+        for attempt in range(1, 6):
+            try:
+                os.replace(staging, target)
+                last_replace_error = None
+                break
+            except PermissionError as error:
+                last_replace_error = error
+                if attempt < 5:
+                    self._sleep(0.2 * attempt)
+            except OSError as error:
+                last_replace_error = error
+                break
+        if last_replace_error is not None:
+            _log.error("step=activate outcome=failed duration=%.3fs error=%s", self._clock() - activate_started, last_replace_error)
+            raise UpdateError(
+                f"Não foi possível ativar a versão {release.version}: não foi possível trocar a pasta da instalação (um arquivo pode estar em uso).",
+                step="activate",
+                hint="Feche o Orin por completo e tente de novo.",
+            ) from None
         try:
-            point_current(self.root, target)
-            self._smoke(target, expected=release.version)
+            try:
+                point_current(self.root, target)
+            except BaseException as error:
+                _log.error("step=activate outcome=failed duration=%.3fs error=%s", self._clock() - activate_started, error)
+                raise
+            _log.info("step=activate outcome=ok duration=%.3fs", self._clock() - activate_started)
+            smoke_started = self._clock()
+            try:
+                self._smoke(target, expected=release.version)
+            except BaseException as error:
+                _log.error("step=smoke outcome=failed duration=%.3fs error=%s", self._clock() - smoke_started, error)
+                raise
+            _log.info("step=smoke outcome=ok duration=%.3fs", self._clock() - smoke_started)
         except BaseException as error:
             restored = self._restore(previous_target)
             shutil.rmtree(target, ignore_errors=True)
@@ -537,6 +638,7 @@ class Updater:
         return data if isinstance(data, dict) else {}
 
     def _write_state(self, *, previous: str | None = None, current: str | None = None, attempt: dict[str, Any] | None = None) -> None:
+        state_started = self._clock()
         payload = self._read_state()
         if current is not None:
             payload.update({"previous": previous, "current": current})
@@ -547,7 +649,9 @@ class Updater:
         try:
             temporary.write_text(json.dumps(payload), encoding="utf-8")
             os.replace(temporary, self.root / STATE_FILE)
-        except OSError:
+            _log.info("step=state outcome=ok duration=%.3fs", self._clock() - state_started)
+        except OSError as error:
+            _log.warning("step=state outcome=failed duration=%.3fs error=%s", self._clock() - state_started, error)
             temporary.unlink(missing_ok=True)
 
     def _result(self, status: str, release: Release, *, downloaded_bytes: int = 0) -> UpdateResult:

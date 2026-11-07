@@ -17,12 +17,14 @@ function rememberDismissed(value: string): void {
   try { window.localStorage.setItem(DISMISSED_KEY, value) } catch { /* a private window just shows it again */ }
 }
 
-/** What the last activation did, worth telling once: it undid itself, or it worked. */
+/** What the last activation did, worth telling once: it undid itself, failed, or worked. */
 function attemptNotice(status: UpdateJobStatus | null, dismissed: string | null): { key: string; attempt: UpdateAttempt } | null {
   const attempt = status?.last_attempt
-  if (!attempt || !attempt.at || attempt.at === dismissed) return null
-  if (attempt.status === 'rolled_back') return { key: attempt.at, attempt }
-  if (attempt.status === 'updated' && attempt.version === status?.current_version) return { key: attempt.at, attempt }
+  if (!attempt) return null
+  const key = attempt.at ?? `${attempt.status}:${attempt.version}`
+  if (key === dismissed) return null
+  if ((attempt.status === 'rolled_back' || attempt.status === 'failed') && attempt.version !== status?.current_version) return { key, attempt }
+  if (attempt.status === 'updated' && attempt.version === status?.current_version) return { key, attempt }
   return null
 }
 
@@ -64,7 +66,18 @@ export function UpdateBanner() {
   if (restarting === 'restarting') {
     return <Banner eyebrow="Atualizando" title={`Instalando a versão ${version}`} hint="O Orin vai fechar e abrir de novo sozinho em alguns segundos." />
   }
-  if (state === 'ready') {
+  if (state === 'ready' && version && version !== status?.current_version) {
+    const failedAttempt = status?.last_attempt?.status === 'failed' && status.last_attempt.version === version
+      ? status.last_attempt
+      : null
+    if (failedAttempt) {
+      return (
+        <Banner eyebrow="Atualização não concluída" title={`Não foi possível ativar a versão ${version}`}
+          hint={restarting === 'failed' ? 'Não foi possível reiniciar. Feche o Orin e rode "orin update --apply" no terminal.' : (failedAttempt.message ?? 'Feche o Orin por completo e tente de novo.')}
+          notes={status?.notes ?? null}
+          action={<button className="button button--primary" type="button" onClick={() => void restart()}>Tentar de novo</button>} />
+      )
+    }
     return (
       <Banner eyebrow="Atualização pronta" title={`Versão ${version} baixada e verificada`}
         hint={restarting === 'failed' ? 'Não foi possível reiniciar. Feche o Orin e rode "orin update --apply" no terminal.' : 'Salve o que estiver fazendo: o Orin reinicia sozinho para concluir.'}
@@ -89,6 +102,14 @@ export function UpdateBanner() {
   }
   if (notice) {
     const { attempt } = notice
+    if (attempt.status === 'failed') {
+      return (
+        <Banner eyebrow="Atualização não concluída"
+          title={`Não foi possível ativar a versão ${attempt.version}.`}
+          hint={attempt.message ?? 'Feche o Orin por completo e tente de novo.'}
+          action={<button className="button button--quiet" type="button" onClick={() => { rememberDismissed(notice.key); setDismissed(notice.key) }}>Entendi</button>} />
+      )
+    }
     const rolledBack = attempt.status === 'rolled_back'
     return (
       <Banner eyebrow={rolledBack ? 'Atualização desfeita' : 'Orin atualizado'}
@@ -97,7 +118,7 @@ export function UpdateBanner() {
         action={<button className="button button--quiet" type="button" onClick={() => { rememberDismissed(notice.key); setDismissed(notice.key) }}>Entendi</button>} />
     )
   }
-  if (announced && (state === 'idle' || state === 'up_to_date')) {
+  if (announced && announced.latestVersion !== status?.current_version && (state === 'idle' || state === 'up_to_date')) {
     return (
       <Banner eyebrow="Atualização disponível" title={`Versão atual ${announced.currentVersion} - Versão mais recente ${announced.latestVersion}`}
         hint={requestFailed ? 'Não foi possível iniciar o download. Tente novamente.' : 'O download acontece em segundo plano, sem interromper seu trabalho.'}

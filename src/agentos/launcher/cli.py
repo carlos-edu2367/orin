@@ -14,7 +14,7 @@ import subprocess
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep, time
 
 from agentos.installation import OrinPaths, RuntimeProfile, orin_paths, runtime_profile
 
@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--rollback", action="store_true", help="go back to the version this one replaced")
     update.add_argument("--apply", action="store_true", help="activate the update the app already downloaded (stops Orin first)")
     update.add_argument("--restart", action="store_true", help="with --apply: reopen Orin Desktop afterwards, on the new version (or the old one if the update was undone)")
+    update.add_argument("--detach", action="store_true", help="with --apply on Windows: respawn outside the launcher job object and exit")
     update.add_argument("--json", action="store_true", help="print machine-readable progress, one JSON object per line")
     commands.add_parser("status", help="show whether Orin is running, and where")
     autostart = commands.add_parser("autostart", help="start Orin in the background when you sign in to the computer")
@@ -135,6 +136,18 @@ def configure_logging(paths: OrinPaths, verbose: bool) -> logging.Logger:
         logger.addHandler(stderr)
     logger.propagate = False
     return logger.getChild("launcher")
+
+
+def configure_update_logging(paths: OrinPaths) -> logging.Handler:
+    """Attach the ``<logs>/update.log`` file handler to ``orin.update``."""
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("orin.update")
+    logger.setLevel(logging.DEBUG)
+    handler = RotatingFileHandler(paths.logs / "update.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s %(message)s"))
+    handler.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    return handler
 
 
 # -- commands -----------------------------------------------------------
@@ -304,6 +317,7 @@ def command_update(
     rollback = bool(getattr(options, "rollback", False))
     apply = bool(getattr(options, "apply", False))
     restart = bool(getattr(options, "restart", False))
+    detach = bool(getattr(options, "detach", False))
     json_out = JsonRenderer() if as_json else None
     renderer = None if as_json else UpdateRenderer(console, current_version=profile.version)
 
@@ -319,45 +333,250 @@ def command_update(
     root = installation_root(profile)
     if root is None:
         return refuse("Este Orin não foi instalado pelo instalador oficial, então não sei atualizá-lo daqui. Reinstale pelo instalador.")
-
-    def stop_before_switching() -> None:
-        if running_instance(paths) is None:
-            return
-        if command_stop(paths, Console(console.stream, quiet=True)) != 0:
-            raise UpdateError("Não consegui encerrar o Orin que está rodando.", step="activate", hint="Feche o Orin e tente de novo.")
-
-    updater = Updater(
-        versions_root=root, current_version=profile.version,
-        emit=json_out if json_out is not None else renderer, before_activate=stop_before_switching,
-        **({"opener": opener} if opener is not None else {}),
-    )
-    if renderer is not None:
-        renderer.header()
+    log_handler = configure_update_logging(paths) if apply else None
+    lock_path = paths.run / UPDATE_APPLY_LOCK
+    lock_acquired = False
     try:
-        result = updater.rollback() if rollback else updater.apply_prepared() if apply else updater.run(
-            getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
+        if apply and _apply_lock_held_by_live_pid(lock_path):
+            logging.getLogger("orin.update").info("update apply: skipped because lock %s is held by a live pid", lock_path)
+            return 0
+        if apply:
+            if not _acquire_apply_lock(lock_path):
+                logging.getLogger("orin.update").info("update apply: skipped because lock %s is held by a live pid", lock_path)
+                return 0
+            lock_acquired = True
+        if detach and apply and os.name == "nt":
+            _spawn_detached_apply(
+                _detached_apply_argv(profile, options),
+                lock_path=lock_path,
+                **({"popen": popen} if popen is not None else {}),
+            )
+            if _lock_handed_off(lock_path):
+                lock_acquired = False
+            return 0
+
+        def stop_before_switching() -> None:
+            if running_instance(paths) is None:
+                return
+            if command_stop(paths, Console(console.stream, quiet=True)) != 0:
+                raise UpdateError("Não consegui encerrar o Orin que está rodando.", step="activate", hint="Feche o Orin e tente de novo.")
+
+        updater = Updater(
+            versions_root=root, current_version=profile.version,
+            emit=json_out if json_out is not None else renderer, before_activate=stop_before_switching,
+            **({"opener": opener} if opener is not None else {}),
         )
-    except UpdateError as error:
-        if json_out is not None:
-            json_out.failed(error)
-        elif renderer is not None:
-            renderer.failed(error)
-        # The person pressed "restart to update": whatever happened, Orin was
-        # closed for it, so reopen the version that is active now (the old one
-        # after a rollback) instead of leaving them with no window at all.
-        if restart and running_instance(paths) is None:
+        if renderer is not None:
+            renderer.header()
+        prepared = updater.prepared_release() if apply else None
+        target_version = (prepared.version if prepared is not None else None) or getattr(options, "target", None) or profile.version
+        try:
+            result = updater.rollback() if rollback else updater.apply_prepared() if apply else updater.run(
+                getattr(options, "target", None) or "latest", force=bool(getattr(options, "force", False)), check_only=check_only,
+            )
+        except UpdateError as error:
+            if apply and prepared is not None and not error.rolled_back:
+                updater.record_failure(target_version, error.message)
+            if json_out is not None:
+                json_out.failed(error)
+            elif renderer is not None:
+                renderer.failed(error)
+            # The person pressed "restart to update": whatever happened, Orin was
+            # closed for it, so reopen the version that is active now (the old one
+            # after a rollback) instead of leaving them with no window at all.
+            if restart and running_instance(paths) is None:
+                _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
+            return 1
+        except Exception as error:  # noqa: BLE001 - unexpected apply errors must be recorded and still reopen Orin
+            logging.getLogger("orin.update").exception("update failed with unexpected exception")
+            message = f"Erro inesperado durante a atualização ({type(error).__name__})."
+            updater.record_failure(target_version, message)
+            wrapped = UpdateError(message, step="activate", hint="Tente de novo.")
+            if json_out is not None:
+                json_out.failed(wrapped)
+            elif renderer is not None:
+                renderer.failed(wrapped)
+            if restart and running_instance(paths) is None:
+                _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
+            return 1
+        if restart:
             _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
-        return 1
-    if restart:
-        _relaunch_desktop(root, **({"sleep": sleep} if sleep else {}), **({"popen": popen} if popen else {}))
-    if json_out is not None:
-        json_out.result(result)
-    elif renderer is not None:
-        {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
-    return 0
+        if json_out is not None:
+            json_out.result(result)
+        elif renderer is not None:
+            {"available": renderer.available, "up_to_date": renderer.up_to_date, "updated": renderer.updated, "rolled_back": renderer.rolled_back}[result.status](result)
+        return 0
+    finally:
+        if lock_acquired:
+            _release_apply_lock(lock_path)
+        if log_handler is not None:
+            logging.getLogger("orin.update").removeHandler(log_handler)
+            log_handler.close()
 
 
 RESTART_GRACE_SECONDS = 3.0
+UPDATE_APPLY_LOCK = "update-apply.lock"
+APPLY_LOCK_MAX_AGE_SECONDS = 600.0
+
+
+def _process_creation_time(pid: int) -> float | None:
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _FileTime(ctypes.Structure):
+                _fields_ = [("low", wintypes.DWORD), ("high", wintypes.DWORD)]
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.GetProcessTimes.restype = wintypes.BOOL
+            kernel32.GetProcessTimes.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+            ]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            try:
+                created, exited, kernel, user = _FileTime(), _FileTime(), _FileTime(), _FileTime()
+                if not kernel32.GetProcessTimes(
+                    handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)
+                ):
+                    return None
+                ticks = (int(created.high) << 32) | int(created.low)
+                return (ticks - 116_444_736_000_000_000) / 10_000_000.0
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        raw_stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        after_comm = raw_stat.rsplit(")", 1)[1].split()
+        start_ticks = int(after_comm[19])
+        clk_tck = float(os.sysconf("SC_CLK_TCK"))
+        for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1]) + (start_ticks / clk_tck)
+    except Exception:
+        return None
+    return None
+
+
+def _apply_lock_held_by_live_pid(lock_path: Path) -> bool:
+    try:
+        stat = lock_path.stat()
+        raw = lock_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if time() - stat.st_mtime > APPLY_LOCK_MAX_AGE_SECONDS:
+        return False
+    tokens = raw.split()
+    if not tokens:
+        return False
+    try:
+        pid = int(tokens[0])
+    except ValueError:
+        return False
+    if len(tokens) >= 2 and tokens[1] == "handoff" and pid == os.getpid():
+        return False
+    if not process_is_alive(pid):
+        return False
+    created_at = _process_creation_time(pid)
+    if created_at is not None and created_at > stat.st_mtime + 1.0:
+        return False
+    return True
+
+
+def _lock_handed_off(lock_path: Path) -> bool:
+    try:
+        tokens = lock_path.read_text(encoding="utf-8").split()
+    except OSError:
+        return False
+    return len(tokens) >= 2 and tokens[1] == "handoff"
+
+
+def _acquire_apply_lock(lock_path: Path) -> bool:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            if _apply_lock_held_by_live_pid(lock_path):
+                return False
+            try:
+                lock_path.unlink()
+            except OSError:
+                return False
+            continue
+        except OSError:
+            return False
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
+        return True
+    return False
+
+
+def _release_apply_lock(lock_path: Path) -> None:
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        if raw.split()[:1] == [str(os.getpid())]:
+            lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _detached_apply_argv(profile: RuntimeProfile, options: argparse.Namespace) -> list[str]:
+    command = [*profile.launcher_command(), "update", "--apply"]
+    if getattr(options, "restart", False):
+        command.append("--restart")
+    if getattr(options, "json", False):
+        command.append("--json")
+    if getattr(options, "detach", False):
+        command.append("--detach")
+    return command
+
+
+def _spawn_detached_apply(argv: list[str], *, popen=subprocess.Popen, lock_path: Path | None = None) -> bool:
+    """Respawn ``orin update --apply`` outside the launcher's Job Object on Windows."""
+    command = [arg for arg in argv if arg != "--detach"]
+    kwargs: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    base = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000
+    )
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
+    used_breakaway = True
+    try:
+        proc = popen(command, creationflags=base | breakaway, **kwargs)
+    except OSError as error:
+        logging.getLogger("orin.update").warning(
+            "update apply: breakaway=denied (%s); falling back to in-job spawn", error
+        )
+        proc = popen(command, creationflags=base, **kwargs)
+        used_breakaway = False
+    child_pid = getattr(proc, "pid", None)
+    if lock_path is not None and isinstance(child_pid, int) and child_pid > 0:
+        try:
+            lock_path.write_text(f"{child_pid} handoff\n", encoding="utf-8")
+        except OSError:
+            pass
+    return used_breakaway
 
 
 def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> bool:
@@ -369,16 +588,21 @@ def _relaunch_desktop(root: Path, *, sleep=sleep, popen=subprocess.Popen) -> boo
     """
     from agentos.installation.updater import runtime_relative_path
 
+    started = monotonic()
+    log = logging.getLogger("orin.update")
     runtime = root / "current" / runtime_relative_path("windows-x64" if os.name == "nt" else "linux-x64")
     if not runtime.is_file():
+        log.error("step=relaunch outcome=failed duration=%.3fs error=runtime missing at %s", monotonic() - started, runtime)
         return False
     sleep(RESTART_GRACE_SECONDS)
     flags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)) if os.name == "nt" else 0
     try:
         popen([str(runtime), "--desktop"], cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
               close_fds=True, start_new_session=os.name != "nt", creationflags=flags)
-    except OSError:
+    except OSError as error:
+        log.error("step=relaunch outcome=failed duration=%.3fs error=%s", monotonic() - started, error)
         return False
+    log.info("step=relaunch outcome=ok duration=%.3fs", monotonic() - started)
     return True
 
 

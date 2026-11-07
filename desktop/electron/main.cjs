@@ -247,7 +247,7 @@ async function updateCommand() {
   } catch {
     return null
   }
-  return [executable, ...arguments, 'update', '--apply', '--restart']
+  return [executable, ...arguments, 'update', '--apply', '--restart', '--detach']
 }
 
 function updateOverlayIcon() {
