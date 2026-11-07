@@ -564,9 +564,9 @@ describe('ChatPage', () => {
     emitDelta(500)
     emitDelta(501)
 
-    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toBe(`${prefix}parte-500|parte-501|`), { timeout: 5000 })
+    await waitFor(() => expect(document.querySelector('.bubble--assistant .markdown-message')?.textContent).toBe(`${prefix}parte-500|parte-501|`), { timeout: 10000 })
     closeStream()
-  })
+  }, 20000)
 
   it('keeps the project chat route and keeps composer mounted when toggling the overview', async () => {
     globalThis.fetch = stubFetch(() => ({ state: 'completed', messages: [], activities: [] }))

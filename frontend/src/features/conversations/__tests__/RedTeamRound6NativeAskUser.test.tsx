@@ -41,17 +41,6 @@ const Q1 = questionPayload('q1', 'Qual banco de dados usar?', [
   { id: 'sqlite', label: 'SQLite' },
   { id: 'postgres', label: 'Postgres' },
 ])
-const Q2 = questionPayload('q2', 'Qual cache usar?', [
-  { id: 'redis', label: 'Redis' },
-  { id: 'memcached', label: 'Memcached' },
-])
-
-/** How the back-end tells the turn read a queued input (the answer). */
-type QueuedInputShape = 'turn.queued_input' | 'turn.started'
-
-function queuedInputActivity(sequence: number, shape: QueuedInputShape, text: string, queueId: string) {
-  return makeActivity(sequence, shape, 'Mensagem da fila entregue ao agente', { queue_id: queueId, queued_text: text })
-}
 
 type Activity = ReturnType<typeof makeActivity>
 
@@ -61,12 +50,6 @@ type Scenario = {
   activities: Activity[]
   /** Activities not yet streamed: the next events request delivers them, as the live SSE stream would. */
   live?: Activity[]
-}
-
-/** A new activity of the running turn: it reaches the page through the event stream (and later snapshots). */
-function emit(scenario: Scenario, activity: Activity) {
-  scenario.activities = [...scenario.activities, activity]
-  scenario.live = [...(scenario.live ?? []), activity]
 }
 
 function snapshot(scenario: Scenario) {
@@ -248,6 +231,7 @@ describe('Red team round 6: composer while a live turn waits for an answer', () 
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(messagePosts(posted)).toHaveLength(0)
     expect(queuePosts(posted)).toHaveLength(0)
+    expect(userBubbles()).toHaveLength(1)
   })
 
   it('an oversized text is blocked and stays in the composer', async () => {
@@ -261,6 +245,7 @@ describe('Red team round 6: composer while a live turn waits for an answer', () 
     expect(queuePosts(posted)).toHaveLength(0)
     expect(posted.some((p) => p.url.endsWith('/v1/uploads'))).toBe(false)
     expect(input.value.length).toBe(200_000)
+    expect(userBubbles()).toHaveLength(1)
   })
 
   it('a !command typed while the turn waits does not start a shell turn queued behind it', async () => {
@@ -271,5 +256,6 @@ describe('Red team round 6: composer while a live turn waits for an answer', () 
     send('!git status')
     await new Promise((resolve) => setTimeout(resolve, 400))
     expect(shellPosts(posted)).toHaveLength(0)
+    expect(userBubbles()).toHaveLength(1)
   })
 })

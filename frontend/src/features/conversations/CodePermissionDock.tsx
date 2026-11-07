@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'motion/react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { StructuredPatchHunk, ToolPermissionRequest } from './activityTypes'
 
 export type DockToolPermissionRequest = ToolPermissionRequest & {
@@ -201,7 +201,7 @@ export function CodePermissionDock({
     }
   }, [feedbackOpen])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!current || busy) return
 
     const handleKeyDown = (event: KeyboardEvent) => {

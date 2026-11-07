@@ -47,6 +47,7 @@ import { PreferencesModal } from '../settings/PreferencesModal'
 import { ActivityStream } from './ActivityStream'
 import { AgentPulse, modeFromEvents, pulseDetailFromEvents } from './AgentPulse'
 import { attachmentNotice } from './attachmentNotice'
+import { pendingMessageId } from './pendingMessageId'
 import {
   CodePermissionDock,
   type CodePermissionDockDecision,
@@ -1267,7 +1268,7 @@ export function ChatPage() {
     permissionMode: codePermissionMode, mode: conversationMode, workspacePath: conversation?.workspace?.path ?? null,
     send: async (text) => {
       if (running) { setCommandNotice('Espere o turno atual terminar para enviar.'); return }
-      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
+      setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
       try {
         await sendChatMessage(text, [])
         await loadSnapshot(false)
@@ -1419,7 +1420,7 @@ export function ChatPage() {
       // bubble here, or the answer would show twice. The card closes now; a later ask_user stays open.
       setAnsweredQuestionEventIds((current) => new Set(current).add(answeredEventId))
     } else {
-      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+      setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     }
     try {
       if (isLiveActiveTurn) {
@@ -1459,7 +1460,7 @@ export function ChatPage() {
       throw caught
     }
     const response = `Conectei o servidor ${server.display_name}.`
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(response)
       await loadSnapshot(false)
@@ -1475,7 +1476,7 @@ export function ChatPage() {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     const response = `Não quero conectar o servidor ${event.mcpApproval.display_name} agora.`
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(response)
       await loadSnapshot(false)
@@ -1491,7 +1492,7 @@ export function ChatPage() {
     if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     await approvePlugin(client, event.pluginApproval.plugin_id)
     const response = `Instalei o plugin ${event.pluginApproval.display_name}.`
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [client, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
@@ -1499,7 +1500,7 @@ export function ChatPage() {
   const declinePluginApproval = useCallback(async (event: ConversationActivityEvent) => {
     if (!event.pluginApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
     const response = `Não quero instalar o plugin ${event.pluginApproval.display_name} agora.`
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
@@ -1546,7 +1547,7 @@ export function ChatPage() {
     if (!event.codeSessionProposal || running) return
     const response = 'Prefiro continuar por aqui no Chat sem abrir o Orin Code.'
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(response)
       await loadSnapshot(false)
@@ -1634,7 +1635,7 @@ export function ChatPage() {
       return
     }
     const response = 'Plano aprovado. Pode prosseguir com accept edits.'
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [changeCodePermissionMode, client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
@@ -1658,7 +1659,7 @@ export function ChatPage() {
       return
     }
     const response = 'Plano aprovado. Pode prosseguir pedindo permissão para edições.'
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: response, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(response)
     await loadSnapshot(false)
   }, [changeCodePermissionMode, client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
@@ -1679,7 +1680,7 @@ export function ChatPage() {
       await submitToolPermission(client, conversationId, turnId, request.requestId, 'deny')
     }
     const normalizedFeedback = feedback.trim()
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: normalizedFeedback, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: normalizedFeedback, status: 'completed', retryable: false, attachments: [], command: null })
     await sendChatMessage(normalizedFeedback)
     await loadSnapshot(false)
   }, [client, conversationId, decidedPlanKeys, loadSnapshot, openQuestionTurnIds, sendChatMessage])
@@ -1785,7 +1786,7 @@ export function ChatPage() {
     }
     setMessage('')
     setError(null)
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(text, readyUploads, liveModeOverride)
       resetAttachments()
@@ -1812,7 +1813,7 @@ export function ChatPage() {
     let sent = false
     setOversizedInput(null)
     setMessage('')
-    setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [], command: null })
+    setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       const uploaded = await uploadFile(client, new File([rawText], 'prompt.txt', { type: 'text/plain;charset=utf-8' }))
       uploadedId = uploaded.upload_id
@@ -1934,7 +1935,7 @@ export function ChatPage() {
         await sendOversizedTextAutomatically(clean, [])
         return
       }
-      setPendingUserMessage({ message_id: `pending-${Date.now()}`, role: 'user', content: clean, status: 'completed', retryable: false, attachments: [], command: null })
+      setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: clean, status: 'completed', retryable: false, attachments: [], command: null })
       await sendChatMessage(clean, [])
       await loadSnapshot(false)
     } catch {

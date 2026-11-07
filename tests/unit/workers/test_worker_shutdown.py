@@ -36,15 +36,27 @@ from agentos.workers.chat import ChatWorker
 READY, WORKSPACE = Path(sys.argv[1]), sys.argv[2]
 
 
+_orig_poll_once = publisher.poll_once
+
+
 def build_worker():
     engine = create_engine("sqlite://", future=True)
     metadata.create_all(engine)
+    worker = ChatWorker(PostgresChatStore(engine))
     session_end.register_session("conv-stop", workspace_root=WORKSPACE, user_id="u", trusted=False)
-    READY.write_text("ready", encoding="utf-8")
-    return ChatWorker(PostgresChatStore(engine))
+    return worker
+
+
+def poll_once_marking_ready(worker_or_runner, next_sweep):
+    if not READY.exists():
+        tmp_ready = READY.with_suffix(".tmp")
+        tmp_ready.write_text("ready", encoding="utf-8")
+        tmp_ready.replace(READY)
+    return _orig_poll_once(worker_or_runner, next_sweep)
 
 
 publisher.create_chat_worker = build_worker
+publisher.poll_once = poll_once_marking_ready
 publisher.main()
 """
 
@@ -122,6 +134,28 @@ def test_session_end_runs_before_the_turns_in_flight_are_drained(monkeypatch: py
         publisher.main()
 
     assert calls == ["runner", ("end_sessions", "other", 5.0), ("shutdown", True)]
+
+
+def test_session_end_runs_even_when_stop_arrives_during_worker_creation(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+
+    def stop_during_build() -> object:
+        calls.append("build")
+        raise SystemExit(0)
+
+    def end_sessions(reason: str = "other", *, timeout_seconds: float = 5.0) -> int:
+        calls.append(("end_sessions", reason, timeout_seconds))
+        return 0
+
+    monkeypatch.setattr(publisher, "install_shutdown_handlers", lambda: None)
+    monkeypatch.setattr(publisher, "create_chat_worker", stop_during_build)
+    monkeypatch.setattr(session_end, "end_sessions", end_sessions)
+
+    with pytest.raises(SystemExit):
+        publisher.main()
+
+    assert calls == ["build", ("end_sessions", "other", 5.0)]
+
 
 
 def test_a_repeated_stop_signal_does_not_cut_the_shutdown_short() -> None:

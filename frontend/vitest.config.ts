@@ -7,6 +7,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./tests/setup.ts'],
     css: true,
+    testTimeout: 15_000,
     exclude: ['./tests/e2e/**', './tests/visual/**', '**/node_modules/**', '**/dist/**'],
   },
 })

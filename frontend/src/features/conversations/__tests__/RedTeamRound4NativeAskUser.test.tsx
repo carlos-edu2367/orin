@@ -41,10 +41,6 @@ const Q1 = questionPayload('q1', 'Qual banco de dados usar?', [
   { id: 'sqlite', label: 'SQLite' },
   { id: 'postgres', label: 'Postgres' },
 ])
-const Q2 = questionPayload('q2', 'Qual cache usar?', [
-  { id: 'redis', label: 'Redis' },
-  { id: 'memcached', label: 'Memcached' },
-])
 
 /** How the back-end tells the turn read a queued input (the answer). */
 type QueuedInputShape = 'turn.queued_input' | 'turn.started'

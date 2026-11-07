@@ -188,11 +188,12 @@ def install_shutdown_handlers() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    install_shutdown_handlers()
-    worker = create_chat_worker()
-    runner = ConcurrentTurnRunner(worker)
-    next_sweep = 0.0
+    runner: ConcurrentTurnRunner | None = None
     try:
+        install_shutdown_handlers()
+        worker = create_chat_worker()
+        runner = ConcurrentTurnRunner(worker)
+        next_sweep = 0.0
         while True:
             try:
                 ran_turn, next_sweep = poll_once(runner, next_sweep)
@@ -209,7 +210,8 @@ def main() -> None:
             end_sessions("other", timeout_seconds=5.0)
         except Exception:
             _LOGGER.exception("SessionEnd hooks could not run at shutdown")
-        runner.shutdown(wait=True)
+        if runner is not None:
+            runner.shutdown(wait=True)
 
 
 if __name__ == "__main__":
