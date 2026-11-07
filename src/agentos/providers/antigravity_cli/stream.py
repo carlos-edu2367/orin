@@ -489,19 +489,22 @@ class AntigravityStreamTranslator:
                     model_usage={},
                 )
                 self._clear_turn_items()
+                result_event = CliEvent(
+                    kind=CliEventKind.RESULT,
+                    text=raw_err,
+                    result=self.result,
+                    usage=usage,
+                    raw=packet,
+                )
+                if self.init is None:
+                    return [result_event]
                 return [
                     CliEvent(
                         kind=CliEventKind.USAGE,
                         usage=usage,
                         raw=packet,
                     ),
-                    CliEvent(
-                        kind=CliEventKind.RESULT,
-                        text=raw_err,
-                        result=self.result,
-                        usage=usage,
-                        raw=packet,
-                    ),
+                    result_event,
                 ]
 
             resp_text = "".join(self._turn_text_parts) or str(

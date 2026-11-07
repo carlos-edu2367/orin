@@ -67,6 +67,7 @@ const FALLBACK_OPTIONS: ReadonlyArray<CuratedModelOption> = [
 const PROVIDER_DISPLAY_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
   'openai-codex': 'OpenAI Codex (Assinatura)',
+  'google-antigravity': 'Google Antigravity (Assinatura)',
   anthropic: 'Anthropic',
   openrouter: 'OpenRouter',
   nvidia: 'NVIDIA NIM',

@@ -458,6 +458,8 @@ function providerLabel(provider: MediaProviderName): string {
   switch (provider) {
     case 'openai-codex':
       return 'OpenAI Codex (Assinatura)'
+    case 'google-antigravity':
+      return 'Google Antigravity (Assinatura)'
     case 'openai':
       return 'OpenAI'
     case 'anthropic':

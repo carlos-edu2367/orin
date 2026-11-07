@@ -937,3 +937,33 @@ def test_adversarial_stream_and_error_classification() -> None:
     assert auth_info.status_code == 401
     assert "agy" in auth_info.user_message
 
+    # 4. Pre-init error result must NOT emit USAGE before RESULT when init is None
+    tr_pre_init = AntigravityStreamTranslator()
+    evs_pre = tr_pre_init.feed_line(
+        '{"event":"result","result":{"conversation_id":"c-err","status":"ERROR","error":"--model gemini-3.8-flash-medium conflicts with --effort=low","finished_reason":"error"}}'
+    )
+    assert [e.kind for e in evs_pre] == [CliEventKind.RESULT]
+
+    # 5. Model slug with effort suffix omits conflicting --effort flag
+    sys_dummy = Path(__file__)
+    cmd_conflict = build_antigravity_command(
+        CliTurnRequest(
+            binary="agy",
+            system_prompt_file=sys_dummy,
+            model="google-antigravity/gemini-3.8-flash-medium",
+            effort="low",
+        )
+    )
+    assert "--effort" not in cmd_conflict
+    cmd_matching = build_antigravity_command(
+        CliTurnRequest(
+            binary="agy",
+            system_prompt_file=sys_dummy,
+            model="google-antigravity/gemini-3.8-flash-medium",
+            effort="medium",
+        )
+    )
+    assert "--effort" in cmd_matching
+    assert cmd_matching[cmd_matching.index("--effort") + 1] == "medium"
+
+

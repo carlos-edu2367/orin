@@ -118,6 +118,22 @@ def _validate_path_arg(value: str | Path, label: str) -> str:
     return text
 
 
+def resolve_antigravity_home(
+    env: Mapping[str, str] | None = None,
+) -> Path:
+    """Resolve the local Antigravity CLI state directory (`~/.gemini/antigravity-cli` by default)."""
+    source_env: Mapping[str, str] = os.environ if env is None else env
+    raw_override = str(source_env.get("ANTIGRAVITY_CLI_HOME") or "").strip()
+    if raw_override:
+        return Path(raw_override).expanduser()
+    if env is not None:
+        for key in ("USERPROFILE", "HOME"):
+            raw_home = str(env.get(key) or "").strip()
+            if raw_home:
+                return Path(raw_home).expanduser() / ".gemini" / "antigravity-cli"
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
 def resolve_antigravity_binary(
     env: Mapping[str, str] | None = None,
 ) -> str | None:
@@ -543,11 +559,17 @@ def build_antigravity_command(
             raise ValueError(
                 f"Invalid effort level for Antigravity CLI: {request.effort!r}"
             )
+        model_effort_suffix: str | None = None
+        lower_model = model.lower()
+        for eff_name in VALID_EFFORT_LEVELS:
+            if lower_model.endswith(f"-{eff_name}"):
+                model_effort_suffix = eff_name
+                break
         allowed_by_model = (
             supported_efforts is None
             or len(supported_efforts) == 0
             or effort in supported_efforts
-        )
+        ) and (model_effort_suffix is None or effort == model_effort_suffix)
         if allowed_by_model:
             cmd.extend(["--effort", effort])
 
@@ -715,5 +737,6 @@ __all__ = [
     "is_antigravity_version_supported",
     "redact_antigravity_argv",
     "resolve_antigravity_binary",
+    "resolve_antigravity_home",
     "wire_antigravity_tool_server",
 ]

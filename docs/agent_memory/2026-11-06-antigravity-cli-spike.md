@@ -69,3 +69,26 @@
 
 1. **Inventário `init.tools`:** no pacote `init`, o `agy 1.5.2` lista estaticamente os 60 nomes de ferramentas embutidas do binário (`["ask_custom_permission", ..., "write_to_file"]`), e não os nomes das ferramentas MCP. O `AntigravityStreamTranslator` filtra/valida `init.tools` contra esse conjunto conhecido do `agy` (ou ferramentas `orin/*` / `mcp_orin_*`) e preenche `mcp_servers={"orin": "connected"}` e `api_key_source="none"`. Qualquer execução real (`step_update` com `step_type == "tool"`) cujo `tool_name` não pertença ao servidor MCP `orin` (`mcp_orin_*`, `orin/*`, `mcp__orin__*`) dispara `CliSecurityAbort`.
 2. **Acumulação de `usage` no 2º turno:** no `result` do 2º turno no mesmo processo (`second_turn.jsonl`), `result.usage` traz o acumulado da conversa (`input_tokens: 1172 = 543 + 629`), enquanto o último `step_update(agent_response, state="DONE")` do turno traz o `usage` do passo (`input_tokens: 629`). O `AntigravityStreamTranslator` deve calcular o uso do turno a partir dos `step_update` do turno atual (ou da diferença em relação ao `result.usage` do turno anterior quando `step_update` não trouxer `usage`), aplicando `input_tokens = max(0, input_tokens - cache_read_tokens)`, `cache_read_input_tokens = cache_read_tokens`, `output_tokens = output_tokens` e `reasoning_tokens = thinking_tokens`.
+
+## 5. Replay de 3 turnos com `AntigravityCliAdapter` e `NativeTurnHandle` (Task C3 Step 2)
+
+Executado ponta a ponta via `start_native_turn_for_provider(ClaudeCliProvider(adapter=AntigravityCliAdapter()), ...)` com o servidor HTTP MCP real do Orin (`BackgroundTurnToolServer`):
+
+1. **Turno 1 (Chat + ferramenta de leitura `read_note`, modelo `gemini-3.8-flash-low`):**
+   - `session_id` gerado pelo `agy`: `7bfb05a5-2223-4b1d-8646-dbb9b848a13f`
+   - Ferramenta executada pelo `ToolExecutor` do Orin: `["read_note"]` (`executor_calls = 1`, `tool_use_id = "7bfb05a5-2223-4b1d-8646-dbb9b848a13f:2"`)
+   - Texto final: `"PROJETO_ORIN_AGY_OK_77"`
+   - Uso reportado: `input_tokens=1545`, `cache_read_input_tokens=0`, `output_tokens=265`, `reasoning_tokens=157`.
+2. **Turno 2 (Modo Orin Code via `stdin` persistente no mesmo processo, modelo `gemini-3.8-flash-low`):**
+   - Enviado via `handle.send_user(...)` na mesma sessão `7bfb05a5-2223-4b1d-8646-dbb9b848a13f`
+   - Pergunta sobre os dois dígitos finais do código lido no turno anterior sem nova chamada de ferramenta (`tools_started = []`)
+   - Texto final: `"77"`
+   - Uso reportado (delta do turno): `input_tokens=1148`, `cache_read_input_tokens=0`, `output_tokens=44`, `reasoning_tokens=42`.
+3. **Turno 3 (Troca de modelo no meio da conversa para `gemini-3.8-flash-medium` + `resume_session_id` via `--conversation`):**
+   - Retomou a sessão `7bfb05a5-2223-4b1d-8646-dbb9b848a13f` num novo processo com `--model gemini-3.8-flash-medium --conversation 7bfb05a5-2223-4b1d-8646-dbb9b848a13f`
+   - Confirmou o código completo lido no 1º turno sem nova chamada de ferramenta: `"PROJETO_ORIN_AGY_OK_77"`
+   - Uso reportado: `input_tokens=1369`, `cache_read_input_tokens=0`, `output_tokens=64`, `reasoning_tokens=50`.
+4. **Ajustes descobertos no replay:**
+   - Os slugs do `agy` (`gemini-3.8-flash-medium`, `gemini-4-argon-low`, etc.) já embutem o nível de esforço no sufixo e rejeitam `--effort` conflitante (`--model gemini-3.8-flash-medium conflicts with --effort=low`); `catalog.py` e `command.py` foram ajustados para inferir `supported_efforts` do sufixo do modelo e omitir `--effort` quando diferente do sufixo.
+   - Quando um pacote `result` de erro chega antes do `init` (`self.init is None`), `AntigravityStreamTranslator` emite apenas `CliEventKind.RESULT` (sem `CliEventKind.USAGE` antes do `init`), permitindo que o `NativeTurnHandle` classifique o erro antes da validação do `init`.
+

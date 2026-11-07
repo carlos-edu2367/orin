@@ -16,84 +16,93 @@ _ANTIGRAVITY_LABEL_SUFFIX = "(Assinatura Antigravity)"
 
 _EFFORTS_STD: tuple[str, ...] = ("low", "medium", "high")
 
+
+def _infer_supported_efforts(slug: str) -> tuple[str, ...]:
+    lower = slug.lower()
+    for eff in ("xhigh", "high", "medium", "low", "max"):
+        if lower.endswith(f"-{eff}"):
+            return (eff,)
+    return _EFFORTS_STD
+
+
 FALLBACK_ANTIGRAVITY_MODELS: tuple[CliModelInfo, ...] = (
     CliModelInfo(
         "gemini-4-argon-medium",
         "gemini-4-argon-medium (Assinatura Antigravity)",
         1_000_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gemini-4-argon-medium"),
     ),
     CliModelInfo(
         "gemini-4-argon-high",
         "gemini-4-argon-high (Assinatura Antigravity)",
         1_000_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gemini-4-argon-high"),
     ),
     CliModelInfo(
         "gemini-4-argon-low",
         "gemini-4-argon-low (Assinatura Antigravity)",
         1_000_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gemini-4-argon-low"),
     ),
     CliModelInfo(
         "gemini-3.8-flash-high",
         "gemini-3.8-flash-high (Assinatura Antigravity)",
         1_000_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gemini-3.8-flash-high"),
     ),
     CliModelInfo(
         "gemini-3.8-flash-medium",
         "gemini-3.8-flash-medium (Assinatura Antigravity)",
         1_000_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gemini-3.8-flash-medium"),
     ),
     CliModelInfo(
         "gemini-3.8-flash-low",
         "gemini-3.8-flash-low (Assinatura Antigravity)",
         1_000_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gemini-3.8-flash-low"),
     ),
     CliModelInfo(
         "claude-opus-5-5-low",
         "claude-opus-5-5-low (Assinatura Antigravity)",
         200_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("claude-opus-5-5-low"),
     ),
     CliModelInfo(
         "claude-opus-5-5-medium",
         "claude-opus-5-5-medium (Assinatura Antigravity)",
         200_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("claude-opus-5-5-medium"),
     ),
     CliModelInfo(
         "claude-opus-5-5-high",
         "claude-opus-5-5-high (Assinatura Antigravity)",
         200_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("claude-opus-5-5-high"),
     ),
     CliModelInfo(
         "claude-sonnet-5-5-low",
         "claude-sonnet-5-5-low (Assinatura Antigravity)",
         200_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("claude-sonnet-5-5-low"),
     ),
     CliModelInfo(
         "claude-sonnet-5-5-medium",
         "claude-sonnet-5-5-medium (Assinatura Antigravity)",
         200_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("claude-sonnet-5-5-medium"),
     ),
     CliModelInfo(
         "claude-sonnet-5-5-high",
         "claude-sonnet-5-5-high (Assinatura Antigravity)",
         200_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("claude-sonnet-5-5-high"),
     ),
     CliModelInfo(
         "gpt-oss-120b-medium",
         "gpt-oss-120b-medium (Assinatura Antigravity)",
         128_000,
-        _EFFORTS_STD,
+        _infer_supported_efforts("gpt-oss-120b-medium"),
     ),
 )
 
@@ -170,7 +179,7 @@ def discover_antigravity_models(
                 id=slug,
                 display_name=f"{slug} {_ANTIGRAVITY_LABEL_SUFFIX}",
                 context_window=_infer_context_window(slug),
-                supported_efforts=_EFFORTS_STD,
+                supported_efforts=_infer_supported_efforts(slug),
             )
         )
 

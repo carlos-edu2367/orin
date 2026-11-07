@@ -2354,6 +2354,14 @@ def create_app(services: ApiServices) -> FastAPI:
         status = await run_in_threadpool(_inspect_codex_cli_status)
         return JSONResponse(status)
 
+    @app.get("/v1/providers/google-antigravity/status")
+    @app.get("/v1/providers/antigravity-cli/status")
+    async def antigravity_cli_status(request: Request) -> JSONResponse:
+        principal = principal_for(request)
+        services.security.authorize(principal, action="provider.inspect", resource_id="google-antigravity", purpose="provider.inspect")
+        status = await run_in_threadpool(_inspect_antigravity_cli_status)
+        return JSONResponse(status)
+
     @app.get("/v1/providers/claude-cli/status")
     async def claude_cli_status(request: Request) -> JSONResponse:
         principal = principal_for(request)
@@ -2846,6 +2854,28 @@ def _inspect_codex_cli_status() -> dict[str, object]:
         "supported": supported,
         "authenticated": authenticated,
         "login_command": "codex login",
+    }
+
+
+def _inspect_antigravity_cli_status() -> dict[str, object]:
+    from agentos.providers.antigravity_cli import command as antigravity_command
+
+    binary = antigravity_command.resolve_antigravity_binary()
+    installed = binary is not None
+    ver_tuple = antigravity_command.antigravity_version(binary) if binary is not None else None
+    version_str = ".".join(str(part) for part in ver_tuple) if ver_tuple is not None else None
+    supported = antigravity_command.is_antigravity_version_supported(ver_tuple)
+    state_path = Path(antigravity_command.resolve_antigravity_home()) / "jetski_state.pbtxt"
+    try:
+        authenticated = bool(not state_path.is_symlink() and state_path.is_file())
+    except OSError:
+        authenticated = False
+    return {
+        "installed": installed,
+        "version": version_str,
+        "supported": supported,
+        "authenticated": authenticated,
+        "login_command": "agy",
     }
 
 

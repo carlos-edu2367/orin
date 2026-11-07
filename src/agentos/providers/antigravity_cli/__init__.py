@@ -21,6 +21,7 @@ from agentos.providers.antigravity_cli.command import (
     is_antigravity_version_supported,
     redact_antigravity_argv,
     resolve_antigravity_binary,
+    resolve_antigravity_home,
     wire_antigravity_tool_server,
 )
 from agentos.providers.antigravity_cli.errors import classify_antigravity_error
@@ -50,5 +51,6 @@ __all__ = [
     "is_antigravity_version_supported",
     "redact_antigravity_argv",
     "resolve_antigravity_binary",
+    "resolve_antigravity_home",
     "wire_antigravity_tool_server",
 ]
