@@ -6,12 +6,28 @@ export type ActiveFileMention = {
   endIndex: number
 }
 
+/** An agent the person can ask for with `@name` (Biblioteca › Agentes). */
+export type MentionAgent = { name: string; description: string }
+
 export type FileMentionPickerProps = {
   files: string[]
+  /** Agents offered before the files; selecting one inserts `@name` as well. */
+  agents?: MentionAgent[]
   query: string
   loading?: boolean
-  onSelect: (filePath: string) => void
+  onSelect: (token: string) => void
   onDismiss: () => void
+}
+
+type MentionItem = { kind: 'agent'; token: string; description: string } | { kind: 'file'; token: string }
+
+/** The agents whose name matches the typed `@query` (an empty query lists them all). */
+export function matchingAgents(agents: readonly MentionAgent[], query: string): MentionAgent[] {
+  const needle = query.trim().toLowerCase()
+  if (needle.includes('/') || needle.includes('\\') || needle.includes('.')) return []
+  return agents
+    .filter((agent) => !needle || agent.name.includes(needle))
+    .sort((a, b) => Number(!a.name.startsWith(needle)) - Number(!b.name.startsWith(needle)) || a.name.localeCompare(b.name))
 }
 
 const MENTION_PREFIX_RE = /(?:^|[\s([{"'`])@([A-Za-z0-9_./\\-]*)$/
@@ -52,18 +68,22 @@ export function applyFileMention(text: string, mention: ActiveFileMention, fileP
  */
 export function FileMentionPicker({
   files,
+  agents = [],
   query,
   loading = false,
   onSelect,
   onDismiss,
 }: FileMentionPickerProps) {
-  const matches = useMemo(() => {
+  const matches = useMemo<MentionItem[]>(() => {
     const needle = query.trim().replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase()
     const filtered = needle
       ? files.filter((item) => item.toLowerCase().includes(needle))
       : files
-    return filtered.slice(0, 20)
-  }, [files, query])
+    const agentItems: MentionItem[] = matchingAgents(agents, query).slice(0, 8)
+      .map((agent) => ({ kind: 'agent', token: agent.name, description: agent.description }))
+    const fileItems: MentionItem[] = filtered.map((token) => ({ kind: 'file', token }))
+    return [...agentItems, ...fileItems].slice(0, 20)
+  }, [files, agents, query])
 
   const [highlighted, setHighlighted] = useState(0)
   const [queryAtLastReset, setQueryAtLastReset] = useState(query)
@@ -89,7 +109,7 @@ export function FileMentionPicker({
       } else if (event.key === 'Enter' || (event.key === 'Tab' && !event.shiftKey)) {
         event.preventDefault()
         const target = matches[highlighted] ?? matches[0]
-        if (target) onSelect(target)
+        if (target) onSelect(target.token)
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
@@ -102,7 +122,7 @@ export function FileMentionPicker({
     <ul
       className="command-picker file-mention-picker"
       role="listbox"
-      aria-label="Arquivos do workspace"
+      aria-label={agents.length > 0 ? 'Agentes e arquivos do workspace' : 'Arquivos do workspace'}
       data-testid="file-mention-picker"
     >
       {loading && matches.length === 0 ? (
@@ -110,7 +130,28 @@ export function FileMentionPicker({
           <span className="command-picker__description">Buscando arquivos…</span>
         </li>
       ) : (
-        matches.map((filePath, index) => {
+        matches.map((item, index) => {
+          if (item.kind === 'agent') {
+            return (
+              <li
+                key={`agent:${item.token}`}
+                role="option"
+                aria-selected={index === highlighted}
+                className={`command-picker__item file-mention-picker__item${index === highlighted ? ' is-highlighted' : ''}`}
+                data-testid={`mention-agent-${item.token}`}
+                onMouseEnter={() => setHighlighted(index)}
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  onSelect(item.token)
+                }}
+              >
+                <span className="command-picker__name">@{item.token}</span>
+                <span className="command-picker__kind">Agente</span>
+                <span className="command-picker__description">{item.description}</span>
+              </li>
+            )
+          }
+          const filePath = item.token
           const parts = filePath.split('/')
           const basename = parts[parts.length - 1] ?? filePath
           const directory = parts.length > 1 ? parts.slice(0, -1).join('/') : ''

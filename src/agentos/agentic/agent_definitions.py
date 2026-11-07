@@ -137,6 +137,9 @@ def _provider_and_models(meta: Mapping[str, Any]) -> tuple[str | None, tuple[str
     return provider, models
 
 
+provider_and_models = _provider_and_models  # also validates the agents a person makes in the interface
+
+
 def _flag(value: object) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() in {"true", "yes", "1"})
 

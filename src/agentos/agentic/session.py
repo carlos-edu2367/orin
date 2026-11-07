@@ -71,6 +71,9 @@ logger = logging.getLogger(__name__)
 _MCP_MENTION = re.compile(r"(?<![\w@])@([a-z0-9][a-z0-9-]{0,31}):(\S+)")
 _RESOURCE_CLOSE = re.compile(r"</\s*mcp-resource", re.IGNORECASE)  # W7: a resource cannot end its own wrapper
 MAX_MCP_MENTIONS = 5
+# `@agent-name` in the person's message: they ask for that agent (a defined one) in this task.
+_AGENT_MENTION = re.compile(r"(?<![\w@/.\\-])@([a-z0-9][a-z0-9_-]{0,63})(?![\w./\\:-])")
+MAX_AGENT_MENTIONS = 5
 MCP_MENTION_CHARS = 20_000
 
 
@@ -2195,6 +2198,16 @@ class TurnSession:
         except Exception:  # noqa: BLE001 - a broken agents folder never stops a turn
             logger.exception("agent definitions could not be read")
             return AgentCatalog()
+        for definition in self._user_agent_definitions():
+            # The agents the person made in the interface: above their own files and plugins, below a repository's
+            # and a managed policy's (those keep the name).
+            previous = catalog.agents.get(definition.name)
+            if previous is not None and previous.origin in {"managed", "project"}:
+                catalog.shadowed.append((definition.name, "orin", previous.origin))
+                continue
+            if previous is not None:
+                catalog.shadowed.append((definition.name, previous.origin, "orin"))
+            catalog.agents[definition.name] = definition
         if self.cli_options is not None and self.cli_options.agents:
             from .agent_definitions import agents_from_mapping
 
@@ -2209,6 +2222,25 @@ class TurnSession:
         for path, reason in catalog.errors[:20]:
             logger.warning("agent definition %s ignored: %s", path, reason)
         return catalog
+
+    def _user_agent_definitions(self) -> list[Any]:
+        """The enabled agents this Orin user made in the interface (``user_agents``); none when there is no database."""
+        user_id = str(self.turn.get("user_id") or "").strip()
+        if not user_id:
+            return []
+        store = getattr(self, "user_agent_store", None)
+        if store is None:
+            engine = getattr(getattr(self, "chat_store", None), "_engine", None)
+            if engine is None:
+                return []
+            from agentos.persistence.postgres.user_agents import UserAgentStore
+
+            store = self.user_agent_store = UserAgentStore(engine)
+        try:
+            return list(store.definitions(user_id))
+        except Exception:  # noqa: BLE001 - a missing table or a broken row never stops a turn
+            logger.warning("the person's own agents could not be read", exc_info=True)
+            return []
 
     def _defined_agents_text(self) -> str:
         """The agents the Agent tool can start besides Orin's builtins, with the models a pinned agent runs on."""
@@ -4507,6 +4539,33 @@ class TurnSession:
         except Exception:  # noqa: BLE001 - a notification never stops a turn
             logger.exception("Notification hooks failed")
 
+    def _apply_agent_mentions(self, task: str) -> None:
+        """`@agent-name`: the person asks for one of the agents defined here, so the model is told to delegate to it.
+        Only a name that is a defined agent counts (anything else stays text, e.g. a file mention); at most five."""
+        catalog = getattr(self, "_agent_definitions", None)
+        if catalog is None or not getattr(self, "enable_subagents", True):
+            return
+        found: list[str] = []
+        for match in _AGENT_MENTION.finditer(str(task or "")):
+            name = match.group(1).lower()
+            definition = catalog.agents.get(name)
+            if definition is None or definition.name in found:
+                continue
+            found.append(definition.name)
+            if len(found) >= MAX_AGENT_MENTIONS:
+                break
+        for name in found:
+            pinned = self._pinned_models({"definition": catalog.agents[name]})
+            choice = ""
+            if pinned is not None and len(pinned.models) > 1:
+                choice = f" It runs on {pinned.provider}: {', '.join(pinned.models)}; pass model_id with the one that fits."
+            self._reminders.add(
+                "agents",
+                f"The person asked for the agent '{name}' in this message (@{name}). Delegate the part of the task "
+                f"it is for with run_subagent(subagent_type=\"{name}\") instead of doing it yourself.{choice}",
+                key=f"agent-mention:{name}",
+            )
+
     def _apply_mcp_mentions(self, task: str) -> None:
         """`@server:uri` (W7): each mentioned resource of a connected MCP server joins the turn as data. Only a name
         that is a connected server counts (`@C:/path` stays text); at most five, 20 000 characters in all."""
@@ -5170,6 +5229,7 @@ class TurnSession:
         if task and not prompt_blocked:
             self._apply_user_command(task, toolset)
             self._apply_mcp_mentions(task)
+            self._apply_agent_mentions(task)
         try:
             toolset._extra_env.update(self._hook_extra_env())
         except Exception:  # noqa: BLE001 - hook env never stops a turn
