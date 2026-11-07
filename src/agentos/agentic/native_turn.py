@@ -643,6 +643,7 @@ class RuntimeToolExecutor(ToolExecutor):
                         f"Tool '{request.name}' is not allowed in phase "
                         f"'{self.runtime.phases.current.value}'. "
                         f"Allowed tools in this phase: {allowed_str}"
+                        + phases.toolkit_hint(internal_name, self.runtime.phases.current)
                     ),
                     is_error=True,
                 )

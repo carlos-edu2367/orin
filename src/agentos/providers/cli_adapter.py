@@ -234,6 +234,9 @@ class CliTurnRequest:
     session_id: str | None = None
     resume_session_id: str | None = None
     persist_session: bool = False
+    # How long one call to Orin's tool server may take (the turn's remaining deadline). An adapter passes it on its
+    # command line or through ``environment(tool_timeout_ms=...)``, whichever its CLI reads.
+    tool_timeout_ms: int | None = None
     capabilities: CliCapabilities = field(default_factory=CliCapabilities)
     prompt_via_stdin_once: bool = field(init=False)
 

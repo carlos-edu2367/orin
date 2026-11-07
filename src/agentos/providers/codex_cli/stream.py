@@ -14,8 +14,10 @@ from agentos.providers.cli_adapter import (
     RateLimitState,
 )
 
+# `collab_tool_call` is Codex's own multi-agent delegation (spawn_agent/send_input/wait): Orin turns it off and
+# refuses it, so a Codex model delegates only through Orin's Agent tool (tree, budget, permissions, cancellation).
 FORBIDDEN_CODEX_ITEM_KINDS: frozenset[str] = frozenset(
-    {"command_execution", "file_change", "web_search"}
+    {"command_execution", "file_change", "web_search", "collab_tool_call"}
 )
 
 _FORBIDDEN_INSPECT_KEYS: tuple[str, ...] = (

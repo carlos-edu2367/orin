@@ -70,6 +70,8 @@ def test_build_codex_command_new_ephemeral_turn(tmp_path: Path) -> None:
         "-c",
         "features.view_image=false",
         "-c",
+        "features.multi_agent=false",
+        "-c",
         'sandbox_mode="read-only"',
         "-c",
         'approval_policy="never"',
@@ -81,6 +83,8 @@ def test_build_codex_command_new_ephemeral_turn(tmp_path: Path) -> None:
         f'mcp_servers.orin.bearer_token_env_var="{ORIN_MCP_TOKEN_ENV}"',
         "-c",
         "mcp_servers.orin.required=true",
+        "-c",
+        'mcp_servers.orin.default_tools_approval_mode="approve"',
         "-",
     ]
     assert argv == expected
