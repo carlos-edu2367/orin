@@ -1386,18 +1386,47 @@ class ChatWorker:
         except Exception:
             return False
 
-    def _child_provider_for_turn(self, turn: dict[str, object], model_id: str) -> object:
-        favorites = self._favorite_child_model_ids(turn)
+    def _is_agent_model_allowed(self, turn: dict[str, object], model_id: str, provider: str) -> bool:
+        """Authorize a pinned agent's model: its provider is enabled for this person (Antigravity once its risk was
+        acknowledged) and the model is in that provider's catalog, or is the turn's own model there. No favorite needed."""
+        raw = str(model_id or "").strip()
+        clean_provider = str(provider or "").strip()
+        if not raw or not clean_provider or raw.lower().endswith(":batch"):
+            return False
+        if clean_provider == str(turn.get("provider") or "") and raw == str(turn.get("model_id") or "").strip():
+            return True
+        try:
+            with self.store._engine.connect() as connection:
+                if clean_provider not in self._allowed_child_providers(connection, turn):
+                    return False
+                return connection.execute(
+                    select(provider_model_catalog.c.id).where(
+                        provider_model_catalog.c.user_id == turn["user_id"],
+                        provider_model_catalog.c.provider == clean_provider,
+                        provider_model_catalog.c.model_id == raw,
+                    )
+                ).first() is not None
+        except Exception:
+            return False
+
+    def _child_provider_for_turn(self, turn: dict[str, object], model_id: str, provider: str | None = None) -> object:
+        explicit_provider = str(provider or "").strip() or None
         raw_model_id = str(model_id or "").strip()
-        resolved_model_id = (
-            resolve_child_model_id(
-                raw_model_id,
-                str(turn.get("model_id") or ""),
-                favorites,
+        if explicit_provider is not None:
+            # A pinned agent names its provider: never guess it from favorites (the same id may exist in two).
+            favorites: tuple[str, ...] = ()
+            resolved_model_id = raw_model_id
+        else:
+            favorites = self._favorite_child_model_ids(turn)
+            resolved_model_id = (
+                resolve_child_model_id(
+                    raw_model_id,
+                    str(turn.get("model_id") or ""),
+                    favorites,
+                )
+                or raw_model_id
             )
-            or raw_model_id
-        )
-        target_provider = str(turn["provider"])
+        target_provider = explicit_provider or str(turn["provider"])
         normalized_child = resolved_model_id.split("/", 1)[-1].strip().lower()
         keep_cli_subscription = (
             target_provider == "anthropic"
@@ -1425,6 +1454,18 @@ class ChatWorker:
                 alias_resolved = resolve_family_alias(family, discover_cached_models())
                 if alias_resolved:
                     resolved_model_id = alias_resolved
+        if explicit_provider is not None:
+            with self.store._engine.connect() as connection:
+                if explicit_provider not in self._allowed_child_providers(connection, turn):
+                    raise PermissionError(f"provider {explicit_provider} is not enabled for this person")
+            return self._transport_for(
+                str(turn["user_id"]),
+                explicit_provider,
+                resolved_model_id,
+                num_ctx=self._num_ctx_for({**turn, "provider": explicit_provider, "model_id": resolved_model_id})
+                if explicit_provider == "ollama"
+                else None,
+            )
         try:
             with self.store._engine.connect() as connection:
                 allowed_providers = self._allowed_child_providers(connection, turn)
@@ -1662,7 +1703,8 @@ class ChatWorker:
             vision_reader_factory=self._vision_reader_factory(turn),
             child_model_ids=self._favorite_child_model_ids(turn),
             child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
-            child_provider_factory=lambda model_id: self._child_provider_for_turn(turn, model_id),
+            agent_model_authorizer=lambda model_id, provider: self._is_agent_model_allowed(turn, model_id, provider),
+            child_provider_factory=lambda model_id, provider=None: self._child_provider_for_turn(turn, model_id, provider=provider),
             mcp_provider=mcp_provider,
             mcp_service=mcp_service,
             plugin_service=plugin_service,

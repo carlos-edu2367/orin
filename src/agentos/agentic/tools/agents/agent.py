@@ -102,7 +102,7 @@ class AgentInput(ToolInput):
     description: str = Field(description="3-5 word summary.")
     prompt: str = Field(description="Complete instructions; the subagent does not see this conversation.")
     subagent_type: str | None = Field(None, description="Explore, Plan, general-purpose or fork.")
-    model: str | None = Field(None, description="Optional model alias.")
+    model: str | None = Field(None, description="Optional model. For an agent that lists its own models, one of them (required when it lists several).")
     run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
     resume: str | None = Field(None, description="Id of a previous subagent to continue.")
     name: str | None = Field(None, description="Name a teammate of an agent team, so the team can message it with SendMessage.")
@@ -156,12 +156,11 @@ SPECS: tuple[ToolSpec, ...] = (
         legacy_schema=_schema({
             "subagent_type": {
                 "type": "string",
-                "enum": ["explore", "plan", "general", "fork"],
-                "description": "Builtin specialist type: 'explore' (read-only search), 'plan' (read-only architect), 'general' (full toolset), or 'fork' (inherits parent conversation context).",
+                "description": "A builtin specialist: 'explore' (read-only search), 'plan' (read-only architect), 'general' (full toolset) or 'fork' (inherits parent conversation context); or the name of an agent defined here.",
             },
             "task": {**_TEXT, "description": "Complete task instructions for the subagent."},
             "description": {**_TEXT, "description": "Short 3-5 word summary of what the subagent will do."},
-            "model_id": {**_TEXT, "description": "Optional favorite model ID from the current provider."},
+            "model_id": {**_TEXT, "description": "Optional. For an agent that lists its own models, one of them (required when it lists several); otherwise a favorite model ID of the current provider."},
             "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
             "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent to inspect or await its output."},
             "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},
