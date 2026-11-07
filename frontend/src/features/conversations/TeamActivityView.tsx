@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type CSSProperties } from 'react'
 import type { ConversationActivityEvent, TodoItem } from './activityTypes'
+import { orderAgentTree } from './agentTree'
 import './teamActivity.css'
 
 export type TeamAgentRoleIcon = 'search' | 'chart' | 'document'
@@ -22,6 +23,10 @@ export interface TeamAgentCardData {
   durationLabel: string
   icon: TeamAgentRoleIcon
   activities: TeamAgentActivityItem[]
+  /** The subagent that started this one, when it was not the main agent. */
+  parentId?: string
+  /** 0 for an agent the main agent started, 1 for one that agent started, and so on. */
+  depth?: number
 }
 
 export interface TeamDecisionOption {
@@ -158,11 +163,14 @@ function deriveAgentsFromEvents(
   if (relevantEvents.length === 0) return []
 
   const grouped = new Map<string, ConversationActivityEvent[]>()
+  const parents = new Map<string, string>()
   for (const ev of relevantEvents) {
     const id = sanitizeAgentId(ev.agentId, 'especialista')
     const bucket = grouped.get(id) ?? []
     bucket.push(ev)
     grouped.set(id, bucket)
+    const parent = sanitizeText(ev.parentAgentId)
+    if (parent && !parents.has(id)) parents.set(id, sanitizeAgentId(parent, ''))
   }
 
   const cards: TeamAgentCardData[] = []
@@ -245,10 +253,12 @@ function deriveAgentsFromEvents(
       durationLabel,
       icon: inferRoleIcon(`${finalRoleName} ${id}`),
       activities,
+      parentId: parents.get(id) || undefined,
     })
   }
 
-  return cards
+  // A subagent started by another subagent is listed right under it.
+  return orderAgentTree(cards, (card) => card.id, (card) => card.parentId).map(({ item, depth }) => ({ ...item, depth }))
 }
 
 function deriveRecentActivities(
@@ -592,7 +602,9 @@ export function TeamActivityView({
               return (
                 <article
                   key={agent.id}
-                  className="team-agent-card"
+                  className={agent.depth ? 'team-agent-card team-agent-card--nested' : 'team-agent-card'}
+                  style={agent.depth ? ({ '--agent-depth': agent.depth } as CSSProperties) : undefined}
+                  data-depth={agent.depth ?? 0}
                   data-testid={`team-agent-card-${agent.id}`}
                 >
                   <div className="team-agent-card__main">

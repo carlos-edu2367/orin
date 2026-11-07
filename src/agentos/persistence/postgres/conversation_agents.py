@@ -107,6 +107,21 @@ class ConversationAgentStore:
         with self._lock, self._engine.begin() as connection:
             connection.execute(update(conversation_agents).where(conversation_agents.c.agent_id == agent_id).values(state=state, updated_at=datetime.now(UTC)))
 
+    def set_parent(self, agent_id: str, parent_agent_id: str) -> None:
+        """The agent that started this one's latest run (the main agent or a subagent): the delegation tree."""
+        clean_parent = str(parent_agent_id or "").strip()
+        if not clean_parent:
+            raise ValueError("parent_agent_id must be non-blank")
+        with self._lock, self._engine.begin() as connection:
+            connection.execute(
+                update(conversation_agents)
+                .where(
+                    conversation_agents.c.agent_id == agent_id,
+                    conversation_agents.c.conversation_id == self._conversation_id,
+                )
+                .values(parent_agent_id=clean_parent, updated_at=datetime.now(UTC))
+            )
+
     def set_model(self, agent_id: str, model_id: str) -> None:
         """Persist a safe pre-run model fallback for one child agent."""
         if not model_id.strip():

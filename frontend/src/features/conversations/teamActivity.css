@@ -174,6 +174,12 @@
   transition: border-color 150ms ease, background-color 150ms ease;
 }
 
+/* A subagent started by another subagent sits under it. */
+.team-agent-card--nested {
+  margin-inline-start: calc(min(var(--agent-depth, 0), 5) * 24px);
+  border-inline-start: 3px solid var(--orin-border-strong, #3a3650);
+}
+
 .team-agent-card:hover {
   border-color: rgba(180, 164, 239, 0.25);
 }
