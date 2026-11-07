@@ -259,6 +259,7 @@ class TurnToolServer:
                         "description": (spec.description or "")[:2000],
                         "inputSchema": dict(spec.input_schema),
                         "annotations": {"readOnlyHint": bool(spec.read_only)},
+                        "_meta": {"antigravity/alwaysLoad": True},
                     }
                     for spec in specs
                 ]
