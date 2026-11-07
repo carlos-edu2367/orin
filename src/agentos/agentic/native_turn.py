@@ -907,7 +907,7 @@ class RuntimeToolExecutor(ToolExecutor):
 
         self.action_count += len(results)
         msg_round_key = str(message_id or "").strip()
-        if not msg_round_key or msg_round_key == "default":
+        if not self._adapter_message_ids or not msg_round_key or msg_round_key == "default":
             self.tool_rounds += 1
         elif msg_round_key not in self._seen_tool_round_message_ids:
             self._seen_tool_round_message_ids.add(msg_round_key)

@@ -1047,6 +1047,47 @@ def test_with_real_message_ids_behavior_is_unchanged(
     assert (workspace.root / "blind.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
+def test_tool_rounds_counts_per_batch_without_message_ids_and_per_message_with_ids(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    for idx in range(3):
+        (workspace.root / f"f{idx}.txt").write_text(f"v{idx}\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+
+    exec_no_ids = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.01)
+    for idx in range(3):
+        res = exec_no_ids.call_tool(
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": f"f{idx}.txt"},
+                meta={TOOL_USE_ID_META_KEY: f"tu_no_{idx}"},
+            )
+        )
+        assert res.is_error is False
+    assert exec_no_ids.tool_rounds == 3
+
+    exec_with_ids = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.01)
+    for idx in range(3):
+        res = exec_with_ids.call_tool(
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": f"f{idx}.txt"},
+                meta={TOOL_USE_ID_META_KEY: f"tu_id_{idx}", "message_id": "m_same"},
+            )
+        )
+        assert res.is_error is False
+    assert exec_with_ids.tool_rounds == 1
+
+
 def test_write_barrier_waits_for_closing_read_batch_even_with_multiple_concurrent_writes() -> None:
     import threading as _th
 
