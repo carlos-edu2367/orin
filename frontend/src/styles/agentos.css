@@ -5974,13 +5974,22 @@ progress.orin-progress::-moz-progress-bar,
   line-height: 1;
 }
 
-.code-changed-files-card,
-.code-steps-checklist-card {
-  margin: 10px 0;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
-  background: var(--orin-surface-1, #15151B);
+.code-changed-files-card {
+  margin: 6px 0;
+  padding: 6px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.06));
+  background: rgba(255, 255, 255, 0.022);
+  width: fit-content;
+  max-width: 100%;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+
+.code-changed-files-card.is-expanded {
+  width: 100%;
+  max-width: 520px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .code-changed-files-card__header {
@@ -5991,11 +6000,27 @@ progress.orin-progress::-moz-progress-bar,
 }
 
 .code-changed-files-card__summary {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--orin-text-secondary, #9D9BAA);
+}
+
+.code-changed-files-card__icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--orin-text-tertiary, #7A7888);
+}
+
+.code-changed-files-card__count {
+  font-weight: 500;
   color: var(--orin-text-primary, #F4F3F8);
+}
+
+.code-changed-files-card__dot {
+  opacity: 0.45;
 }
 
 .code-changed-files-card__btn {
@@ -6004,8 +6029,8 @@ progress.orin-progress::-moz-progress-bar,
   background: transparent;
   color: var(--orin-accent, #B4A4EF);
   font: inherit;
-  font-size: 13px;
-  font-weight: 560;
+  font-size: 12px;
+  font-weight: 540;
   cursor: pointer;
 }
 
@@ -6014,19 +6039,30 @@ progress.orin-progress::-moz-progress-bar,
 }
 
 .code-changed-files-card__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
   border: 0;
+  border-radius: 5px;
   background: transparent;
   color: var(--orin-text-secondary, #9D9BAA);
   cursor: pointer;
 }
 
+.code-changed-files-card__chevron:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
 .code-changed-files-card__list {
   list-style: none;
-  margin: 10px 0 0;
-  padding: 8px 0 0;
-  border-top: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.06));
+  margin: 7px 0 0;
+  padding: 6px 0 0;
+  border-top: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.05));
   display: grid;
-  gap: 6px;
+  gap: 3px;
 }
 
 .code-changed-files-card__file-btn {
@@ -6035,19 +6071,27 @@ progress.orin-progress::-moz-progress-bar,
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 6px 8px;
+  padding: 4px 7px;
   border: 0;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  background: transparent;
   color: var(--orin-text-primary, #F4F3F8);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11.5px;
   cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.code-changed-files-card__file-btn:hover {
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .code-changed-files-card__file-badge {
   font-family: var(--sans, inherit);
-  font-size: 11px;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(180, 164, 239, 0.12);
   color: var(--orin-accent, #B4A4EF);
 }
 

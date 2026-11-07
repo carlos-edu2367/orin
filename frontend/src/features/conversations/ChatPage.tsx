@@ -679,6 +679,9 @@ export function ChatPage() {
     setWorkbenchTab('preview')
     setSelectedWorkbenchFile(null)
     setChangedFilesExpanded(false)
+    setHasOlderActivities(false)
+    setOldestActivityId(null)
+    dispatch({ type: 'snapshot', events: [], cursor: '0' })
   } else if (conversation && conversation.conversation_id === conversationId && selectionFor !== conversationId) {
     const initialProvider = asProviderName(conversation.provider)
     if (initialProvider) {
@@ -1220,18 +1223,6 @@ export function ChatPage() {
     return latestTool && latestTool.state === 'working' ? latestTool.summary || null : null
   }, [activity.events, running])
 
-  const liveWorkStep = useMemo(() => {
-    if (!running) return null
-    const turnScopedEvents = activeTurn?.turn_id
-      ? activity.events.filter((ev) => ev.turnId === activeTurn.turn_id || !ev.turnId)
-      : activity.events
-    const latestActive = [...turnScopedEvents]
-      .reverse()
-      .find((ev) => ev.kind === 'tool' || ev.kind === 'agent' || ev.kind === 'lifecycle')
-    const title = liveWorkingStatus ?? latestActive?.summary ?? 'Em andamento…'
-    const subtitle = latestActive?.detail ?? latestActive?.tool ?? null
-    return { title, subtitle }
-  }, [activeTurn, activity.events, liveWorkingStatus, running])
 
   const userInitial = useMemo(() => {
     try {
@@ -2564,13 +2555,16 @@ export function ChatPage() {
 
             {!loadFailure && messages.map((item, itemIndex) => {
               const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
-              const oldestEventId = consolidatedEvents[0]?.eventId
+              const oldestTurnId = consolidatedEvents[0]?.turnId
+              const firstAssistantIdx = messages.findIndex((m) => m.role === 'assistant')
+              const matchingOldestIdx = oldestTurnId
+                ? messages.findIndex((m) => m.role === 'assistant' && m.turn_id === oldestTurnId)
+                : -1
+              const targetOlderIdx = matchingOldestIdx !== -1 ? matchingOldestIdx : firstAssistantIdx
               const isEarliestPartialTurn = Boolean(
                 hasOlderActivities
                 && item.role === 'assistant'
-                && timeline
-                && oldestEventId
-                && timeline.some((seg) => seg.kind === 'activity' && seg.group.events.some((ev) => ev.eventId === oldestEventId)),
+                && itemIndex === targetOlderIdx,
               )
               // An answer a live turn read from the queue does not end that turn.
               const hasSubsequentUserMessage = messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user' && !isQueuedAnswerMessage(candidate))
@@ -2831,10 +2825,23 @@ export function ChatPage() {
               )
             })()}
             {!loadFailure && conversationMode === 'code' && changedWorkbenchFiles.length > 0 && (
-              <div className="code-changed-files-card" data-testid="code-changed-files-card">
+              <div
+                className={`code-changed-files-card${changedFilesExpanded ? ' is-expanded' : ''}`}
+                data-testid="code-changed-files-card"
+              >
                 <div className="code-changed-files-card__header">
                   <div className="code-changed-files-card__summary">
-                    <span className="code-changed-files-card__icon" aria-hidden="true">📄</span>
+                    <span className="code-changed-files-card__icon" aria-hidden="true">
+                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                        <path
+                          d="M4 2.5h5.5L13 6v7.5a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-10a1 1 0 0 1 1-1Z"
+                          stroke="currentColor"
+                          strokeWidth="1.35"
+                          strokeLinejoin="round"
+                        />
+                        <path d="M9 2.5V6h3.5" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" />
+                      </svg>
+                    </span>
                     <span className="code-changed-files-card__count">
                       {changedWorkbenchFiles.length} {changedWorkbenchFiles.length === 1 ? 'arquivo alterado' : 'arquivos alterados'}
                     </span>
@@ -2858,7 +2865,15 @@ export function ChatPage() {
                     aria-label={changedFilesExpanded ? 'Recolher arquivos alterados' : 'Expandir arquivos alterados'}
                     onClick={() => setChangedFilesExpanded((prev) => !prev)}
                   >
-                    {changedFilesExpanded ? '▴' : '▾'}
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                      style={{ transform: changedFilesExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 150ms ease' }}
+                    >
+                      <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
                   </button>
                 </div>
                 {changedFilesExpanded && (
@@ -2885,30 +2900,6 @@ export function ChatPage() {
                 )}
               </div>
             )}
-
-            {!loadFailure && conversationMode === 'code' && activity.todos.length > 0 && (
-              <div className="code-steps-checklist-card" data-testid="code-steps-checklist-card">
-                <ul className="code-steps-checklist-card__list">
-                  {activity.todos.map((todo, idx) => {
-                    const isDone = todo.status === 'completed'
-                    return (
-                      <li
-                        key={`${idx}-${todo.content}`}
-                        className={`code-steps-checklist-card__item${isDone ? ' is-done' : ' is-pending'}`}
-                      >
-                        <span className="code-steps-checklist-card__check" aria-hidden="true">
-                          {isDone ? '✓' : '○'}
-                        </span>
-                        <span className="code-steps-checklist-card__text">{todo.content}</span>
-                        {!isDone && (
-                          <span className="code-steps-checklist-card__status">Em andamento</span>
-                        )}
-                      </li>
-                    )
-                  })}
-                </ul>
-              </div>
-            )}
             <AnimatePresence>
               {!loadFailure && showAgentPulse && (
                 <motion.div
@@ -2927,41 +2918,6 @@ export function ChatPage() {
                 </motion.div>
               )}
             </AnimatePresence>
-            {!loadFailure && running && (
-              <div className="live-work-progress-card" data-testid="live-work-progress-card">
-                <div className="live-work-progress-card__status">
-                  <span className="live-work-progress-card__dot" aria-hidden="true" />
-                  <div className="live-work-progress-card__copy">
-                    <span className="live-work-progress-card__title">
-                      {liveWorkStep?.title ?? 'Em andamento…'}
-                    </span>
-                    {Boolean(liveWorkStep?.subtitle) && (
-                      <span className="live-work-progress-card__subtitle">
-                        {liveWorkStep?.subtitle}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="live-work-progress-card__actions">
-                  <button
-                    type="button"
-                    className="live-work-progress-card__details-btn"
-                    data-testid="live-work-view-details"
-                    onClick={() => setTeamViewOpen(true)}
-                  >
-                    Ver detalhes ›
-                  </button>
-                  <button
-                    type="button"
-                    className="live-work-progress-card__stop-btn"
-                    data-testid="live-work-stop-button"
-                    onClick={() => { void stop() }}
-                  >
-                    Parar
-                  </button>
-                </div>
-              </div>
-            )}
           </div>
           )}
         </div>

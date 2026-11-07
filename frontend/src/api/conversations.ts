@@ -659,7 +659,7 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (queueId) extraPayload.queue_id = queueId
   if (queuedText) extraPayload.queued_text = queuedText
   if (payload.in_turn === true) extraPayload.in_turn = true
-  if (typeof payload.delta === 'string' && payload.delta.length <= 16_000 && !isRedactedValue(payload.delta)) {
+  if (typeof payload.delta === 'string' && payload.delta.length <= 500_000 && !isRedactedValue(payload.delta)) {
     extraPayload.delta = payload.delta
   }
   if (typeof payload.bytes_received === 'number' && Number.isFinite(payload.bytes_received) && payload.bytes_received >= 0) {
@@ -751,9 +751,9 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   const todos = parseTodoItems(todosSource)
   if (todos) event.todos = todos
   if (errorCode) event.errorCode = errorCode
-  if (typeof payload.content === 'string' && payload.content.length <= 16_000 && !isRedactedValue(payload.content)) {
+  if (typeof payload.content === 'string' && payload.content.length <= 500_000 && !isRedactedValue(payload.content)) {
     event.content = payload.content
-  } else if (type === 'assistant.delta' && typeof payload.delta === 'string' && payload.delta.length <= 16_000 && !isRedactedValue(payload.delta)) {
+  } else if (type === 'assistant.delta' && typeof payload.delta === 'string' && payload.delta.length <= 500_000 && !isRedactedValue(payload.delta)) {
     event.content = payload.delta
   } else if (event.state === 'failed') {
     const errorText = optionalText(payload.error ?? payload.detail, 16_000)

@@ -1395,7 +1395,7 @@ class PostgresChatStore:
                             user_id=user_id,
                             conversation_id=conversation_id,
                             turns=turns,
-                            limit=150,
+                            limit=300,
                             before_id=None,
                             encode_cursor=encode_fn,
                         )
@@ -1519,11 +1519,16 @@ class PostgresChatStore:
                     conversation_activity_events.c.turn_id.in_(settled_turns)
                     & conversation_activity_events.c.event_type.in_((
                         "tool.requested",
-                        "tool.started",
                         "tool.progressed",
                         "code_mode.validation_started",
                         "code_mode.validation_finished",
                         "code_mode.stage_changed",
+                        "speak.block_started",
+                        "speak.delta",
+                        "speak.chunk_ready",
+                        "speak.filler_triggered",
+                        "speak.interrupted",
+                        "speak.finished",
                     ))
                 )
             )
@@ -1590,16 +1595,82 @@ class PostgresChatStore:
             elif ev_type == AgentActivityEventType.CODE_MODE_VALIDATION_STARTED.value:
                 last_validation_id_by_turn[t_id] = r_id
 
+        settled_skip_events = {
+            "tool.requested",
+            "tool.progressed",
+            "speak.block_started",
+            "speak.delta",
+            "speak.chunk_ready",
+            "speak.filler_triggered",
+            "speak.interrupted",
+            "speak.finished",
+        }
+        non_breaking_delta_events = {
+            "context.updated",
+            "context.compacted",
+            "code_mode.validation_started",
+            "code_mode.validation_finished",
+            "code_mode.stage_changed",
+            "speak.block_started",
+            "speak.delta",
+            "speak.chunk_ready",
+            "speak.filler_triggered",
+            "speak.interrupted",
+            "speak.finished",
+        }
+        tool_completion_events = {
+            "tool.finished",
+            "tool.failed",
+            "filesystem.read",
+            "filesystem.wrote",
+            "filesystem.patched",
+            "web.searched",
+            "web.fetched",
+            "mcp.tool_called",
+            "memory.read",
+            "memory.written",
+            "canvas.updated",
+        }
+        tool_enrich_keys = (
+            "path",
+            "file_path",
+            "target_path",
+            "command",
+            "description",
+            "tool_name",
+            "tool_kind",
+            "invocation_id",
+            "call_id",
+        )
+
         compacted: list[dict[str, object]] = []
+        last_assistant_delta_idx: dict[tuple[str, str], int] = {}
+        last_thought_delta_idx: dict[tuple[str, str], int] = {}
+        open_tool_started_by_turn: dict[tuple[str, str], list[int]] = {}
+        seen_artifacts_by_turn: dict[str, set[str]] = {}
+        artifact_count_by_turn: dict[str, int] = {}
+
         for row in rows:
             ev_type = str(row["event_type"])
             t_id = str(row["turn_id"])
             r_id = int(row["id"])
             raw_payload = row["payload"]
-            payload = _plain(raw_payload) if isinstance(raw_payload, Mapping) else {}
-            if t_id in settled_turns:
-                if ev_type in {"tool.requested", "tool.progressed"}:
+            payload = dict(_plain(raw_payload)) if isinstance(raw_payload, Mapping) else {}
+            if t_id in settled_turns and ev_type in settled_skip_events:
+                continue
+            if ev_type == AgentActivityEventType.ARTIFACT_CREATED.value:
+                raw_art_path = str(payload.get("path") or payload.get("file_path") or "").replace("\\", "/").strip()
+                if raw_art_path.startswith(".orin/") or "/.orin/" in raw_art_path:
                     continue
+                if t_id in settled_turns:
+                    seen_paths = seen_artifacts_by_turn.setdefault(t_id, set())
+                    if raw_art_path and raw_art_path in seen_paths:
+                        continue
+                    if artifact_count_by_turn.get(t_id, 0) >= 10:
+                        continue
+                    if raw_art_path:
+                        seen_paths.add(raw_art_path)
+                    artifact_count_by_turn[t_id] = artifact_count_by_turn.get(t_id, 0) + 1
             if (
                 ev_type == AgentActivityEventType.CONTEXT_UPDATED.value
                 and context_count_by_turn.get(t_id, 0) > 3
@@ -1624,42 +1695,73 @@ class PostgresChatStore:
                 else str(created_at)
             )
             agent_id = str(row["agent_id"])
+            stream_key = (t_id, agent_id)
             item_cursor = encode_cursor(r_id) if callable(encode_cursor) else str(row["sequence"])
-            if (
-                ev_type == AgentActivityEventType.ASSISTANT_DELTA.value
-                and compacted
-                and compacted[-1]["event_type"] == AgentActivityEventType.ASSISTANT_DELTA.value
-                and compacted[-1]["turn_id"] == t_id
-                and compacted[-1]["agent_id"] == agent_id
-            ):
-                prev_payload = compacted[-1].get("payload")
-                if isinstance(prev_payload, dict) and isinstance(payload, dict):
-                    prev_content = str(prev_payload.get("content") or "")
-                    chunk_content = str(payload.get("content") or "")
-                    prev_payload["content"] = prev_content + chunk_content
-                    compacted[-1]["sequence"] = int(row["sequence"])
-                    compacted[-1]["cursor"] = item_cursor
-                    compacted[-1]["occurred_at"] = occurred_at
-                    continue
 
-            if (
-                ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value
-                and compacted
-                and compacted[-1]["event_type"] == AgentActivityEventType.AGENT_THOUGHT_DELTA.value
-                and compacted[-1]["turn_id"] == t_id
-                and compacted[-1]["agent_id"] == agent_id
-            ):
-                prev_payload = compacted[-1].get("payload")
-                if isinstance(prev_payload, dict) and isinstance(payload, dict):
-                    prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
-                    chunk_content = str(payload.get("content") or payload.get("delta") or "")
-                    merged = prev_content + chunk_content
-                    prev_payload["content"] = merged
-                    prev_payload["delta"] = merged
-                    compacted[-1]["sequence"] = int(row["sequence"])
-                    compacted[-1]["cursor"] = item_cursor
-                    compacted[-1]["occurred_at"] = occurred_at
-                    continue
+            if ev_type == AgentActivityEventType.ASSISTANT_DELTA.value:
+                last_thought_delta_idx.pop(stream_key, None)
+                prev_idx = last_assistant_delta_idx.get(stream_key)
+                if prev_idx is not None:
+                    prev_entry = compacted[prev_idx]
+                    prev_payload = prev_entry.get("payload")
+                    if isinstance(prev_payload, dict) and isinstance(payload, dict):
+                        prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
+                        chunk_content = str(payload.get("content") or payload.get("delta") or "")
+                        prev_payload["content"] = prev_content + chunk_content
+                        prev_entry["sequence"] = int(row["sequence"])
+                        prev_entry["cursor"] = item_cursor
+                        prev_entry["occurred_at"] = occurred_at
+                        continue
+
+            elif ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value:
+                last_assistant_delta_idx.pop(stream_key, None)
+                prev_idx = last_thought_delta_idx.get(stream_key)
+                if prev_idx is not None:
+                    prev_entry = compacted[prev_idx]
+                    prev_payload = prev_entry.get("payload")
+                    if isinstance(prev_payload, dict) and isinstance(payload, dict):
+                        prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
+                        chunk_content = str(payload.get("content") or payload.get("delta") or "")
+                        merged = prev_content + chunk_content
+                        prev_payload["content"] = merged
+                        prev_payload["delta"] = merged
+                        prev_entry["sequence"] = int(row["sequence"])
+                        prev_entry["cursor"] = item_cursor
+                        prev_entry["occurred_at"] = occurred_at
+                        continue
+
+            elif ev_type not in non_breaking_delta_events:
+                last_assistant_delta_idx.pop(stream_key, None)
+                last_thought_delta_idx.pop(stream_key, None)
+
+            if t_id in settled_turns and ev_type in tool_completion_events:
+                open_list = open_tool_started_by_turn.get(stream_key)
+                if open_list:
+                    inv_id = str(payload.get("invocation_id") or payload.get("call_id") or "")
+                    t_name = str(payload.get("tool_name") or "")
+                    matched_pos = None
+                    if inv_id:
+                        for pos, idx in enumerate(open_list):
+                            sp = compacted[idx].get("payload")
+                            if isinstance(sp, dict) and str(sp.get("invocation_id") or sp.get("call_id") or "") == inv_id:
+                                matched_pos = pos
+                                break
+                    if matched_pos is None and t_name:
+                        for pos, idx in enumerate(open_list):
+                            sp = compacted[idx].get("payload")
+                            if isinstance(sp, dict) and str(sp.get("tool_name") or "") == t_name:
+                                matched_pos = pos
+                                break
+                    if matched_pos is None:
+                        matched_pos = 0
+                    matched_idx = open_list.pop(matched_pos)
+                    started_entry = compacted[matched_idx]
+                    started_payload = started_entry.get("payload")
+                    if isinstance(started_payload, dict):
+                        for k in tool_enrich_keys:
+                            if not payload.get(k) and started_payload.get(k):
+                                payload[k] = started_payload[k]
+                    started_entry["_drop_settled_started"] = True
 
             entry: dict[str, object] = {
                 "event_id": str(row["event_id"]),
@@ -1677,7 +1779,15 @@ class PostgresChatStore:
             if keep_db_id:
                 entry["_db_id"] = r_id
             compacted.append(entry)
-        return compacted
+            new_idx = len(compacted) - 1
+            if ev_type == AgentActivityEventType.ASSISTANT_DELTA.value:
+                last_assistant_delta_idx[stream_key] = new_idx
+            elif ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value:
+                last_thought_delta_idx[stream_key] = new_idx
+            elif t_id in settled_turns and ev_type == AgentActivityEventType.TOOL_STARTED.value:
+                open_tool_started_by_turn.setdefault(stream_key, []).append(new_idx)
+
+        return [item for item in compacted if not item.pop("_drop_settled_started", False)]
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:

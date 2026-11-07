@@ -1149,7 +1149,7 @@ export function TurnTimeline({
   }
 
   return (
-    <div className="turn-timeline">
+    <div className="turn-timeline" data-testid="turn-timeline">
       {canShowRewind && (
         <header
           className="turn-timeline__header turn-timeline__action-bar flex flex-wrap items-center justify-between gap-2 pb-1 text-[11px] text-[var(--text-muted)]"
