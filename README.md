@@ -113,7 +113,7 @@ flowchart TD
 
 **Como criar um agente**
 
-- **Pela interface:** *Biblioteca › Agentes › Novo agente*. Escolha o provedor, marque os modelos permitidos (o primeiro é o padrão) e escreva quando usá-lo.
+- **Pela interface:** clique em **Biblioteca** na barra lateral e abra a aba **Agentes**. Comece do zero ou de um modelo pronto (revisor, pesquisador, testador), escolha o provedor e marque os modelos permitidos. Com um modelo só, o agente roda direto nele; com vários, quem chama escolhe um, e a ordem da lista vale para o fallback.
 - **Por arquivo** (formato do Claude Code, em `.orin/agents/` ou `.claude/agents/`):
 
 ```markdown

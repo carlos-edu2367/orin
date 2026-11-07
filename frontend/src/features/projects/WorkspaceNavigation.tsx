@@ -847,9 +847,9 @@ export function WorkspaceNavigation({
               to="/library/skills"
               onClick={() => setMobileOpen(false)}
               aria-current={isLibraryActive ? 'page' : undefined}
-              aria-label="Habilidades (Biblioteca)"
+              aria-label="Biblioteca (Skills, Agentes, Plugins e Memória)"
               className={`project-navigation__hub-link${isLibraryActive ? ' is-active' : ''}`}
-              title="Habilidades"
+              title="Biblioteca: Skills, Agentes, Plugins e Memória"
             >
               <span className="project-navigation__hub-icon" aria-hidden="true">
                 <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -859,7 +859,7 @@ export function WorkspaceNavigation({
                   <rect x="9" y="9" width="4.75" height="4.75" rx="1" />
                 </svg>
               </span>
-              <span className="project-navigation__hub-label">Habilidades</span>
+              <span className="project-navigation__hub-label">Biblioteca</span>
             </Link>
 
             <Link

@@ -63,9 +63,9 @@ describe('WorkspaceShell & Sidebar Hubs', () => {
     expect(screen.getByTestId('sidebar-orin-friend-button')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /Ações agendadas/i })).toHaveAttribute('href', '/schedules')
 
-    // Sidebar footer links ("Habilidades", "Conexões", "Configurações") and local ProfileMenu
+    // Sidebar footer links ("Biblioteca", "Conexões", "Configurações") and local ProfileMenu
     expect(screen.queryByRole('heading', { name: /Seu espaço/i })).not.toBeInTheDocument()
-    expect(screen.getByRole('link', { name: /Habilidades/i })).toHaveAttribute('href', '/library/skills')
+    expect(screen.getByRole('link', { name: /Biblioteca/i })).toHaveAttribute('href', '/library/skills')
     expect(screen.getByRole('link', { name: /Conexões/i })).toHaveAttribute('href', '/integrations/providers')
     expect(screen.getByRole('link', { name: /Configurações/i })).toHaveAttribute('href', '/settings/general')
     expect(screen.getByTestId('sidebar-profile-menu')).toBeInTheDocument()

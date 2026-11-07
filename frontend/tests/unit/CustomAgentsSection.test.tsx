@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
-import { CustomAgentsSection, customAgentProblems, draftOf, type AgentForm } from '../../src/features/agents/CustomAgentsSection'
+import { CustomAgentsSection, customAgentProblems, draftOf, normalizeAgentName, type AgentForm } from '../../src/features/agents/CustomAgentsSection'
 import { FileMentionPicker, matchingAgents } from '../../src/features/conversations/FileMentionPicker'
 
 afterEach(() => {
@@ -69,6 +69,11 @@ describe('customAgentProblems', () => {
     expect(customAgentProblems({ ...FORM, tools: 'Read(*)' }, { creating: true }).join(' ')).toContain('nome de ferramenta')
   })
 
+  it('makes a typed name valid as it is typed', () => {
+    expect(normalizeAgentName('Revisão Ágil!')).toBe('revisao-agil')
+    expect(normalizeAgentName('Meu_Agente 2')).toBe('meu_agente-2')
+  })
+
   it('sends no models when the agent runs on the caller’s provider', () => {
     expect(draftOf({ ...FORM, provider: '', models: ['gpt-5'] })).toMatchObject({ provider: null, models: [] })
     expect(draftOf({ ...FORM, tools: 'Read, Grep' })).toMatchObject({ provider: 'openai-codex', models: ['gpt-5'], tools: ['Read', 'Grep'] })
@@ -81,31 +86,57 @@ describe('CustomAgentsSection', () => {
     renderSection(client)
     const item = await screen.findByTestId('custom-agent-revisor')
     expect(item.textContent).toContain('@revisor')
-    expect(item.textContent).toContain('OpenAI Codex (Assinatura): gpt-5-codex | gpt-5')
+    expect(item.textContent).toContain('OpenAI Codex (Assinatura)')
+    expect(item.textContent).toContain('gpt-5-codex')
+    expect(within(item).getByRole('switch', { name: 'Desligar @revisor' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('button', { name: 'Novo agente' })).toBeInTheDocument()
   })
 
-  it('creates an agent pinned to a provider’s models, the first being the default', async () => {
+  it('creates an agent pinned to a provider’s models, in the order of fallback', async () => {
     const { client, calls } = server()
     renderSection(client)
-    fireEvent.click(await screen.findByRole('button', { name: 'Novo agente' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Criar o primeiro agente' }))
     fireEvent.change(screen.getByLabelText('Nome'), { target: { value: 'Revisor' } })
     fireEvent.change(screen.getByLabelText('Quando usar'), { target: { value: 'Revisa o diff' } })
     fireEvent.change(screen.getByLabelText('Instruções'), { target: { value: 'Revise o diff.' } })
-    const providerSelect = screen.getByLabelText('Provedor')
-    await waitFor(() => expect(within(providerSelect).getByRole('option', { name: 'OpenAI Codex (Assinatura)' })).toBeInTheDocument())
-    expect(within(providerSelect).queryByRole('option', { name: /Anthropic/ })).toBeNull() // lists no models: not offered
-    fireEvent.change(providerSelect, { target: { value: 'openai-codex' } })
+    const providers = screen.getByRole('radiogroup', { name: 'Provedor' })
+    const codex = await within(providers).findByRole('radio', { name: /OpenAI Codex \(Assinatura\)/ })
+    expect(within(providers).queryByRole('radio', { name: /Anthropic/ })).toBeNull() // lists no models: not offered
+    fireEvent.click(codex)
     const catalog = screen.getByRole('list', { name: 'Modelos do provedor' })
     fireEvent.click(within(catalog).getByLabelText('gpt-5'))
     fireEvent.click(within(catalog).getByLabelText('gpt-5-codex'))
     const chosen = screen.getByRole('list', { name: 'Modelos escolhidos' })
-    expect(within(chosen).getAllByRole('listitem')[0].textContent).toContain('padrão')
-    fireEvent.click(within(chosen).getByRole('button', { name: 'Tornar padrão' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
+    expect(within(chosen).getAllByRole('listitem')[0].textContent).toContain('gpt-5')
+    fireEvent.click(within(chosen).getByRole('button', { name: 'Pôr em 1º' }))
+    expect(screen.getByLabelText('Prévia do agente').textContent).toContain('@revisor')
+    fireEvent.click(screen.getByRole('button', { name: 'Criar agente' }))
 
     await screen.findByTestId('custom-agent-revisor')
+    expect(screen.getByRole('status').textContent).toContain('@revisor salvo')
     const post = calls.find((call) => call.method === 'POST')
     expect(post?.body).toMatchObject({ name: 'revisor', provider: 'openai-codex', models: ['gpt-5-codex', 'gpt-5'], enabled: true })
+  })
+
+  it('starts from a template, and gives a taken name a number', async () => {
+    const { client } = server([REVISOR])
+    renderSection(client)
+    fireEvent.click(await screen.findByRole('button', { name: 'Novo agente' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Revisor de código' }))
+    expect(screen.getByLabelText('Nome')).toHaveValue('revisor-2')
+    expect(screen.getByLabelText('Ferramentas permitidas')).toHaveValue('Read, Grep, Glob')
+    fireEvent.change(screen.getByLabelText('Nome'), { target: { value: 'revisor' } })
+    expect(screen.getByText(/Você já tem um agente @revisor/)).toBeInTheDocument()
+  })
+
+  it('marks the missing fields instead of saving', async () => {
+    const { client, calls } = server()
+    renderSection(client)
+    fireEvent.click(await screen.findByRole('button', { name: 'Criar o primeiro agente' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Criar agente' }))
+    expect(screen.getByLabelText('Quando usar')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByLabelText('Instruções')).toHaveAttribute('aria-invalid', 'true')
+    expect(calls.some((call) => call.method === 'POST')).toBe(false)
   })
 
   it('shows the server’s reasons when a save is refused', async () => {
