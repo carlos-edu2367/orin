@@ -1873,8 +1873,11 @@ export function ChatPage() {
     await sendOversizedTextAutomatically(oversizedInput.text, oversizedInput.attachments)
   }
 
-  const stop = useCallback(async () => {
+  const stop = useCallback(async (options?: { keepSubagents?: boolean } | unknown) => {
     if (stopping) return
+    const keepSubagents = Boolean(
+      options && typeof options === 'object' && 'keepSubagents' in options && (options as { keepSubagents?: boolean }).keepSubagents,
+    )
     setStopping(true)
     const runningIds = (conversation?.turns ?? [])
       .filter((turn) => RUNNING_STATES.has(turn.state))
@@ -1890,7 +1893,9 @@ export function ChatPage() {
       })
     }
     try {
-      const receipt = await cancelConversation(client, conversationId)
+      const receipt = keepSubagents
+        ? await cancelConversation(client, conversationId, { keepSubagents: true })
+        : await cancelConversation(client, conversationId)
       if (receipt.cancelling.length > 0) {
         const cancelled = new Set(receipt.cancelling)
         setCancelledTurnIds((current) => new Set([...current, ...cancelled]))
@@ -1942,7 +1947,7 @@ export function ChatPage() {
     if (!clean || queueBusy) return
     setQueueBusy(true)
     try {
-      await stop()
+      await stop({ keepSubagents: true })
       if (!(await waitUntilStopped())) {
         setError('O turno ainda está rodando; a mensagem não foi enviada. Tente de novo quando ele parar.')
         return

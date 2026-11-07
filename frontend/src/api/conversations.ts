@@ -289,10 +289,18 @@ export function updateConversationPermissionMode(
   })
 }
 
-export function cancelConversation(client: ApiClient, id: string, intent = client.createMutationIntent()): Promise<{ cancelling: string[] }> {
+export function cancelConversation(
+  client: ApiClient,
+  id: string,
+  intentOrOptions: MutationIntent | { keepSubagents?: boolean; intent?: MutationIntent } = client.createMutationIntent(),
+): Promise<{ cancelling: string[] }> {
+  const isOptions = typeof intentOrOptions === 'object' && intentOrOptions !== null && !('idempotencyKey' in intentOrOptions)
+  const keepSubagents = isOptions ? Boolean(intentOrOptions.keepSubagents) : false
+  const intent = (isOptions ? intentOrOptions.intent : intentOrOptions) ?? client.createMutationIntent()
+  const cancelBody = keepSubagents ? { keep_subagents: true } : {}
   return client.request({
     path: `/v1/conversations/${encodeURIComponent(id)}/cancel`, method: 'POST', expectedStatus: 202, intent,
-    body: {},
+    body: cancelBody,
     parse: (value) => {
       const data = record(value)
       return { cancelling: Array.isArray(data.cancelling) ? data.cancelling.map((item) => String(item)) : [] }

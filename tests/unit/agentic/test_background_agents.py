@@ -425,3 +425,154 @@ def test_subagent_finishing_after_turn_closes_schedules_continuation_once(tmp_pa
         engine.dispose()
 
 
+
+def test_cancel_api_with_keep_subagents_leaves_background_entry_running_while_default_stops_it(
+    tmp_path: Path,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS, BackgroundAgentEntry
+    from agentos.agentic.settings import AgentRuntimeSettingsStore
+    from agentos.api.gateway import ApiServices, create_app
+    from agentos.api.security import AuthenticatedPrincipal, InMemorySecurityService
+    from agentos.conversations.chat import ChatApplication, PostgresChatStore
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 't7.db').as_posix()}")
+    metadata.create_all(engine)
+    try:
+        store = PostgresChatStore(engine)
+        chat_app = ChatApplication(store)
+        security = InMemorySecurityService()
+        security.add_pat(
+            "pat",
+            AuthenticatedPrincipal(
+                user_id=TURN["user_id"],
+                credential_ref="pat-1",
+                scopes=frozenset({"api"}),
+            ),
+        )
+        services = ApiServices(
+            security=security,
+            conversation_application=chat_app,
+            agentic_runtime=AgentRuntimeSettingsStore(tmp_path / "runtime.json"),
+            workspace_root=tmp_path / "workspaces",
+        )
+        client = TestClient(create_app(services))
+        headers = {"Authorization": "Bearer pat"}
+
+        receipt1 = chat_app.create(
+            user_id=TURN["user_id"],
+            message="Tarefa 1",
+            provider=TURN["provider"],
+            model_id=TURN["model_id"],
+            idempotency_key="idem-t7-1",
+        )
+        claimed1 = store.claim(receipt1.turn_id)
+        assert claimed1 is not None
+
+        session1 = TurnSession(
+            turn=dict(claimed1),
+            store=store,
+            agents_store=ConversationAgentStore(
+                engine,
+                conversation_id=receipt1.conversation_id,
+                user_id=TURN["user_id"],
+            ),
+            memory_store=None,
+            provider_factory=lambda: _QuickChild(),
+            workspace_root=tmp_path,
+            child_provider_factory=lambda _model: _QuickChild(),
+        )
+        cancel1 = threading.Event()
+        entry1 = BackgroundAgentEntry(
+            agent_id=f"agent:{receipt1.conversation_id}:bg1",
+            conversation_id=receipt1.conversation_id,
+            name="antigravity",
+            output_file=".orin/agent-outputs/bg1.md",
+            status="running",
+            started_at=time.monotonic(),
+            finished_at=None,
+            summary="",
+            cancel=cancel1,
+            future=None,
+        )
+        BACKGROUND_AGENTS.register(entry1)
+        session1._background_subagents[entry1.agent_id] = {
+            "future": None,
+            "agent_id": entry1.agent_id,
+            "agent_name": "antigravity",
+            "subagent_type": "antigravity",
+            "cancel": cancel1,
+            "output_file": entry1.output_file,
+        }
+
+        resp1 = client.post(
+            f"/v1/conversations/{receipt1.conversation_id}/cancel",
+            json={"keep_subagents": True},
+            headers={**headers, "Idempotency-Key": "cancel-t7-1"},
+        )
+        assert resp1.status_code == 202
+        session1.close_background_subagents()
+
+        assert cancel1.is_set() is False
+        assert BACKGROUND_AGENTS.get(receipt1.conversation_id, entry1.agent_id).status == "running"
+
+        receipt2 = chat_app.create(
+            user_id=TURN["user_id"],
+            message="Tarefa 2",
+            provider=TURN["provider"],
+            model_id=TURN["model_id"],
+            idempotency_key="idem-t7-2",
+        )
+        claimed2 = store.claim(receipt2.turn_id)
+        assert claimed2 is not None
+
+        session2 = TurnSession(
+            turn=dict(claimed2),
+            store=store,
+            agents_store=ConversationAgentStore(
+                engine,
+                conversation_id=receipt2.conversation_id,
+                user_id=TURN["user_id"],
+            ),
+            memory_store=None,
+            provider_factory=lambda: _QuickChild(),
+            workspace_root=tmp_path,
+            child_provider_factory=lambda _model: _QuickChild(),
+        )
+        cancel2 = threading.Event()
+        entry2 = BackgroundAgentEntry(
+            agent_id=f"agent:{receipt2.conversation_id}:bg2",
+            conversation_id=receipt2.conversation_id,
+            name="antigravity",
+            output_file=".orin/agent-outputs/bg2.md",
+            status="running",
+            started_at=time.monotonic(),
+            finished_at=None,
+            summary="",
+            cancel=cancel2,
+            future=None,
+        )
+        BACKGROUND_AGENTS.register(entry2)
+        session2._background_subagents[entry2.agent_id] = {
+            "future": None,
+            "agent_id": entry2.agent_id,
+            "agent_name": "antigravity",
+            "subagent_type": "antigravity",
+            "cancel": cancel2,
+            "output_file": entry2.output_file,
+        }
+
+        resp2 = client.post(
+            f"/v1/conversations/{receipt2.conversation_id}/cancel",
+            headers={**headers, "Idempotency-Key": "cancel-t7-2"},
+        )
+        assert resp2.status_code == 202
+        session2.close_background_subagents()
+
+        assert cancel2.is_set() is True
+        assert BACKGROUND_AGENTS.get(receipt2.conversation_id, entry2.agent_id).status == "stopped"
+    finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+        engine.dispose()

@@ -2925,7 +2925,7 @@ class PostgresChatStore:
             "token_usage": _total_token_usage(usage_by_agent.values()),
         }
 
-    def request_cancel(self, conversation_id: str, user_id: str) -> dict[str, object]:
+    def request_cancel(self, conversation_id: str, user_id: str, *, keep_subagents: bool = False) -> dict[str, object]:
         """Mark the conversation's live turns as cancelling.
 
         The worker observes this flag between provider events and between tool
@@ -2953,7 +2953,19 @@ class PostgresChatStore:
                 cancelled.append(str(turn["turn_id"]))
         for turn in rows:
             self.finish(dict(turn), failed=True, code="TURN_CANCELLED")
+        keep_set = getattr(self, "_keep_subagents_turns", None)
+        if keep_set is None:
+            keep_set = self._keep_subagents_turns = set()
+        for tid in cancelled:
+            if keep_subagents:
+                keep_set.add(tid)
+            else:
+                keep_set.discard(tid)
         return {"conversation_id": conversation_id, "cancelling": cancelled}
+
+    def keep_subagents_requested(self, turn_id: str) -> bool:
+        keep_set = getattr(self, "_keep_subagents_turns", None)
+        return bool(keep_set and str(turn_id) in keep_set)
 
     def cancel_requested(self, turn_id: str) -> bool:
         with self._engine.connect() as c:
@@ -3134,7 +3146,7 @@ class ChatApplication:
     def list_older_activities(self, conversation_id: str, user_id: str, *, before_id: int, limit: int = 100):
         return self.store.list_older_activities(conversation_id, user_id, before_id=before_id, limit=limit)
     def events(self, conversation_id: str, user_id: str, after: int): return self.store.events(conversation_id, user_id, after)
-    def cancel(self, conversation_id: str, user_id: str):
+    def cancel(self, conversation_id: str, user_id: str, *, keep_subagents: bool = False):
         """Request cancellation from the canonical Executions before the chat projection.
 
         A conversation can own more than one live turn.  Each cancellation is
@@ -3163,7 +3175,14 @@ class ChatApplication:
                 "idempotency_key": f"conversation-cancel:{conversation_id}:{turn['turn_id']}",
                 "requested_at": datetime.now(UTC),
             })
-        return self.store.request_cancel(conversation_id, user_id)
+        try:
+            return self.store.request_cancel(conversation_id, user_id, keep_subagents=keep_subagents)
+        except TypeError:
+            return self.store.request_cancel(conversation_id, user_id)
+
+    def keep_subagents_requested(self, turn_id: str) -> bool:
+        checker = getattr(self.store, "keep_subagents_requested", None)
+        return bool(checker(turn_id)) if callable(checker) else False
     def _has_live_turn(self, conversation_id: str, user_id: str) -> bool:
         with self.store._engine.connect() as connection:
             return connection.execute(select(conversation_turns.c.turn_id).where(

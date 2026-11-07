@@ -1487,7 +1487,18 @@ def create_app(services: ApiServices) -> FastAPI:
     async def cancel_conversation(conversation_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.cancel", resource_id=conversation_id, purpose="conversation.cancel")
-        result = require_port(services.conversation_application).cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
+        keep_subagents = False
+        try:
+            raw_body = await request.json()
+            if isinstance(raw_body, Mapping):
+                keep_subagents = bool(raw_body.get("keep_subagents"))
+        except Exception:
+            pass
+        app_port = require_port(services.conversation_application)
+        try:
+            result = app_port.cancel(conversation_id, principal.user_id, keep_subagents=keep_subagents)  # type: ignore[union-attr]
+        except TypeError:
+            result = app_port.cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(result), status_code=202)
 
     @app.post("/v1/conversations/{conversation_id}/queue", status_code=201)

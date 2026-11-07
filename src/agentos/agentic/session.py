@@ -3856,6 +3856,16 @@ class TurnSession:
             is_cancelled = bool(self.cancelled(self.turn))
         except Exception:
             pass
+        if not is_cancelled:
+            for cand in (getattr(self, "store", None), getattr(self, "chat_store", None)):
+                cancel_req = getattr(cand, "cancel_requested", None)
+                if callable(cancel_req):
+                    try:
+                        if cancel_req(str((self.turn or {}).get("turn_id") or "")):
+                            is_cancelled = True
+                            break
+                    except Exception:
+                        pass
         turn_state = str((self.turn or {}).get("state") or "").strip().lower()
         turn_code = str((self.turn or {}).get("error_code") or (self.turn or {}).get("code") or "").strip().upper()
         limit_or_deadline = turn_code in {
@@ -3879,7 +3889,12 @@ class TurnSession:
                         pass
                 future = entry.get("future")
                 agent_id = str(entry.get("agent_id") or "")
-                if future is not None and hasattr(future, "cancel") and future.cancel() and agent_id:
+                if future is not None and hasattr(future, "cancel"):
+                    try:
+                        future.cancel()
+                    except Exception:
+                        pass
+                if agent_id:
                     BACKGROUND_AGENTS.finish(agent_id, "stopped", "Cancelled")
         if should_cancel and self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             for entry in bg_entries:

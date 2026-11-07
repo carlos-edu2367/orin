@@ -300,6 +300,55 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     expect(screen.queryByTestId('queue-edit-button-q-edit-1')).not.toBeInTheDocument()
   })
 
+  it('calls /cancel with keep_subagents: true when clicking "Enviar agora" in QueuePanel', async () => {
+    const user = userEvent.setup()
+    const cancelBodies: Array<Record<string, unknown>> = []
+    let turnState = 'running'
+
+    const baseStub = stubFetch(
+      () => ({
+        state: turnState,
+        mode: 'chat',
+        messages: [
+          { message_id: 'msg-1', role: 'user', content: 'Primeira pergunta', status: 'completed', retryable: false },
+        ],
+        activities: [
+          activity(1, 'turn.started', 'Executando turno', { state: turnState }),
+        ],
+      }),
+      {
+        queueItems: [
+          {
+            queue_id: 'q-now-1',
+            content: 'Mude para porta 4000 agora',
+            created_at: '2026-08-10T20:00:05+00:00',
+          },
+        ],
+      },
+    )
+
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.includes('/cancel') && method === 'POST') {
+        const raw = init?.body ? String(init.body) : '{}'
+        cancelBodies.push(JSON.parse(raw) as Record<string, unknown>)
+        turnState = 'cancelled'
+      }
+      return baseStub(input, init)
+    })
+
+    renderChat()
+
+    const sendNowBtn = await screen.findByRole('button', { name: /Enviar agora/i })
+    await user.click(sendNowBtn)
+
+    await waitFor(() => {
+      expect(cancelBodies.length).toBeGreaterThanOrEqual(1)
+    })
+    expect(cancelBodies[0]).toEqual({ keep_subagents: true })
+  })
+
   it('rehydrates TurnTimeline tool calls across settled turns, preserves >16KB compacted deltas, and shows load-older-activities when oldest event is turn.started', async () => {
     const longThought = 'Pensamento detalhado '.repeat(900) // ~18,900 chars (> 16,000)
     const longNarration = 'Explicação completa '.repeat(900) // ~18,000 chars (> 16,000)
