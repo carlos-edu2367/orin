@@ -77,6 +77,12 @@ CONTEXT_COMPACTION_THRESHOLD = 0.82
 CONTEXT_COMPACTION_KEEP_UNITS = 6
 PLAN_MODE_REMINDER_EVERY = 5
 TODO_REMINDER_EVERY = 8
+STATUS_NUDGE_MIN_TOOL_ROUNDS = 8
+STATUS_NUDGE_WINDOW_SECONDS = 180.0
+STATUS_NUDGE_REMINDER = (
+    "You have run several tool rounds without updating the user. "
+    "Write one brief status line on your current phase and progress."
+)
 PLAN_MODE_REMINDER = (
     "Plan mode is on: explore and read only, change nothing, and finish by presenting the plan with ExitPlanMode "
     "(exit_plan_mode) when it is ready."
@@ -337,6 +343,9 @@ class AgenticTurnRuntime:
         self._stop_continuations = 0
         self._bg_continuations = 0
         self._started_mono = time.monotonic()
+        self._last_visible_text_at: datetime | None = None
+        self._silent_tool_rounds = 0
+        self._last_status_nudge_at: datetime | None = None
         self._max_tokens_recoveries = 0
         self._reminder_requests = 0
         # Raised for the rest of the turn after a tool call was cut by the output limit.
@@ -414,9 +423,35 @@ class AgenticTurnRuntime:
             except Exception:
                 pass
 
+    def _note_visible_text(self) -> None:
+        self._last_visible_text_at = self.clock()
+        self._silent_tool_rounds = 0
+
+    def _note_tool_round(self) -> None:
+        if self._last_visible_text_at is None:
+            self._last_visible_text_at = self._started_at or self.clock()
+        self._silent_tool_rounds += 1
+        self._maybe_add_status_nudge()
+
+    def _maybe_add_status_nudge(self) -> None:
+        if self.reminders is None or self._silent_tool_rounds < STATUS_NUDGE_MIN_TOOL_ROUNDS:
+            return
+        now = self.clock()
+        anchor = self._last_visible_text_at or self._started_at or now
+        if (now - anchor).total_seconds() < STATUS_NUDGE_WINDOW_SECONDS:
+            return
+        if (
+            self._last_status_nudge_at is not None
+            and (now - self._last_status_nudge_at).total_seconds() < STATUS_NUDGE_WINDOW_SECONDS
+        ):
+            return
+        if self.reminders.add("status_nudge", STATUS_NUDGE_REMINDER, key="status_nudge"):
+            self._last_status_nudge_at = now
+
     def _add_periodic_reminders(self) -> None:
         """Plan mode and an open todo list are restated every few model requests, as Claude Code does."""
         queue = self.reminders
+        self._maybe_add_status_nudge()
         if queue is None or self.toolset is None:
             return
         self._reminder_requests += 1
@@ -728,6 +763,9 @@ class AgenticTurnRuntime:
         self._stop_continuations = 0
         self._bg_continuations = 0
         self._started_mono = time.monotonic()
+        self._last_visible_text_at: datetime | None = None
+        self._silent_tool_rounds = 0
+        self._last_status_nudge_at: datetime | None = None
         self._max_tokens_recoveries = 0
         self._output_cap = None
         self._queued_turn_count = 0
@@ -1030,6 +1068,7 @@ class AgenticTurnRuntime:
                             text_parts.append(chunk_text)
                             continuing_text = False
                             self.store.delta(turn, chunk_text)
+                            self._note_visible_text()
                             emitted_text_in_turn = True
                             last_emitted_text_ended_with_newline = chunk_text.endswith("\n")
                     elif event.kind is StreamKind.TOOL_CALL and event.tool_call_id:
@@ -1039,6 +1078,7 @@ class AgenticTurnRuntime:
                             if tail_text:
                                 text_parts.append(tail_text)
                                 self.store.delta(turn, tail_text)
+                                self._note_visible_text()
                                 emitted_text_in_turn = True
                                 last_emitted_text_ended_with_newline = tail_text.endswith("\n")
                         call_id = (
@@ -1106,6 +1146,7 @@ class AgenticTurnRuntime:
                     if fin_tail:
                         text_parts.append(fin_tail)
                         self.store.delta(turn, fin_tail)
+                        self._note_visible_text()
                         emitted_text_in_turn = True
                         last_emitted_text_ended_with_newline = fin_tail.endswith("\n")
             except Exception as exc:
@@ -1224,6 +1265,8 @@ class AgenticTurnRuntime:
                     action_count += len(results)
                     self._advance_phase(turn, results)
                     tool_rounds += 1
+                    if not "".join(text_parts).strip():
+                        self._note_tool_round()
                 else:
                     try:
                         for _ in calls.values():

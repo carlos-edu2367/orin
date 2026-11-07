@@ -57,7 +57,12 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
             "# Doing tasks",
             "- Understand before you change anything: read the relevant code, look for existing patterns and follow the project's conventions.",
             "- Keep changes inside the scope of the request. Do not refactor, rename or reformat unrelated code, and never replace a real implementation with a stub or a TODO.",
+            "- When you move to a new phase (research, plan, delegation, verification), write one status line for the user.",
         ]
+        if has("ask_user"):
+            doing.append(
+                f"- When the request says to research or define before building, present the result and ask for approval with {t('ask_user')} before delegating the implementation."
+            )
         if has("todo_write"):
             doing.append(f"- When a task has several steps, track them with {t('todo_write')} and keep exactly one item in progress.")
         verify_clause = f", or {t('verify_project')} when present" if has("verify_project") else ""

@@ -909,9 +909,11 @@ class RuntimeToolExecutor(ToolExecutor):
         msg_round_key = str(message_id or "").strip()
         if not self._adapter_message_ids or not msg_round_key or msg_round_key == "default":
             self.tool_rounds += 1
+            self.runtime._note_tool_round()
         elif msg_round_key not in self._seen_tool_round_message_ids:
             self._seen_tool_round_message_ids.add(msg_round_key)
             self.tool_rounds += 1
+            self.runtime._note_tool_round()
 
         prev_phase = (
             self.runtime.phases.current if self.runtime.phases is not None else None
@@ -1172,6 +1174,8 @@ class _RunnerSink:
         self._message_wrote_text = True
         self.text_parts.append(chunk_text)
         self._runner.runtime.store.delta(self._runner.turn, chunk_text)
+        if chunk_text.strip():
+            self._runner.runtime._note_visible_text()
         self._emitted_text_in_turn = True
         self._last_text_ended_with_newline = chunk_text.endswith("\n")
 

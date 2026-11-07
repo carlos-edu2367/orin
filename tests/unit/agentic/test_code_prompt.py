@@ -212,3 +212,83 @@ def test_prompt_lists_deferred_tools_and_how_to_load_them() -> None:
     ))
     assert "`ToolSearch`" in text and "select:" in text
     assert "WebFetch, WebSearch" in text
+
+
+def test_code_prompt_includes_phase_status_and_research_approval_rules() -> None:
+    internal_prompt = render_code_system_prompt(_options(public=False))
+    assert "When you move to a new phase (research, plan, delegation, verification), write one status line for the user." in internal_prompt
+    assert "When the request says to research or define before building, present the result and ask for approval with `ask_user` before delegating the implementation." in internal_prompt
+    public_prompt = render_code_system_prompt(_options(public=True))
+    assert "When you move to a new phase (research, plan, delegation, verification), write one status line for the user." in public_prompt
+    assert "When the request says to research or define before building, present the result and ask for approval with `AskUserQuestion` before delegating the implementation." in public_prompt
+
+
+def test_runtime_injects_status_nudge_once_in_three_minute_window() -> None:
+    from datetime import UTC, datetime, timedelta
+    from agentos.agentic.agent_tools import ToolOutcome
+    from agentos.agentic.provider_stream import normalize_sse
+    from agentos.agentic.reminders import ReminderQueue
+    from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+
+    now = [datetime(2026, 11, 7, 12, 0, 0, tzinfo=UTC)]
+
+    def fake_clock() -> datetime:
+        return now[0]
+
+    class _SilentToolProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.seen_requests: list[dict[str, object]] = []
+
+        def stream(self, request):
+            self.calls += 1
+            self.seen_requests.append(request)
+            if self.calls <= 10:
+                return normalize_sse([
+                    f'data: {{"choices":[{{"delta":{{"tool_calls":[{{"index":0,"id":"c{self.calls}","function":{{"name":"read_file","arguments":"{{\\"path\\":\\"a{self.calls}.txt\\"}}"}}}}]}},"finish_reason":"tool_calls"}}]}}',
+                    "data: [DONE]",
+                ], provider="openrouter")
+            return normalize_sse([
+                'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}',
+                "data: [DONE]",
+            ], provider="openrouter")
+
+    class _CountingToolset:
+        def schemas(self, allowed=None):
+            return []
+
+        def is_read_only(self, name):
+            return True
+
+        def argument_names(self, name):
+            return frozenset({"path"})
+
+        def invoke(self, name, arguments):
+            now[0] = now[0] + timedelta(seconds=25)
+            return ToolOutcome("succeeded", "ok", "file content")
+
+    class _TrackingReminderQueue(ReminderQueue):
+        def __init__(self) -> None:
+            super().__init__()
+            self.status_nudge_adds = 0
+
+        def add(self, kind: str, text: str, *, key: str = "") -> bool:
+            added = super().add(kind, text, key=key)
+            if key == "status_nudge" and added:
+                self.status_nudge_adds += 1
+            return added
+
+    provider = _SilentToolProvider()
+    reminders = _TrackingReminderQueue()
+    runtime = AgenticTurnRuntime(
+        store=_Store(),
+        provider=provider,
+        toolset=_CountingToolset(),
+        reminders=reminders,
+        clock=fake_clock,
+        limits=AgenticLimits(max_iterations=15, max_actions=20, deadline=timedelta(minutes=30)),
+    )
+    res = runtime.run("t")
+    assert res.state == "completed"
+    assert reminders.status_nudge_adds == 1
+
