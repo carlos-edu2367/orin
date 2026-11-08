@@ -237,6 +237,38 @@ describe('Bancada preview driven by the agent', () => {
     expect(screen.getByTestId('workbench-preview-empty')).toHaveTextContent('Nenhuma prévia ativa')
   })
 
+  it('starts the preview via POST /v1/conversations/{id}/preview/start from the empty state and moves to starting', async () => {
+    let resolveFetch!: (value: Response) => void
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve
+        }),
+    )
+    try {
+      render(<CodeWorkbenchPanel files={[]} conversationId="conv-preview-1" />)
+      const startBtn = screen.getByRole('button', { name: /iniciar prévia/i })
+      fireEvent.click(startBtn)
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        '/v1/conversations/conv-preview-1/preview/start',
+        expect.objectContaining({ method: 'POST' }),
+      )
+      expect(screen.getByTestId('workbench-preview-starting')).toBeInTheDocument()
+
+      await act(async () => {
+        resolveFetch(
+          new Response(JSON.stringify({ status: 'running', url: 'http://127.0.0.1:5173' }), {
+            status: 202,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        )
+      })
+    } finally {
+      fetchSpy.mockRestore()
+    }
+  })
+
   it('auto-reloads (debounced) after file changes when the server has no HMR, and skips it for HMR servers', () => {
     vi.useFakeTimers()
     const preview = { status: 'running' as const, url: 'http://127.0.0.1:8000/', name: 'http.server', hmr: false, token: 'ev:1' }

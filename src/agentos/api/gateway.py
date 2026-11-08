@@ -1501,6 +1501,57 @@ def create_app(services: ApiServices) -> FastAPI:
             result = app_port.cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(result), status_code=202)
 
+    @app.post("/v1/conversations/{conversation_id}/preview/start", status_code=202)
+    async def start_conversation_preview(conversation_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.preview.start",
+        )
+        try:
+            raw_body = await request.json()
+        except Exception:
+            raw_body = {}
+        server_name = (
+            str(raw_body.get("name")).strip()
+            if isinstance(raw_body, Mapping) and raw_body.get("name")
+            else None
+        )
+        app_port = require_port(services.conversation_application)
+
+        def _start_and_record() -> dict[str, object]:
+            from agentos.agentic.tools.orin.preview import _has_hmr
+            from agentos.code_mode.preview_server import PreviewServerError, PreviewServerManager
+
+            workspace = conversation_workspace(conversation_id, principal)
+            workspace_root = Path(getattr(workspace, "root", workspace))
+            manager = PreviewServerManager(workspace_root)
+            try:
+                result = manager.start_server(name=server_name)
+            except PreviewServerError as exc:
+                raise ApplicationValidationError(str(exc)) from exc
+            preview: dict[str, object] = {
+                **{k: v for k, v in result.items() if k not in {"logs_tail", "browser"}},
+                "hmr": _has_hmr(str(result.get("command")) if result.get("command") is not None else None),
+            }
+            if hasattr(app_port, "record_preview_event"):
+                return app_port.record_preview_event(  # type: ignore[no-any-return,union-attr]
+                    conversation_id,
+                    principal.user_id,
+                    result=result,
+                    preview=preview,
+                )
+            return {
+                "conversation_id": conversation_id,
+                "preview": preview,
+                "preview_server": result,
+            }
+
+        payload = await run_in_threadpool(_start_and_record)
+        return JSONResponse(_jsonable(payload), status_code=202)
+
     @app.post("/v1/conversations/{conversation_id}/queue", status_code=201)
     async def queue_conversation_input(conversation_id: str, payload: QueueConversationInputRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)

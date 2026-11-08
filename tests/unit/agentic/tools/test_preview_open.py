@@ -136,3 +136,103 @@ def test_hmr_detection_from_command() -> None:
     assert _has_hmr("webpack-dev-server --hot") is True
     assert _has_hmr("python -m http.server 8000") is False
     assert _has_hmr(None) is False
+
+
+def test_preview_start_api_starts_server_from_package_json_and_records_activity_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from agentos.agentic.settings import AgentRuntimeSettingsStore
+    from agentos.api.gateway import ApiServices, create_app
+    from agentos.api.security import AuthenticatedPrincipal, InMemorySecurityService
+    from agentos.code_mode.preview_server import PreviewServerManager
+    from agentos.conversations.chat import ChatApplication, PostgresChatStore
+    from agentos.persistence.postgres.schema import metadata
+    from agentos.persistence.sqlite import create_local_engine
+
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 'preview_api.db').as_posix()}")
+    metadata.create_all(engine)
+    try:
+        store = PostgresChatStore(engine)
+        chat_app = ChatApplication(store)
+        user_id = "00000000-0000-0000-0000-000000000777"
+        security = InMemorySecurityService()
+        security.add_pat(
+            "pat",
+            AuthenticatedPrincipal(
+                user_id=user_id,
+                credential_ref="pat-1",
+                scopes=frozenset({"api"}),
+            ),
+        )
+        workspaces_root = tmp_path / "workspaces"
+        services = ApiServices(
+            security=security,
+            conversation_application=chat_app,
+            agentic_runtime=AgentRuntimeSettingsStore(tmp_path / "runtime.json"),
+            workspace_root=workspaces_root,
+        )
+        client = TestClient(create_app(services))
+        headers = {"Authorization": "Bearer pat"}
+
+        receipt = chat_app.create(
+            user_id=user_id,
+            message="Criar app web",
+            provider="openai",
+            model_id="gpt-5.4",
+            idempotency_key="idem-preview-1",
+            code_mode="code",
+        )
+        ws = ConversationWorkspace(
+            services.managed_root_for(user_id), receipt.conversation_id
+        )
+        (ws.root / "package.json").write_text(
+            json.dumps({"name": "demo-app", "scripts": {"dev": "vite --port 5173"}}),
+            encoding="utf-8",
+        )
+
+        started_roots: list[Path] = []
+
+        def fake_start_server(self: PreviewServerManager, name: str | None = None, wait_timeout: float = 10.0) -> dict[str, object]:
+            started_roots.append(self.workspace_root)
+            detected = self.load_configurations()
+            assert len(detected) >= 1
+            return {
+                "name": "npm:dev",
+                "command": "vite --port 5173",
+                "url": "http://127.0.0.1:5173",
+                "port": 5173,
+                "pid": 43210,
+                "status": "running",
+                "logs_tail": "ready in 100ms",
+            }
+
+        monkeypatch.setattr(PreviewServerManager, "start_server", fake_start_server)
+
+        resp = client.post(
+            f"/v1/conversations/{receipt.conversation_id}/preview/start",
+            headers=headers,
+        )
+        assert resp.status_code == 202, resp.text
+        assert len(started_roots) == 1
+        assert (started_roots[0] / "package.json").is_file()
+
+        snapshot = chat_app.get(receipt.conversation_id, user_id)
+        activities = snapshot["activities"]
+        preview_events = [
+            ev
+            for ev in activities
+            if ev.get("event_type") == "tool.finished"
+            and isinstance(ev.get("payload"), dict)
+            and ev["payload"].get("tool_name") == "preview_start"
+        ]
+        assert len(preview_events) == 1
+        preview_payload = preview_events[0]["payload"]["preview"]
+        assert preview_payload["url"] == "http://127.0.0.1:5173"
+        assert preview_payload["name"] == "npm:dev"
+        assert preview_payload["status"] == "running"
+        assert preview_payload["hmr"] is True
+    finally:
+        engine.dispose()
+

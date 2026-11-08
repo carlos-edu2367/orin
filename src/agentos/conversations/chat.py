@@ -572,6 +572,58 @@ class PostgresChatStore:
             ).scalar()
         return int(current or 0) + 1
 
+    def record_preview_event(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        result: Mapping[str, object],
+        preview: Mapping[str, object],
+    ) -> dict[str, object]:
+        with self._engine.connect() as c:
+            conv = c.execute(
+                select(conversations.c.conversation_id).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
+                )
+            ).first()
+            if conv is None:
+                raise ApplicationNotFoundError(conversation_id)
+            latest_turn = c.execute(
+                select(conversation_turns.c.turn_id)
+                .where(conversation_turns.c.conversation_id == conversation_id)
+                .order_by(conversation_turns.c.created_at.desc())
+                .limit(1)
+            ).first()
+        turn_id = str(latest_turn.turn_id) if latest_turn is not None else f"preview:{conversation_id}"
+        if self.activity_store is None:
+            from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
+
+            self.activity_store = PostgresAgenticActivityStore(self._engine, "orin-preview-cursor")
+        turn_ctx = {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "turn_id": turn_id,
+            "execution_id": f"exec:{turn_id}",
+        }
+        target_label = str(result.get("url") or result.get("name") or "preview")
+        self._activity(
+            turn_ctx,
+            AgentActivityEventType.TOOL_FINISHED,
+            f"PreviewStart ({target_label})",
+            payload={
+                "tool_name": "preview_start",
+                "status": "completed",
+                "preview": dict(preview),
+                "preview_server": dict(result),
+            },
+        )
+        return {
+            "conversation_id": conversation_id,
+            "preview": dict(preview),
+            "preview_server": dict(result),
+        }
+
     def record_tool_call(self, turn: Mapping[str, object], *, tool_name: str, arguments: Mapping[str, object], status: str, summary: str) -> None:
         """Append one line to the conversation's durable tool ledger.
 
@@ -3243,6 +3295,16 @@ class ChatApplication:
         except Exception:
             self.store.restore_queued_inputs(ids)
             raise
+
+    def record_preview_event(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        result: Mapping[str, object],
+        preview: Mapping[str, object],
+    ) -> dict[str, object]:
+        return self.store.record_preview_event(conversation_id, user_id, result=result, preview=preview)
 
     def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
 

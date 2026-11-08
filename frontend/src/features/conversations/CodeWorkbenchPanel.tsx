@@ -45,6 +45,8 @@ export type CodeWorkbenchPanelProps = {
   selectedPath?: string | null
   onSelectFile?: (path: string | null) => void
   onClose?: () => void
+  conversationId?: string
+  onStartPreview?: () => Promise<unknown> | unknown
 }
 
 const URL_ERROR_MESSAGE = 'URL inválida. Use http:// ou https://.'
@@ -182,7 +184,7 @@ export function CodeWorkbenchPanel({
   activeTab,
   onTabChange,
   initialPreviewUrl,
-  preview = null,
+  preview: previewProp = null,
   fileChangeToken = null,
   onRetryPreview,
   rootName = null,
@@ -192,7 +194,32 @@ export function CodeWorkbenchPanel({
   selectedFilePath,
   onSelectFile,
   onClose,
+  conversationId,
+  onStartPreview,
 }: CodeWorkbenchPanelProps) {
+  const [manualPreview, setManualPreview] = useState<CodeWorkbenchPreviewState | null>(null)
+  const preview = previewProp ?? manualPreview
+
+  const handleStartPreview = async () => {
+    const startToken = `manual:${Date.now()}`
+    setManualPreview({ status: 'starting', token: startToken })
+    try {
+      if (onStartPreview) {
+        await onStartPreview()
+      } else {
+        const res = await fetch(
+          `/v1/conversations/${encodeURIComponent(conversationId ?? 'default')}/preview/start`,
+          { method: 'POST' },
+        )
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`)
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Falha ao iniciar o servidor.'
+      setManualPreview({ status: 'failed', error: message, token: `${startToken}:err` })
+    }
+  }
   const previewToken = preview?.token ?? null
   const agentUrl = preview?.url ? sanitizePreviewUrl(preview.url) : null
 
@@ -563,6 +590,16 @@ export function CodeWorkbenchPanel({
                   <span>
                     Peça ao agente para mostrar o app: ele inicia o servidor de desenvolvimento e abre a prévia aqui
                     automaticamente. Você também pode digitar uma URL http(s) acima.
+                  <button
+                    type="button"
+                    className="code-workbench__retry-btn code-workbench__start-btn"
+                    data-testid="workbench-preview-start"
+                    onClick={() => {
+                      void handleStartPreview()
+                    }}
+                  >
+                    Iniciar prévia
+                  </button>
                   </span>
                 </div>
               )}

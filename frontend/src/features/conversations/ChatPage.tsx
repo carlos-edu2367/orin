@@ -3210,6 +3210,7 @@ export function ChatPage() {
           onTabChange={setWorkbenchTab}
           initialPreviewUrl={detectedPreviewUrl}
           preview={workbenchPreview ?? null}
+          conversationId={conversationId}
           fileChangeToken={workbenchFileChangeToken}
           rootName={conversation?.workspace?.folderName ?? conversation?.workspace?.path?.split(/[\\/]/).filter(Boolean).pop() ?? null}
           running={running}
