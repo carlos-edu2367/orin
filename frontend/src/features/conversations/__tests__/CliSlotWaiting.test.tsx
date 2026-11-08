@@ -45,6 +45,39 @@ describe('CliSlotWaiting UI (R3.6)', () => {
     expect(parsed.queuePosition).toBe(2)
   })
 
+  it('formats waiting_subagents as "Aguardando Antigravity (7 min)" in pulseDetailFromEvents and AgentPulse', () => {
+    const parsed = parseConversationActivityEvent(
+      {
+        event_id: 'ws-raw',
+        event_type: 'turn.started',
+        turn_id: 't1',
+        agent_id: 'agent:main',
+        summary: 'Aguardando Antigravity',
+        occurred_at: '2026-08-10T20:07:00+00:00',
+        payload: {
+          state: 'waiting_subagents',
+          waiting_subagents: true,
+          agents: ['Antigravity'],
+        },
+      },
+      '2',
+    )
+    expect(parsed.waitingSubagents).toBe(true)
+    expect(parsed.waitingAgents).toEqual(['Antigravity'])
+    expect(parsed.state).toBe('waiting_agent')
+    expect(
+      pulseDetailFromEvents([parsed], '2026-08-10T20:00:00+00:00'),
+    ).toBe('Aguardando Antigravity (7 min)')
+    render(
+      <AgentPulse
+        mode="waiting_agent"
+        state="waiting_agent"
+        detail={pulseDetailFromEvents([parsed], '2026-08-10T20:00:00+00:00')}
+      />,
+    )
+    expect(screen.getByText('Aguardando Antigravity (7 min)')).toBeInTheDocument()
+  })
+
   it('shows the waiting summary while the last event is waiting for a slot', () => {
     expect(pulseDetailFromEvents([waiting])).toBe(
       'Aguardando vaga na CLI (2º na fila, limite de 3)',

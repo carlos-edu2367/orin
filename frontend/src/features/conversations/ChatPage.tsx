@@ -2987,7 +2987,7 @@ export function ChatPage() {
                   <AgentPulse
                     mode={mode}
                     state={activity.events.at(-1)?.state ?? 'working'}
-                    detail={pulseDetailFromEvents(activity.events)}
+                    detail={pulseDetailFromEvents(activity.events, activeTurn?.started_at)}
                     activeTurnId={activeTurn?.turn_id ?? null}
                   />
                 </motion.div>

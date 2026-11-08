@@ -219,6 +219,8 @@ export type ConversationActivityEvent = {
   codeStage?: string
   verification?: 'unverified'
   waitingForSlot?: boolean
+  waitingSubagents?: boolean
+  waitingAgents?: string[]
   queuePosition?: number
   codeApproval?: boolean
   /** Set only on `memory.learned`: what the agent stored, and where. */

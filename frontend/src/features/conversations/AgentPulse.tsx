@@ -79,12 +79,74 @@ const TERMINAL_CANCELLED_EVENT_TYPES = new Set([
 
 export const STALE_RESPONDING_THRESHOLD_MS = 2500
 
-export function pulseDetailFromEvents(
-  events: ConversationActivityEvent[],
-): string | undefined {
+export function formatWaitingSubagentsDetail(
+  event: ConversationActivityEvent,
+  events: ConversationActivityEvent[] = [],
+  turnStartedAt?: string | null,
+  nowMs = Date.now(),
+): string {
+  const rawAgents =
+    event.waitingAgents ??
+    (Array.isArray(event.payload?.agents)
+      ? event.payload.agents.filter((a): a is string => typeof a === 'string' && a.trim().length > 0)
+      : [])
+  const fallbackFromSummary =
+    typeof event.summary === 'string' && /^Aguardando\s+/i.test(event.summary)
+      ? event.summary.replace(/^Aguardando\s+/i, '').replace(/\s*\(\d+\s*min\)\s*$/i, '').trim()
+      : ''
+  const names = rawAgents.length > 0 ? rawAgents.join(', ') : fallbackFromSummary || 'subagentes'
+
+  let diffMs = 0
+  const explicitMins = event.payload?.minutes ?? event.payload?.elapsed_minutes
+  const explicitMs = event.elapsedMs ?? event.payload?.elapsed_ms
+  const explicitSec = event.payload?.seconds ?? event.payload?.elapsed_seconds
+  if (typeof explicitMins === 'number' && Number.isFinite(explicitMins) && explicitMins >= 0) {
+    diffMs = explicitMins * 60_000
+  } else if (typeof explicitMs === 'number' && Number.isFinite(explicitMs) && explicitMs >= 0) {
+    diffMs = explicitMs
+  } else if (typeof explicitSec === 'number' && Number.isFinite(explicitSec) && explicitSec >= 0) {
+    diffMs = explicitSec * 1_000
+  } else {
+    const eventMs = event.occurredAt ? Date.parse(event.occurredAt) : Number.NaN
+    const turnStartIso =
+      turnStartedAt ??
+      events.find((e) => (!event.turnId || e.turnId === event.turnId) && Boolean(e.occurredAt))?.occurredAt
+    const turnStartMs = turnStartIso ? Date.parse(turnStartIso) : Number.NaN
+    const latestIso = [...events]
+      .reverse()
+      .find((e) => (!event.turnId || e.turnId === event.turnId) && Boolean(e.occurredAt))?.occurredAt
+    const latestMs = latestIso ? Date.parse(latestIso) : Number.NaN
+
+    if (Number.isFinite(eventMs) && nowMs >= eventMs && nowMs - eventMs < 86_400_000) {
+      diffMs = nowMs - eventMs
+      if (diffMs < 60_000 && Number.isFinite(turnStartMs) && nowMs >= turnStartMs && nowMs - turnStartMs < 86_400_000) {
+        diffMs = nowMs - turnStartMs
+      }
+    } else if (Number.isFinite(turnStartMs) && nowMs >= turnStartMs && nowMs - turnStartMs < 86_400_000) {
+      diffMs = nowMs - turnStartMs
+    } else if (Number.isFinite(latestMs) && Number.isFinite(turnStartMs) && latestMs >= turnStartMs) {
+      diffMs = latestMs - turnStartMs
+    } else if (Number.isFinite(eventMs) && Number.isFinite(turnStartMs) && eventMs >= turnStartMs) {
+      diffMs = eventMs - turnStartMs
+    }
+  }
+
+  const minutes = Math.floor(diffMs / 60_000)
+  return minutes >= 1 ? `Aguardando ${names} (${minutes} min)` : `Aguardando ${names}`
+}
+
+export function pulseDetailFromEvents(events: ConversationActivityEvent[], turnStartedAt?: string | null, nowMs = Date.now()): string | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event.type.startsWith('context.')) continue
+    if (
+      event.waitingSubagents === true ||
+      event.payload?.waiting_subagents === true ||
+      event.payload?.state === 'waiting_subagents'
+    ) {
+      return formatWaitingSubagentsDetail(event, events, turnStartedAt, nowMs)
+    }
+    if (event.parentAgentId) continue
     if (!event.waitingForSlot) return undefined
     return event.summary || undefined
   }
@@ -365,7 +427,14 @@ export function modeFromEvents(
       }
       return 'responding'
     }
-    if (event.type === 'agent.message_sent') return 'waiting_agent'
+    if (
+      event.type === 'agent.message_sent' ||
+      (event as { waitingSubagents?: boolean }).waitingSubagents === true ||
+      event.payload?.waiting_subagents === true ||
+      event.payload?.state === 'waiting_subagents'
+    ) {
+      return 'waiting_agent'
+    }
     if (event.type === 'tool.started' || event.type === 'tool.progressed') {
       const phase = event.payload?.phase ?? event.phase
       if (event.type === 'tool.progressed' && phase === 'generating_arguments') {

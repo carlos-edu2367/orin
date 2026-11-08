@@ -380,4 +380,29 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     expect(screen.getByTestId('thought-block-completed')).toBeInTheDocument()
     expect(screen.getByTestId('load-older-activities')).toBeInTheDocument()
   })
+
+  it('shows "Aguardando Antigravity (7 min)" when the turn emits waiting_subagents', async () => {
+    globalThis.fetch = stubFetch(() => ({
+      state: 'running',
+      mode: 'code',
+      messages: [
+        { message_id: 'u-1', role: 'user', content: 'Delegue para o Antigravity', status: 'completed', retryable: false, turn_id: 'turn-1' },
+        { message_id: 'a-1', role: 'assistant', content: 'Delegado ao Antigravity em segundo plano.', status: 'streaming', retryable: false, turn_id: 'turn-1' },
+      ],
+      activities: [
+        {
+          ...activity(1, 'turn.started', 'Aguardando Antigravity', {
+            state: 'waiting_subagents',
+            waiting_subagents: true,
+            agents: ['Antigravity'],
+          }),
+          occurred_at: '2026-08-10T20:07:01+00:00',
+        },
+      ],
+    }))
+
+    renderChat()
+
+    expect(await screen.findByText('Aguardando Antigravity (7 min)')).toBeInTheDocument()
+  })
 })

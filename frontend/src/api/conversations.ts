@@ -594,6 +594,14 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('codeStage', optionalText(payload.stage, 64))
   if (payload.verification === 'unverified') event.verification = 'unverified'
   if (payload.waiting_for_slot === true) event.waitingForSlot = true
+  if (payload.waiting_subagents === true || payload.state === 'waiting_subagents') {
+    event.waitingSubagents = true
+    event.state = 'waiting_agent'
+    if (Array.isArray(payload.agents)) {
+      const agents = payload.agents.filter((a): a is string => typeof a === 'string' && a.trim().length > 0).map((a) => a.trim())
+      event.waitingAgents = agents
+    }
+  }
   if (typeof payload.queue_position === 'number' && Number.isFinite(payload.queue_position)) {
     event.queuePosition = Math.max(1, Math.floor(payload.queue_position))
   }
@@ -667,6 +675,11 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (queueId) extraPayload.queue_id = queueId
   if (queuedText) extraPayload.queued_text = queuedText
   if (payload.in_turn === true) extraPayload.in_turn = true
+  if (payload.waiting_subagents === true || payload.state === 'waiting_subagents') {
+    extraPayload.waiting_subagents = true
+    extraPayload.state = 'waiting_subagents'
+    if (event.waitingAgents) extraPayload.agents = event.waitingAgents
+  }
   if (typeof payload.delta === 'string' && payload.delta.length <= 500_000 && !isRedactedValue(payload.delta)) {
     extraPayload.delta = payload.delta
   }
