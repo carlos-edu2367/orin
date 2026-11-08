@@ -2604,3 +2604,51 @@ def test_foreground_subagent_promotes_to_background_on_queued_user_input_and_t4_
         BACKGROUND_AGENTS.clear_for_tests()
         engine.dispose()
 
+
+def test_native_turn_emits_two_waiting_model_events_when_clock_advances_45s_without_cli_event(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime
+
+    now = [datetime(2026, 11, 7, 12, 0, 0, tzinfo=UTC)]
+
+    def _clock() -> datetime:
+        return now[0]
+
+    def _round_with_45s_silence(
+        req: NativeTurnRequest, sink: NativeTurnSink, _h: ScriptedHandle
+    ) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        now[0] = now[0] + timedelta(seconds=45)
+        req.cancel_check()
+        sink.on_text("Done after thinking.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Done after thinking."),
+            init=init,
+            final_text="Done after thinking.",
+            exit_code=0,
+        )
+
+    store = FakeStore()
+    provider = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round_with_45s_silence])
+    )
+    toolset = _make_toolset(ConversationWorkspace(tmp_path, "c1"))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=toolset,
+        limits=AgenticLimits(deadline=timedelta(minutes=5)),
+        clock=_clock,
+    )
+
+    res = runtime.run("t1")
+    assert res.state == "completed"
+    waiting_model_events = [
+        payload for state, payload in store.states if state == "waiting_model"
+    ]
+    assert len(waiting_model_events) == 2
+    assert [ev["seconds"] for ev in waiting_model_events] == [20, 40]
+
+

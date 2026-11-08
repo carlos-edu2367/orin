@@ -1774,6 +1774,30 @@ class TurnSession:
                 agent_id=actor,
             )
             return
+        if state == "waiting_model":
+            seconds = int(payload.get("seconds") or 0)
+            wait_summary = f"pensando há {seconds} s" if seconds > 0 else "pensando"
+            wait_payload = {
+                **base,
+                "seconds": seconds,
+                "iteration": payload.get("iteration"),
+            }
+            if is_subagent:
+                self._record(
+                    AgentActivityEventType.TOOL_PROGRESSED,
+                    wait_summary,
+                    wait_payload,
+                    agent_id=actor,
+                    parent_agent_id=self._parent_of(actor),
+                )
+            else:
+                self._record(
+                    AgentActivityEventType.TURN_STARTED,
+                    wait_summary,
+                    wait_payload,
+                    agent_id=actor,
+                )
+            return
         if state == "model_switched":
             self._record(
                 AgentActivityEventType.TURN_STARTED,

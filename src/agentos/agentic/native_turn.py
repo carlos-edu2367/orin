@@ -1137,6 +1137,39 @@ class _RunnerSink:
         executor.speak_state = self.speak_state
         executor.on_batch_finished = self._on_tool_batch_finished
         executor.consume_round_buffers = self.consume_round_buffers
+        self._last_cli_event_at: float = self._now_seconds()
+        self._last_waiting_model_bucket: int = 0
+
+    def _now_seconds(self) -> float:
+        val = self._runner.clock()
+        if isinstance(val, (int, float)):
+            return float(val)
+        if isinstance(val, datetime):
+            return val.timestamp()
+        return time.monotonic()
+
+    def _reset_model_heartbeat(self) -> None:
+        self._last_cli_event_at = self._now_seconds()
+        self._last_waiting_model_bucket = 0
+
+    def check_model_heartbeat(self) -> None:
+        if getattr(self._executor, "_in_flight", 0) > 0:
+            self._reset_model_heartbeat()
+            return
+        now_sec = self._now_seconds()
+        elapsed = now_sec - self._last_cli_event_at
+        while self._last_waiting_model_bucket + 20 <= int(elapsed):
+            self._last_waiting_model_bucket += 20
+            self._runner.runtime._life(
+                self._runner.turn,
+                "waiting_model",
+                seconds=self._last_waiting_model_bucket,
+                iteration=self._runner.iteration,
+            )
+
+    def _note_cli_event(self) -> None:
+        self.check_model_heartbeat()
+        self._reset_model_heartbeat()
 
     @property
     def _adapter_name(self) -> str:
@@ -1205,6 +1238,7 @@ class _RunnerSink:
                 and not self.speak_state.pending_retraction
             )
         self._runner.iteration += 1
+        self._reset_model_heartbeat()
 
     def finish_speak(self) -> None:
         if self._speak_parser is None:
@@ -1227,6 +1261,7 @@ class _RunnerSink:
     def reset_for_new_message(self) -> None:
         self._message_wrote_text = False
         self._current_sink_message_id = None
+        self._reset_model_heartbeat()
         if self._is_live_or_friend:
             self.speak_state.iteration_had_speak = False
             self._speak_parser = SpeakStreamParser(
@@ -1248,6 +1283,7 @@ class _RunnerSink:
         )
 
     def on_init(self, init: CliInit) -> None:
+        self._note_cli_event()
         reported = str(init.model or "").strip()
         if reported.lower() in {"codex", "claude", "antigravity", "gemini"}:
             return
@@ -1268,9 +1304,11 @@ class _RunnerSink:
             )
 
     def on_text(self, text: str) -> None:
+        self._note_cli_event()
         if not text:
             return
         self.had_visible_output = True
+        self._note_cli_event()
         self._round_text_parts.append(text)
         self.flush_thinking_buffer()
         chunk_text = text
@@ -1286,6 +1324,7 @@ class _RunnerSink:
             self._emit_visual_delta(chunk_text)
 
     def on_thinking(self, text: str) -> None:
+        self._note_cli_event()
         if text:
             self._round_thinking_parts.append(text)
             self._thinking_buffer.append(text)
@@ -1316,6 +1355,7 @@ class _RunnerSink:
         message_id: str | None = None,
     ) -> None:
         self.had_visible_output = True
+        self._note_cli_event()
         if message_id:
             self.on_message_id(message_id)
         self.flush_thinking_buffer()
@@ -1335,6 +1375,7 @@ class _RunnerSink:
         self._executor.register_tool_use_started(
             tool_use_id, tool_name, message_id=message_id
         )
+        self._note_cli_event()
         internal_name = self._executor._resolve_internal_name(tool_name)
         now_mono = time.monotonic()
         if (
@@ -1357,6 +1398,7 @@ class _RunnerSink:
         tool_name: str,
         bytes_received: int,
     ) -> None:
+        self._note_cli_event()
         internal_name = self._executor._resolve_internal_name(tool_name)
         now_mono = time.monotonic()
         if (
@@ -1383,6 +1425,7 @@ class _RunnerSink:
         if message_id:
             self.on_message_id(message_id)
         self.flush_thinking_buffer()
+        self._note_cli_event()
         if self._adapter_name in ("antigravity", "codex"):
             return
         self._executor.register_tool_use_complete(
@@ -1393,6 +1436,7 @@ class _RunnerSink:
         )
 
     def on_assistant_usage(self, message_id: str, usage: CliUsage) -> None:
+        self._note_cli_event()
         msg_key = str(message_id or "").strip()
         if msg_key:
             self.on_message_id(msg_key)
@@ -1532,6 +1576,7 @@ class NativeTurnRunner:
         self.deadline = deadline
         self.iteration = 1
         self.last_context: dict[str, object] = {}
+        self.clock: Callable[[], Any] = runtime.clock
 
     def _stop_code_after_stream_error(self, exc: BaseException, executor: RuntimeToolExecutor) -> str | None:
         """Why the turn really stopped when the CLI stream ended in an error: a limit that fired, or the deadline."""
@@ -1968,7 +2013,7 @@ class NativeTurnRunner:
                 system_prompt=str(self.runtime.system_prompt or ""),
                 user_content=user_content,
                 executor=executor,
-                cancel_check=lambda: self.runtime.cancelled(self.turn),
+                cancel_check=lambda: (sink.check_model_heartbeat(), self.runtime.cancelled(self.turn))[1],
                 deadline_monotonic=self._remaining_deadline_monotonic(),
                 max_turns=max_turns,
                 cwd=native_cwd,
@@ -1990,6 +2035,7 @@ class NativeTurnRunner:
                 while True:
                     try:
                         outcome: NativeTurnOutcome = handle.run_until_result(sink)
+                        sink._note_cli_event()
                     except ProviderTransportError as stream_exc:
                         if closing_sent and self._stop_code_after_stream_error(stream_exc, executor) is None:
                             self.runtime._effect_finished(

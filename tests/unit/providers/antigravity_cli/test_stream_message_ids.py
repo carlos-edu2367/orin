@@ -61,3 +61,15 @@ def test_antigravity_tool_events_read_then_write_carry_no_message_id() -> None:
     ]
     assert len(tool_events) == 6
     assert all(ev.message_id is None for ev in tool_events)
+
+
+def test_antigravity_step_update_with_thinking_emits_thinking_delta() -> None:
+    from pathlib import Path
+    from tests.unit.providers.cli_adapter_conformance import load_jsonl
+
+    tr = AntigravityStreamTranslator()
+    fixture_lines = load_jsonl(Path(__file__).parent / "fixtures" / "tool_call.jsonl")
+    # Line 3 (index 2) is agent_response with thinking_tokens=31 and no text_delta
+    events = tr.feed_line(fixture_lines[2])
+    assert any(ev.kind == CliEventKind.THINKING_DELTA for ev in events)
+

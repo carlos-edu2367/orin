@@ -335,7 +335,10 @@ class AntigravityStreamTranslator:
                     self._num_turns += 1
                 return []
 
-            if step_type == "agent_response":
+            if step_type in ("agent_response", "thought", "thinking", "reasoning"):
+                prev_step_before = self._turn_step_usages.get(step_idx)
+                prev_think_tokens = prev_step_before.get("thinking_tokens", 0) if prev_step_before else 0
+                new_think_tokens = 0
                 usage_obj = su.get("usage")
                 if isinstance(usage_obj, Mapping):
                     new_usage = {
@@ -353,6 +356,7 @@ class AntigravityStreamTranslator:
                         ),
                     }
                     prev_step = self._turn_step_usages.get(step_idx)
+                    new_think_tokens = new_usage["thinking_tokens"]
                     if prev_step is not None or any(v > 0 for v in new_usage.values()):
                         merged_step = {
                             k: max(prev_step.get(k, 0) if prev_step else 0, v)
@@ -374,6 +378,31 @@ class AntigravityStreamTranslator:
 
                 events: list[CliEvent] = []
                 text_delta = su.get("text_delta")
+                thinking_text = ""
+                for th_key in ("thinking_delta", "thought_delta", "thinking", "thought", "reasoning"):
+                    th_val = su.get(th_key)
+                    if isinstance(th_val, str) and th_val != "":
+                        thinking_text = th_val
+                        break
+                if thinking_text != "":
+                    events.append(
+                        CliEvent(
+                            kind=CliEventKind.THINKING_DELTA,
+                            text=thinking_text,
+                            raw=packet,
+                        )
+                    )
+                elif (
+                    step_type in ("thought", "thinking", "reasoning")
+                    or (new_think_tokens > prev_think_tokens and not (isinstance(text_delta, str) and text_delta != ""))
+                ):
+                    events.append(
+                        CliEvent(
+                            kind=CliEventKind.THINKING_DELTA,
+                            text="",
+                            raw=packet,
+                        )
+                    )
                 if isinstance(text_delta, str) and text_delta != "":
                     self._turn_text_parts.append(text_delta)
                     events.append(
