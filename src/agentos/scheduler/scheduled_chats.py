@@ -186,7 +186,11 @@ class ScheduledChatService:
         return candidate.astimezone(UTC)
 
     def create(self, user_id: str, request: ScheduledChatInput, *, idempotency_key: str) -> dict[str, object]:
-        message = " ".join(request.message.split())
+        message = (
+            "\n".join(" ".join(line.split()) for line in request.message.splitlines() if line.strip())
+            if request.source == "subagent"
+            else " ".join(request.message.split())
+        )
         if not message or len(message) > 16000:
             raise ValueError("message must be a bounded non-blank string")
         if not request.provider.strip() or not request.model_id.strip():

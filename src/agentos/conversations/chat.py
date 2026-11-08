@@ -3013,6 +3013,13 @@ class PostgresChatStore:
                 keep_set.add(tid)
             else:
                 keep_set.discard(tid)
+        if not keep_subagents:
+            try:
+                from agentos.agentic.background_agents import BACKGROUND_AGENTS
+
+                BACKGROUND_AGENTS.cancel_conversation(conversation_id)
+            except Exception:
+                pass
         return {"conversation_id": conversation_id, "cancelling": cancelled}
 
     def keep_subagents_requested(self, turn_id: str) -> bool:

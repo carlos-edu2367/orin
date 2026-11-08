@@ -118,7 +118,7 @@ class PostgresSkillLibraryService:
         available = SKILL_RUNTIME_TOOLS
         metadata = registry.metadata(skill_id, available_tools=available)
         skill = registry.resolve(skill_id)
-        versions = [skill.version for skill in self._skills_for(user_id) if skill.id == skill_id]
+        versions = [item.version for item in self._skills_for(user_id) if item.id == skill.id]
         return {**self._summary(metadata), "instructions": registry.read_instructions(skill_id), "dependencies": list(skill.dependencies.skills), "requires_tools": list(skill.required_tools), "versions": sorted(set(versions), key=semver_key, reverse=True)}
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:

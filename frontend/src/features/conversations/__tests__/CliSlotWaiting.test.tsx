@@ -78,6 +78,40 @@ describe('CliSlotWaiting UI (R3.6)', () => {
     expect(screen.getByText('Aguardando Antigravity (7 min)')).toBeInTheDocument()
   })
 
+  it('keeps modeFromEvents as waiting_agent when subagent emits child tool events while root is waiting_subagents', async () => {
+    const { modeFromEvents } = await import('../AgentPulse')
+    const rootWaiting = parseConversationActivityEvent(
+      {
+        event_id: 'ws-root',
+        event_type: 'turn.started',
+        turn_id: 't1',
+        agent_id: 'agent:main',
+        summary: 'Aguardando Antigravity',
+        occurred_at: '2026-08-10T20:02:00+00:00',
+        payload: {
+          state: 'waiting_subagents',
+          waiting_subagents: true,
+          agents: ['Antigravity'],
+        },
+      },
+      '1',
+    )
+    const childToolFinished = parseConversationActivityEvent(
+      {
+        event_id: 'child-1',
+        event_type: 'tool.finished',
+        turn_id: 't1',
+        agent_id: 'agent:sub:1',
+        parent_agent_id: 'agent:main',
+        summary: 'read_file succeeded',
+        occurred_at: '2026-08-10T20:02:30+00:00',
+        payload: { tool_name: 'read_file', status: 'succeeded' },
+      },
+      '2',
+    )
+    expect(modeFromEvents([rootWaiting, childToolFinished], true, 't1')).toBe('waiting_agent')
+  })
+
   it('shows the waiting summary while the last event is waiting for a slot', () => {
     expect(pulseDetailFromEvents([waiting])).toBe(
       'Aguardando vaga na CLI (2º na fila, limite de 3)',

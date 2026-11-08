@@ -106,7 +106,7 @@ class SkillLibraryService:
         return {**self._summary(meta), "instructions": registry.read_instructions(skill_id),
                 "dependencies": list(skill.dependencies.skills),
                 "requires_tools": list(skill.required_tools),
-                "versions": [skill.version for skill in self._all_versions(user_id, skill_id)]}
+                "versions": [item.version for item in self._all_versions(user_id, skill.id)]}
 
     def create(self, command: Mapping[str, object]) -> dict[str, object]:
         user_id = str(command["user_id"])

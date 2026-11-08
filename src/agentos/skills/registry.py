@@ -70,19 +70,28 @@ class SkillRegistry:
         return disabled
 
     def resolve(self, skill_id: str, *, version: str | None = None, scope: SkillScope | None = None) -> Skill:
-        candidates = [skill for skill in self._skills.values() if skill.id == skill_id and (version is None or skill.version == version) and (scope is None or skill.scope is SkillScope(scope))]
-        if not candidates and ":" not in skill_id:
-            tail = f":{skill_id}"
+        clean_id = str(skill_id or "").strip().lstrip("/")
+        candidates = [
+            skill
+            for skill in self._skills.values()
+            if skill.id.lower() == clean_id.lower()
+            and (version is None or skill.version == version)
+            and (scope is None or skill.scope is SkillScope(scope))
+        ]
+        if not candidates and ":" not in clean_id:
+            tail = f":{clean_id}".lower()
             namespaced = [
                 skill
                 for skill in self._skills.values()
-                if skill.id.endswith(tail)
+                if skill.id.lower().endswith(tail)
                 and (version is None or skill.version == version)
                 and (scope is None or skill.scope is SkillScope(scope))
             ]
-            distinct_ids = sorted({skill.id for skill in namespaced})
+            enabled_ns = [skill for skill in namespaced if skill.enabled]
+            active_pool = enabled_ns if enabled_ns else namespaced
+            distinct_ids = sorted({skill.id for skill in active_pool})
             if len(distinct_ids) == 1:
-                candidates = namespaced
+                candidates = [skill for skill in namespaced if skill.id == distinct_ids[0]]
             elif len(distinct_ids) > 1:
                 suffix = f"@{version}" if version else ""
                 raise SkillNotFound(
@@ -136,7 +145,7 @@ class SkillRegistry:
         loaded = self.load(skill_id, version=version, available_tools=available_tools, scope=scope)
         package = loaded.skill.package_path
         if package is None:
-            raise SkillUnavailable(f"skill '{skill_id}' has no package resources")
+            raise SkillUnavailable(f"skill '{loaded.skill.id}' has no package resources")
         relative = Path(resource_path)
         allowed_roots = {"resources", "references", "examples", "templates"}
         if not resource_path or relative.is_absolute() or ".." in relative.parts or not relative.parts or relative.parts[0] not in allowed_roots:

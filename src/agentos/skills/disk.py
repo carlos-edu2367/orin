@@ -78,7 +78,12 @@ class DiskSkillCatalog:
 
     def get(self, name: str) -> DiskSkill | None:
         clean = str(name or "").strip().lstrip("/").lower()
-        return self.skills.get(clean)
+        direct = self.skills.get(clean)
+        if direct is not None or ":" in clean or not clean:
+            return direct
+        tail = f":{clean}"
+        matches = [skill for key, skill in self.skills.items() if key.endswith(tail)]
+        return matches[0] if len(matches) == 1 else None
 
     def model_invocable(self) -> list[DiskSkill]:
         return [item for item in self.skills.values() if item.model_invocable]

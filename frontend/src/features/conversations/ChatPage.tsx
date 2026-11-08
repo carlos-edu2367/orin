@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationMessage, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
+  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationMessage, startConversationPreview, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
   type Conversation, type ConversationMessage, type ConversationMode,
   getFriendPersona, updateFriendPersona, syncFriendSoul, listFriendMemories, deleteFriendMemory,
   type FriendPersonaState, type FriendMemoryEntry,
@@ -1945,6 +1945,11 @@ export function ChatPage() {
   async function sendNow(text: string, queueId?: string) {
     const clean = text.trim()
     if (!clean || queueBusy) return
+    if (!running && !queueId) {
+      setMessage('')
+      await submit(clean, true)
+      return
+    }
     setQueueBusy(true)
     try {
       await stop({ keepSubagents: true })
@@ -3211,6 +3216,7 @@ export function ChatPage() {
           initialPreviewUrl={detectedPreviewUrl}
           preview={workbenchPreview ?? null}
           conversationId={conversationId}
+          onStartPreview={() => startConversationPreview(client, conversationId)}
           fileChangeToken={workbenchFileChangeToken}
           rootName={conversation?.workspace?.folderName ?? conversation?.workspace?.path?.split(/[\\/]/).filter(Boolean).pop() ?? null}
           running={running}

@@ -412,7 +412,7 @@ class AntigravityStreamTranslator:
                             raw=packet,
                         )
                     )
-                if state == "DONE" and self._turn_text_parts:
+                if step_type == "agent_response" and state == "DONE" and self._turn_text_parts:
                     events.append(
                         CliEvent(
                             kind=CliEventKind.ASSISTANT_MESSAGE,

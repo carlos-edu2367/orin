@@ -2652,3 +2652,119 @@ def test_native_turn_emits_two_waiting_model_events_when_clock_advances_45s_with
     assert [ev["seconds"] for ev in waiting_model_events] == [20, 40]
 
 
+def test_read_plus_two_concurrent_writes_in_same_burst_without_message_id_both_rejected_as_same_batch(
+    tmp_path: Path,
+) -> None:
+    store = FakeStore()
+    ws = ConversationWorkspace(tmp_path, "conv-burst-2w")
+    (ws.root / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (ws.root / "b.py").write_text("y = 2\n", encoding="utf-8")
+    toolset = _make_toolset(ws)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    executor = RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, gather_seconds=0.08)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        f_r1 = pool.submit(
+            executor.call_tool,
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": "a.py"},
+                meta={TOOL_USE_ID_META_KEY: "tu_r1"},
+            ),
+        )
+        f_r2 = pool.submit(
+            executor.call_tool,
+            ToolCallRequest(
+                name="Read",
+                arguments={"file_path": "b.py"},
+                meta={TOOL_USE_ID_META_KEY: "tu_r2"},
+            ),
+        )
+        time.sleep(0.01)
+        f_w1 = pool.submit(
+            executor.call_tool,
+            ToolCallRequest(
+                name="Edit",
+                arguments={"file_path": "a.py", "old_string": "x = 1", "new_string": "x = 10"},
+                meta={TOOL_USE_ID_META_KEY: "tu_w1"},
+            ),
+        )
+        f_w2 = pool.submit(
+            executor.call_tool,
+            ToolCallRequest(
+                name="Edit",
+                arguments={"file_path": "b.py", "old_string": "y = 2", "new_string": "y = 20"},
+                meta={TOOL_USE_ID_META_KEY: "tu_w2"},
+            ),
+        )
+        r_r1 = f_r1.result(timeout=2.0)
+        r_r2 = f_r2.result(timeout=2.0)
+        r_w1 = f_w1.result(timeout=2.0)
+        r_w2 = f_w2.result(timeout=2.0)
+
+    assert r_r1.is_error is False
+    assert r_r2.is_error is False
+    assert r_w1.is_error is True
+    assert r_w2.is_error is True
+    assert "same batch" in r_w1.text.lower() or "mesmo lote" in r_w1.text.lower()
+    assert "same batch" in r_w2.text.lower() or "mesmo lote" in r_w2.text.lower()
+    assert (ws.root / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert (ws.root / "b.py").read_text(encoding="utf-8") == "y = 2\n"
+
+
+def test_native_turn_suppresses_waiting_model_while_tool_runs_and_on_text_arrival(
+    tmp_path: Path,
+) -> None:
+    from datetime import UTC, datetime
+
+    now = [datetime(2026, 11, 7, 12, 0, 0, tzinfo=UTC)]
+
+    def _clock() -> datetime:
+        return now[0]
+
+    ws = ConversationWorkspace(tmp_path, "c-hb")
+    (ws.root / "f.txt").write_text("hello\n", encoding="utf-8")
+
+    def _round_tool_and_late_text(
+        req: NativeTurnRequest, sink: NativeTurnSink, _h: ScriptedHandle
+    ) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        # Advance clock 25s right before text arrives without cancel_check polling:
+        # _note_cli_event should reset the timer rather than emitting waiting_model on text arrival.
+        now[0] = now[0] + timedelta(seconds=25)
+        sink.on_text("Immediate text after silence.")
+        return NativeTurnOutcome(
+            result=_make_result(text="Immediate text after silence."),
+            init=init,
+            final_text="Immediate text after silence.",
+            exit_code=0,
+        )
+
+    store = FakeStore()
+    provider = FakeNativeProvider(
+        handle_factory=lambda req: ScriptedHandle(req, [_round_tool_and_late_text])
+    )
+    toolset = _make_toolset(ws)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=toolset,
+        limits=AgenticLimits(deadline=timedelta(minutes=5)),
+        clock=_clock,
+    )
+    res = runtime.run("t1")
+    assert res.state == "completed"
+    waiting_model_events = [
+        payload for state, payload in store.states if state == "waiting_model"
+    ]
+    assert waiting_model_events == []
+
+
+

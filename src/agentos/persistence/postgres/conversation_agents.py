@@ -11,7 +11,7 @@ from hashlib import sha256
 import threading
 from uuid import uuid4
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.engine import Engine
 
 from .schema import conversation_agent_usage, conversation_agents
@@ -97,6 +97,25 @@ class ConversationAgentStore:
         return dict(row) if row else None
 
     def find(self, name: str) -> dict[str, object] | None:
+        clean_name = " ".join(str(name or "").split()).strip()
+        if not clean_name:
+            return None
+        with self._engine.connect() as connection:
+            row = connection.execute(
+                select(conversation_agents).where(conversation_agents.c.agent_id == self.agent_id_for(clean_name))
+            ).mappings().first()
+            if row is None:
+                row = connection.execute(
+                    select(conversation_agents)
+                    .where(
+                        conversation_agents.c.conversation_id == self._conversation_id,
+                        func.lower(conversation_agents.c.name) == clean_name.lower(),
+                    )
+                    .order_by(conversation_agents.c.created_at.desc())
+                ).mappings().first()
+        return dict(row) if row else None
+
+    def _find_legacy_unused(self, name: str) -> dict[str, object] | None:
         with self._engine.connect() as connection:
             row = connection.execute(
                 select(conversation_agents).where(conversation_agents.c.agent_id == self.agent_id_for(name))

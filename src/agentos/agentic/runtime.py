@@ -729,6 +729,22 @@ class AgenticTurnRuntime:
         return raised
 
     def run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
+        resolved_turn = turn or self._load(turn_id)
+        is_sub = bool(resolved_turn.get("is_subagent")) or (hasattr(self.store, "text") and hasattr(self.store, "agent_id"))
+        conv_id = str(resolved_turn.get("conversation_id") or "") if not is_sub else ""
+        if conv_id:
+            from .background_agents import BACKGROUND_AGENTS
+
+            BACKGROUND_AGENTS.begin_turn(conv_id)
+        try:
+            return self._run_with_queued_count(turn_id, turn=resolved_turn)
+        finally:
+            if conv_id:
+                from .background_agents import BACKGROUND_AGENTS
+
+                BACKGROUND_AGENTS.end_turn(conv_id)
+
+    def _run_with_queued_count(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         try:
             result = self._run(turn_id, turn=turn)
         except BaseException:
@@ -1068,7 +1084,8 @@ class AgenticTurnRuntime:
                             text_parts.append(chunk_text)
                             continuing_text = False
                             self.store.delta(turn, chunk_text)
-                            self._note_visible_text()
+                            if chunk_text.strip():
+                                self._note_visible_text()
                             emitted_text_in_turn = True
                             last_emitted_text_ended_with_newline = chunk_text.endswith("\n")
                     elif event.kind is StreamKind.TOOL_CALL and event.tool_call_id:
@@ -1078,7 +1095,8 @@ class AgenticTurnRuntime:
                             if tail_text:
                                 text_parts.append(tail_text)
                                 self.store.delta(turn, tail_text)
-                                self._note_visible_text()
+                                if tail_text.strip():
+                                    self._note_visible_text()
                                 emitted_text_in_turn = True
                                 last_emitted_text_ended_with_newline = tail_text.endswith("\n")
                         call_id = (
@@ -1146,7 +1164,8 @@ class AgenticTurnRuntime:
                     if fin_tail:
                         text_parts.append(fin_tail)
                         self.store.delta(turn, fin_tail)
-                        self._note_visible_text()
+                        if fin_tail.strip():
+                            self._note_visible_text()
                         emitted_text_in_turn = True
                         last_emitted_text_ended_with_newline = fin_tail.endswith("\n")
             except Exception as exc:

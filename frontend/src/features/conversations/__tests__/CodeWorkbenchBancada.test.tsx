@@ -396,4 +396,24 @@ describe('preview events → Bancada state', () => {
     },
     )
   })
+
+  it('transitions manual preview to running when onStartPreview returns a preview url and overrides stale failed previewProp', async () => {
+    const onStartPreview = vi.fn().mockResolvedValue({
+      preview: { status: 'running', url: 'http://localhost:4173', name: 'vite' },
+    })
+    render(
+      <CodeWorkbenchPanel
+        files={[]}
+        terminalEntries={[]}
+        fileChangeToken={null}
+        preview={{ status: 'failed', error: 'Porta fechada', token: 'stale-fail-1' }}
+        onStartPreview={onStartPreview}
+      />,
+    )
+    expect(screen.getByTestId('workbench-preview-failed')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('workbench-preview-retry'))
+    expect(onStartPreview).toHaveBeenCalledTimes(1)
+    const iframe = await screen.findByTestId('workbench-preview-iframe')
+    expect(iframe).toHaveAttribute('src', 'http://localhost:4173')
+  })
 })

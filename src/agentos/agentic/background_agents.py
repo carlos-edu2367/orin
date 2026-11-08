@@ -16,7 +16,8 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
+from uuid import uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
@@ -42,6 +43,16 @@ def extract_report_summary(text: str) -> str:
     return ""
 
 
+def _escape_attr(value: str) -> str:
+    return (
+        str(value or "")
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def format_subagent_notifications(
     finished: Sequence[BackgroundAgentEntry],
     *,
@@ -49,9 +60,14 @@ def format_subagent_notifications(
 ) -> str:
     blocks: list[str] = []
     for entry in finished:
-        summary_line = entry.summary or f"Status: {entry.status}"
+        summary_line = (entry.summary or f"Status: {entry.status}").replace(
+            "</subagent-finished>", "<\\/subagent-finished>"
+        )
+        aid = _escape_attr(entry.agent_id)
+        name = _escape_attr(entry.name)
+        status = _escape_attr(entry.status)
         blocks.append(
-            f'<subagent-finished agent_id="{entry.agent_id}" name="{entry.name}" status="{entry.status}">'
+            f'<subagent-finished agent_id="{aid}" name="{name}" status="{status}">'
             f"{summary_line}\nRelatório: {entry.output_file}</subagent-finished>"
         )
     if still_running:
@@ -85,6 +101,7 @@ class BackgroundAgentEntry:
     future: Future | None
     notified: bool = False
     callback_fired: bool = field(default=False, repr=False)
+    run_id: str = field(default_factory=lambda: uuid4().hex[:12], repr=False)
 
 
 class BackgroundAgentRegistry:
@@ -95,6 +112,8 @@ class BackgroundAgentRegistry:
         self._by_id: dict[str, BackgroundAgentEntry] = {}
         self._callbacks: dict[str, list[Callable[[BackgroundAgentEntry], None]]] = {}
         self._active_waiters: dict[str, int] = {}
+        self._active_turns: dict[str, int] = {}
+        self._histories: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._executors: dict[str, ThreadPoolExecutor] = {}
 
     def executor_for(self, conversation_id: str, *, max_workers: int = 32) -> ThreadPoolExecutor:
@@ -109,6 +128,42 @@ class BackgroundAgentRegistry:
                 self._executors[conv_key] = pool
             return pool
 
+    def begin_turn(self, conversation_id: str) -> None:
+        conv_id = str(conversation_id or "")
+        if not conv_id:
+            return
+        with self._cond:
+            self._active_turns[conv_id] = self._active_turns.get(conv_id, 0) + 1
+            self._callbacks.pop(conv_id, None)
+
+    def end_turn(self, conversation_id: str) -> None:
+        conv_id = str(conversation_id or "")
+        if not conv_id:
+            return
+        with self._cond:
+            cur = self._active_turns.get(conv_id, 0)
+            if cur <= 1:
+                self._active_turns.pop(conv_id, None)
+            else:
+                self._active_turns[conv_id] = cur - 1
+
+    def save_history(self, conversation_id: str, agent_id: str, history: list[dict[str, Any]]) -> None:
+        conv_id = str(conversation_id or "")
+        clean_id = str(agent_id or "")
+        if not conv_id or not clean_id:
+            return
+        with self._lock:
+            self._histories[(conv_id, clean_id)] = [dict(item) for item in history]
+
+    def get_history(self, conversation_id: str, agent_id: str) -> list[dict[str, Any]] | None:
+        conv_id = str(conversation_id or "")
+        clean_id = str(agent_id or "")
+        if not conv_id or not clean_id:
+            return None
+        with self._lock:
+            saved = self._histories.get((conv_id, clean_id))
+            return [dict(item) for item in saved] if saved else None
+
     def register(self, entry: BackgroundAgentEntry) -> None:
         conv_id = str(entry.conversation_id or "")
         agent_id = str(entry.agent_id or "")
@@ -119,12 +174,15 @@ class BackgroundAgentRegistry:
             self._by_id[agent_id] = entry
             self._cond.notify_all()
 
-    def finish(self, agent_id: str, status: str, summary: str) -> None:
+    def finish(self, agent_id: str, status: str, summary: str, *, conversation_id: str | None = None) -> None:
         clean_id = str(agent_id or "")
         callbacks_to_run: list[Callable[[BackgroundAgentEntry], None]] = []
         entry: BackgroundAgentEntry | None = None
         with self._cond:
-            entry = self._by_id.get(clean_id)
+            if conversation_id:
+                entry = self._by_conv.get(str(conversation_id), {}).get(clean_id)
+            if entry is None:
+                entry = self._by_id.get(clean_id)
             if entry is None:
                 return
             entry.status = _normalize_status(status)
@@ -134,16 +192,45 @@ class BackgroundAgentRegistry:
                 not entry.callback_fired
                 and not entry.notified
                 and self._active_waiters.get(entry.conversation_id, 0) <= 0
+                and self._active_turns.get(entry.conversation_id, 0) <= 0
             ):
                 callbacks_to_run = list(self._callbacks.get(entry.conversation_id, ()))
                 if callbacks_to_run:
                     entry.callback_fired = True
+                    entry.notified = True
             self._cond.notify_all()
         for cb in callbacks_to_run:
             try:
                 cb(entry)
             except Exception:  # noqa: BLE001
                 logger.warning("background agent on_finish callback failed for %s", clean_id, exc_info=True)
+
+    def cancel_conversation(self, conversation_id: str) -> list[str]:
+        conv_id = str(conversation_id or "")
+        if not conv_id:
+            return []
+        cancelled_ids: list[str] = []
+        with self._cond:
+            self._callbacks.pop(conv_id, None)
+            conv_map = self._by_conv.get(conv_id, {})
+            for entry in conv_map.values():
+                if entry.status == "running":
+                    try:
+                        entry.cancel.set()
+                    except Exception:
+                        pass
+                    if entry.future is not None:
+                        try:
+                            entry.future.cancel()
+                        except Exception:
+                            pass
+                    entry.status = "stopped"
+                    entry.finished_at = time.monotonic()
+                    entry.summary = entry.summary or "Cancelled"
+                    entry.notified = True
+                    cancelled_ids.append(entry.agent_id)
+            self._cond.notify_all()
+        return cancelled_ids
 
     def get(self, conversation_id: str, agent_id: str) -> BackgroundAgentEntry | None:
         conv_id = str(conversation_id or "")
@@ -172,12 +259,12 @@ class BackgroundAgentRegistry:
             taken: list[BackgroundAgentEntry] = []
             for entry in conv_map.values():
                 if entry.status != "running" and not entry.notified:
-                    entry.notified = True
                     if (
                         since_monotonic is None
                         or entry.started_at >= since_monotonic
                         or (entry.finished_at is not None and entry.finished_at >= since_monotonic)
                     ):
+                        entry.notified = True
                         taken.append(entry)
             return taken
 
@@ -256,11 +343,12 @@ class BackgroundAgentRegistry:
         pending_entries: list[BackgroundAgentEntry] = []
         with self._cond:
             self._callbacks[conv_id] = [callback]
-            if self._active_waiters.get(conv_id, 0) <= 0:
+            if self._active_waiters.get(conv_id, 0) <= 0 and self._active_turns.get(conv_id, 0) <= 0:
                 conv_map = self._by_conv.get(conv_id, {})
                 for entry in conv_map.values():
                     if entry.status != "running" and not entry.notified and not entry.callback_fired:
                         entry.callback_fired = True
+                        entry.notified = True
                         pending_entries.append(entry)
         for entry in pending_entries:
             try:
@@ -274,6 +362,8 @@ class BackgroundAgentRegistry:
             self._by_id.clear()
             self._callbacks.clear()
             self._active_waiters.clear()
+            self._active_turns.clear()
+            self._histories.clear()
             self._cond.notify_all()
 
 

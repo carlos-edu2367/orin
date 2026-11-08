@@ -99,15 +99,20 @@ class ConcurrentTurnRunner:
         self.reap()
 
 
+_ORPHANS_SWEPT = False
+
+
 def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
     """Requeue turns after a worker crash and fail turns no worker can claim."""
-    if not has_in_flight:
+    global _ORPHANS_SWEPT
+    if not has_in_flight and not _ORPHANS_SWEPT:
         engine = getattr(store, "_engine", None)
         if engine is not None:
             try:
                 from agentos.agentic.background_agents import fail_orphaned_running_agents
 
                 fail_orphaned_running_agents(engine)
+                _ORPHANS_SWEPT = True
             except Exception:
                 _LOGGER.debug("could not sweep orphaned running agents", exc_info=True)
     recovered = () if has_in_flight else ChatWorker(store).watchdog(maximum_age=UNCLAIMED_AFTER)

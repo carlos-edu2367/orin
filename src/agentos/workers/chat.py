@@ -259,6 +259,10 @@ class _RuntimeStore:
     def claim_queued_inputs(self, turn: dict[str, object]):
         return self._store.claim_queued_inputs(turn)
 
+    def has_queued_inputs(self, turn: dict[str, object]) -> bool:
+        return self._store.has_queued_inputs(turn)
+        return self._store.claim_queued_inputs(turn)
+
     def mark_queued_input_blocked(self, queue_id: str) -> None:
         self._store.mark_queued_input_blocked(queue_id)
 

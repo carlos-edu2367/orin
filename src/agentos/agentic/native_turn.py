@@ -239,6 +239,8 @@ class ToolBatchCollector:
         self._exec_lock = threading.Lock()
         self._open_batches: dict[str, _OpenReadBatch] = {}
         self._in_flight_reads: dict[str, list[_BatchEntry]] = {}
+        self._closed_read_batches: dict[str, tuple[list[_BatchEntry], float]] = {}
+        self._in_flight_writes: dict[str, int] = {}
 
     def submit(
         self,
@@ -266,19 +268,40 @@ class ToolBatchCollector:
                     with open_batch.cond:
                         open_batch.cond.notify_all()
                 prior_entries = list(self._in_flight_reads.get(msg_key, ()))
+                now = self._clock()
+                if prior_entries:
+                    deadline = open_batch.deadline if open_batch is not None else now + self._gather_seconds
+                    self._closed_read_batches[msg_key] = (prior_entries, deadline)
+                else:
+                    saved = self._closed_read_batches.get(msg_key)
+                    if saved is not None and (now < saved[1] or self._in_flight_writes.get(msg_key, 0) > 0):
+                        prior_entries = list(saved[0])
+                self._in_flight_writes[msg_key] = self._in_flight_writes.get(msg_key, 0) + 1
             for prior in prior_entries:
                 prior.done.wait()
             if prior_entries and prior_entries[-1].batch_key:
                 entry.batch_key = prior_entries[-1].batch_key
 
             with self._exec_lock:
-                results = self._run_batch([entry], msg_key)
+                try:
+                    results = self._run_batch([entry], msg_key)
+                finally:
+                    with self._state_lock:
+                        rem_writes = self._in_flight_writes.get(msg_key, 1) - 1
+                        if rem_writes <= 0:
+                            self._in_flight_writes.pop(msg_key, None)
+                            saved = self._closed_read_batches.get(msg_key)
+                            if saved is not None and self._clock() >= saved[1]:
+                                self._closed_read_batches.pop(msg_key, None)
+                        else:
+                            self._in_flight_writes[msg_key] = rem_writes
             if not results:
                 return ToolCallResult(text="", is_error=True)
             return results[0]
 
         with self._state_lock:
             now = self._clock()
+            self._closed_read_batches.pop(msg_key, None)
             self._in_flight_reads.setdefault(msg_key, []).append(entry)
             batch = self._open_batches.get(msg_key)
             if batch is not None and not batch.closed:
@@ -388,6 +411,7 @@ class RuntimeToolExecutor(ToolExecutor):
         self._msg_seq: int = 1
         self._adapter_message_ids: bool = False
         self._batch_seq: int = 0
+        self._in_flight: int = 0
         self._closed = threading.Event()
         self._first_read_keys_by_message_id: dict[str, set[str]] = {}
         self._seen_tool_round_message_ids: set[str] = set()
@@ -560,6 +584,7 @@ class RuntimeToolExecutor(ToolExecutor):
             if message_id and str(message_id).strip():
                 self._adapter_message_ids = True
                 msg_id = str(message_id).strip()
+                self._current_message_id = msg_id
             else:
                 msg_id = self._current_message_id
             if tool_use_id:
@@ -579,6 +604,7 @@ class RuntimeToolExecutor(ToolExecutor):
             if message_id and str(message_id).strip():
                 self._adapter_message_ids = True
                 msg_id = str(message_id).strip()
+                self._current_message_id = msg_id
             else:
                 msg_id = self._tool_use_message_id.get(str(tool_use_id), self._current_message_id)
             if tool_use_id:
@@ -694,13 +720,20 @@ class RuntimeToolExecutor(ToolExecutor):
                 )
 
         read_only = self._is_read_only(raw_name, internal_name)
-        return self.collector.submit(
+        return self._call_collector(
             call_id,
             internal_name,
             request.arguments,
             message_id=message_id,
             read_only=read_only,
         )
+
+    def _call_collector(self, *args: Any, **kwargs: Any) -> ToolCallResult:
+        self._in_flight += 1
+        try:
+            return self.collector.submit(*args, **kwargs)
+        finally:
+            self._in_flight = max(0, self._in_flight - 1)
 
     def _deadline_exceeded(self) -> bool:
         if self.deadline is None:
@@ -906,8 +939,8 @@ class RuntimeToolExecutor(ToolExecutor):
             self._build_specs()
 
         self.action_count += len(results)
-        msg_round_key = str(message_id or "").strip()
-        if not self._adapter_message_ids or not msg_round_key or msg_round_key == "default":
+        msg_round_key = str(message_id or "").strip() if self._adapter_message_ids else batch_key
+        if not msg_round_key or msg_round_key == "default":
             self.tool_rounds += 1
             self.runtime._note_tool_round()
         elif msg_round_key not in self._seen_tool_round_message_ids:
@@ -1153,7 +1186,7 @@ class _RunnerSink:
         self._last_waiting_model_bucket = 0
 
     def check_model_heartbeat(self) -> None:
-        if getattr(self._executor, "_in_flight", 0) > 0:
+        if getattr(self._executor, "_in_flight", 0) > 0 or getattr(getattr(self._executor, "handle", None), "in_flight", 0) > 0:
             self._reset_model_heartbeat()
             return
         now_sec = self._now_seconds()
@@ -1168,7 +1201,7 @@ class _RunnerSink:
             )
 
     def _note_cli_event(self) -> None:
-        self.check_model_heartbeat()
+        pass
         self._reset_model_heartbeat()
 
     @property

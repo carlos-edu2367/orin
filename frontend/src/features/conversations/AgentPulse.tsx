@@ -117,13 +117,10 @@ export function formatWaitingSubagentsDetail(
       .find((e) => (!event.turnId || e.turnId === event.turnId) && Boolean(e.occurredAt))?.occurredAt
     const latestMs = latestIso ? Date.parse(latestIso) : Number.NaN
 
-    if (Number.isFinite(eventMs) && nowMs >= eventMs && nowMs - eventMs < 86_400_000) {
-      diffMs = nowMs - eventMs
-      if (diffMs < 60_000 && Number.isFinite(turnStartMs) && nowMs >= turnStartMs && nowMs - turnStartMs < 86_400_000) {
-        diffMs = nowMs - turnStartMs
-      }
-    } else if (Number.isFinite(turnStartMs) && nowMs >= turnStartMs && nowMs - turnStartMs < 86_400_000) {
+    if (Number.isFinite(turnStartMs) && nowMs >= turnStartMs && nowMs - turnStartMs < 86_400_000) {
       diffMs = nowMs - turnStartMs
+    } else if (Number.isFinite(eventMs) && nowMs >= eventMs && nowMs - eventMs < 86_400_000) {
+      diffMs = nowMs - eventMs
     } else if (Number.isFinite(latestMs) && Number.isFinite(turnStartMs) && latestMs >= turnStartMs) {
       diffMs = latestMs - turnStartMs
     } else if (Number.isFinite(eventMs) && Number.isFinite(turnStartMs) && eventMs >= turnStartMs) {
@@ -415,7 +412,7 @@ export function modeFromEvents(
     if (event.type === 'turn.waiting_user' || event.type === 'tool.permission_required' || event.state === 'waiting_user') {
       return 'idle'
     }
-    if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
+    if (!event.parentAgentId && (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA')) {
       return 'thinking'
     }
     if (event.type === 'assistant.delta' || event.type === 'ASSISTANT_DELTA') {
@@ -434,6 +431,23 @@ export function modeFromEvents(
       event.payload?.state === 'waiting_subagents'
     ) {
       return 'waiting_agent'
+    }
+    if (event.parentAgentId) {
+      for (let rIdx = scopedEvents.length - 1; rIdx >= 0; rIdx -= 1) {
+        const rootEvt = scopedEvents[rIdx]
+        if (rootEvt.parentAgentId || rootEvt.type.startsWith('context.')) continue
+        if (
+          (rootEvt as { waitingSubagents?: boolean }).waitingSubagents === true ||
+          rootEvt.payload?.waiting_subagents === true ||
+          rootEvt.payload?.state === 'waiting_subagents'
+        ) {
+          return 'waiting_agent'
+        }
+        break
+      }
+      if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
+        return 'thinking'
+      }
     }
     if (event.type === 'tool.started' || event.type === 'tool.progressed') {
       const phase = event.payload?.phase ?? event.phase

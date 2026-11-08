@@ -1017,6 +1017,9 @@ class _MainAgentStore:
         if callable(forward):
             forward(turn, state, **payload)
 
+    def has_queued_inputs(self, turn: dict[str, object]) -> bool:
+        return self._session._has_queued_user_input()
+
     def record_usage(self, turn: dict[str, object], *, input_tokens: int | None, output_tokens: int | None, total_tokens: int | None) -> None:
         self._session.record_usage(
             turn,
@@ -2053,7 +2056,7 @@ class TurnSession:
         selected_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else self._current_model_id()
         if target_name == key and self.agents_store is not None and hasattr(self.agents_store, "find"):
             existing = self.agents_store.find(key)
-            if existing is not None:
+            if existing is not None and str(existing.get("state") or "idle").strip().lower() == "idle":
                 merged = dict(existing)
                 merged.setdefault("builtin_type", key)
                 return merged
@@ -2066,7 +2069,7 @@ class TurnSession:
                         parent_agent_id=parent_agent_id,
                         provider=record_provider,
                         model_id=selected_model_id,
-                        force_new=(target_name != key),
+                        force_new=True,
                     )
                 except TypeError:
                     created = self.agents_store.create(
@@ -2495,6 +2498,13 @@ class TurnSession:
             known = self._team_roster().get(teammate_name)
             if known is not None and known.get("agent_id"):  # a placeholder (W5-R12) has no agent yet
                 resumed_agent_id = known["agent_id"]
+            elif self.agents_store is not None and hasattr(self.agents_store, "find"):
+                try:
+                    found_mate = self.agents_store.find(teammate_name)
+                    if found_mate is not None and found_mate.get("agent_id"):
+                        resumed_agent_id = str(found_mate["agent_id"])
+                except Exception:
+                    pass
         clean = " ".join(str(name).split())[:60]
         builtin_key = clean.lower()
         if builtin_key == "general-purpose":
@@ -2912,7 +2922,7 @@ class TurnSession:
                     else:
                         bg_status = "failed"
                     bg_summary = str((outcome.content or outcome.summary) if outcome is not None else "")
-                    BACKGROUND_AGENTS.finish(agent_id, bg_status, bg_summary)
+                    BACKGROUND_AGENTS.finish(agent_id, bg_status, bg_summary, conversation_id=conv_id)
 
         with self._subagent_lock:
             if self._bg_subagent_executor is None:
@@ -2924,6 +2934,49 @@ class TurnSession:
 
         while not future.done():
             if self.cancelled(self.turn):
+                if self._keep_subagents_requested():
+                    with promote_lock:
+                        if not completed_unpromoted and not future.done():
+                            promoted.set()
+                            reg_entry = BackgroundAgentEntry(
+                                agent_id=agent_id,
+                                conversation_id=conv_id,
+                                name=clean,
+                                output_file=output_file,
+                                status="running",
+                                started_at=time.monotonic(),
+                                finished_at=None,
+                                summary="",
+                                cancel=cancel,
+                                future=future,
+                            )
+                            BACKGROUND_AGENTS.register(reg_entry)
+                            with self._subagent_lock:
+                                self._background_subagents[agent_id] = {
+                                    "future": future,
+                                    "agent_id": agent_id,
+                                    "agent_name": clean,
+                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                                    "cancel": cancel,
+                                    "output_file": output_file,
+                                }
+                            return ToolOutcome(
+                                "succeeded",
+                                f"{clean} continua em segundo plano",
+                                f"{clean} continues in the background (agent_id={agent_id}).",
+                                {
+                                    "agent_id": agent_id,
+                                    "agent_name": clean,
+                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                                    "status": "running",
+                                    "output_file": output_file,
+                                    "background": True,
+                                    "promoted_to_background": True,
+                                    "resumed": bool(resumed_agent_id),
+                                    "label": clean,
+                                    "tool_kind": "agent",
+                                },
+                            )
                 cancel.set()
                 break
             if self._has_queued_user_input():
@@ -3229,6 +3282,12 @@ class TurnSession:
                     saved_history = self._subagent_histories.get(resumed_agent_id)
                     if saved_history:
                         initial_history = [dict(item) for item in saved_history]
+                if initial_history is None:
+                    reg_hist = BACKGROUND_AGENTS.get_history(
+                        str(self.turn.get("conversation_id") or ""), str(resumed_agent_id)
+                    )
+                    if reg_hist:
+                        initial_history = reg_hist
             if initial_history is None and inherit_context and caller.history is not None:
                 # A fork inherits the conversation of whoever started it (the main agent's, or a subagent's own).
                 try:
@@ -3265,6 +3324,7 @@ class TurnSession:
             subagent_tools = self._toolset(
                 subagents=can_delegate,
                 caller=child_caller if can_delegate else None,
+                cancel_check=lambda: bool(sub_cancelled(subagent_turn)),
                 share_read_state=False,
                 browser_agent_key=agent_id,
                 code_mode_active=is_code_mode,
@@ -3381,25 +3441,30 @@ class TurnSession:
                     set_state=False,
                 )
             answer = sub_store.final_answer()
-            prior_transcript = [dict(item) for item in initial_history] if initial_history else []
-            prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
-            if answer:
-                prior_transcript.append({"role": "assistant", "content": answer})
-            elif sub_store.recent_tool_calls(15):
-                prior_transcript.append(
-                    {
-                        "role": "assistant",
-                        "content": "Partial progress before interruption:\n"
-                        + "\n".join(f"- {c}" for c in sub_store.recent_tool_calls(15)),
-                    }
-                )
-            with self._subagent_lock:
-                self._subagent_histories[agent_id] = prior_transcript
             limit_stopped = (
                 result.error_code in {"ACTION_LIMIT", "ITERATION_LIMIT", "TURN_DEADLINE_EXCEEDED"}
                 or result.budget_exhausted
             )
             acceptable_state = result.state in {"completed", "completed_with_caveats"} or (limit_stopped and bool(answer))
+            prior_transcript = [dict(item) for item in initial_history] if initial_history else []
+            prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
+            recent_calls = sub_store.recent_tool_calls(15)
+            progress_note = (
+                "Partial progress before interruption:\n" + "\n".join(f"- {c}" for c in recent_calls)
+                if recent_calls
+                else ""
+            )
+            if answer and (acceptable_state or not progress_note):
+                prior_transcript.append({"role": "assistant", "content": answer})
+            elif answer and progress_note:
+                prior_transcript.append({"role": "assistant", "content": f"{answer}\n\n{progress_note}"})
+            elif progress_note:
+                prior_transcript.append({"role": "assistant", "content": progress_note})
+            with self._subagent_lock:
+                self._subagent_histories[agent_id] = prior_transcript
+            BACKGROUND_AGENTS.save_history(
+                str(self.turn.get("conversation_id") or ""), agent_id, prior_transcript
+            )
             if not acceptable_state or not answer:
                 reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
                 final_agent_state = "cancelled" if (result.state == "cancelled" or reason == "TURN_CANCELLED") else "failed"
@@ -3564,7 +3629,12 @@ class TurnSession:
                 else:
                     bg_status = "failed"
                 bg_summary = str((outcome.content or outcome.summary) if outcome is not None else "")
-                BACKGROUND_AGENTS.finish(agent_id, bg_status, bg_summary)
+                BACKGROUND_AGENTS.finish(
+                    agent_id,
+                    bg_status,
+                    bg_summary,
+                    conversation_id=str(self.turn.get("conversation_id") or ""),
+                )
         self._teammate_idle(name, str(record.get("team_name") or "team"), outcome, unread=unread)
         return outcome
 
@@ -3962,6 +4032,21 @@ class TurnSession:
         if manager:
             manager.close()
 
+    def _keep_subagents_requested(self) -> bool:
+        keep_subagents = bool((self.turn or {}).get("keep_subagents"))
+        if not keep_subagents:
+            store_obj = getattr(self, "store", None)
+            chat_store_obj = getattr(self, "chat_store", None)
+            keep_checker = getattr(store_obj, "keep_subagents_requested", None) or getattr(
+                chat_store_obj, "keep_subagents_requested", None
+            )
+            if callable(keep_checker):
+                try:
+                    keep_subagents = bool(keep_checker(str((self.turn or {}).get("turn_id") or "")))
+                except Exception:
+                    pass
+        return keep_subagents
+
     def close_background_subagents(self) -> None:
         # W5: the turn's language servers stop with its background work.
         if hasattr(self, "_lsp_lock"):
@@ -3971,16 +4056,7 @@ class TurnSession:
             self._bg_subagent_executor = None
             bg_entries = list(self._background_subagents.values())
         conv_id = str((self.turn or {}).get("conversation_id") or "")
-        keep_subagents = bool((self.turn or {}).get("keep_subagents"))
-        if not keep_subagents:
-            store_obj = getattr(self, "store", None)
-            chat_store_obj = getattr(self, "chat_store", None)
-            keep_checker = getattr(store_obj, "keep_subagents_requested", None) or getattr(chat_store_obj, "keep_subagents_requested", None)
-            if callable(keep_checker):
-                try:
-                    keep_subagents = bool(keep_checker(str((self.turn or {}).get("turn_id") or "")))
-                except Exception:
-                    pass
+        keep_subagents = self._keep_subagents_requested()
         is_cancelled = False
         try:
             is_cancelled = bool(self.cancelled(self.turn))
@@ -4010,6 +4086,8 @@ class TurnSession:
             and not keep_subagents
         )
         if should_cancel:
+            if conv_id:
+                BACKGROUND_AGENTS.cancel_conversation(conv_id)
             for entry in bg_entries:
                 cancel_event = entry.get("cancel")
                 if cancel_event is not None and hasattr(cancel_event, "set"):
@@ -4025,7 +4103,7 @@ class TurnSession:
                     except Exception:
                         pass
                 if agent_id:
-                    BACKGROUND_AGENTS.finish(agent_id, "stopped", "Cancelled")
+                    BACKGROUND_AGENTS.finish(agent_id, "stopped", "Cancelled", conversation_id=conv_id)
         if should_cancel and self.agents_store is not None and hasattr(self.agents_store, "set_state"):
             for entry in bg_entries:
                 future = entry.get("future")
@@ -4439,6 +4517,7 @@ class TurnSession:
         non_interactive_ask: str = "allow",
         share_read_state: bool | None = None,
         caller: SubagentCaller | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -4470,7 +4549,7 @@ class TurnSession:
             public_tool_names=self.effective_settings.experimental("claudeToolNames", default=self.turn.get("code_mode") == "code"),
             lifecycle=self.lifecycle,
             extra_env=self._hook_extra_env(),
-            cancel_check=lambda: bool(self.cancelled(self.turn)),
+            cancel_check=cancel_check or (lambda: bool(self.cancelled(self.turn))),
             lifecycle_context=lifecycle_context,
             reminders=reminders,
             non_interactive_ask=non_interactive_ask,
@@ -4672,7 +4751,7 @@ class TurnSession:
         context = self._schedule_context()
 
         def wake(entry: BackgroundAgentEntry) -> None:
-            if scheduler is None or entry.notified:
+            if scheduler is None:
                 return
             from .background_agents import format_subagent_notifications
             from agentos.scheduler.scheduled_chats import ScheduledChatInput
@@ -4693,10 +4772,11 @@ class TurnSession:
                 conversation_id=conversation_id,
                 source="subagent",
             )
+            run_id = getattr(entry, "run_id", None) or entry.agent_id
             scheduler.create(
                 context["user_id"],
                 request,
-                idempotency_key=f"subagent:{entry.agent_id}",
+                idempotency_key=f"subagent:{entry.agent_id}:{run_id}",
             )
 
         return wake

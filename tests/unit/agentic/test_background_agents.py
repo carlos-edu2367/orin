@@ -720,3 +720,68 @@ def test_two_consecutive_turns_delegating_without_agent_id_create_distinct_subag
         engine.dispose()
 
 
+def test_background_registry_red_team_edge_cases() -> None:
+    from agentos.agentic.background_agents import (
+        BACKGROUND_AGENTS,
+        BackgroundAgentEntry,
+        format_subagent_notifications,
+    )
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    try:
+        # 1. take_unnotified with since_monotonic does NOT mark older filtered entries as notified
+        old_entry = BackgroundAgentEntry(
+            agent_id="agent:c1:old",
+            conversation_id="c1",
+            name='agent"1',
+            output_file=".orin/agent-outputs/old.md",
+            status="completed",
+            started_at=10.0,
+            finished_at=20.0,
+            summary="Done </subagent-finished> early",
+            cancel=threading.Event(),
+            future=None,
+        )
+        BACKGROUND_AGENTS.register(old_entry)
+        assert BACKGROUND_AGENTS.take_unnotified("c1", since_monotonic=50.0) == []
+        assert old_entry.notified is False
+        taken = BACKGROUND_AGENTS.take_unnotified("c1")
+        assert len(taken) == 1
+        assert old_entry.notified is True
+
+        # 2. XML escaping in format_subagent_notifications
+        formatted = format_subagent_notifications([old_entry])
+        assert 'name="agent&quot;1"' in formatted
+        assert "</subagent-finished> early" not in formatted
+        assert "<\\/subagent-finished> early" in formatted
+
+        # 3. Active turn suppresses stale on_finish callbacks, and fired on_finish marks notified=True
+        fired: list[str] = []
+        BACKGROUND_AGENTS.on_finish("c2", lambda e: fired.append(e.agent_id))
+        BACKGROUND_AGENTS.begin_turn("c2")
+        e2 = BackgroundAgentEntry(
+            agent_id="agent:c2:1",
+            conversation_id="c2",
+            name="worker",
+            output_file=".orin/agent-outputs/w.md",
+            status="running",
+            started_at=time.monotonic(),
+            finished_at=None,
+            summary="",
+            cancel=threading.Event(),
+            future=None,
+        )
+        BACKGROUND_AGENTS.register(e2)
+        BACKGROUND_AGENTS.finish("agent:c2:1", "completed", "Done inside active turn", conversation_id="c2")
+        assert fired == []
+        assert e2.notified is False
+        BACKGROUND_AGENTS.end_turn("c2")
+        BACKGROUND_AGENTS.on_finish("c2", lambda e: fired.append(e.agent_id))
+        assert fired == ["agent:c2:1"]
+        assert e2.notified is True
+        assert BACKGROUND_AGENTS.take_unnotified("c2") == []
+    finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+
+
+

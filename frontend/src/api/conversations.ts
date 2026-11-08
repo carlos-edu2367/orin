@@ -473,6 +473,20 @@ function tokenUsage(value: unknown): TokenUsage {
   }
 }
 
+export async function startConversationPreview(
+  client: ApiClient,
+  conversationId: string,
+  name?: string,
+): Promise<Record<string, unknown>> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/preview/start`,
+    method: 'POST',
+    expectedStatus: 202,
+    body: name ? { name } : {},
+    parse: (payload) => (payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}),
+  })
+}
+
 export type ConversationEventStreamHandlers = {
   onEvent: (event: ConversationActivityEvent) => void
   onCursor: (cursor: string) => void

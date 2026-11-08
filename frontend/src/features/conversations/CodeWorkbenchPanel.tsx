@@ -197,27 +197,67 @@ export function CodeWorkbenchPanel({
   conversationId,
   onStartPreview,
 }: CodeWorkbenchPanelProps) {
-  const [manualPreview, setManualPreview] = useState<CodeWorkbenchPreviewState | null>(null)
-  const preview = previewProp ?? manualPreview
+  const [manualPreview, setManualPreview] = useState<{
+    state: CodeWorkbenchPreviewState
+    overriddenToken: string | null
+  } | null>(null)
+  const preview =
+    manualPreview && (previewProp?.token ?? null) === manualPreview.overriddenToken
+      ? manualPreview.state
+      : (previewProp ?? manualPreview?.state ?? null)
 
   const handleStartPreview = async () => {
+    const overriddenToken = previewProp?.token ?? null
     const startToken = `manual:${Date.now()}`
-    setManualPreview({ status: 'starting', token: startToken })
+    setManualPreview({ state: { status: 'starting', token: startToken }, overriddenToken })
     try {
+      let payload: unknown = null
       if (onStartPreview) {
-        await onStartPreview()
+        payload = await onStartPreview()
       } else {
         const res = await fetch(
           `/v1/conversations/${encodeURIComponent(conversationId ?? 'default')}/preview/start`,
-          { method: 'POST' },
+          { method: 'POST', credentials: 'same-origin' },
         )
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`)
         }
+        try {
+          payload = await res.json()
+        } catch {
+          payload = null
+        }
+      }
+      if (payload && typeof payload === 'object') {
+        const rec = payload as Record<string, unknown>
+        const rawPreview =
+          rec.preview && typeof rec.preview === 'object' ? (rec.preview as Record<string, unknown>) : rec
+        const rawUrl = typeof rawPreview.url === 'string' ? rawPreview.url : undefined
+        const rawStatus = typeof rawPreview.status === 'string' ? rawPreview.status : undefined
+        const rawName = typeof rawPreview.name === 'string' ? rawPreview.name : undefined
+        if (rawUrl) {
+          setManualPreview({
+            state: { status: 'running', url: rawUrl, name: rawName, token: `${startToken}:ok` },
+            overriddenToken,
+          })
+        } else if (rawStatus === 'exited' || rawStatus === 'stopped' || rawStatus === 'failed') {
+          setManualPreview({
+            state: {
+              status: 'failed',
+              name: rawName,
+              error: typeof rawPreview.error === 'string' ? rawPreview.error : 'Falha ao iniciar o servidor.',
+              token: `${startToken}:err`,
+            },
+            overriddenToken,
+          })
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Falha ao iniciar o servidor.'
-      setManualPreview({ status: 'failed', error: message, token: `${startToken}:err` })
+      setManualPreview({
+        state: { status: 'failed', error: message, token: `${startToken}:err` },
+        overriddenToken,
+      })
     }
   }
   const previewToken = preview?.token ?? null
@@ -335,6 +375,9 @@ export function CodeWorkbenchPanel({
   const handleRetry = () => {
     if (preview) setDismissedFailure(preview.token)
     onRetryPreview?.()
+    if (!onRetryPreview && !safeCommittedUrl) {
+      void handleStartPreview()
+    }
     if (safeCommittedUrl) reloadFrame(safeCommittedUrl)
   }
 
