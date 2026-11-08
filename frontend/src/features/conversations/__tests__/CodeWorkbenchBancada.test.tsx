@@ -363,6 +363,37 @@ describe('preview events → Bancada state', () => {
     expect(isLikelyHmrUrl('http://localhost:5173/')).toBe(true)
     expect(isLikelyHmrUrl('http://localhost:3000/')).toBe(true)
     expect(isLikelyHmrUrl('http://127.0.0.1:8000/')).toBe(false)
+    expect(isLikelyHmrUrl('http://127.0.0.1:8000/')).toBe(false)
     expect(isLikelyHmrUrl(null)).toBe(false)
+  })
+
+  it('derives status: running when preview_start is emitted by a background or foreground subagent', () => {
+    const subStarted = event({
+      eventId: 'sub-1',
+      type: 'tool.started',
+      state: 'working',
+      toolName: 'preview_start',
+      agentId: 'agent:conv-1:antigravity',
+      parentAgentId: 'agent:conv-1:main',
+    })
+    expect(derivePreviewFromEvents([subStarted])).toMatchObject({ status: 'starting', token: 'sub-1' })
+
+    const subFinished = event({
+      eventId: 'sub-2',
+      type: 'tool.finished',
+      toolName: 'preview_start',
+      status: 'succeeded',
+      agentId: 'agent:conv-1:antigravity',
+      parentAgentId: 'agent:conv-1:main',
+      previewServer: { url: 'http://127.0.0.1:5173', name: 'Vite', status: 'running', hmr: true },
+    })
+    expect(derivePreviewFromEvents([subStarted, subFinished])).toEqual({
+      status: 'running',
+      url: 'http://127.0.0.1:5173',
+      name: 'Vite',
+      hmr: true,
+      token: 'sub-2',
+    },
+    )
   })
 })

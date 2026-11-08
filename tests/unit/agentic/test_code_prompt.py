@@ -292,3 +292,43 @@ def test_runtime_injects_status_nudge_once_in_three_minute_window() -> None:
     assert res.state == "completed"
     assert reminders.status_nudge_adds == 1
 
+
+def test_code_prompt_and_subagent_prompt_include_preview_and_tool_rules(tmp_path: Path) -> None:
+    internal_prompt = render_code_system_prompt(_options(public=False))
+    assert (
+        "If the deliverable is a web app, finish with `preview_start` or `preview_open` so the user's Bancada shows it running."
+        in internal_prompt
+    )
+    public_prompt = render_code_system_prompt(_options(public=True))
+    assert (
+        "If the deliverable is a web app, finish with `PreviewStart` or `PreviewOpen` so the user's Bancada shows it running."
+        in public_prompt
+    )
+
+    session = _session(tmp_path, code_mode="code")
+    child_toolset = session._toolset(subagents=False, code_mode_active=True, read_only_mode=False)
+    child_names = {schema.get("name") or schema["function"]["name"] for schema in child_toolset.schemas()}
+    assert {"preview_start", "PreviewStart"} & child_names
+    assert {"preview_open", "PreviewOpen"} & child_names
+
+    child_toolset.name_translator = None
+    sub_prompt = session._subagent_prompt(
+        {"name": "antigravity", "role": "Engineer"},
+        "Implement the requested feature.",
+        child_toolset,
+    )
+    assert (
+        "Create and change files only with write_file/edit_file, never with shell redirection (`cat >`, `node -e fs.writeFileSync`, `Set-Content`)."
+        in sub_prompt
+    )
+    assert "Batch independent reads in one turn." in sub_prompt
+    assert (
+        "For implementation tasks: write the failing test early; do not spend more than ~10 tool calls exploring before the first change; update todo_write as you go."
+        in sub_prompt
+    )
+    assert (
+        "To test a server use run_command with run_in_background, not `&`; never stop a server the leader or the user opened."
+        in sub_prompt
+    )
+
+

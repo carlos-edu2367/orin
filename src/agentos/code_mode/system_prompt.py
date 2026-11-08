@@ -65,6 +65,10 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
             )
         if has("todo_write"):
             doing.append(f"- When a task has several steps, track them with {t('todo_write')} and keep exactly one item in progress.")
+        if has("preview_start") or has("preview_open"):
+            doing.append(
+                f"- If the deliverable is a web app, finish with {t('preview_start')} or {t('preview_open')} so the user's Bancada shows it running."
+            )
         verify_clause = f", or {t('verify_project')} when present" if has("verify_project") else ""
         doing += [
             f"- Verify your work before you say it is done: run the checks that cover your change (the project's tests, type checks or build{verify_clause}). If you could not verify, say so plainly; the interface marks the turn as not verified. Never say a check passed if you did not run it.",

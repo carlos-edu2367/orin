@@ -4092,6 +4092,16 @@ class TurnSession:
                 "- You have the same freedom as the main agent: create, edit and delete files and run commands with "
                 "your tools to do the task yourself; do not hand the change back as instructions."
             )
+            lines.append(
+                "- Create and change files only with write_file/edit_file, never with shell redirection (`cat >`, `node -e fs.writeFileSync`, `Set-Content`)."
+            )
+            lines.append("- Batch independent reads in one turn.")
+            lines.append(
+                "- For implementation tasks: write the failing test early; do not spend more than ~10 tool calls exploring before the first change; update todo_write as you go."
+            )
+            lines.append(
+                "- To test a server use run_command with run_in_background, not `&`; never stop a server the leader or the user opened."
+            )
         if getattr(toolset, "_code_mode_permits_push", False):
             lines.append("- `git push` is authorized for this turn. Production deploys still need confirmation.")
         return "\n".join(lines)
