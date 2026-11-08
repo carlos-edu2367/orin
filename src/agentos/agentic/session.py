@@ -889,6 +889,22 @@ class _SubagentStore:
         self.prior_text: list[str] = []
         self.failed = False
         self.error_code: str | None = None
+        self._tool_call_lines: list[tuple[str, str]] = []
+
+    def _record_tool_call_line(
+        self, inv_id: str, tool_name: str, target: str
+    ) -> None:
+        clean_target = target.strip().splitlines()[0][:160] if target.strip() else ""
+        line = f"{tool_name}: {clean_target}" if clean_target else tool_name
+        if inv_id:
+            for idx, (existing_id, _) in enumerate(self._tool_call_lines):
+                if existing_id == inv_id:
+                    self._tool_call_lines[idx] = (inv_id, line)
+                    return
+        self._tool_call_lines.append((inv_id, line))
+
+    def recent_tool_calls(self, limit: int = 15) -> list[str]:
+        return [line for _, line in self._tool_call_lines[-limit:]]
 
     def load(self, turn_id: str) -> dict[str, object]:
         return self._turn
@@ -914,6 +930,21 @@ class _SubagentStore:
         )
 
     def lifecycle(self, turn: dict[str, object], state: str, **payload: object) -> None:
+        if state in ("tool_started", "tool_finished"):
+            inv_id = str(payload.get("invocation_id") or "")
+            name = str(payload.get("tool_name") or "tool")
+            args = (
+                payload.get("tool_arguments")
+                if isinstance(payload.get("tool_arguments"), Mapping)
+                else {}
+            )
+            target = ""
+            for k in ("path", "target_path", "file_path", "pattern", "description", "command", "summary"):
+                val = args.get(k) if isinstance(args, Mapping) and k in args else payload.get(k)
+                if isinstance(val, str) and val.strip():
+                    target = val.strip()
+                    break
+            self._record_tool_call_line(inv_id, name, target)
         self._session.emit_lifecycle(turn, state, agent_id=self.agent_id, agent_name=self.name, **payload)
 
     def record_step(self, turn: dict[str, object], **values: object) -> None:
@@ -3019,6 +3050,33 @@ class TurnSession:
         finally:
             slot.release()
 
+    def _format_subagent_partial_failure(
+        self,
+        *,
+        clean: str,
+        reason: str,
+        agent_id: str,
+        sub_store: _SubagentStore,
+        subagent_tools: AgentToolset | None,
+    ) -> str:
+        lines: list[str] = [f"Subagent '{clean}' did not finish ({reason})."]
+        recent_calls = sub_store.recent_tool_calls(15)
+        if recent_calls:
+            lines.append("Recent tool calls:")
+            for call_line in recent_calls:
+                lines.append(f"- {call_line}")
+        changed = sorted(
+            str(p)
+            for p in getattr(subagent_tools, "_changed_paths", ())
+            if str(p).strip()
+        )
+        if changed:
+            lines.append("Modified files: " + ", ".join(changed))
+        else:
+            lines.append("Modified files: none")
+        lines.append(f'Resume with run_subagent(agent_id="{agent_id}", task=...).')
+        return "\n".join(lines)
+
     def _subagent_limits(self, *, max_iterations: int | None, max_actions: int | None, code_mode: bool) -> AgenticLimits:
         """A subagent's limits. In Code mode it shares the turn's deadline, retries and budget (W3-R7); Chat keeps its own."""
         common = {
@@ -3299,6 +3357,14 @@ class TurnSession:
             prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
             if answer:
                 prior_transcript.append({"role": "assistant", "content": answer})
+            elif sub_store.recent_tool_calls(15):
+                prior_transcript.append(
+                    {
+                        "role": "assistant",
+                        "content": "Partial progress before interruption:\n"
+                        + "\n".join(f"- {c}" for c in sub_store.recent_tool_calls(15)),
+                    }
+                )
             with self._subagent_lock:
                 self._subagent_histories[agent_id] = prior_transcript
             limit_stopped = (
@@ -3315,7 +3381,19 @@ class TurnSession:
                     {"agent_name": clean, "sender_name": clean, "recipient_name": caller.name, "label": clean, "error_code": reason},
                     agent_id=agent_id, parent_agent_id=parent_agent_id,
                 )
-                return ToolOutcome("failed", f"{clean} não concluiu", f"Subagent '{clean}' did not finish ({reason}).", {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"}, reason)
+                return ToolOutcome(
+                    "failed",
+                    f"{clean} não concluiu",
+                    self._format_subagent_partial_failure(
+                        clean=clean,
+                        reason=reason,
+                        agent_id=agent_id,
+                        sub_store=sub_store,
+                        subagent_tools=subagent_tools,
+                    ),
+                    {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"},
+                    reason,
+                )
             final_agent_state = "completed"
             delegation_settled = True
             self._record(

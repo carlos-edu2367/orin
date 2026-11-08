@@ -576,3 +576,70 @@ def test_cancel_api_with_keep_subagents_leaves_background_entry_running_while_de
     finally:
         BACKGROUND_AGENTS.clear_for_tests()
         engine.dispose()
+
+
+def test_cancelled_subagent_returns_partial_progress_with_recent_tool_calls_and_agent_id(
+    tmp_path: Path,
+) -> None:
+    from agentos.agentic.workspace import ConversationWorkspace
+
+    ws = ConversationWorkspace(tmp_path, TURN["conversation_id"])
+    for fname in ("alpha.py", "beta.py", "gamma.py"):
+        (ws.root / fname).write_text(f"# {fname}\n", encoding="utf-8")
+
+    cancelled_flag = [False]
+
+    class _ThreeReadsThenCancelledChild:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, _request: dict[str, object]):
+            self.calls += 1
+            if self.calls == 1:
+                return iter(
+                    _parallel_tool_calls_batch(
+                        [
+                            ("c1", "read_file", {"path": "alpha.py"}),
+                            ("c2", "read_file", {"path": "beta.py"}),
+                            ("c3", "read_file", {"path": "gamma.py"}),
+                        ]
+                    )
+                )
+            cancelled_flag[0] = True
+            return iter(_text_batch("unreachable"))
+
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 't14.db').as_posix()}")
+    metadata.create_all(engine)
+    try:
+        child = _ThreeReadsThenCancelledChild()
+        session = TurnSession(
+            turn=dict(TURN),
+            store=_RecordingStore(),
+            agents_store=ConversationAgentStore(
+                engine,
+                conversation_id=TURN["conversation_id"],
+                user_id=TURN["user_id"],
+            ),
+            memory_store=None,
+            provider_factory=lambda: child,
+            workspace_root=tmp_path,
+            child_provider_factory=lambda _model: child,
+            cancelled=lambda _turn: cancelled_flag[0],
+        )
+
+        outcome = session._run_subagent(
+            subagent_type="general-purpose",
+            task="Leia alpha.py, beta.py e gamma.py",
+            run_in_background=False,
+        )
+        assert outcome.status == "failed"
+        assert "did not finish (TURN_CANCELLED)" in outcome.content
+        assert "alpha.py" in outcome.content
+        assert "beta.py" in outcome.content
+        assert "gamma.py" in outcome.content
+        agent_id = str(outcome.payload.get("agent_id") or "")
+        assert agent_id
+        assert agent_id in outcome.content
+    finally:
+        engine.dispose()
+
