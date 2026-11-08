@@ -71,6 +71,23 @@ class SkillRegistry:
 
     def resolve(self, skill_id: str, *, version: str | None = None, scope: SkillScope | None = None) -> Skill:
         candidates = [skill for skill in self._skills.values() if skill.id == skill_id and (version is None or skill.version == version) and (scope is None or skill.scope is SkillScope(scope))]
+        if not candidates and ":" not in skill_id:
+            tail = f":{skill_id}"
+            namespaced = [
+                skill
+                for skill in self._skills.values()
+                if skill.id.endswith(tail)
+                and (version is None or skill.version == version)
+                and (scope is None or skill.scope is SkillScope(scope))
+            ]
+            distinct_ids = sorted({skill.id for skill in namespaced})
+            if len(distinct_ids) == 1:
+                candidates = namespaced
+            elif len(distinct_ids) > 1:
+                suffix = f"@{version}" if version else ""
+                raise SkillNotFound(
+                    f"skill '{skill_id}{suffix}' is ambiguous; specify one of: {', '.join(distinct_ids)}"
+                )
         if not candidates:
             suffix = f"@{version}" if version else ""
             raise SkillNotFound(f"skill '{skill_id}{suffix}' was not found")
