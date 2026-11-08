@@ -643,3 +643,80 @@ def test_cancelled_subagent_returns_partial_progress_with_recent_tool_calls_and_
     finally:
         engine.dispose()
 
+
+def test_two_consecutive_turns_delegating_without_agent_id_create_distinct_subagent_instances(
+    tmp_path: Path,
+) -> None:
+    """T15 (N4): two consecutive turns of the same conversation calling run_subagent(subagent_type='antigravity')
+    without agent_id generate two distinct agent_ids (antigravity and antigravity-2) instead of reusing turn 1's record."""
+    from types import SimpleNamespace
+
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 't15.db').as_posix()}")
+    metadata.create_all(engine)
+    try:
+        agents_store = ConversationAgentStore(
+            engine,
+            conversation_id=TURN["conversation_id"],
+            user_id=TURN["user_id"],
+        )
+        cli_opts = SimpleNamespace(
+            agents={
+                "antigravity": {
+                    "description": "Antigravity specialist subagent",
+                    "prompt": "You are Antigravity.",
+                }
+            }
+        )
+        child = _QuickChild()
+
+        turn1 = dict(TURN, turn_id="turn-1", execution_id="exec-1")
+        session1 = TurnSession(
+            turn=turn1,
+            store=_RecordingStore(),
+            agents_store=agents_store,
+            memory_store=None,
+            provider_factory=lambda: child,
+            workspace_root=tmp_path,
+            child_provider_factory=lambda _model: child,
+        )
+        session1.cli_options = cli_opts
+        session1._agent_definitions = session1._load_agent_definitions(trusted=True)
+        outcome1 = session1._run_subagent(
+            subagent_type="antigravity",
+            task="Tarefa do turno 1",
+            run_in_background=False,
+        )
+        assert outcome1.status == "succeeded"
+
+        turn2 = dict(TURN, turn_id="turn-2", execution_id="exec-2")
+        session2 = TurnSession(
+            turn=turn2,
+            store=_RecordingStore(),
+            agents_store=agents_store,
+            memory_store=None,
+            provider_factory=lambda: child,
+            workspace_root=tmp_path,
+            child_provider_factory=lambda _model: child,
+        )
+        session2.cli_options = cli_opts
+        session2._agent_definitions = session2._load_agent_definitions(trusted=True)
+        outcome2 = session2._run_subagent(
+            subagent_type="antigravity",
+            task="Tarefa do turno 2",
+            run_in_background=False,
+        )
+        assert outcome2.status == "succeeded"
+
+        id1 = str(outcome1.payload.get("agent_id") or "")
+        id2 = str(outcome2.payload.get("agent_id") or "")
+        name1 = str(outcome1.payload.get("agent_name") or "")
+        name2 = str(outcome2.payload.get("agent_name") or "")
+        assert name1 == "antigravity"
+        assert name2 == "antigravity-2"
+        assert id1 != id2
+        assert id1.startswith(f"agent:{TURN['conversation_id']}:")
+        assert id2.startswith(f"agent:{TURN['conversation_id']}:")
+    finally:
+        engine.dispose()
+
+

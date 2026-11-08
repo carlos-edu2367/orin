@@ -2553,8 +2553,36 @@ class TurnSession:
                     builtin_key = raw_bt
                     builtin_spec = self._subagent_spec(builtin_key)
         elif builtin_spec is not None:
+            existing_count = 0
+            if self.agents_store is not None:
+                lister = getattr(self.agents_store, "list", None)
+                if callable(lister):
+                    prefix = f"{builtin_key}-"
+                    try:
+                        for item in lister():
+                            if not isinstance(item, Mapping):
+                                continue
+                            if str(item.get("state") or "idle").strip().lower() == "idle":
+                                continue
+                            raw_name = str(item.get("name") or "").strip().lower()
+                            if raw_name == builtin_key:
+                                existing_count = max(existing_count, 1)
+                            elif raw_name.startswith(prefix):
+                                suffix = raw_name[len(prefix) :]
+                                if suffix.isdigit():
+                                    existing_count = max(existing_count, int(suffix))
+                    except Exception:
+                        pass
+                elif hasattr(self.agents_store, "find"):
+                    try:
+                        if self.agents_store.find(builtin_key) is not None:
+                            existing_count = 1
+                            while self.agents_store.find(f"{builtin_key}-{existing_count + 1}") is not None:
+                                existing_count += 1
+                    except Exception:
+                        pass
             with self._subagent_lock:
-                count = self._builtin_type_counts.get(builtin_key, 0) + 1
+                count = max(self._builtin_type_counts.get(builtin_key, 0), existing_count) + 1
                 self._builtin_type_counts[builtin_key] = count
             instance_name = teammate_name or (builtin_key if count == 1 else f"{builtin_key}-{count}")
             clean = instance_name
