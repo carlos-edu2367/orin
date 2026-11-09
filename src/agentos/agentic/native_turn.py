@@ -64,6 +64,10 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 BATCH_GATHER_SECONDS: float = 0.1
+# When the stream did not say which assistant message an edit and a read belong to,
+# a read whose result was delivered longer ago than this is treated as seen by the
+# model: a new model round takes longer than that.
+SAME_MESSAGE_READ_WINDOW_SECONDS: float = 1.0
 CLI_PARALLEL_MCP: bool = True
 CLI_PARALLEL_NEEDS_READONLY_HINT: bool = True
 SESSION_BRANCH: str = "B"
@@ -379,9 +383,13 @@ class RuntimeToolExecutor(ToolExecutor):
         gather_seconds: float = BATCH_GATHER_SECONDS,
         deadline: datetime | float | None = None,
         allow_deferral: bool = True,
+        same_message_read_window: float = SAME_MESSAGE_READ_WINDOW_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.runtime = runtime
         self.turn = turn
+        self._same_message_read_window = max(0.0, float(same_message_read_window))
+        self._clock = clock
         self._allow_deferral = bool(allow_deferral)
         self._explicit_tool_schemas: list[dict[str, object]] | None = (
             list(tool_schemas) if tool_schemas is not None else None
@@ -414,6 +422,13 @@ class RuntimeToolExecutor(ToolExecutor):
         self._in_flight: int = 0
         self._closed = threading.Event()
         self._first_read_keys_by_message_id: dict[str, set[str]] = {}
+        # When each first-read result was handed back to the model, and which assistant
+        # message the stream itself said each tool_use belongs to: lets the same-batch
+        # guard tell a blind edit from one written after the read result, even when the
+        # message id an MCP call fell back to is stale, repeated or missing.
+        self._read_delivered_at: dict[str, float] = {}
+        self._read_stream_message_id: dict[str, str | None] = {}
+        self._tool_use_stream_message_id: dict[str, str] = {}
         self._seen_tool_round_message_ids: set[str] = set()
         self.consume_round_buffers: Callable[[], tuple[list[str], list[str]]] | None = None
 
@@ -589,6 +604,8 @@ class RuntimeToolExecutor(ToolExecutor):
                 msg_id = self._current_message_id
             if tool_use_id:
                 self._tool_use_message_id[str(tool_use_id)] = msg_id
+                if message_id and str(message_id).strip():
+                    self._tool_use_stream_message_id[str(tool_use_id)] = msg_id
 
     def register_tool_use_complete(
         self,
@@ -609,6 +626,8 @@ class RuntimeToolExecutor(ToolExecutor):
                 msg_id = self._tool_use_message_id.get(str(tool_use_id), self._current_message_id)
             if tool_use_id:
                 self._tool_use_message_id[str(tool_use_id)] = msg_id
+                if message_id and str(message_id).strip():
+                    self._tool_use_stream_message_id[str(tool_use_id)] = msg_id
                 self._pending_tool_uses.append(
                     (str(tool_use_id), int_name, canon_args, msg_id)
                 )
@@ -871,6 +890,44 @@ class RuntimeToolExecutor(ToolExecutor):
                 time.sleep(min(step, poll_seconds - waited))
                 waited += step
 
+    def _forget_reads_already_seen(
+        self, msg_first_reads: set[str], entries: Sequence[_BatchEntry]
+    ) -> None:
+        """Drop reads whose result the model already had when it wrote this batch's edits.
+
+        The batch key comes from a message id that can be stale (the MCP call raced
+        the stream event), repeated by the adapter, or missing, so it may hold reads
+        from earlier rounds. When the stream named the assistant message of both the
+        read and the edit, the edit is blind only if they share it; otherwise it is
+        blind only if the read result was delivered just before the edit arrived.
+        """
+        if not msg_first_reads:
+            return
+        writes = [e for e in entries if not e.read_only]
+        if not writes:
+            return
+        edit_msg = self._stream_message_id_of(writes)
+        now = self._clock()
+        for key in list(msg_first_reads):
+            delivered = self._read_delivered_at.get(key)
+            if delivered is None:
+                continue
+            read_msg = self._read_stream_message_id.get(key)
+            if read_msg is not None and edit_msg is not None:
+                seen = read_msg != edit_msg
+            else:
+                seen = now - delivered >= self._same_message_read_window
+            if seen:
+                msg_first_reads.discard(key)
+
+    def _stream_message_id_of(self, entries: Any) -> str | None:
+        """The one assistant message the stream assigned to all `entries`, if any."""
+        with self._corr_lock:
+            ids = {self._tool_use_stream_message_id.get(e.call_id) for e in entries}
+        if len(ids) != 1 or None in ids:
+            return None
+        return next(iter(ids))
+
     def _execute_batch(
         self,
         entries: list[_BatchEntry],
@@ -925,12 +982,21 @@ class RuntimeToolExecutor(ToolExecutor):
         msg_first_reads = self._first_read_keys_by_message_id.setdefault(
             batch_key, set()
         )
+        self._forget_reads_already_seen(msg_first_reads, entries)
+        reads_before = set(msg_first_reads)
         before_discovered = self._snapshot_discovered()
         self.runtime._native_message_first_read_keys = msg_first_reads
         try:
             results = self.runtime._run_toolset(self.turn, raw_calls)
         finally:
             self.runtime._native_message_first_read_keys = None
+            new_reads = msg_first_reads - reads_before
+            if new_reads:
+                delivered = self._clock()
+                read_msg = self._stream_message_id_of(e for e in entries if e.read_only)
+                for key in new_reads:
+                    self._read_delivered_at[key] = delivered
+                    self._read_stream_message_id[key] = read_msg
         after_discovered = self._snapshot_discovered()
         tools_changed = after_discovered != before_discovered
         if tools_changed:

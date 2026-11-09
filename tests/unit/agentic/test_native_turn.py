@@ -2768,3 +2768,105 @@ def test_native_turn_suppresses_waiting_model_while_tool_runs_and_on_text_arriva
 
 
 
+
+
+def _leak_executor(tmp_path: Path, **kwargs: Any) -> tuple[ConversationWorkspace, RuntimeToolExecutor]:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / "page.tsx").write_text("x = 1\n", encoding="utf-8")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=50, max_actions=50, context_window_tokens=1_000_000),
+    )
+    schemas = runtime._names.schemas_out(runtime._tool_schemas(store.turn))
+    kwargs.setdefault("gather_seconds", 0.01)
+    kwargs.setdefault("same_message_read_window", 0.02)
+    return workspace, RuntimeToolExecutor(runtime, store.turn, tool_schemas=schemas, **kwargs)
+
+
+def _read(executor: RuntimeToolExecutor, tool_use_id: str) -> ToolCallResult:
+    return executor.call_tool(
+        ToolCallRequest(name="Read", arguments={"file_path": "page.tsx"}, meta={TOOL_USE_ID_META_KEY: tool_use_id})
+    )
+
+
+def _edit(executor: RuntimeToolExecutor, tool_use_id: str, old: str, new: str) -> ToolCallResult:
+    return executor.call_tool(
+        ToolCallRequest(
+            name="Edit",
+            arguments={"file_path": "page.tsx", "old_string": old, "new_string": new},
+            meta={TOOL_USE_ID_META_KEY: tool_use_id},
+        )
+    )
+
+
+def test_edit_in_a_later_message_is_not_refused_when_its_call_beats_the_stream_event(tmp_path: Path) -> None:
+    """Regression: the edit's MCP call can arrive before Orin parses the new message's
+    stream event, so it falls back to the previous message id, whose reads leaked into it."""
+    workspace, executor = _leak_executor(tmp_path)
+    executor.register_tool_use_started("tu_r1", "mcp__orin__Read", message_id="msg_1")
+    executor.register_tool_use_complete("tu_r1", "mcp__orin__Read", {"file_path": "page.tsx"}, message_id="msg_1")
+    assert _read(executor, "tu_r1").is_error is False
+    time.sleep(0.05)
+
+    # msg_2 stream events have not been parsed yet when the Edit call arrives.
+    r_edit = _edit(executor, "tu_e2", "x = 1", "x = 2")
+    assert r_edit.is_error is False, r_edit.text
+    assert (workspace.root / "page.tsx").read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_without_any_message_id_a_read_never_blocks_an_edit_minutes_later(tmp_path: Path) -> None:
+    """Regression (Antigravity): the adapter reports no message ids, only usage at the end."""
+    workspace, executor = _leak_executor(tmp_path)
+    assert _read(executor, "r1").is_error is False
+    time.sleep(0.05)
+    r_edit = _edit(executor, "e1", "x = 1", "x = 2")
+    assert r_edit.is_error is False, r_edit.text
+    time.sleep(0.05)
+    assert _read(executor, "r2").is_error is False
+    time.sleep(0.05)
+    r_edit2 = _edit(executor, "e2", "x = 2", "x = 3")
+    assert r_edit2.is_error is False, r_edit2.text
+
+
+def test_an_edit_streamed_in_the_same_message_as_the_read_is_refused_even_when_it_arrives_late(
+    tmp_path: Path,
+) -> None:
+    """Claude can run a read while it is still streaming the rest of the message: the edit
+    that follows in that message arrives well after the read result, but is still blind."""
+    workspace, executor = _leak_executor(tmp_path)
+    executor.register_tool_use_started("tu_r1", "mcp__orin__Read", message_id="msg_1")
+    assert _read(executor, "tu_r1").is_error is False
+    executor.register_tool_use_started("tu_e1", "mcp__orin__Edit", message_id="msg_1")
+    time.sleep(0.05)
+    r_edit = _edit(executor, "tu_e1", "x = 1", "x = 2")
+    assert r_edit.is_error is True
+    assert "same batch" in r_edit.text.lower()
+    assert (workspace.root / "page.tsx").read_text(encoding="utf-8") == "x = 1\n"
+
+    executor.register_tool_use_started("tu_e2", "mcp__orin__Edit", message_id="msg_2")
+    r_next = _edit(executor, "tu_e2", "x = 1", "x = 2")
+    assert r_next.is_error is False, r_next.text
+
+
+def test_without_stream_ids_an_edit_right_after_the_read_is_still_refused(tmp_path: Path) -> None:
+    workspace, executor = _leak_executor(tmp_path, same_message_read_window=5.0)
+    executor.note_message_id("msg_const")
+    assert _read(executor, "r1").is_error is False
+    r_edit = _edit(executor, "e1", "x = 1", "x = 2")
+    assert r_edit.is_error is True
+    assert (workspace.root / "page.tsx").read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_a_constant_adapter_message_id_does_not_leak_reads_across_rounds(tmp_path: Path) -> None:
+    """Regression: an adapter that keeps reporting the same message id for every round."""
+    workspace, executor = _leak_executor(tmp_path)
+    executor.note_message_id("msg_const")
+    assert _read(executor, "r1").is_error is False
+    time.sleep(0.05)
+    r_edit = _edit(executor, "e1", "x = 1", "x = 2")
+    assert r_edit.is_error is False, r_edit.text
+    assert (workspace.root / "page.tsx").read_text(encoding="utf-8") == "x = 2\n"
