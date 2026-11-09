@@ -727,7 +727,7 @@ def test_run_command_terminates_its_process_tree_when_it_times_out(toolset: Agen
     assert outcome.status == "failed"
     assert outcome.error_code == "TOOL_REFUSED"
     assert outcome.content == "Command timed out after 45s."
-    assert process.timeouts == [45, None]
+    assert process.timeouts == [45, 5]  # the drain after the kill is bounded: a grandchild may hold the pipe
     assert terminated == [2468]
 
 

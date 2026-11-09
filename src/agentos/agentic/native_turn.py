@@ -215,6 +215,18 @@ class _BatchEntry:
     result: ToolCallResult | None = None
     error: BaseException | None = None
     batch_key: str | None = None
+    cancelled: threading.Event | None = None
+
+    def abandoned(self) -> bool:
+        return self.cancelled is not None and self.cancelled.is_set()
+
+
+# How often a call queued behind another checks whether its client gave up on it.
+EXEC_WAIT_POLL_SECONDS: float = 0.2
+ABANDONED_BEFORE_START = (
+    "Not run: the client stopped waiting for this call (tool timeout) while an earlier "
+    "tool of this turn was still running. Nothing was changed; call it again if still needed."
+)
 
 
 class _OpenReadBatch:
@@ -245,6 +257,45 @@ class ToolBatchCollector:
         self._in_flight_reads: dict[str, list[_BatchEntry]] = {}
         self._closed_read_batches: dict[str, tuple[list[_BatchEntry], float]] = {}
         self._in_flight_writes: dict[str, int] = {}
+        self._running: list[_BatchEntry] = []
+
+    def running_call_abandoned(self) -> bool:
+        """Whether the client gave up on every call of the batch running now.
+
+        The CLI stops waiting after its MCP tool timeout but the tool keeps
+        running here and holds the turn's tools; a long tool checks this to stop itself.
+        """
+        with self._state_lock:
+            running = list(self._running)
+        return bool(running) and all(entry.abandoned() for entry in running)
+
+    def _run_exclusive(self, entries: list[_BatchEntry], msg_key: str) -> list[ToolCallResult]:
+        """Run one batch at a time; a call its client already gave up on is never run late."""
+        while not self._exec_lock.acquire(timeout=EXEC_WAIT_POLL_SECONDS):
+            if all(entry.abandoned() for entry in entries):
+                return [ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True) for _ in entries]
+        try:
+            live = [entry for entry in entries if not entry.abandoned()]
+            if not live:
+                return [ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True) for _ in entries]
+            with self._state_lock:
+                self._running = live
+            try:
+                live_results = self._run_batch(live, msg_key)
+            finally:
+                with self._state_lock:
+                    self._running = []
+        finally:
+            self._exec_lock.release()
+        if len(live) == len(entries):
+            return live_results
+        if len(live_results) != len(live):
+            return live_results  # the caller reports the mismatch
+        by_entry = {id(entry): result for entry, result in zip(live, live_results)}
+        return [
+            by_entry.get(id(entry)) or ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True)
+            for entry in entries
+        ]
 
     def submit(
         self,
@@ -254,6 +305,7 @@ class ToolBatchCollector:
         *,
         message_id: str = "default",
         read_only: bool = False,
+        cancelled: threading.Event | None = None,
     ) -> ToolCallResult:
         msg_key = str(message_id or "default")
         entry = _BatchEntry(
@@ -262,6 +314,7 @@ class ToolBatchCollector:
             arguments=dict(arguments or {}),
             message_id=msg_key,
             read_only=bool(read_only),
+            cancelled=cancelled,
         )
 
         if not entry.read_only:
@@ -282,23 +335,24 @@ class ToolBatchCollector:
                         prior_entries = list(saved[0])
                 self._in_flight_writes[msg_key] = self._in_flight_writes.get(msg_key, 0) + 1
             for prior in prior_entries:
-                prior.done.wait()
+                while not prior.done.wait(EXEC_WAIT_POLL_SECONDS):
+                    if entry.abandoned():
+                        break
             if prior_entries and prior_entries[-1].batch_key:
                 entry.batch_key = prior_entries[-1].batch_key
 
-            with self._exec_lock:
-                try:
-                    results = self._run_batch([entry], msg_key)
-                finally:
-                    with self._state_lock:
-                        rem_writes = self._in_flight_writes.get(msg_key, 1) - 1
-                        if rem_writes <= 0:
-                            self._in_flight_writes.pop(msg_key, None)
-                            saved = self._closed_read_batches.get(msg_key)
-                            if saved is not None and self._clock() >= saved[1]:
-                                self._closed_read_batches.pop(msg_key, None)
-                        else:
-                            self._in_flight_writes[msg_key] = rem_writes
+            try:
+                results = self._run_exclusive([entry], msg_key)
+            finally:
+                with self._state_lock:
+                    rem_writes = self._in_flight_writes.get(msg_key, 1) - 1
+                    if rem_writes <= 0:
+                        self._in_flight_writes.pop(msg_key, None)
+                        saved = self._closed_read_batches.get(msg_key)
+                        if saved is not None and self._clock() >= saved[1]:
+                            self._closed_read_batches.pop(msg_key, None)
+                    else:
+                        self._in_flight_writes[msg_key] = rem_writes
             if not results:
                 return ToolCallResult(text="", is_error=True)
             return results[0]
@@ -338,8 +392,7 @@ class ToolBatchCollector:
             entries = list(batch.entries)
 
         try:
-            with self._exec_lock:
-                results = self._run_batch(entries, msg_key)
+            results = self._run_exclusive(entries, msg_key)
             if len(results) != len(entries):
                 raise RuntimeError(
                     f"ToolBatchCollector expected {len(entries)} results, got {len(results)}"
@@ -441,6 +494,11 @@ class RuntimeToolExecutor(ToolExecutor):
             self._execute_batch,
             gather_seconds=gather_seconds,
         )
+        # A long tool (run_command, fetch, wait) stops when the CLI gave up on its call,
+        # instead of holding every later tool of the turn behind it.
+        bind_abandon = getattr(runtime.toolset, "set_call_abandoned_check", None)
+        if callable(bind_abandon):
+            bind_abandon(self.collector.running_call_abandoned)
 
     def close(self) -> None:
         self._closed.set()
@@ -739,12 +797,17 @@ class RuntimeToolExecutor(ToolExecutor):
                 )
 
         read_only = self._is_read_only(raw_name, internal_name)
+        extra: dict[str, Any] = {}
+        cancelled = getattr(request, "cancelled", None)
+        if cancelled is not None:
+            extra["cancelled"] = cancelled
         return self._call_collector(
             call_id,
             internal_name,
             request.arguments,
             message_id=message_id,
             read_only=read_only,
+            **extra,
         )
 
     def _call_collector(self, *args: Any, **kwargs: Any) -> ToolCallResult:

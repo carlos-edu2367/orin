@@ -686,9 +686,53 @@ def _terminate_pid(pid: int) -> None:
             pass
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
-    """Stop a timed-out shell together with any child retaining its output pipes."""
+def _checked(check: Callable[[], Any] | None) -> bool:
+    """A stop check's answer; a check that is missing or raises never stops a healthy command."""
+    if check is None:
+        return False
+    try:
+        return bool(check())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _close_stream_quietly(stream: Any, wait_seconds: float = 0.2) -> None:
+    """Close a pipe without ever blocking the caller.
+
+    ``BufferedReader.close()`` takes the same lock a ``readline()`` blocked in
+    another thread holds, so closing a pipe a reader thread is still waiting on
+    (a grandchild keeps its write end open) blocks forever. The close runs in a
+    daemon thread and the caller waits at most ``wait_seconds`` for it.
+    """
+    if stream is None:
+        return
+
+    def _close() -> None:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    closer = threading.Thread(target=_close, name="orin-pipe-close", daemon=True)
+    closer.start()
+    closer.join(max(0.0, wait_seconds))
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes], *, job: Any = None) -> None:
+    """Stop a timed-out shell together with any child retaining its output pipes.
+
+    On Windows ``taskkill /T`` follows parent links, and a Git Bash pipeline
+    (``find / | head``) leaves its programs with a parent that already exited,
+    so they survive it and keep the output pipe open. ``job`` (a Windows Job
+    Object the shell was assigned to) reaches them anyway: every descendant is
+    in the job, whatever happened to its parent.
+    """
     if os.name == "nt":
+        if job is not None:
+            try:
+                job.terminate()
+            except Exception:
+                pass
         if getattr(process, "pid", None):
             _terminate_pid(process.pid)
     else:
@@ -701,12 +745,7 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
         except Exception:
             pass
     for stream_attr in ("stdout", "stderr"):
-        stream = getattr(process, stream_attr, None)
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                pass
+        _close_stream_quietly(getattr(process, stream_attr, None))
 
 
 def _process_is_running(pid: int) -> bool:

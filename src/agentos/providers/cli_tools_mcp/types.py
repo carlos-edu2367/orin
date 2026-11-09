@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import threading
 from typing import Any, Mapping, Protocol, Sequence
 
 
@@ -17,6 +18,9 @@ class ToolCallRequest:
     name: str
     arguments: dict[str, Any]
     meta: Mapping[str, Any] = field(default_factory=dict)
+    # Set when the client gives up on this call (MCP ``notifications/cancelled``, sent
+    # on its tool timeout): a queued call is then skipped and a running one stopped.
+    cancelled: threading.Event | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)

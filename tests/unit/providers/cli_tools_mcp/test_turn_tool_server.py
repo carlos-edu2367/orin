@@ -377,3 +377,60 @@ def test_rejects_ipv6_or_non_ipv4_loopback_bind_and_invalid_jsonrpc_shapes() -> 
         assert r_batch.status_code == 400
     finally:
         bg.close()
+
+
+def test_cancelled_notification_signals_the_running_call() -> None:
+    """The CLI sends notifications/cancelled when its tool timeout fires; the call must hear it."""
+    fake = _FakeExecutor()
+    fake.gate = threading.Event()
+    bg = BackgroundTurnToolServer.start(TurnToolServer(fake))
+    try:
+        headers = _auth_headers(bg.handle.token)
+        done: list[dict[str, Any]] = []
+
+        def _call() -> None:
+            r = httpx.post(
+                bg.handle.url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {"name": "Write", "arguments": {"file_path": "slow.py"}},
+                },
+                headers=headers,
+                timeout=5.0,
+            )
+            done.append(r.json())
+
+        t = threading.Thread(target=_call)
+        t.start()
+        assert fake.entered.wait(timeout=2.0)
+        cancelled = fake.calls[0].cancelled
+        assert cancelled is not None and not cancelled.is_set()
+
+        other = httpx.post(
+            bg.handle.url,
+            json={"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 8}},
+            headers=headers,
+            timeout=2.0,
+        )
+        assert other.status_code == 202
+        assert not cancelled.is_set()
+
+        resp = httpx.post(
+            bg.handle.url,
+            json={
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": 7, "reason": "McpError: Request timed out"},
+            },
+            headers=headers,
+            timeout=2.0,
+        )
+        assert resp.status_code == 202
+        assert cancelled.is_set()
+        fake.gate.set()
+        t.join(timeout=2.0)
+        assert len(done) == 1
+    finally:
+        bg.close()

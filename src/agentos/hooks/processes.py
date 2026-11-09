@@ -29,9 +29,14 @@ class ProcessResult:
 
 
 class _WindowsJob:
-    """A Job Object with KILL_ON_JOB_CLOSE: closing it kills every process inside."""
+    """A Job Object; with ``kill_on_close`` (the default) closing it kills every process inside.
 
-    def __init__(self) -> None:
+    Without it the job only groups the tree, so ``terminate()`` reaches every
+    descendant (even one whose parent already exited) while a normal ``close()``
+    leaves a process the command meant to keep running alone.
+    """
+
+    def __init__(self, *, kill_on_close: bool = True) -> None:
         import ctypes
         from ctypes import wintypes
 
@@ -83,7 +88,7 @@ class _WindowsJob:
         if not self.handle:
             raise OSError("CreateJobObjectW failed")
         info = ExtendedLimits()
-        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        info.BasicLimitInformation.LimitFlags = 0x2000 if kill_on_close else 0  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not kernel32.SetInformationJobObject(self.handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
             kernel32.CloseHandle(self.handle)
             self.handle = None

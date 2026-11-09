@@ -105,7 +105,7 @@ from agentos.agentic.tools.scheduling.monitor import MonitorTools
 from agentos.agentic.tools.interaction.notify import NotificationBudget, NotifyTools
 from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for callers and tests
     _SENSITIVE_NAME, _PRIVATE_KEY_BLOCK, _AUTHORIZATION_VALUE, _SENSITIVE_ASSIGNMENT, _JWT_VALUE,
-    _netloc, _safe_display_url, sanitize_page_text, _READ_ORDER, ReadFileRecord, TOOLKITS,
+    _netloc, _safe_display_url, sanitize_page_text, _READ_ORDER, ReadFileRecord, TOOLKITS, _checked,
     VERIFICATION_MODES, ContractError, parse_contract, image_block, logger, MAX_TOOL_RESULT_CHARS,
     EXTERNAL_CHANGE_HASH_LIMIT_BYTES, PERMISSION_DENIAL_CODES, _ORIN_AUTHORED_CODES,
     DEFAULT_COMMAND_TIMEOUT_SECONDS, CANCEL_CHECK_SECONDS, MAX_COMMAND_TIMEOUT_SECONDS,
@@ -274,6 +274,7 @@ class AgentToolset(
         self._tls = threading.local()
         # Asked while a foreground command runs: True stops the command (the turn was interrupted).
         self._cancel_check = cancel_check
+        self._call_abandoned_check: Callable[[], bool] | None = None
         # Per-message file history (W4): what each file held before this user message's turn first changed it.
         self._file_history = file_history
         self._history_message_id = str(user_message_id or turn_id or "") or None
@@ -569,15 +570,17 @@ class AgentToolset(
         except AgentToolError:
             return False
 
+    def set_call_abandoned_check(self, check: Callable[[], bool] | None) -> None:
+        """Install how a running tool learns that the model's client stopped waiting for it."""
+        self._call_abandoned_check = check
+
+    def _call_abandoned(self) -> bool:
+        """Whether the client gave up on the call running now (CLI tool timeout)."""
+        return _checked(self._call_abandoned_check)
+
     def _cancel_requested(self) -> bool:
-        """Whether the person has stopped the turn. A check that raises never stops a healthy command."""
-        check = self._cancel_check
-        if check is None:
-            return False
-        try:
-            return bool(check())
-        except Exception:  # noqa: BLE001 - a broken check must not kill the command
-            return False
+        """Whether the person stopped the turn or the client abandoned this call."""
+        return self._call_abandoned() or _checked(self._cancel_check)
 
     def is_mutating(self, name: str) -> bool:
         """Whether a failed call could have changed an external effect.

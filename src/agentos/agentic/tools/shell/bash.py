@@ -44,6 +44,37 @@ from agentos.agentic.tools._shared import (
 )
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
+def _job_for(process: Any) -> Any:
+    """Put a foreground command's process tree in a Windows Job Object, so a timeout reaches all of it.
+
+    The job does not kill on close: a program the command deliberately left
+    running survives a normal exit. ``None`` off Windows or when the job cannot be made.
+    """
+    if os.name != "nt" or not isinstance(getattr(process, "pid", None), int):
+        return None
+    try:
+        from agentos.hooks.processes import _WindowsJob
+
+        job = _WindowsJob(kill_on_close=False)
+    except Exception:  # noqa: BLE001 - without a job the taskkill fallback still runs
+        return None
+    try:
+        if job.assign(process.pid):
+            return job
+    except Exception:  # noqa: BLE001
+        pass
+    job.close()
+    return None
+
+
+def _release_job(job: Any) -> None:
+    if job is not None:
+        try:
+            job.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 SESSION_CWD_PATH = ".orin/state/cwd.json"
 MAX_OUTPUT_FIELD_CHARS = 30_000
 # Exit codes that are an answer, not a failure, for common read-only programs.
@@ -337,6 +368,7 @@ class BashTools:
                     "tool_output": _bash_output("", "", command=command, background_id=shell_id),
                 }
             if getattr(process, "stdout", None) is not None and getattr(process, "stderr", None) is not None and hasattr(process, "poll"):
+                process_job = _job_for(process)
                 stdout_chunks: list[bytes] = []
                 stderr_chunks: list[bytes] = []
                 live_parts: list[str] = []
@@ -387,27 +419,29 @@ class BashTools:
                         if exited_at is None:
                             exited_at = now
                         elif (now - exited_at) >= 0.25:
-                            for stream_attr in ("stdout", "stderr"):
-                                stream = getattr(process, stream_attr, None)
-                                if stream is not None:
-                                    try:
-                                        stream.close()
-                                    except Exception:
-                                        pass
+                            # The shell exited but a program it started still holds the pipe. Stop waiting
+                            # for it; never close a pipe a reader is blocked on (that close blocks forever).
                             break
                     if now >= next_cancel_check:
                         next_cancel_check = now + CANCEL_CHECK_SECONDS
                         if self._cancel_requested():
-                            _terminate_process_tree(process)
+                            _terminate_process_tree(process, job=process_job)
+                            _release_job(process_job)
                             t_out.join(timeout=0.3)
                             t_err.join(timeout=0.3)
                             try:
                                 process.wait(timeout=0.5)  # the readers own the pipes now; communicate() would read them again
                             except Exception:
                                 pass
+                            if self._call_abandoned():
+                                raise AgentToolError(
+                                    "Stopped: the model's client gave up waiting for this command (tool timeout).",
+                                    error_code="TOOL_CALL_ABANDONED",
+                                )
                             raise AgentToolError("Interrupted by user: the command was stopped.", error_code="INTERRUPTED_BY_USER")
                     if elapsed >= timeout:
-                        _terminate_process_tree(process)
+                        _terminate_process_tree(process, job=process_job)
+                        _release_job(process_job)
                         t_out.join(timeout=0.3)
                         t_err.join(timeout=0.3)
                         if hasattr(process, "wait"):
@@ -430,6 +464,7 @@ class BashTools:
                         or (is_dev_server_cmd and elapsed >= 2.0)
                     )
                     if should_auto_bg:
+                        _release_job(process_job)
                         _restore_stashed_orin()
                         auto_log_rel = f"{_PROCESS_LOG_DIR}/{uuid4().hex[:12]}.log"
                         try:
@@ -556,15 +591,11 @@ class BashTools:
                                 pass
                     time.sleep(0.02)
 
-                for stream_attr in ("stdout", "stderr"):
-                    stream = getattr(process, stream_attr, None)
-                    if stream is not None:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
+                # Each reader closes its own pipe at EOF; one still blocked belongs to a leftover
+                # program and is left behind (daemon) instead of being closed under it.
                 t_out.join(timeout=0.3)
                 t_err.join(timeout=0.3)
+                _release_job(process_job)
                 if hasattr(process, "wait"):
                     try:
                         process.wait(timeout=0.5)
@@ -592,14 +623,18 @@ class BashTools:
                                 self._on_tool_progress(tool_name,progress_payload)  # type: ignore[call-arg]
                         except Exception:
                             pass
-                stdout_bytes = b"".join(stdout_chunks)
-                stderr_bytes = b"".join(stderr_chunks)
+                with stream_lock:
+                    stdout_bytes = b"".join(stdout_chunks)
+                    stderr_bytes = b"".join(stderr_chunks)
             else:
                 try:
                     stdout_bytes, stderr_bytes = process.communicate(timeout=timeout)
                 except subprocess.TimeoutExpired as error:
                     _terminate_process_tree(process)
-                    process.communicate()
+                    try:
+                        process.communicate(timeout=5)
+                    except Exception:
+                        pass
                     raise AgentToolError(f"Command timed out after {timeout}s.") from error
         finally:
             _restore_stashed_orin()

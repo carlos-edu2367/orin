@@ -175,6 +175,8 @@ class TurnToolServer:
         )
 
         handle_ref: list[TurnToolServerHandle] = []
+        # tools/call requests in progress, by JSON-RPC id, so the client can cancel them.
+        in_flight_calls: dict[str, threading.Event] = {}
 
         async def _dispatch_single(
             item: Mapping[str, Any],
@@ -221,6 +223,13 @@ class TurnToolServer:
             params: Mapping[str, Any] = raw_params if isinstance(raw_params, Mapping) else {}
 
             if not has_id:
+                if method == "notifications/cancelled":
+                    # The client stopped waiting (its tool timeout or the person's Esc).
+                    cancelled_id = params.get("requestId")
+                    if _is_valid_jsonrpc_id(cancelled_id):
+                        event = in_flight_calls.get(json.dumps(cancelled_id))
+                        if event is not None:
+                            event.set()
                 return None, headers_out, 202
 
             if method == "initialize":
@@ -335,6 +344,9 @@ class TurnToolServer:
                             200,
                         )
 
+                    call_key = json.dumps(req_id)
+                    cancel_event = threading.Event()
+                    in_flight_calls[call_key] = cancel_event
                     try:
                         call_res = await asyncio.to_thread(
                             self._executor.call_tool,
@@ -342,6 +354,7 @@ class TurnToolServer:
                                 name=tool_name,
                                 arguments=arguments,
                                 meta=meta,
+                                cancelled=cancel_event,
                             ),
                         )
                     except Exception as exc:
@@ -358,6 +371,9 @@ class TurnToolServer:
                             headers_out,
                             200,
                         )
+                    finally:
+                        if in_flight_calls.get(call_key) is cancel_event:
+                            del in_flight_calls[call_key]
 
                     content_blocks: list[dict[str, Any]] = [
                         {"type": "text", "text": str(call_res.text or "")}

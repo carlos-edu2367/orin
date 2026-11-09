@@ -190,7 +190,7 @@ def test_run_shell_timeout_terminates_tree_without_communicate_hang(
             communicate_calls.append(timeout)
             return b"", b""
 
-    def _fake_terminate(proc: Any) -> None:
+    def _fake_terminate(proc: Any, **_kwargs: Any) -> None:
         terminated.append(proc.pid)
         proc.stdout.close()
         proc.stderr.close()
