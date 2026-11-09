@@ -660,6 +660,24 @@ export function TurnTimeline({
   }, [items, events])
 
   const primaryAgentId = useMemo(() => {
+    // The main agent is the root of the delegation tree: some event names it
+    // as parent and no event gives it a parent. A subagent event that arrives
+    // without parent_agent_id (code-mode validation, for one) must not win just
+    // because it came first, or every action of the main agent looks delegated.
+    const parentIds = new Set<string>()
+    const delegatedIds = new Set<string>()
+    for (const item of resolvedItems) {
+      if (item.kind !== 'activity') continue
+      for (const ev of item.group.events) {
+        if (ev.parentAgentId) {
+          parentIds.add(ev.parentAgentId)
+          if (ev.agentId) delegatedIds.add(ev.agentId)
+        }
+      }
+    }
+    for (const parentId of parentIds) {
+      if (!delegatedIds.has(parentId)) return parentId
+    }
     for (const item of resolvedItems) {
       if (item.kind !== 'activity') continue
       for (const ev of item.group.events) {
@@ -1254,7 +1272,12 @@ export function TurnTimeline({
               break
             }
             timelineNodes.push(...interstitialAgentNodes)
-            if (subagentWave.length >= 2) {
+            // One subagent shows up as several stretches when its work interleaves
+            // with narration; the header counts agents, not stretches.
+            const waveAgentCount = new Set(
+              subagentWave.map((entry) => entry.group.agentId || entry.id),
+            ).size
+            if (waveAgentCount >= 2) {
               const anyRunning =
                 !turnCompleted &&
                 subagentWave.some((entry) =>
@@ -1263,7 +1286,7 @@ export function TurnTimeline({
               timelineNodes.push(
                 <ParallelSubagentsGroup
                   key={`parallel-subagents:${subagentWave[0].id}`}
-                  count={subagentWave.length}
+                  count={waveAgentCount}
                   running={anyRunning}
                 >
                   {subagentWave.map((entry) => (
@@ -1273,12 +1296,14 @@ export function TurnTimeline({
                   ))}
                 </ParallelSubagentsGroup>,
               )
-            } else if (subagentWave.length === 1) {
-              timelineNodes.push(
-                <div key={subagentWave[0].id} className="turn-timeline__activity">
-                  {subagentWave[0].node}
-                </div>,
-              )
+            } else {
+              for (const entry of subagentWave) {
+                timelineNodes.push(
+                  <div key={entry.id} className="turn-timeline__activity">
+                    {entry.node}
+                  </div>,
+                )
+              }
             }
             idx = lookahead
             continue
