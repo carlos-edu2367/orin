@@ -109,7 +109,7 @@ describe('CliSlotWaiting UI (R3.6)', () => {
       },
       '2',
     )
-    expect(modeFromEvents([rootWaiting, childToolFinished], true, 't1')).toBe('waiting_agent')
+    expect(modeFromEvents([rootWaiting, childToolFinished], 'running', 't1')).toBe('waiting_agent')
   })
 
   it('shows the waiting summary while the last event is waiting for a slot', () => {
