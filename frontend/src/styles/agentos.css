@@ -4946,6 +4946,24 @@ progress.orin-progress::-moz-progress-bar,
   color: var(--orin-accent, #B4A4EF);
 }
 
+.chat__view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 10px;
+  border: 1px solid var(--orin-border, rgba(255, 255, 255, 0.09));
+  background: var(--orin-surface-1, #141419);
+}
+
+.chat__view-switch .chat__team-toggle-btn {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border-color: transparent;
+  background: transparent;
+}
+
 .chat__user-avatar {
   display: inline-grid;
   place-items: center;

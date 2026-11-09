@@ -1,7 +1,29 @@
 import { useState } from 'react'
+import type { ConversationActivityEvent } from './activityTypes'
 import { MarkdownMessage } from './MarkdownMessage'
 
 export type PlanApprovalDecision = 'accept_edits' | 'ask_permissions' | 'changes_requested'
+
+export function extractPlanApprovalDetails(event: ConversationActivityEvent): {
+  planPath: string | null
+  planContent: string | null
+} {
+  const planPath =
+    event.planApproval?.plan_path ??
+    event.planPath ??
+    event.toolPermission?.planApproval?.plan_path ??
+    event.toolPermission?.path ??
+    event.filePath ??
+    event.path ??
+    null
+  const planContent =
+    event.planApproval?.plan_content ??
+    event.planContent ??
+    event.toolPermission?.planApproval?.plan_content ??
+    event.content ??
+    null
+  return { planPath, planContent }
+}
 
 export type PlanApprovalCardProps = {
   planPath?: string | null

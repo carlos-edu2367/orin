@@ -387,5 +387,30 @@ describe('conversation activity reducer', () => {
       expect(presentIds.has(id)).toBe(true)
     }
   })
-})
 
+  it('preserves to_agent_id and from_agent_id in payload on agent message events', () => {
+    const sent = parseConversationActivityEvent(
+      {
+        event_id: 'evt-msg-sent',
+        event_type: 'agent.message_sent',
+        summary: 'Delegando pesquisa',
+        agent_id: 'agent:c:main',
+        payload: { agent_name: 'Pesquisador', to_agent_id: 'agent:c:sub-1', content: 'Investigue' },
+      },
+      'a.10',
+    )
+    const received = parseConversationActivityEvent(
+      {
+        event_id: 'evt-msg-recv',
+        event_type: 'agent.message_received',
+        summary: 'Concluído',
+        agent_id: 'agent:c:sub-1',
+        parent_agent_id: 'agent:c:main',
+        payload: { agent_name: 'Pesquisador', from_agent_id: 'agent:c:sub-1', content: 'Pronto' },
+      },
+      'a.11',
+    )
+    expect(sent.payload?.to_agent_id).toBe('agent:c:sub-1')
+    expect(received.payload?.from_agent_id).toBe('agent:c:sub-1')
+  })
+})

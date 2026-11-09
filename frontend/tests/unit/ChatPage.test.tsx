@@ -481,6 +481,56 @@ describe('ChatPage', () => {
     closeStream()
   })
 
+  it('hides the return action over the Cena and restores the chat offset when coming back', async () => {
+    let emitActivity: () => void = () => {}
+    let closeStream: () => void = () => {}
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : String(input)
+      if (url.includes('/events?')) {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            closeStream = () => controller.close()
+            emitActivity = () => controller.enqueue(new TextEncoder().encode(
+              'id: a.10\nevent: tool.started\ndata: {"event_id":"activity:turn-1:10","event_type":"tool.started","sequence":10,"summary":"Executando busca","payload":{"tool_name":"search","tool_kind":"web","invocation_id":"call-10"},"occurred_at":"2026-08-10T20:00:10+00:00","turn_id":"turn-1","execution_id":"exe-1","agent_id":"agent:chat_e2e:main","cursor":"a.10"}\n\n',
+            ))
+          },
+        })
+        return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) return new Response(JSON.stringify({ items: [] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.endsWith('/v1/conversations')) return new Response(JSON.stringify({ items: [{ conversation_id: CONVERSATION_ID, title: 'Conversa de teste', state: 'running' }] }), { headers: { 'Content-Type': 'application/json' } })
+      if (url.includes(`/v1/conversations/${CONVERSATION_ID}`)) return new Response(JSON.stringify(snapshotBody({
+        state: 'running', messages: [{ message_id: 'msg-1', role: 'assistant', content: 'Vou pesquisar.', status: 'streaming', retryable: false }], activities: [],
+      })), { headers: { 'Content-Type': 'application/json' } })
+      return new Response('{}', { headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const user = userEvent.setup()
+    const { container } = renderChat()
+    await screen.findByText('Vou pesquisar.')
+    const scroll = container.querySelector('.chat__scroll') as HTMLDivElement
+    Object.defineProperties(scroll, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 200 },
+      scrollTo: { configurable: true, value: vi.fn() },
+    })
+    fireEvent.scroll(scroll)
+    emitActivity()
+    await screen.findByRole('button', { name: /Ir para o fim/ })
+
+    await user.click(screen.getByTestId('chat-view-scene'))
+    expect(await screen.findByTestId('scene-view')).toBeInTheDocument()
+    expect(scroll.scrollTop).toBe(0)
+    expect(screen.queryByRole('button', { name: /Ir para o fim/ })).not.toBeInTheDocument()
+
+    await user.click(screen.getByTestId('chat-view-chat'))
+    expect(screen.queryByTestId('scene-view')).not.toBeInTheDocument()
+    expect(scroll.scrollTop).toBe(200)
+    expect(screen.getByRole('button', { name: /Ir para o fim/ })).toBeInTheDocument()
+    closeStream()
+  })
+
   it('updates a pinned viewport without queuing smooth scroll animations per event', async () => {
     let emitActivity: () => void = () => {}
     let closeStream: () => void = () => {}

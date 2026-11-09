@@ -4,7 +4,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest';
 import { ThemeProvider } from '../../../app/ThemeContext';
 import { parseConversationActivityEvent } from '../../../api/conversations';
 import { CodeToolCallBlock } from '../CodeToolCallBlock';
-import { TeamActivityView } from '../TeamActivityView';
+import { SceneView } from '../scene/SceneView';
 import { CodeWorkbenchPanel } from '../CodeWorkbenchPanel';
 import { ChatPage } from '../ChatPage';
 import { buildTurnTimeline } from '../turnTimelineFold';
@@ -179,7 +179,7 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
     expect(settledTool?.summary).toBe('Inspect logs');
   });
 
-  it('excludes main agent tool events from TeamActivityView and settles subagents when running is false', () => {
+  it('normalizes main agent to Orin in SceneView and settles agents when running is false', () => {
     const events: ConversationActivityEvent[] = [
       {
         eventId: 'evt_1',
@@ -211,9 +211,11 @@ describe('Long task reconciliation, powershell tool blocks, and workbench/team c
       },
     ];
 
-    render(<TeamActivityView events={events} running={false} />);
+    render(<SceneView events={events} running={false} />);
     expect(screen.queryByText(/agent:conv_1:main/i)).toBeNull();
+    expect(screen.getByText('Orin')).toBeTruthy();
     expect(screen.getByText(/Researcher/i)).toBeTruthy();
+    expect(screen.queryByText(/Trabalhando/i)).toBeNull();
     expect(screen.queryByText(/Em andamento/i)).toBeNull();
   });
 

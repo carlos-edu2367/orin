@@ -57,6 +57,8 @@ class ConversationApplication(Protocol):
     def list(self, user_id: str) -> object: ...
     def get(self, conversation_id: str, user_id: str) -> object: ...
     def events(self, conversation_id: str, user_id: str, after: str = "0") -> object: ...
+    def request_agent_stop(self, conversation_id: str, user_id: str, agent_id: str) -> object: ...
+    def send_agent_message(self, conversation_id: str, user_id: str, agent_id: str, message: str) -> object: ...
 
 
 class SecurityService(Protocol):
@@ -75,11 +77,20 @@ class AuthenticatedPrincipal(Protocol):
 
 
 class ApplicationConflictError(RuntimeError):
-    """Raised when a command loses an optimistic-concurrency race (HTTP 409)."""
+    """Raised when a command loses an optimistic-concurrency race or state precondition (HTTP 409)."""
 
-    def __init__(self, execution_id: str, current_state_version: int) -> None:
+    def __init__(
+        self,
+        execution_id: str,
+        current_state_version: int = 0,
+        *,
+        code: str = "execution_conflict",
+        retryable: bool = True,
+    ) -> None:
         self.execution_id = execution_id
         self.current_state_version = current_state_version
+        self.code = code
+        self.retryable = retryable
         super().__init__(f"execution {execution_id} is at version {current_state_version}")
 
 

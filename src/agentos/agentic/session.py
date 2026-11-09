@@ -865,6 +865,149 @@ class SubagentCaller:
         return self.depth == 0
 
 
+class _AgentControlWatcher:
+    """Polls user stop/message controls for one running subagent at most once per second."""
+
+    POLL_INTERVAL_SECONDS: float = 1.0
+
+    def __init__(
+        self,
+        *,
+        store: Any,
+        user_id: str,
+        conversation_id: str,
+        agent_id: str,
+        clean: str,
+        event: threading.Event,
+        reminders: ReminderQueue | None = None,
+        main_reminders: ReminderQueue | None = None,
+        record_activity: Callable[..., None] | None = None,
+        clock: Callable[[], float] | None = None,
+        min_interval: float = POLL_INTERVAL_SECONDS,
+    ) -> None:
+        self._store = store
+        self.user_id = str(user_id or "")
+        self.conversation_id = str(conversation_id or "")
+        self.agent_id = str(agent_id or "")
+        self.clean = str(clean or "")
+        self.event = event
+        self.reminders = reminders if reminders is not None else ReminderQueue()
+        self.main_reminders = main_reminders
+        self._record_activity = record_activity
+        self._clock = clock
+        self._min_interval = float(min_interval)
+        self._last_poll: float | None = None
+        self.stopped_by_user = False
+        self._lock = threading.Lock()
+        self.expire_pending()
+
+    def _now(self) -> float:
+        if self._clock is not None:
+            return float(self._clock())
+        return float(time.monotonic())
+
+    def expire_pending(self) -> None:
+        if self._store is None or not self.agent_id:
+            return
+        try:
+            self._store.expire_pending(self.user_id, self.conversation_id, self.agent_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("could not expire pending agent controls for %s", self.agent_id, exc_info=True)
+
+    def poll(self) -> None:
+        if self._store is None or not self.agent_id:
+            return
+        with self._lock:
+            try:
+                now = self._now()
+            except Exception:  # noqa: BLE001
+                logger.debug("agent control clock failed for %s", self.agent_id, exc_info=True)
+                return
+            if self._last_poll is not None and (now - self._last_poll) < self._min_interval:
+                return
+            self._last_poll = now
+            try:
+                items = list(self._store.take(self.user_id, self.conversation_id, self.agent_id) or ())
+            except Exception:  # noqa: BLE001
+                logger.debug("could not poll agent controls for %s", self.agent_id, exc_info=True)
+                return
+            for item in items:
+                self._apply_polled_item(item)
+
+    def _apply_polled_item(self, item: Mapping[str, object]) -> None:
+        control_id = str(item.get("control_id") or "")
+        kind = str(item.get("kind") or "")
+        content = str(item.get("content") or "")
+        if kind == "stop":
+            self.stopped_by_user = True
+            self.event.set()
+            try:
+                self._store.set_outcome(control_id, "stopped")
+            except Exception:  # noqa: BLE001
+                logger.debug("could not set stop outcome for %s", self.agent_id, exc_info=True)
+            return
+        if kind == "message":
+            if content:
+                self.reminders.add(
+                    "user_message",
+                    f"Message from the user (sent to you directly while you work):\n{content}",
+                    key=f"user-msg:{control_id}",
+                )
+            try:
+                self._store.set_outcome(control_id, "delivered")
+            except Exception:  # noqa: BLE001
+                logger.debug("could not set message outcome for %s", self.agent_id, exc_info=True)
+            if self._record_activity is not None:
+                try:
+                    self._record_activity(
+                        AgentActivityEventType.AGENT_MESSAGE_SENT,
+                        f"Você enviou uma mensagem para {self.clean}",
+                        {
+                            "agent_name": self.clean,
+                            "recipient_name": self.clean,
+                            "sender_name": "Você",
+                            "label": self.clean,
+                            "content": content[:PREVIEW_CHARS],
+                            "to_agent_id": self.agent_id,
+                            "source": "user",
+                            "tool_kind": "agent",
+                        },
+                        agent_id=self.agent_id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("could not record user message activity for %s", self.agent_id, exc_info=True)
+
+    def finalize(self) -> None:
+        if self._store is None or not self.agent_id:
+            return
+        with self._lock:
+            try:
+                items = list(self._store.take(self.user_id, self.conversation_id, self.agent_id) or ())
+            except Exception:  # noqa: BLE001
+                logger.debug("could not finalize agent controls for %s", self.agent_id, exc_info=True)
+                return
+            for item in items:
+                control_id = str(item.get("control_id") or "")
+                kind = str(item.get("kind") or "")
+                content = str(item.get("content") or "")
+                if kind == "stop":
+                    try:
+                        self._store.set_outcome(control_id, "expired")
+                    except Exception:  # noqa: BLE001
+                        logger.debug("could not expire leftover stop for %s", self.agent_id, exc_info=True)
+                elif kind == "message":
+                    try:
+                        self._store.set_outcome(control_id, "forwarded")
+                    except Exception:  # noqa: BLE001
+                        logger.debug("could not mark leftover message forwarded for %s", self.agent_id, exc_info=True)
+                    if self.main_reminders is not None and content:
+                        self.main_reminders.add(
+                            "user_message",
+                            f"The user sent this to subagent {self.clean} ({self.agent_id}), which finished before reading it:\n{content}",
+                            key=f"user-msg-fwd:{control_id}",
+                        )
+
+
 class _SubagentStore:
     """Turn-store view for a subagent run.
 
@@ -3088,12 +3231,27 @@ class TurnSession:
         model_chain: tuple[str, ...] = (),
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
+        if hook_cancel is None:
+            hook_cancel = threading.Event()
+        watcher = _AgentControlWatcher(
+            store=self._agent_controls(),
+            user_id=str(self.turn.get("user_id") or ""),
+            conversation_id=str(self.turn.get("conversation_id") or ""),
+            agent_id=agent_id,
+            clean=clean,
+            event=hook_cancel,
+            main_reminders=getattr(self, "_reminders", None),
+            record_activity=self._record,
+            clock=getattr(self, "_agent_control_clock", None),
+        )
         slot = _SubagentSlot(self._subagent_semaphore)
         slot.acquire()
         try:
-            if self._child_cancelled(hook_cancel, caller)(self.turn):
+            if self._child_cancelled(hook_cancel, caller, watcher=watcher)(self.turn):
                 if self.agents_store is not None and hasattr(self.agents_store, "set_state"):
                     self.agents_store.set_state(agent_id, "cancelled")
+                stopped_by_user = bool(watcher.stopped_by_user)
+                reason = "STOPPED_BY_USER" if stopped_by_user else "TURN_CANCELLED"
                 self._record(
                     AgentActivityEventType.DELEGATION_FAILED,
                     f"{clean} não concluiu a tarefa",
@@ -3102,17 +3260,23 @@ class TurnSession:
                         "sender_name": clean,
                         "recipient_name": caller.name,
                         "label": clean,
-                        "error_code": "TURN_CANCELLED",
+                        "error_code": reason,
                     },
                     agent_id=agent_id,
                     parent_agent_id=caller.agent_id,
                 )
+                content = (
+                    f"The user stopped subagent '{clean}' from the interface. Do not restart it unless the user asks.\n"
+                    f"Subagent '{clean}' did not finish (STOPPED_BY_USER)."
+                    if stopped_by_user
+                    else f"Subagent '{clean}' was cancelled before starting (TURN_CANCELLED)."
+                )
                 return ToolOutcome(
                     "failed",
                     f"{clean} cancelado",
-                    f"Subagent '{clean}' was cancelled before starting (TURN_CANCELLED).",
+                    content,
                     {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"},
-                    "TURN_CANCELLED",
+                    reason,
                 )
             return self._execute_subagent_run_unlocked(
                 record=record,
@@ -3126,13 +3290,17 @@ class TurnSession:
                 description=description,
                 resumed_agent_id=resumed_agent_id,
                 hook_cancel=hook_cancel,
+                watcher=watcher,
                 caller=caller,
                 slot=slot,
                 child_provider=child_provider,
                 model_chain=model_chain,
             )
         finally:
-            slot.release()
+            try:
+                watcher.finalize()
+            finally:
+                slot.release()
 
     def _format_subagent_partial_failure(
         self,
@@ -3205,6 +3373,7 @@ class TurnSession:
         description: str,
         resumed_agent_id: str | None = None,
         hook_cancel: threading.Event | None = None,
+        watcher: _AgentControlWatcher | None = None,
         caller: SubagentCaller | None = None,
         slot: _SubagentSlot | None = None,
         child_provider: str | None = None,
@@ -3311,8 +3480,12 @@ class TurnSession:
             # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
             requested_mode = definition.permission_mode if definition is not None and definition.origin != "plugin" else None
             sub_permission_mode = "plan_mode" if read_only_subagent else child_permission_mode(caller.permission_mode, requested_mode)
-            sub_reminders = ReminderQueue()
-            sub_cancelled = self._child_cancelled(hook_cancel, caller)
+            sub_reminders = watcher.reminders if watcher is not None else ReminderQueue()
+            sub_cancelled = (
+                self._child_cancelled(hook_cancel, caller, watcher=watcher)
+                if watcher is not None
+                else self._child_cancelled(hook_cancel, caller)
+            )
             child_depth = caller.depth + 1
             # A subagent may delegate in turn while it is above the deepest level; read-only ones (Explore, Plan) never do.
             can_delegate = bool(getattr(self, "enable_subagents", True)) and not read_only_subagent and child_depth < self._subagent_max_depth()
@@ -3470,23 +3643,40 @@ class TurnSession:
             )
             if not acceptable_state or not answer:
                 reason = result.error_code or ("SUBAGENT_EMPTY_RESPONSE" if not answer else "SUBAGENT_FAILED")
-                final_agent_state = "cancelled" if (result.state == "cancelled" or reason == "TURN_CANCELLED") else "failed"
+                stopped_by_user = bool(
+                    watcher is not None
+                    and watcher.stopped_by_user
+                    and (result.state == "cancelled" or reason == "TURN_CANCELLED")
+                )
+                if stopped_by_user:
+                    reason = "STOPPED_BY_USER"
+                final_agent_state = (
+                    "cancelled"
+                    if (result.state == "cancelled" or reason in {"TURN_CANCELLED", "STOPPED_BY_USER"})
+                    else "failed"
+                )
                 delegation_settled = True
                 self._record(
                     AgentActivityEventType.DELEGATION_FAILED, f"{clean} não concluiu a tarefa",
                     {"agent_name": clean, "sender_name": clean, "recipient_name": caller.name, "label": clean, "error_code": reason},
                     agent_id=agent_id, parent_agent_id=parent_agent_id,
                 )
+                partial_summary = self._format_subagent_partial_failure(
+                    clean=clean,
+                    reason=reason,
+                    agent_id=agent_id,
+                    sub_store=sub_store,
+                    subagent_tools=subagent_tools,
+                )
+                failure_content = (
+                    f"The user stopped subagent '{clean}' from the interface. Do not restart it unless the user asks.\n{partial_summary}"
+                    if stopped_by_user
+                    else partial_summary
+                )
                 return ToolOutcome(
                     "failed",
                     f"{clean} não concluiu",
-                    self._format_subagent_partial_failure(
-                        clean=clean,
-                        reason=reason,
-                        agent_id=agent_id,
-                        sub_store=sub_store,
-                        subagent_tools=subagent_tools,
-                    ),
+                    failure_content,
                     {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"},
                     reason,
                 )
@@ -3670,6 +3860,22 @@ class TurnSession:
             mailbox = InMemoryMailbox()
         self._mailbox_store = mailbox
         return mailbox
+
+    def _agent_controls(self):
+        """The conversation's per-agent control store: in the database when the session has one, else in memory."""
+        controls = getattr(self, "_agent_controls_store", None)
+        if controls is not None:
+            return controls
+        from agentos.conversations.agent_controls import AgentControlStore, InMemoryAgentControls
+
+        engine = getattr(self.chat_store, "_engine", None)
+        try:
+            controls = AgentControlStore(engine) if engine is not None else InMemoryAgentControls()
+        except Exception:  # noqa: BLE001 - a database that cannot hold controls still lets the session run in memory
+            logger.warning("agent control store unavailable; keeping controls in memory", exc_info=True)
+            controls = InMemoryAgentControls()
+        self._agent_controls_store = controls
+        return controls
 
     def _teammate_refusal(self, name: str, team_name: str | None = None) -> ToolOutcome | None:
         """Why this teammate cannot take a task now, or None — and then a known teammate is claimed (busy) for the caller."""
@@ -4967,14 +5173,27 @@ class TurnSession:
             self._hook_agent_running = False
             self._hook_agent_guard.release()
 
-    def _child_cancelled(self, hook_cancel: threading.Event | None, caller: SubagentCaller | None = None):
+    def _child_cancelled(
+        self,
+        hook_cancel: threading.Event | None,
+        caller: SubagentCaller | None = None,
+        watcher: _AgentControlWatcher | None = None,
+    ):
         """The cancel predicate of a subagent: its caller's (the turn's own cancel for the main agent), plus its
         own stop event (a background agent's TaskStop or a verifier's timeout). Stopping an agent stops everything
         it started."""
         parent = caller.cancelled if caller is not None and caller.cancelled is not None else self.cancelled
-        if hook_cancel is None:
+        if hook_cancel is None and watcher is None:
             return parent
-        return lambda turn: bool(parent(turn)) or hook_cancel.is_set()
+
+        def _check(turn: Mapping[str, object]) -> bool:
+            if watcher is not None:
+                watcher.poll()
+            if bool(parent(turn)):
+                return True
+            return bool(hook_cancel is not None and hook_cancel.is_set())
+
+        return _check
 
     def _close_hook_dispatcher(self) -> None:
         relay, self._sdk_relay = getattr(self, "_sdk_relay", None), None

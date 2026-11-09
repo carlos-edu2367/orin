@@ -138,7 +138,7 @@ function renderChat(initialEntry = `/chats/${CONVERSATION_ID}`) {
   )
 }
 
-describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
+describe('ChatPage ref-03 and SceneView integration', () => {
   const originalFetch = globalThis.fetch
 
   beforeEach(() => {
@@ -150,7 +150,7 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders ref-03 header controls ("Abrir no Code", "Equipe em atividade", "Conversar por voz", OrinMascot) and toggles TeamActivityView', async () => {
+  it('renders ref-03 header controls ("Abrir no Code", Chat/Cena switch, "Conversar por voz", OrinMascot) and toggles SceneView', async () => {
     const user = userEvent.setup()
     globalThis.fetch = stubFetch(() => ({
       state: 'completed',
@@ -182,23 +182,33 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     expect(within(header).getByTestId('orin-activity-center-trigger')).toBeInTheDocument()
     expect(within(header).queryByTestId('orin-mascot-status-dot')).not.toBeInTheDocument()
 
-    const teamToggleBtn = within(header).getByTestId('chat-team-view-toggle')
-    expect(teamToggleBtn).toHaveTextContent('Equipe em atividade')
+    const viewSwitch = within(header).getByTestId('chat-view-switch')
+    const chatBtn = within(viewSwitch).getByTestId('chat-view-chat')
+    const sceneBtn = within(viewSwitch).getByTestId('chat-view-scene')
+    expect(chatBtn).toHaveTextContent('Chat')
+    expect(sceneBtn).toHaveTextContent('Cena')
+    expect(chatBtn).toHaveAttribute('aria-pressed', 'true')
+    expect(sceneBtn).toHaveAttribute('aria-pressed', 'false')
 
-    // Toggle to TeamActivityView
-    await user.click(teamToggleBtn)
-    expect(await screen.findByTestId('team-activity-view')).toBeInTheDocument()
+    // Switch to SceneView: it opens at its top even when the chat was scrolled down.
+    const scrollEl = container.querySelector('.chat__scroll') as HTMLElement
+    scrollEl.scrollTop = 480
+    await user.click(sceneBtn)
+    expect(await screen.findByTestId('scene-view')).toBeInTheDocument()
+    expect(scrollEl.scrollTop).toBe(0)
+    expect(chatBtn).toHaveAttribute('aria-pressed', 'false')
+    expect(sceneBtn).toHaveAttribute('aria-pressed', 'true')
 
-    // Return to conversation via "Voltar à conversa" button inside TeamActivityView
-    await user.click(screen.getByTestId('team-back-to-chat-button'))
-    expect(screen.queryByTestId('team-activity-view')).not.toBeInTheDocument()
+    // Return to conversation via "Voltar à conversa" button inside SceneView
+    await user.click(screen.getByTestId('scene-back-to-chat-button'))
+    expect(screen.queryByTestId('scene-view')).not.toBeInTheDocument()
     expect(screen.getByText('Monte um estudo de precificação')).toBeInTheDocument()
 
-    // Toggle again via header button and return via header toggle button
-    await user.click(teamToggleBtn)
-    expect(await screen.findByTestId('team-activity-view')).toBeInTheDocument()
-    await user.click(teamToggleBtn)
-    expect(screen.queryByTestId('team-activity-view')).not.toBeInTheDocument()
+    // Reopen Cena and return via header "Chat" button
+    await user.click(sceneBtn)
+    expect(await screen.findByTestId('scene-view')).toBeInTheDocument()
+    await user.click(chatBtn)
+    expect(screen.queryByTestId('scene-view')).not.toBeInTheDocument()
   })
 
   it('renders user circular avatar, assistant OrinMascot, and Live Work Progress Card with "Ver detalhes ›" and "Parar" when running', async () => {
@@ -244,11 +254,11 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
 
     expect(screen.queryByTestId('live-work-progress-card')).toBeNull()
 
-    const teamToggleBtn = screen.getByTestId('chat-team-view-toggle')
-    await user.click(teamToggleBtn)
+    const sceneBtn = screen.getByTestId('chat-view-scene')
+    await user.click(sceneBtn)
 
-    expect(await screen.findByTestId('team-activity-view')).toBeInTheDocument()
-    await user.click(screen.getByTestId('team-back-to-chat-button'))
+    expect(await screen.findByTestId('scene-view')).toBeInTheDocument()
+    await user.click(screen.getByTestId('scene-back-to-chat-button'))
 
     const stopBtn = await screen.findByRole('button', { name: 'Parar execução' })
     await user.click(stopBtn)
@@ -404,5 +414,85 @@ describe('ChatPage ref-03 and TeamActivityView (ref-10) integration', () => {
     renderChat()
 
     expect(await screen.findByText('Aguardando Antigravity (7 min)')).toBeInTheDocument()
+  })
+
+  it('shows the Chat/Cena view switch in Code mode as well', async () => {
+    const user = userEvent.setup()
+    globalThis.fetch = stubFetch(() => ({
+      state: 'completed',
+      mode: 'code',
+      messages: [
+        { message_id: 'u-1', role: 'user', content: 'Inspecione o modo code', status: 'completed', retryable: false, turn_id: 'turn-1' },
+      ],
+      activities: [
+        activity(1, 'turn.completed', 'Concluído', { state: 'completed' }),
+      ],
+    }))
+
+    renderChat()
+
+    expect(await screen.findByText('Inspecione o modo code')).toBeInTheDocument()
+    const viewSwitch = screen.getByTestId('chat-view-switch')
+    const chatBtn = within(viewSwitch).getByTestId('chat-view-chat')
+    const sceneBtn = within(viewSwitch).getByTestId('chat-view-scene')
+    expect(chatBtn).toHaveAttribute('aria-pressed', 'true')
+    expect(sceneBtn).toHaveAttribute('aria-pressed', 'false')
+
+    await user.click(sceneBtn)
+    expect(await screen.findByTestId('scene-view')).toBeInTheDocument()
+    expect(sceneBtn).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('enqueues message to Orin from Cena while a turn is running without clearing the Composer draft', async () => {
+    const user = userEvent.setup()
+    const queuedPayloads: Array<Record<string, unknown>> = []
+
+    const baseStub = stubFetch(() => ({
+      state: 'running',
+      mode: 'chat',
+      messages: [
+        { message_id: 'u-1', role: 'user', content: 'Pesquise concorrentes', status: 'completed', retryable: false, turn_id: 'turn-1' },
+      ],
+      activities: [
+        activity(1, 'turn.started', 'Executando turno', { state: 'running' }),
+      ],
+    }))
+
+    globalThis.fetch = vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith(`/v1/conversations/${CONVERSATION_ID}/queue`) && method === 'POST') {
+        const raw = init?.body ? String(init.body) : '{}'
+        queuedPayloads.push(JSON.parse(raw) as Record<string, unknown>)
+        return new Response(
+          JSON.stringify({ queued: true, queue_id: 'q-scene-1', position: 1 }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        )
+      }
+      return baseStub(input, init)
+    })
+
+    renderChat()
+
+    expect(await screen.findByText('Pesquise concorrentes')).toBeInTheDocument()
+
+    // Digite um rascunho no composer principal
+    const composerInput = screen.getByRole('textbox', { name: 'Mensagem' }) as HTMLTextAreaElement
+    await user.type(composerInput, 'Rascunho preservado no composer')
+    expect(composerInput.value).toBe('Rascunho preservado no composer')
+
+    // Abra a Cena e envie mensagem para o Orin
+    await user.click(screen.getByTestId('chat-view-scene'))
+    expect(await screen.findByTestId('scene-view')).toBeInTheDocument()
+
+    const sceneInput = screen.getByTestId('scene-orin-message-input') as HTMLTextAreaElement
+    await user.type(sceneInput, 'Priorize empresas B2B')
+    await user.click(screen.getByTestId('scene-orin-message-submit'))
+
+    await waitFor(() => {
+      expect(queuedPayloads).toEqual([{ message: 'Priorize empresas B2B' }])
+    })
+    expect(sceneInput.value).toBe('')
+    expect(composerInput.value).toBe('Rascunho preservado no composer')
   })
 })

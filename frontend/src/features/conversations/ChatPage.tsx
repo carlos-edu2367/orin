@@ -3,7 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationMessage, startConversationPreview, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
+  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationAgentMessage, sendConversationMessage, startConversationPreview, stopConversationAgent, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
   type Conversation, type ConversationMessage, type ConversationMode,
   getFriendPersona, updateFriendPersona, syncFriendSoul, listFriendMemories, deleteFriendMemory,
   type FriendPersonaState, type FriendMemoryEntry,
@@ -70,7 +70,7 @@ import { MessageAttachments } from './MessageAttachments'
 import { PushNotificationToast, isFreshNotice, type PushNotice } from './PushNotificationToast'
 import { StatusLineBar } from './StatusLineBar'
 import { TasksPanel } from './TasksPanel'
-import { TeamActivityView } from './TeamActivityView'
+import { SceneView, type SceneAgentControlResult } from './scene/SceneView'
 import { TranscriptView } from './TranscriptView'
 import { useKeybindingHandlers } from '../keybindings/engine'
 import { useTheme } from '../../app/ThemeContext'
@@ -266,6 +266,8 @@ export function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const threadRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
+  // Chat offset when the Cena opened, restored when the reader comes back.
+  const chatScrollRestoreRef = useRef<{ conversationId: string; top: number } | null>(null)
   const loadingOlderRef = useRef(false)
   const observedContentRef = useRef(new Set<string>())
   const observedConversationRef = useRef(conversationId)
@@ -675,7 +677,7 @@ export function ChatPage() {
   // so they happen during render: an effect would paint one frame of the
   // previous conversation's model before correcting itself, and that flicker
   // sits in the most-used screen in the product.
-  const [teamViewOpen, setTeamViewOpen] = useState(false)
+  const [sceneOpen, setSceneOpen] = useState(false)
   const [teamPaused, setTeamPaused] = useState(false)
   const [workbenchOpen, setWorkbenchOpen] = useState(false)
   const [workbenchTab, setWorkbenchTab] = useState<CodeWorkbenchTab>('preview')
@@ -695,7 +697,7 @@ export function ChatPage() {
     setStopping(false)
     setError(null)
     setOversizedInput(null)
-    setTeamViewOpen(false)
+    setSceneOpen(false)
     setTeamPaused(false)
     setWorkbenchOpen(false)
     setWorkbenchTab('preview')
@@ -1000,6 +1002,30 @@ export function ChatPage() {
         }
       })
   }, [activity.events, cancelledTurnIds, closedQuestionEventIds, conversation?.messages, resolvedPermissionDecisions])
+
+  const sceneEvents = useMemo(() => {
+    if (closedQuestionEventIds.size === 0 && resolvedPermissionDecisions.size === 0) {
+      return activity.events
+    }
+    return activity.events.map((event): ConversationActivityEvent => {
+      if (event.questions && closedQuestionEventIds.has(event.eventId)) {
+        return { ...event, questionsAnswered: true }
+      }
+      const reqId = event.toolPermission?.requestId
+      const resolvedState = reqId ? resolvedPermissionDecisions.get(reqId) : undefined
+      if (resolvedState && event.toolPermission) {
+        return {
+          ...event,
+          state: resolvedState === 'allowed' ? 'completed' : 'failed',
+          toolPermission: {
+            ...event.toolPermission,
+            state: resolvedState,
+          },
+        }
+      }
+      return event
+    })
+  }, [activity.events, closedQuestionEventIds, resolvedPermissionDecisions])
 
   // Each assistant message gets its own text/action timeline, folded from the
   // turn it belongs to; a turn no message could claim (still running before
@@ -1378,7 +1404,8 @@ export function ChatPage() {
   }, [activity.events, conversationId, messages])
 
   useLayoutEffect(() => {
-    if (!pinnedRef.current) return
+    // The Cena shares this scroll container: live events must not drag it to the bottom.
+    if (!pinnedRef.current || sceneOpen) return
     const element = scrollRef.current
     if (!element) return
     // Run before paint. A passive effect leaves one frame with the previous
@@ -1387,7 +1414,21 @@ export function ChatPage() {
     // are intentionally immediate; smooth scrolling is reserved for the
     // explicit "Ir para o fim" action below.
     element.scrollTop = element.scrollHeight
-  }, [messages, activity.events, activity.cursor, showAgentPulse])
+  }, [messages, activity.events, activity.cursor, showAgentPulse, sceneOpen])
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    // Opening the Cena starts at its top (its controls live there), not at the chat's scroll offset.
+    if (sceneOpen) {
+      if (element) element.scrollTop = 0
+      return
+    }
+    // Back to the chat: a pinned reader stays at the end, anyone else returns where they were.
+    const saved = chatScrollRestoreRef.current
+    chatScrollRestoreRef.current = null
+    if (!element || !saved || saved.conversationId !== conversationId) return
+    element.scrollTop = pinnedRef.current ? element.scrollHeight : saved.top
+  }, [sceneOpen, conversationId])
 
   useLayoutEffect(() => {
     document
@@ -1407,7 +1448,8 @@ export function ChatPage() {
     })
     observer.observe(threadEl)
     return () => observer.disconnect()
-  }, [conversationId])
+    // The thread unmounts while the Cena is open, so watch the new one when the chat comes back.
+  }, [conversationId, sceneOpen])
 
   const scrollToLatest = useCallback(() => {
     const element = scrollRef.current
@@ -1738,11 +1780,16 @@ export function ChatPage() {
    * `afterStop` (W7-R14): send-now has just stopped the turn, but this closure still sees it running; the
    * stop-related checks are then skipped, because the turn is known to have stopped.
    */
-  async function submit(override?: string, afterStop = false, liveModeOverride?: boolean) {
+  async function submit(
+    override?: string,
+    afterStop = false,
+    liveModeOverride?: boolean,
+    options?: { fromScene?: boolean },
+  ) {
     if (submitInFlight.current) return
     submitInFlight.current = true
     try {
-      await runSubmit(override, afterStop, liveModeOverride)
+      await runSubmit(override, afterStop, liveModeOverride, options)
     } finally {
       submitInFlight.current = false
     }
@@ -1756,12 +1803,18 @@ export function ChatPage() {
     void submit(pendingUtterance, false, true)
   })
 
-  async function runSubmit(override: string | undefined, afterStop: boolean, liveModeOverride?: boolean) {
+  async function runSubmit(
+    override: string | undefined,
+    afterStop: boolean,
+    liveModeOverride?: boolean,
+    options?: { fromScene?: boolean },
+  ) {
+    const preserveComposer = Boolean(options?.fromScene)
     const text = (override ?? message).trim()
-    const readyUploads = readyUploadIds()
+    const readyUploads = preserveComposer ? [] : readyUploadIds()
     const turnBusy = !afterStop && (running || stopping)
     // W7 `!command`: a shell turn in the session's folder (Code conversations only).
-    if (conversationMode === 'code' && text.startsWith('!') && text.length > 1 && readyUploads.length === 0) {
+    if (!preserveComposer && conversationMode === 'code' && text.startsWith('!') && text.length > 1 && readyUploads.length === 0) {
       // A live turn waiting for an ask_user answer would hold the shell turn behind it.
       if (turnBusy || liveTurnAwaitingAnswer) { setCommandNotice('Espere o turno atual terminar para rodar um comando.'); return }
       setMessage('')
@@ -1776,7 +1829,7 @@ export function ChatPage() {
       return
     }
     // W7: a built-in slash command runs here (even while a turn runs); a skill or plugin command is sent as before.
-    if (text.startsWith('/') && readyUploads.length === 0 && !(stopping && !afterStop)) {
+    if (!preserveComposer && text.startsWith('/') && readyUploads.length === 0 && !(stopping && !afterStop)) {
       let outcome: Awaited<ReturnType<typeof chatCommands.run>> | { kind: 'failed' }
       try {
         outcome = await chatCommands.run(text)
@@ -1798,7 +1851,7 @@ export function ChatPage() {
       // Once the turn waits in the turn, the text it reads is the answer, and it shows then (no optimistic bubble).
       // Before that wait it reads the text as a normal message, so the question stays open.
       const asAnswer = Boolean(activeTurn && waitingTurnIds.has(activeTurn.turn_id))
-      setMessage('')
+      if (!preserveComposer) setMessage('')
       setError(null)
       if (readyUploads.length > 0) setCommandNotice('Espere o turno atual terminar para enviar.')
       try {
@@ -1807,29 +1860,31 @@ export function ChatPage() {
         if (asAnswer && queueId) setAnswerQueueIds((current) => new Set(current).add(queueId))
         if (!receipt.queued) await loadSnapshot(false) // the turn had already ended: the text was sent as a new turn
         await refreshQueue()
-      } catch {
-        setMessage(text)
+      } catch (caught) {
+        if (!preserveComposer) setMessage(text)
         setError('Não foi possível pôr a mensagem na fila.')
+        if (preserveComposer) throw caught
       }
       return
     }
     if (text.length > MAX_MESSAGE_CHARACTERS) {
-      await sendOversizedTextAutomatically(text, readyUploads, liveModeOverride)
+      await sendOversizedTextAutomatically(text, readyUploads, liveModeOverride, preserveComposer)
       return
     }
-    setMessage('')
+    if (!preserveComposer) setMessage('')
     setError(null)
     setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       await sendChatMessage(text, readyUploads, liveModeOverride)
-      resetAttachments()
+      if (!preserveComposer) resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
       window.dispatchEvent(new Event('orin:conversations-updated'))
-    } catch {
-      setMessage(text)
+    } catch (caught) {
+      if (!preserveComposer) setMessage(text)
       setPendingUserMessage(null)
       setError('Não foi possível enviar. Tente novamente.')
+      if (preserveComposer) throw caught
     }
   }
 
@@ -1837,6 +1892,7 @@ export function ChatPage() {
     rawText: string,
     baseAttachments: string[],
     liveModeOverride?: boolean,
+    preserveComposer = false,
   ) {
     if (sendingOversizedInput) return
     setSendingOversizedInput(true)
@@ -1844,25 +1900,28 @@ export function ChatPage() {
     const prompt = buildOversizedPromptMessage(rawText)
     let uploadedId: string | null = null
     let sent = false
-    setOversizedInput(null)
-    setMessage('')
+    if (!preserveComposer) {
+      setOversizedInput(null)
+      setMessage('')
+    }
     setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: prompt, status: 'completed', retryable: false, attachments: [], command: null })
     try {
       const uploaded = await uploadFile(client, new File([rawText], 'prompt.txt', { type: 'text/plain;charset=utf-8' }))
       uploadedId = uploaded.upload_id
       await sendChatMessage(prompt, [...baseAttachments, uploaded.upload_id], liveModeOverride)
       sent = true
-      resetAttachments()
+      if (!preserveComposer) resetAttachments()
       await loadSnapshot(false)
       void listConversations(client).then((value) => setChats(value.items)).catch(() => undefined)
       window.dispatchEvent(new Event('orin:conversations-updated'))
-    } catch {
+    } catch (caught) {
       if (uploadedId && !sent) void deleteUpload(client, uploadedId).catch(() => undefined)
       if (!sent) {
-        setMessage(rawText)
+        if (!preserveComposer) setMessage(rawText)
         setPendingUserMessage(null)
       }
       setError('Não foi possível enviar. Tente novamente.')
+      if (preserveComposer) throw caught
     } finally {
       setSendingOversizedInput(false)
     }
@@ -1928,6 +1987,74 @@ export function ChatPage() {
     } catch {
       setMessage(text)
       setError('Não foi possível pôr a mensagem na fila.')
+    }
+  }
+
+  async function sendFromScene(rawText: string) {
+    const text = rawText.trim()
+    if (!text) return
+    if (running || stopping) {
+      setError(null)
+      try {
+        const receipt = await enqueueMessage(client, conversationId, text)
+        if (!receipt.queued) await loadSnapshot(false)
+        await refreshQueue()
+      } catch (caught) {
+        setError('Não foi possível pôr a mensagem na fila.')
+        throw caught
+      }
+      return
+    }
+    await submit(text, false, undefined, { fromScene: true })
+  }
+
+  async function stopAgentFromScene(agentId: string): Promise<SceneAgentControlResult> {
+    if (!conversationId || !agentId) {
+      return { ok: false, reason: 'error', message: 'Subagente inválido.' }
+    }
+    try {
+      await stopConversationAgent(client, conversationId, agentId)
+      return { ok: true }
+    } catch (caught) {
+      if (
+        caught instanceof ApiError &&
+        caught.status === 409 &&
+        caught.code.toUpperCase() === 'AGENT_NOT_RUNNING'
+      ) {
+        return { ok: false, reason: 'not_running' }
+      }
+      return {
+        ok: false,
+        reason: 'error',
+        message: 'Não foi possível parar o subagente.',
+      }
+    }
+  }
+
+  async function messageAgentFromScene(
+    agentId: string,
+    rawText: string,
+  ): Promise<SceneAgentControlResult> {
+    const text = rawText.trim()
+    if (!conversationId || !agentId || !text) {
+      return { ok: false, reason: 'error', message: 'Mensagem inválida.' }
+    }
+    try {
+      await sendConversationAgentMessage(client, conversationId, agentId, text)
+      return { ok: true }
+    } catch (caught) {
+      if (
+        caught instanceof ApiError &&
+        caught.status === 409 &&
+        caught.code.toUpperCase() === 'AGENT_NOT_RUNNING'
+      ) {
+        return { ok: false, reason: 'not_running' }
+      }
+      return {
+        ok: false,
+        reason: 'error',
+        message: 'Não foi possível enviar a mensagem ao subagente.',
+      }
     }
   }
 
@@ -2383,15 +2510,37 @@ export function ChatPage() {
               <span>Abrir no Code</span>
             </button>
           )}
-          <button
-            type="button"
-            className={teamViewOpen ? 'chat__team-toggle-btn is-active' : 'chat__team-toggle-btn'}
-            data-testid="chat-team-view-toggle"
-            aria-pressed={teamViewOpen}
-            onClick={() => setTeamViewOpen((prev) => !prev)}
+          <div
+            role="group"
+            aria-label="Visualização da conversa"
+            data-testid="chat-view-switch"
+            className="chat__view-switch"
           >
-            <span>Equipe em atividade</span>
-          </button>
+            <button
+              type="button"
+              className={!sceneOpen ? 'chat__team-toggle-btn is-active' : 'chat__team-toggle-btn'}
+              data-testid="chat-view-chat"
+              aria-pressed={!sceneOpen}
+              onClick={() => setSceneOpen(false)}
+            >
+              <span>Chat</span>
+            </button>
+            <button
+              type="button"
+              className={sceneOpen ? 'chat__team-toggle-btn is-active' : 'chat__team-toggle-btn'}
+              data-testid="chat-view-scene"
+              aria-pressed={sceneOpen}
+              onClick={() => {
+                // Read before the Cena replaces the thread: a shorter page would clamp the offset.
+                if (!sceneOpen && scrollRef.current) {
+                  chatScrollRestoreRef.current = { conversationId, top: scrollRef.current.scrollTop }
+                }
+                setSceneOpen(true)
+              }}
+            >
+              <span>Cena</span>
+            </button>
+          </div>
           <ContextIndicator usage={contextUsage} />
 
           <div className="chat__project-control" data-testid="conversation-project-control">
@@ -2579,6 +2728,7 @@ export function ChatPage() {
 
       <div className="chat__body" style={conversationMode === 'code' && workspaceDrawerOpen ? { position: 'relative' } : undefined}>
         <div className="chat__scroll" ref={scrollRef} onScroll={(event) => {
+          if (sceneOpen) return
           const element = event.currentTarget
           const nextAtBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 120
           pinnedRef.current = nextAtBottom
@@ -2588,16 +2738,31 @@ export function ChatPage() {
             void loadOlderActivities()
           }
         }}>
-          {teamViewOpen ? (
-            <TeamActivityView
-              events={activity.events}
+          {sceneOpen ? (
+            <SceneView
+              events={sceneEvents}
               todos={activity.todos}
               running={running}
               paused={teamPaused}
+              openQuestionTurnIds={openQuestionTurnIds}
+              actions={{
+                onToolPermission: submitToolPermissionDecision,
+                onAnswer: submitQuestionAnswers,
+                onMcpApprove: submitMcpApproval,
+                onMcpDecline: declineMcpApproval,
+                onPluginApprove: submitPluginApproval,
+                onPluginDecline: declinePluginApproval,
+                onApprovePlanAcceptEdits: handleApprovePlanAcceptEdits,
+                onApprovePlanAskPermissions: handleApprovePlanAskPermissions,
+                onRequestPlanChanges: handleRequestPlanChanges,
+              }}
+              onSendToOrin={sendFromScene}
+              onStopAgent={stopAgentFromScene}
+              onMessageAgent={messageAgentFromScene}
               onPauseTeam={() => setTeamPaused((prev) => !prev)}
-              onBackToChat={() => setTeamViewOpen(false)}
+              onBackToChat={() => setSceneOpen(false)}
               onResolveDecision={(optionValue) => {
-                setTeamViewOpen(false)
+                setSceneOpen(false)
                 void submit(optionValue)
               }}
               onOpenDeliverable={(deliverable) => {
@@ -3002,7 +3167,7 @@ export function ChatPage() {
           )}
         </div>
 
-        {newActivityCount > 0 && !atBottom && (
+        {newActivityCount > 0 && !atBottom && !sceneOpen && (
           <button type="button" className="chat__new-activity" onClick={scrollToLatest}>
             Ir para o fim · {newActivityCount} novas atividades
           </button>

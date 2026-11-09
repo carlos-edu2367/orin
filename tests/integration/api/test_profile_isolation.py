@@ -48,6 +48,8 @@ OWNED = {
     ("POST", "/v1/conversations/{conversation_id}/worktree"),
     ("POST", "/v1/conversations/{conversation_id}/messages"),
     ("POST", "/v1/conversations/{conversation_id}/cancel"),
+    ("POST", "/v1/conversations/{conversation_id}/agents/{agent_id}/stop"),
+    ("POST", "/v1/conversations/{conversation_id}/agents/{agent_id}/messages"),
     ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/rewind"),
     ("POST", "/v1/conversations/{conversation_id}/messages/{message_id}/rewind"),
     ("GET", "/v1/conversations/{conversation_id}/file-history"),

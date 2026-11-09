@@ -2,7 +2,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { ConversationActivityEvent } from '../../src/features/conversations/activityTypes'
 import { orderAgentTree } from '../../src/features/conversations/agentTree'
-import { TeamActivityView } from '../../src/features/conversations/TeamActivityView'
+import { SceneView } from '../../src/features/conversations/scene/SceneView'
 
 afterEach(() => {
   cleanup()
@@ -34,7 +34,7 @@ describe('orderAgentTree', () => {
   })
 })
 
-describe('TeamActivityView agent tree', () => {
+describe('SceneView agent tree', () => {
   it('puts a subagent started by another subagent under it, indented', () => {
     const events: ConversationActivityEvent[] = [
       {
@@ -51,17 +51,18 @@ describe('TeamActivityView agent tree', () => {
       },
     ]
 
-    render(<TeamActivityView events={events} />)
+    render(<SceneView events={events} />)
 
-    const cards = Array.from(screen.getByTestId('team-agents-list').querySelectorAll('[data-testid^="team-agent-card-"]'))
-    expect(cards.map((card) => card.getAttribute('data-testid'))).toEqual([
-      'team-agent-card-agent-lead',
-      'team-agent-card-agent-verifier',
-      'team-agent-card-agent-other',
+    const buttons = Array.from(screen.getByTestId('scene-agents-list').querySelectorAll('[data-testid^="scene-agent-button-"]'))
+    expect(buttons.map((btn) => btn.getAttribute('data-testid'))).toEqual([
+      'scene-agent-button-agent:main',
+      'scene-agent-button-agent-lead',
+      'scene-agent-button-agent-verifier',
+      'scene-agent-button-agent-other',
     ])
-    const verifier = screen.getByTestId('team-agent-card-agent-verifier')
-    expect(verifier.getAttribute('data-depth')).toBe('1')
-    expect(verifier.className).toContain('team-agent-card--nested')
-    expect(screen.getByTestId('team-agent-card-agent-lead').getAttribute('data-depth')).toBe('0')
+    const verifier = screen.getByTestId('scene-agent-button-agent-verifier')
+    expect(verifier.getAttribute('data-depth')).toBe('2')
+    expect(verifier.className).toContain('scene-hud__agent-btn--nested')
+    expect(screen.getByTestId('scene-agent-button-agent-lead').getAttribute('data-depth')).toBe('1')
   })
 })

@@ -7,6 +7,7 @@
     "dev": "vite",
     "dev:local": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "test:visual": "playwright test --config=playwright.visual.config.ts",

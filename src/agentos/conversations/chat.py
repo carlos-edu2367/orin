@@ -17,7 +17,8 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from agentos.api.contracts import ApplicationNotFoundError, ApplicationValidationError
+from agentos.api.contracts import ApplicationConflictError, ApplicationNotFoundError, ApplicationValidationError
+from agentos.conversations.agent_controls import AgentControlStore
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
 from agentos.agentic.workspace import WorkspaceError, _directory_name, resolve_workspace
@@ -3026,6 +3027,46 @@ class PostgresChatStore:
         keep_set = getattr(self, "_keep_subagents_turns", None)
         return bool(keep_set and str(turn_id) in keep_set)
 
+    def _validate_running_agent(self, conversation_id: str, user_id: str, agent_id: str) -> None:
+        with self._engine.connect() as c:
+            owned = c.execute(
+                select(conversations.c.conversation_id).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
+                )
+            ).first()
+            if owned is None:
+                raise ApplicationNotFoundError(conversation_id)
+            agent_row = c.execute(
+                select(conversation_agents.c.state).where(
+                    conversation_agents.c.agent_id == agent_id,
+                    conversation_agents.c.conversation_id == conversation_id,
+                    conversation_agents.c.user_id == user_id,
+                )
+            ).first()
+        if agent_row is None:
+            raise ApplicationNotFoundError(agent_id)
+        if str(agent_row.state or "") not in {"running", "working"}:
+            raise ApplicationConflictError(agent_id, code="AGENT_NOT_RUNNING", retryable=False)
+
+    def _agent_controls(self) -> AgentControlStore:
+        controls = getattr(self, "_agent_control_store", None)
+        if controls is None:
+            controls = self._agent_control_store = AgentControlStore(self._engine)
+        return controls
+
+    def request_agent_stop(self, conversation_id: str, user_id: str, agent_id: str) -> dict[str, object]:
+        self._validate_running_agent(conversation_id, user_id, agent_id)
+        control_id = self._agent_controls().request_stop(user_id, conversation_id, agent_id)
+        return {"agent_id": agent_id, "status": "stopping", "control_id": control_id}
+
+    def send_agent_message(
+        self, conversation_id: str, user_id: str, agent_id: str, message: str
+    ) -> dict[str, object]:
+        self._validate_running_agent(conversation_id, user_id, agent_id)
+        control_id = self._agent_controls().post_message(user_id, conversation_id, agent_id, message)
+        return {"agent_id": agent_id, "status": "queued", "control_id": control_id}
+
     def cancel_requested(self, turn_id: str) -> bool:
         with self._engine.connect() as c:
             state = c.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == turn_id)).scalar()
@@ -3242,6 +3283,14 @@ class ChatApplication:
     def keep_subagents_requested(self, turn_id: str) -> bool:
         checker = getattr(self.store, "keep_subagents_requested", None)
         return bool(checker(turn_id)) if callable(checker) else False
+
+    def request_agent_stop(self, conversation_id: str, user_id: str, agent_id: str) -> dict[str, object]:
+        return self.store.request_agent_stop(conversation_id, user_id, agent_id)
+
+    def send_agent_message(
+        self, conversation_id: str, user_id: str, agent_id: str, message: str
+    ) -> dict[str, object]:
+        return self.store.send_agent_message(conversation_id, user_id, agent_id, message)
     def _has_live_turn(self, conversation_id: str, user_id: str) -> bool:
         with self.store._engine.connect() as connection:
             return connection.execute(select(conversation_turns.c.turn_id).where(

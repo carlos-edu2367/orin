@@ -1071,6 +1071,26 @@ conversation_agent_usage = Table(
 )
 Index("ix_conversation_agent_usage_conversation", conversation_agent_usage.c.conversation_id)
 
+conversation_agent_controls = Table(
+    "conversation_agent_controls", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("control_id", String(255), nullable=False, unique=True),
+    Column("conversation_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    Column("outcome", String(16), nullable=True),
+)
+Index(
+    "ix_conversation_agent_controls_pending",
+    conversation_agent_controls.c.conversation_id,
+    conversation_agent_controls.c.agent_id,
+    conversation_agent_controls.c.consumed_at,
+)
+
 runtime_heartbeats = Table(
     "runtime_heartbeats", metadata,
     Column("component", String(64), primary_key=True), Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -1214,6 +1234,7 @@ __all__ = [
     "conversation_activity_events",
     "conversation_agents",
     "conversation_agent_usage",
+    "conversation_agent_controls",
     "execution_checkpoints",
     "execution_effects",
     "turn_quality_metrics",

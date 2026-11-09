@@ -3,7 +3,7 @@ import { MarkdownMessage } from './MarkdownMessage'
 import { renderActivityGroup } from './ActivityStream'
 import { CodeToolCallBlock, formatToolSignature, resolveVisualStatus } from './CodeToolCallBlock'
 import { UnverifiedNotice } from './CodeModeCard'
-import { PlanApprovalCard } from './PlanApprovalCard'
+import { PlanApprovalCard, extractPlanApprovalDetails } from './PlanApprovalCard'
 import type { ApiClient } from '../../api/client'
 import type { CodePermissionMode } from '../../api/codeMode'
 import { rewindTurn, type ConversationMode } from '../../api/conversations'
@@ -736,20 +736,7 @@ export function TurnTimeline({
   }
 
   function renderPlanApproval(event: ConversationActivityEvent, group?: ActivityGroup): ReactNode {
-    const planPath =
-      event.planApproval?.plan_path ??
-      event.planPath ??
-      event.toolPermission?.planApproval?.plan_path ??
-      event.toolPermission?.path ??
-      event.filePath ??
-      event.path ??
-      null
-    const planContent =
-      event.planApproval?.plan_content ??
-      event.planContent ??
-      event.toolPermission?.planApproval?.plan_content ??
-      event.content ??
-      null
+    const { planPath, planContent } = extractPlanApprovalDetails(event)
 
     const approveAcceptHandler = onApprovePlanAcceptEdits ?? onApproveAcceptEdits
     const approveAskHandler = onApprovePlanAskPermissions ?? onApproveAskPermissions

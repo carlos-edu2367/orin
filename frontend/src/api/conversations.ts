@@ -308,6 +308,65 @@ export function cancelConversation(
   })
 }
 
+export type StopConversationAgentResponse = {
+  agent_id: string
+  status: string
+  control_id: string
+}
+
+export function stopConversationAgent(
+  client: ApiClient,
+  conversationId: string,
+  agentId: string,
+  intent: MutationIntent = client.createMutationIntent(),
+): Promise<StopConversationAgentResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/agents/${encodeURIComponent(agentId)}/stop`,
+    method: 'POST',
+    expectedStatus: 202,
+    intent,
+    body: {},
+    parse: (value) => {
+      const data = record(value)
+      return {
+        agent_id: typeof data.agent_id === 'string' ? data.agent_id : agentId,
+        status: typeof data.status === 'string' ? data.status : 'stopping',
+        control_id: typeof data.control_id === 'string' ? data.control_id : '',
+      }
+    },
+  })
+}
+
+export type SendConversationAgentMessageResponse = {
+  agent_id: string
+  status: string
+  control_id: string
+}
+
+export function sendConversationAgentMessage(
+  client: ApiClient,
+  conversationId: string,
+  agentId: string,
+  message: string,
+  intent: MutationIntent = client.createMutationIntent(),
+): Promise<SendConversationAgentMessageResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/agents/${encodeURIComponent(agentId)}/messages`,
+    method: 'POST',
+    expectedStatus: 202,
+    intent,
+    body: { message },
+    parse: (value) => {
+      const data = record(value)
+      return {
+        agent_id: typeof data.agent_id === 'string' ? data.agent_id : agentId,
+        status: typeof data.status === 'string' ? data.status : 'queued',
+        control_id: typeof data.control_id === 'string' ? data.control_id : '',
+      }
+    },
+  })
+}
+
 export type ToolPermissionDecisionResponse = {
   request_id: string
   decision: ToolPermissionDecision
@@ -676,18 +735,29 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   const extraPayload: Record<string, unknown> = {}
   const modelId = optionalText(payload.model_id, 128)
   const subagentType = optionalText(payload.subagent_type, 128)
+  const toAgentId = optionalText(payload.to_agent_id, 255)
+  const fromAgentId = optionalText(payload.from_agent_id, 255)
   const phase = optionalText(payload.phase, 64)
   const callId = optionalText(payload.call_id, 255)
   const payloadToolName = optionalText(payload.tool_name, 64)
   const queueId = optionalText(payload.queue_id, 255)
   const queuedText = optionalText(payload.queued_text, 2000)
+  const source = optionalText(payload.source, 32)
+  const senderName = optionalText(payload.sender_name, 120)
+  const recipientName = optionalText(payload.recipient_name, 120)
   if (modelId) extraPayload.model_id = modelId
   if (subagentType) extraPayload.subagent_type = subagentType
+  if (toAgentId) extraPayload.to_agent_id = toAgentId
+  if (fromAgentId) extraPayload.from_agent_id = fromAgentId
   if (phase) extraPayload.phase = phase
   if (callId) extraPayload.call_id = callId
   if (payloadToolName) extraPayload.tool_name = payloadToolName
   if (queueId) extraPayload.queue_id = queueId
   if (queuedText) extraPayload.queued_text = queuedText
+  if (source) extraPayload.source = source
+  if (senderName) extraPayload.sender_name = senderName
+  if (recipientName) extraPayload.recipient_name = recipientName
+  if (errorCode) extraPayload.error_code = errorCode
   if (payload.in_turn === true) extraPayload.in_turn = true
   if (payload.waiting_subagents === true || payload.state === 'waiting_subagents') {
     extraPayload.waiting_subagents = true
@@ -706,11 +776,9 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (type === 'plugin.hook_executed') {
     // W7 detailed transcript: what a hook was and how it ended (the server has already redacted these).
     const hookEvent = optionalText(payload.hook_event, 64)
-    const source = optionalText(payload.source, 32)
     const hookType = optionalText(payload.type, 16)
     const reason = optionalText(payload.reason, 300)
     if (hookEvent) extraPayload.hook_event = hookEvent
-    if (source) extraPayload.source = source
     if (hookType) extraPayload.hook_type = hookType
     if (reason) extraPayload.reason = reason
     if (typeof payload.exit_code === 'number' && Number.isInteger(payload.exit_code)) extraPayload.exit_code = payload.exit_code

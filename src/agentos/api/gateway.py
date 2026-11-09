@@ -285,6 +285,10 @@ class QueueConversationInputRequest(_RequestModel):
     message: str = Field(min_length=1, max_length=16000)
 
 
+class SendConversationAgentMessageRequest(_RequestModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
 class CompactConversationRequest(_RequestModel):
     instructions: str | None = Field(default=None, max_length=4000)
 
@@ -537,8 +541,13 @@ def create_app(services: ApiServices) -> FastAPI:
         return _error(422, "VALIDATION", "archive_rejected", retryable=False)
 
     @app.exception_handler(ApplicationConflictError)
-    async def conflict_error(_: Request, __: ApplicationConflictError) -> JSONResponse:
-        return _error(409, "CONFLICT", "execution_conflict", retryable=True)
+    async def conflict_error(_: Request, exc: ApplicationConflictError) -> JSONResponse:
+        return _error(
+            409,
+            "CONFLICT",
+            getattr(exc, "code", "execution_conflict") or "execution_conflict",
+            retryable=bool(getattr(exc, "retryable", True)),
+        )
 
     @app.exception_handler(ApplicationIndeterminateError)
     async def indeterminate_error(_: Request, __: ApplicationIndeterminateError) -> JSONResponse:
@@ -1499,6 +1508,48 @@ def create_app(services: ApiServices) -> FastAPI:
             result = app_port.cancel(conversation_id, principal.user_id, keep_subagents=keep_subagents)  # type: ignore[union-attr]
         except TypeError:
             result = app_port.cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
+        return JSONResponse(_jsonable(result), status_code=202)
+
+    @app.post("/v1/conversations/{conversation_id}/agents/{agent_id}/stop", status_code=202)
+    async def stop_conversation_agent(conversation_id: str, agent_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.cancel",
+            resource_id=conversation_id,
+            purpose="conversation.cancel",
+        )
+        app_port = require_port(services.conversation_application)
+        result = await run_in_threadpool(
+            app_port.request_agent_stop,  # type: ignore[union-attr]
+            conversation_id,
+            principal.user_id,
+            agent_id,
+        )
+        return JSONResponse(_jsonable(result), status_code=202)
+
+    @app.post("/v1/conversations/{conversation_id}/agents/{agent_id}/messages", status_code=202)
+    async def send_conversation_agent_message(
+        conversation_id: str,
+        agent_id: str,
+        payload: SendConversationAgentMessageRequest,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.send",
+        )
+        app_port = require_port(services.conversation_application)
+        result = await run_in_threadpool(
+            app_port.send_agent_message,  # type: ignore[union-attr]
+            conversation_id,
+            principal.user_id,
+            agent_id,
+            payload.message,
+        )
         return JSONResponse(_jsonable(result), status_code=202)
 
     @app.post("/v1/conversations/{conversation_id}/preview/start", status_code=202)

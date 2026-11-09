@@ -48,6 +48,7 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "conversation_tool_records",
             "conversation_agents",
             "conversation_agent_usage",
+            "conversation_agent_controls",
             "vision_model_selections",
             "media_model_selections",
             "agent_memories",
