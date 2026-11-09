@@ -95,6 +95,12 @@
 | 🔌 **Codex e Antigravity por assinatura** | Novos adaptadores para **OpenAI Codex CLI** e **Google Antigravity (`agy`)**, ao lado do Claude Code CLI, todos com as ferramentas do Orin via MCP e isolamento completo. |
 | 🚦 **Fila justa de CLIs** | Processos de CLI compartilham uma fila por conversa com proteção de memória; a interface mostra *"aguardando vaga"* e um agente que espera outro libera a própria vaga. |
 | 🛠️ **Orin Code** | Conjunto central de ferramentas com carregamento sob demanda (`ToolSearch`), `Read` de 2000 linhas com orçamento de tokens, lint só das linhas alteradas e aviso **"não verificado"** quando um turno termina sem checagens. |
+| 🎮 **Cena em pixel art** | Os chats ganham uma **Cena**: cada agente vira um personagem em sua estação, com balões de fala, HUD acessível e cartões de pendências (aprovações e perguntas). Você pode **parar** um subagente ou **mandar uma mensagem** direto a ele; ao ser parado, ele devolve ao pai o que já tinha feito (`STOPPED_BY_USER`) sem cancelar o turno. |
+| 🕓 **Subagentes em segundo plano** | O líder é **reativado** quando um subagente em segundo plano termina (inclusive depois do turno, via turno de continuação). Sua mensagem chega ao líder sem esperar o subagente, **"Enviar agora"** não derruba quem está rodando, e a interface mostra quais subagentes o turno aguarda, o status por fase e a aprovação da pesquisa antes de implementar. |
+| 🗂️ **Sessões** | **Clique direito** na sessão renomeia, fixa ou apaga (com desfazer). Sessões fixadas viram **abas no cabeçalho**, o rascunho do composer é preservado entre telas e a sua mensagem fica **flutuando no topo** do chat enquanto você lê a resposta. |
+| 🖥️ **Bancada e prévia** | Você pode iniciar a prévia do projeto pela Bancada, com árvore de arquivos nova; os agentes abrem a prévia e escrevem arquivos apenas pelas ferramentas do Orin. |
+| 🩹 **Correções do multiagente** | Cada delegação cria uma instância nova de subagente; o contador de *"subagentes em paralelo"* conta só subagentes reais; a edição não é mais recusada por leituras de rodadas anteriores (`READ_IN_SAME_BATCH`); `project_map`/`search_code` não travam mais o turno esperando o índice; `run_command` respeita o timeout (mata a árvore inteira de processos); uma chamada abandonada pelo CLI não prende mais o turno; e o `use_skill` resolve skills sem o namespace quando o nome é único. |
+| 👁️ **Antigravity com visão** | Os modelos Gemini e Claude do Antigravity agora enxergam imagens anexadas. |
 | ⬆️ **Atualização em um reinício** | A atualização roda fora do launcher, reconcilia tentativas interrompidas e sempre reabre o Orin; no Linux, o atalho do menu é criado automaticamente. |
 
 ---
@@ -136,6 +142,7 @@ Revise o diff, aponte bugs com caminho:linha e não altere arquivos.
 - **Fallback:** só dentro da lista do agente. Se nenhum modelo subir, o erro é claro (`CHILD_MODELS_UNAVAILABLE`).
 - **Árvore:** profundidade padrão 3 (`subagentMaxDepth`; um repositório só pode diminuir). Explore e Plan nunca delegam, e o filho de um agente somente leitura também é somente leitura.
 - **Posse:** um subagente só inspeciona, retoma ou para os próprios descendentes; o principal enxerga todos. Times (*teammates*) ficam no agente principal.
+- **Controle pelo usuário:** na Cena você para ou manda mensagem a qualquer subagente em execução (`409 AGENT_NOT_RUNNING` se ele já terminou). Mensagem que o subagente não chegou a ler, ou enviada depois de um *Parar*, vai para o Orin.
 - **Precedência:** agentes da política gerenciada e do repositório mantêm o nome; os da Biblioteca valem acima dos seus arquivos e dos plugins.
 
 </details>
@@ -172,12 +179,12 @@ O **Orin Friend** mantém uma linha contínua de convivência, evolui o vínculo
 </details>
 
 <details open>
-<summary><b>3. Chat Multimodal & Atividade em Equipe</b></summary>
+<summary><b>3. Chat Multimodal & Equipe de Agentes</b></summary>
 
-| Chat, Memória Inline & Fila | Atividade em Equipe |
+| Chat, Memória Inline & Fila | Equipe de Agentes (Cena) |
 | :---: | :---: |
 | ![Orin Chat](docs/images/readme/orin-chat.png) | ![Atividade em Equipe](docs/images/readme/orin-team.png) |
-| *PDFs e planilhas, card "Memória atualizada · Desfazer" e fila de mensagens com envio imediato.* | *Cada especialista com seu progresso; subagentes chamados por outro aparecem recuados sob ele.* |
+| *PDFs e planilhas, card "Memória atualizada · Desfazer" e fila de mensagens com envio imediato.* | *Cada especialista com seu progresso; subagentes chamados por outro aparecem recuados sob ele. Na **Cena**, eles viram personagens em pixel art que você pode parar ou chamar.* |
 
 </details>
 
@@ -363,7 +370,7 @@ flowchart LR
 
 ```text
 src/agentos/
-├── api/                 # Gateway FastAPI, REST, SSE, WebSocket de voz e /v1/custom-agents
+├── api/                 # Gateway FastAPI, REST, SSE, WebSocket de voz, /v1/custom-agents e controles de subagente da Cena
 ├── agentic/             # Sessão, runtime, ferramentas, árvore de subagentes e definições de agentes
 ├── providers/           # Adaptadores de CLI (Claude, Codex, Antigravity), fila de vagas e servidor MCP de ferramentas
 ├── provider_catalog/    # Catálogo de modelos, preços e bridges
