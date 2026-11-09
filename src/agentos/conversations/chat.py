@@ -3028,6 +3028,10 @@ class PostgresChatStore:
         return bool(keep_set and str(turn_id) in keep_set)
 
     def _validate_running_agent(self, conversation_id: str, user_id: str, agent_id: str) -> None:
+        if not self._agent_is_running(conversation_id, user_id, agent_id):
+            raise ApplicationConflictError(agent_id, code="AGENT_NOT_RUNNING", retryable=False)
+
+    def _agent_is_running(self, conversation_id: str, user_id: str, agent_id: str) -> bool:
         with self._engine.connect() as c:
             owned = c.execute(
                 select(conversations.c.conversation_id).where(
@@ -3046,7 +3050,13 @@ class PostgresChatStore:
             ).first()
         if agent_row is None:
             raise ApplicationNotFoundError(agent_id)
-        if str(agent_row.state or "") not in {"running", "working"}:
+        return str(agent_row.state or "") in {"running", "working"}
+
+    def _confirm_control_reachable(self, conversation_id: str, user_id: str, agent_id: str, control_id: str) -> None:
+        """The agent may finish between the check and the insert; then nothing would ever read the control."""
+        if self._agent_is_running(conversation_id, user_id, agent_id):
+            return
+        if self._agent_controls().withdraw(control_id):
             raise ApplicationConflictError(agent_id, code="AGENT_NOT_RUNNING", retryable=False)
 
     def _agent_controls(self) -> AgentControlStore:
@@ -3058,6 +3068,7 @@ class PostgresChatStore:
     def request_agent_stop(self, conversation_id: str, user_id: str, agent_id: str) -> dict[str, object]:
         self._validate_running_agent(conversation_id, user_id, agent_id)
         control_id = self._agent_controls().request_stop(user_id, conversation_id, agent_id)
+        self._confirm_control_reachable(conversation_id, user_id, agent_id, control_id)
         return {"agent_id": agent_id, "status": "stopping", "control_id": control_id}
 
     def send_agent_message(
@@ -3065,6 +3076,7 @@ class PostgresChatStore:
     ) -> dict[str, object]:
         self._validate_running_agent(conversation_id, user_id, agent_id)
         control_id = self._agent_controls().post_message(user_id, conversation_id, agent_id, message)
+        self._confirm_control_reachable(conversation_id, user_id, agent_id, control_id)
         return {"agent_id": agent_id, "status": "queued", "control_id": control_id}
 
     def cancel_requested(self, turn_id: str) -> bool:

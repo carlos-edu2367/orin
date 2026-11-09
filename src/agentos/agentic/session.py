@@ -884,6 +884,8 @@ class _AgentControlWatcher:
         record_activity: Callable[..., None] | None = None,
         clock: Callable[[], float] | None = None,
         min_interval: float = POLL_INTERVAL_SECONDS,
+        main_turn_active: Callable[[], bool] | None = None,
+        wake_main: Callable[[str, str], None] | None = None,
     ) -> None:
         self._store = store
         self.user_id = str(user_id or "")
@@ -897,9 +899,22 @@ class _AgentControlWatcher:
         self._clock = clock
         self._min_interval = float(min_interval)
         self._last_poll: float | None = None
+        self._main_turn_active = main_turn_active
+        self._wake_main = wake_main
+        # control_id -> content of messages put in `reminders` that the subagent may not have read yet
+        self._queued_messages: dict[str, str] = {}
+        self._warned = False
         self.stopped_by_user = False
         self._lock = threading.Lock()
         self.expire_pending()
+
+    def _store_failed(self, what: str) -> None:
+        """A database error leaves Stop/Message without effect: say it once per run, then keep quiet."""
+        if self._warned:
+            logger.debug("agent control store failed (%s) for %s", what, self.agent_id, exc_info=True)
+            return
+        self._warned = True
+        logger.warning("agent control store failed (%s) for %s", what, self.agent_id, exc_info=True)
 
     def _now(self) -> float:
         if self._clock is not None:
@@ -912,7 +927,7 @@ class _AgentControlWatcher:
         try:
             self._store.expire_pending(self.user_id, self.conversation_id, self.agent_id)
         except Exception:  # noqa: BLE001
-            logger.debug("could not expire pending agent controls for %s", self.agent_id, exc_info=True)
+            self._store_failed("expire_pending")
 
     def poll(self) -> None:
         if self._store is None or not self.agent_id:
@@ -929,7 +944,7 @@ class _AgentControlWatcher:
             try:
                 items = list(self._store.take(self.user_id, self.conversation_id, self.agent_id) or ())
             except Exception:  # noqa: BLE001
-                logger.debug("could not poll agent controls for %s", self.agent_id, exc_info=True)
+                self._store_failed("poll")
                 return
             for item in items:
                 self._apply_polled_item(item)
@@ -941,22 +956,22 @@ class _AgentControlWatcher:
         if kind == "stop":
             self.stopped_by_user = True
             self.event.set()
-            try:
-                self._store.set_outcome(control_id, "stopped")
-            except Exception:  # noqa: BLE001
-                logger.debug("could not set stop outcome for %s", self.agent_id, exc_info=True)
+            self._set_outcome(control_id, "stopped")
             return
         if kind == "message":
-            if content:
-                self.reminders.add(
-                    "user_message",
-                    f"Message from the user (sent to you directly while you work):\n{content}",
-                    key=f"user-msg:{control_id}",
-                )
-            try:
-                self._store.set_outcome(control_id, "delivered")
-            except Exception:  # noqa: BLE001
-                logger.debug("could not set message outcome for %s", self.agent_id, exc_info=True)
+            if not content:
+                self._set_outcome(control_id, "expired")
+                return
+            # A subagent that is stopping, or whose queue is full, would never read it: the Orin gets it instead.
+            if self.stopped_by_user or not self.reminders.add(
+                "user_message",
+                self._message_text(content),
+                key=f"user-msg:{control_id}",
+            ):
+                self._forward(control_id, content)
+                return
+            self._queued_messages[control_id] = content
+            self._set_outcome(control_id, "delivered")
             if self._record_activity is not None:
                 try:
                     self._record_activity(
@@ -977,35 +992,64 @@ class _AgentControlWatcher:
                 except Exception:  # noqa: BLE001
                     logger.debug("could not record user message activity for %s", self.agent_id, exc_info=True)
 
+    @staticmethod
+    def _message_text(content: str) -> str:
+        return f"Message from the user (sent to you directly while you work):\n{content}".strip()
+
+    def _set_outcome(self, control_id: str, outcome: str) -> None:
+        try:
+            self._store.set_outcome(control_id, outcome)
+        except Exception:  # noqa: BLE001
+            self._store_failed(f"set_outcome {outcome}")
+
+    def _forward(self, control_id: str, content: str) -> None:
+        """Hand a message the subagent will never read to the Orin: this turn if it still runs, else a new one."""
+        text = (
+            f"The user sent this to subagent {self.clean} ({self.agent_id}), which finished before reading it:\n{content}"
+        )
+        main_running = True
+        if self._main_turn_active is not None:
+            try:
+                main_running = bool(self._main_turn_active())
+            except Exception:  # noqa: BLE001
+                main_running = True
+        delivered = False
+        if main_running and self.main_reminders is not None:
+            delivered = self.main_reminders.add("user_message", text, key=f"user-msg-fwd:{control_id}")
+        if not delivered and self._wake_main is not None:
+            try:
+                self._wake_main(text, control_id)
+                delivered = True
+            except Exception:  # noqa: BLE001
+                logger.warning("could not hand the user's message for %s to the Orin", self.agent_id, exc_info=True)
+        if not delivered and not main_running and self.main_reminders is not None:
+            delivered = self.main_reminders.add("user_message", text, key=f"user-msg-fwd:{control_id}")
+        self._set_outcome(control_id, "forwarded" if delivered else "expired")
+
     def finalize(self) -> None:
         if self._store is None or not self.agent_id:
             return
         with self._lock:
+            # Messages queued for the subagent that it never drained (it ended on that model call).
+            if self._queued_messages:
+                unread = {item.text for item in self.reminders.drain() if item.kind == "user_message"}
+                for control_id, content in self._queued_messages.items():
+                    if self._message_text(content) in unread:
+                        self._forward(control_id, content)
+                self._queued_messages.clear()
             try:
                 items = list(self._store.take(self.user_id, self.conversation_id, self.agent_id) or ())
             except Exception:  # noqa: BLE001
-                logger.debug("could not finalize agent controls for %s", self.agent_id, exc_info=True)
+                self._store_failed("finalize")
                 return
             for item in items:
                 control_id = str(item.get("control_id") or "")
                 kind = str(item.get("kind") or "")
                 content = str(item.get("content") or "")
-                if kind == "stop":
-                    try:
-                        self._store.set_outcome(control_id, "expired")
-                    except Exception:  # noqa: BLE001
-                        logger.debug("could not expire leftover stop for %s", self.agent_id, exc_info=True)
-                elif kind == "message":
-                    try:
-                        self._store.set_outcome(control_id, "forwarded")
-                    except Exception:  # noqa: BLE001
-                        logger.debug("could not mark leftover message forwarded for %s", self.agent_id, exc_info=True)
-                    if self.main_reminders is not None and content:
-                        self.main_reminders.add(
-                            "user_message",
-                            f"The user sent this to subagent {self.clean} ({self.agent_id}), which finished before reading it:\n{content}",
-                            key=f"user-msg-fwd:{control_id}",
-                        )
+                if kind == "message" and content:
+                    self._forward(control_id, content)
+                else:
+                    self._set_outcome(control_id, "expired")
 
 
 class _SubagentStore:
@@ -3243,6 +3287,8 @@ class TurnSession:
             main_reminders=getattr(self, "_reminders", None),
             record_activity=self._record,
             clock=getattr(self, "_agent_control_clock", None),
+            main_turn_active=partial(BACKGROUND_AGENTS.turn_active, str(self.turn.get("conversation_id") or "")),
+            wake_main=self._user_message_waker(str(self.turn.get("conversation_id") or "")),
         )
         slot = _SubagentSlot(self._subagent_semaphore)
         slot.acquire()
@@ -3275,7 +3321,7 @@ class TurnSession:
                     "failed",
                     f"{clean} cancelado",
                     content,
-                    {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"},
+                    {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent", **({"transient": True} if stopped_by_user else {})},
                     reason,
                 )
             return self._execute_subagent_run_unlocked(
@@ -3677,7 +3723,7 @@ class TurnSession:
                     "failed",
                     f"{clean} não concluiu",
                     failure_content,
-                    {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent"},
+                    {"agent_id": agent_id, "agent_name": clean, "tool_kind": "agent", **({"transient": True} if stopped_by_user else {})},
                     reason,
                 )
             final_agent_state = "completed"
@@ -4987,6 +5033,32 @@ class TurnSession:
                 request,
                 idempotency_key=f"subagent:{entry.agent_id}:{run_id}",
             )
+
+        return wake
+
+    def _user_message_waker(self, conversation_id: str) -> Callable[[str, str], None] | None:
+        """Start a new Orin turn with a message the user sent to a subagent that ended after the Orin's turn."""
+        if not conversation_id:
+            return None
+
+        def wake(message: str, control_id: str) -> None:
+            scheduler = self._turn_scheduler()
+            if scheduler is None:
+                raise RuntimeError("no scheduler for this session")
+            from agentos.scheduler.scheduled_chats import ScheduledChatInput
+
+            context = self._schedule_context()
+            request = ScheduledChatInput(
+                message,
+                context["provider"],
+                context["model_id"],
+                str(context.get("timezone") or "UTC"),
+                "once",
+                fire_at=datetime.now(UTC) + timedelta(seconds=2),
+                conversation_id=conversation_id,
+                source="subagent",
+            )
+            scheduler.create(context["user_id"], request, idempotency_key=f"agent-msg:{control_id}")
 
         return wake
 

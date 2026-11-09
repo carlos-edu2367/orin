@@ -31,7 +31,7 @@ const CONTROLLABLE_SUBAGENT_STATUSES: ReadonlySet<SceneAgentStatus> = new Set([
   'thinking',
   'waiting_agent',
   'waiting_user',
-  'queued',
+  // 'queued' is left out on purpose: the backend keeps a subagent waiting for a slot as idle and answers 409.
 ])
 
 type AgentMessageFeedback =
@@ -69,7 +69,7 @@ function normalizeThrownControlError(
   if (err && typeof err === 'object') {
     const rec = err as { status?: unknown; code?: unknown; message?: unknown }
     const code = typeof rec.code === 'string' ? rec.code.toUpperCase() : ''
-    if (rec.status === 409 || code === 'AGENT_NOT_RUNNING') {
+    if (rec.status === 409 && code === 'AGENT_NOT_RUNNING') {
       return { ok: false, reason: 'not_running' }
     }
   }

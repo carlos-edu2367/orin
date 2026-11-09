@@ -252,3 +252,49 @@ def test_agent_control_routes_happy_path_not_found_conflict_and_validation(tmp_p
     finally:
         engine.dispose()
 
+
+
+@pytest.mark.parametrize("kind", ["sql", "memory"])
+def test_withdraw_only_expires_a_control_nobody_took(kind: str) -> None:
+    store = AgentControlStore(create_engine_for_tests()) if kind == "sql" else InMemoryAgentControls()
+    pending = store.post_message("u1", "c1", "a1", "ainda pendente")
+    assert store.withdraw(pending) is True
+    assert store.take("u1", "c1", "a1") == []
+
+    taken = store.post_message("u1", "c1", "a1", "já lida")
+    assert [item["control_id"] for item in store.take("u1", "c1", "a1")] == [taken]
+    assert store.withdraw(taken) is False
+
+
+def test_take_never_returns_a_row_another_taker_claimed_first() -> None:
+    """Between this taker's SELECT and its UPDATE another worker consumes the row: it must not be returned twice."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import event, update
+
+    engine = create_engine_for_tests()
+    store = AgentControlStore(engine)
+    control_id = store.post_message("u1", "c1", "a1", "uma vez só")
+    raced: list[bool] = []
+
+    def competing_taker(conn, clauseelement, multiparams, params, execution_options):
+        if getattr(clauseelement, "is_update", False) and not raced:
+            raced.append(True)
+            conn.execute(
+                update(conversation_agent_controls)
+                .where(conversation_agent_controls.c.control_id == control_id)
+                .values(consumed_at=datetime.now(UTC), outcome="delivered")
+            )
+        return clauseelement, multiparams, params
+
+    event.listen(engine, "before_execute", competing_taker, retval=True)
+    try:
+        assert store.take("u1", "c1", "a1") == []
+    finally:
+        event.remove(engine, "before_execute", competing_taker)
+    assert raced == [True]
+    with engine.connect() as conn:
+        outcome = conn.execute(
+            select(conversation_agent_controls.c.outcome).where(conversation_agent_controls.c.control_id == control_id)
+        ).scalar()
+    assert outcome == "delivered"

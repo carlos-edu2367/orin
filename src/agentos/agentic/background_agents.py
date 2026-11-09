@@ -147,6 +147,11 @@ class BackgroundAgentRegistry:
             else:
                 self._active_turns[conv_id] = cur - 1
 
+    def turn_active(self, conversation_id: str) -> bool:
+        """Whether a leader turn of this conversation is running now (between begin_turn and end_turn)."""
+        with self._cond:
+            return self._active_turns.get(str(conversation_id or ""), 0) > 0
+
     def save_history(self, conversation_id: str, agent_id: str, history: list[dict[str, Any]]) -> None:
         conv_id = str(conversation_id or "")
         clean_id = str(agent_id or "")

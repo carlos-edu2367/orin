@@ -1262,6 +1262,60 @@ describe('SceneView', () => {
     })
   })
 
+  it('(24) subagente na fila não mostra Parar/Mensagem, e um 409 de outro tipo lançado pelo handler é erro, não "já terminou"', async () => {
+    const queued: ConversationActivityEvent[] = [
+      {
+        eventId: 'ev-q',
+        cursor: '1',
+        type: 'delegation.waiting',
+        kind: 'agent',
+        state: 'queued',
+        agentId: 'agent:conv:fila',
+        agentName: 'Revisor',
+        summary: 'Aguardando vaga',
+      },
+    ]
+    render(
+      <SceneView events={queued} running={true} onStopAgent={vi.fn()} onMessageAgent={vi.fn()} />,
+    )
+    fireEvent.click(screen.getByTestId('scene-agent-button-agent:conv:fila'))
+    expect(screen.queryByTestId('scene-agent-stop-button')).toBeNull()
+    expect(screen.queryByTestId('scene-agent-message-button')).toBeNull()
+    cleanup()
+
+    const working: ConversationActivityEvent[] = [
+      {
+        eventId: 'ev-w',
+        cursor: '1',
+        type: 'tool.started',
+        kind: 'tool',
+        state: 'working',
+        agentId: 'agent:conv:ativo',
+        agentName: 'Analista',
+        parentAgentId: 'main',
+        toolName: 'read_file',
+        summary: 'Lendo',
+      },
+    ]
+    const onMessageAgent = vi
+      .fn()
+      .mockRejectedValue({ status: 409, code: 'execution_conflict', message: 'conflito' })
+    render(
+      <SceneView events={working} running={true} onStopAgent={vi.fn()} onMessageAgent={onMessageAgent} />,
+    )
+    fireEvent.click(screen.getByTestId('scene-agent-button-agent:conv:ativo'))
+    fireEvent.click(screen.getByTestId('scene-agent-message-button'))
+    fireEvent.change(screen.getByTestId('scene-agent-message-input'), {
+      target: { value: 'Olá' },
+    })
+    fireEvent.click(screen.getByTestId('scene-agent-message-submit'))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('scene-agent-message-error').getAttribute('role')).toBe('alert')
+    })
+    expect(screen.queryByTestId('scene-agent-not-running')).toBeNull()
+  })
+
   it('(23) API stopConversationAgent e sendConversationAgentMessage usam encodeURIComponent no agentId e expectedStatus 202', async () => {
     const requestMock = vi.fn().mockImplementation(async (req: { parse: (v: unknown) => unknown }) =>
       req.parse({

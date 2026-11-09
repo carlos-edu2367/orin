@@ -95,8 +95,13 @@ class AgentControlStore:
         *,
         outcome: str | None = None,
     ) -> list[dict[str, object]]:
-        """Take pending controls in order, marking ``consumed_at`` (and optional ``outcome``)."""
+        """Take pending controls in order, marking ``consumed_at`` (and optional ``outcome``).
+
+        Each row is claimed with ``consumed_at IS NULL`` in the UPDATE itself, so two concurrent takers never both
+        return the same control.
+        """
         now = datetime.now(UTC)
+        claimed = []
         with self._engine.begin() as connection:
             rows = (
                 connection.execute(
@@ -113,15 +118,20 @@ class AgentControlStore:
                 .mappings()
                 .all()
             )
-            if rows:
-                values: dict[str, object] = {"consumed_at": now}
-                if outcome is not None:
-                    values["outcome"] = outcome
-                connection.execute(
+            values: dict[str, object] = {"consumed_at": now}
+            if outcome is not None:
+                values["outcome"] = outcome
+            for row in rows:
+                result = connection.execute(
                     update(conversation_agent_controls)
-                    .where(conversation_agent_controls.c.id.in_([row["id"] for row in rows]))
+                    .where(
+                        conversation_agent_controls.c.id == row["id"],
+                        conversation_agent_controls.c.consumed_at.is_(None),
+                    )
                     .values(**values)
                 )
+                if result.rowcount == 1:
+                    claimed.append(row)
         return [
             {
                 "control_id": str(row["control_id"]),
@@ -129,8 +139,21 @@ class AgentControlStore:
                 "content": str(row["content"]),
                 "outcome": outcome if outcome is not None else row["outcome"],
             }
-            for row in rows
+            for row in claimed
         ]
+
+    def withdraw(self, control_id: str) -> bool:
+        """Expire ``control_id`` if nobody has taken it yet; False when a worker already consumed it."""
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                update(conversation_agent_controls)
+                .where(
+                    conversation_agent_controls.c.control_id == str(control_id),
+                    conversation_agent_controls.c.consumed_at.is_(None),
+                )
+                .values(consumed_at=datetime.now(UTC), outcome="expired")
+            )
+        return result.rowcount == 1
 
     def set_outcome(self, control_id: str, outcome: str) -> None:
         """Record the final outcome ('delivered' | 'stopped' | 'expired' | 'forwarded') for a taken control."""
@@ -234,6 +257,15 @@ class InMemoryAgentControls:
             for row in self._rows:
                 if row["control_id"] == str(control_id):
                     row["outcome"] = str(outcome)
+
+    def withdraw(self, control_id: str) -> bool:
+        with self._lock:
+            for row in self._rows:
+                if row["control_id"] == str(control_id) and row["consumed_at"] is None:
+                    row["consumed_at"] = datetime.now(UTC)
+                    row["outcome"] = "expired"
+                    return True
+        return False
 
     def expire_pending(self, user_id: str, conversation_id: str, agent_id: str) -> list[dict[str, object]]:
         return self.take(user_id, conversation_id, agent_id, outcome="expired")

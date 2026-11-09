@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 from sqlalchemy import select
 
+from agentos.agentic.background_agents import BACKGROUND_AGENTS
 from agentos.agentic.events import AgentActivityEventType
 from agentos.agentic.reminders import ReminderQueue
 from agentos.agentic.session import TurnSession, _AgentControlWatcher
@@ -281,6 +282,8 @@ def test_leftover_message_at_end_of_subagent_is_forwarded_to_main_reminders(tmp_
     engine, _store, agents_store, session, _clock = _make_env(tmp_path, child, child)
     session_holder.append(session)
     agents_holder.append(agents_store)
+    # The Orin's turn is still running, so the leftover reaches it as a reminder (not a new scheduled turn).
+    BACKGROUND_AGENTS.begin_turn(TURN["conversation_id"])
     try:
         outcome = session._run_subagent("general", "Gere o relatório")
         assert outcome.status == "succeeded"
@@ -299,6 +302,7 @@ def test_leftover_message_at_end_of_subagent_is_forwarded_to_main_reminders(tmp_
         assert len(ctrl_rows) == 1
         assert ctrl_rows[0]["outcome"] == "forwarded"
     finally:
+        BACKGROUND_AGENTS.end_turn(TURN["conversation_id"])
         engine.dispose()
 
 
@@ -587,5 +591,158 @@ def test_subagent_control_routes_202_404_409_and_422(tmp_path: Path) -> None:
             ).status_code
             == 422
         )
+    finally:
+        engine.dispose()
+
+
+def _memory_watcher(**kwargs: Any):
+    from agentos.conversations.agent_controls import InMemoryAgentControls
+
+    store = InMemoryAgentControls()
+    main = ReminderQueue()
+    params: dict[str, Any] = {
+        "store": store,
+        "user_id": "u1",
+        "conversation_id": "c1",
+        "agent_id": "agent:c1:1",
+        "clean": "Explore",
+        "event": threading.Event(),
+        "main_reminders": main,
+        "clock": _FakeClock(),
+    }
+    params.update(kwargs)
+    return store, main, _AgentControlWatcher(**params)
+
+
+def _outcome(store: Any, control_id: str) -> object:
+    return next(row["outcome"] for row in store._rows if row["control_id"] == control_id)
+
+
+def test_message_queued_but_never_read_is_forwarded_to_the_orin_at_the_end() -> None:
+    """Review #1: a message polled into the subagent's queue during its last model call is not lost."""
+    store, main, watcher = _memory_watcher()
+    control_id = store.post_message("u1", "c1", "agent:c1:1", "Inclua o resumo")
+    watcher.poll()
+    assert _outcome(store, control_id) == "delivered"
+
+    watcher.finalize()  # the subagent ended without another model request: its queue was never drained
+
+    assert len(watcher.reminders) == 0
+    forwarded = main.drain()
+    assert len(forwarded) == 1
+    assert "which finished before reading it:\nInclua o resumo" in forwarded[0].text
+    assert _outcome(store, control_id) == "forwarded"
+
+
+def test_message_read_by_the_subagent_is_not_forwarded_again() -> None:
+    store, main, watcher = _memory_watcher()
+    control_id = store.post_message("u1", "c1", "agent:c1:1", "Priorize auth.py")
+    watcher.poll()
+    assert len(watcher.reminders.drain()) == 1  # the runtime drained it before the next model request
+
+    watcher.finalize()
+
+    assert len(main) == 0
+    assert _outcome(store, control_id) == "delivered"
+
+
+def test_message_after_a_stop_or_with_a_full_queue_goes_to_the_orin() -> None:
+    store, main, watcher = _memory_watcher()
+    store.request_stop("u1", "c1", "agent:c1:1")
+    late = store.post_message("u1", "c1", "agent:c1:1", "Na verdade, continue")
+    watcher.poll()
+
+    assert watcher.stopped_by_user is True
+    assert len(watcher.reminders) == 0
+    assert "Na verdade, continue" in main.drain()[0].text
+    assert _outcome(store, late) == "forwarded"
+
+    full = ReminderQueue(max_items=1)
+    full.add("note", "already waiting")
+    store2, main2, watcher2 = _memory_watcher(reminders=full)
+    overflow = store2.post_message("u1", "c1", "agent:c1:1", "Não cabe na fila")
+    watcher2.poll()
+    assert "Não cabe na fila" in main2.drain()[0].text
+    assert _outcome(store2, overflow) == "forwarded"
+
+
+def test_leftover_message_after_the_orins_turn_ended_starts_a_new_turn() -> None:
+    """Review #2: with the leader's turn over, its reminder queue is dead; the message must open a new turn."""
+    woken: list[tuple[str, str]] = []
+    store, main, watcher = _memory_watcher(
+        main_turn_active=lambda: False,
+        wake_main=lambda text, control_id: woken.append((text, control_id)),
+    )
+    control_id = store.post_message("u1", "c1", "agent:c1:1", "Revise também o README")
+
+    watcher.finalize()
+
+    assert len(main) == 0
+    assert len(woken) == 1
+    assert "Revise também o README" in woken[0][0]
+    assert woken[0][1] == control_id
+    assert _outcome(store, control_id) == "forwarded"
+
+
+def test_user_message_waker_schedules_a_turn_once_per_control(tmp_path: Path) -> None:
+    class _Unused:
+        def stream(self, _request: dict[str, Any]):
+            raise AssertionError("no model call expected")
+
+    engine, _store, _agents, session, _clock = _make_env(tmp_path, _Unused(), _Unused())
+    try:
+        created: list[tuple[str, Any, str]] = []
+
+        class _Scheduler:
+            def create(self, user_id: str, request: Any, *, idempotency_key: str) -> None:
+                created.append((user_id, request, idempotency_key))
+
+        session._scheduler_service = _Scheduler()
+        wake = session._user_message_waker(TURN["conversation_id"])
+        assert wake is not None
+        wake("The user sent this to subagent x", "ctrl_abc")
+
+        assert len(created) == 1
+        user_id, request, key = created[0]
+        assert user_id == TURN["user_id"]
+        assert key == "agent-msg:ctrl_abc"
+        assert request.conversation_id == TURN["conversation_id"]
+    finally:
+        engine.dispose()
+
+
+def test_stopped_by_user_never_counts_as_a_repeated_tool_failure() -> None:
+    """Review #3: asking again for a subagent the person stopped is not a retry loop."""
+    from agentos.agentic.runtime import POLICY_REFUSAL_CODES
+
+    assert "STOPPED_BY_USER" in POLICY_REFUSAL_CODES
+
+
+def test_control_accepted_after_the_agent_finished_is_withdrawn_with_409(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #4: the agent may finish between the state check and the insert; nothing would ever read it."""
+    from agentos.api.contracts import ApplicationConflictError
+
+    engine = create_local_engine(f"sqlite:///{(tmp_path / 'race.db').as_posix()}")
+    metadata.create_all(engine)
+    try:
+        store = PostgresChatStore(engine)
+        states = iter([True, False, True, False])
+        monkeypatch.setattr(store, "_agent_is_running", lambda *_a: next(states))
+
+        with pytest.raises(ApplicationConflictError):
+            store.send_agent_message("c1", "u1", "agent:c1:1", "tarde demais")
+        with pytest.raises(ApplicationConflictError):
+            store.request_agent_stop("c1", "u1", "agent:c1:1")
+
+        with engine.connect() as conn:
+            rows = conn.execute(select(conversation_agent_controls)).mappings().all()
+        assert len(rows) == 2
+        assert all(row["outcome"] == "expired" and row["consumed_at"] is not None for row in rows)
+
+        monkeypatch.setattr(store, "_agent_is_running", lambda *_a: True)
+        accepted = store.send_agent_message("c1", "u1", "agent:c1:1", "a tempo")
+        assert accepted["status"] == "queued"
     finally:
         engine.dispose()
