@@ -1,5 +1,5 @@
 """Runtime version embedded in every source and frozen Orin build."""
 
-__version__ = "0.12.9"
+__version__ = "0.12.10"
 
 __all__ = ["__version__"]
