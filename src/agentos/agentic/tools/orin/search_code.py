@@ -27,6 +27,9 @@ class CodeSearchTools:
             )
         if result.mode == "lexical":
             body = f"[lexical mode: no embedder available, results are keyword-based]\n\n{body}"
+        building = _index_building_note(self._retrieval, result.status.files)
+        if building:
+            body = f"{building}\n\n{body}"
         return {
             "summary": f"Buscou no código '{query[:40]}': {len(result.hits)} {'trecho' if len(result.hits) == 1 else 'trechos'}",
             "content": body,
@@ -48,6 +51,9 @@ class CodeSearchTools:
                 f"{entry['path']} (imported by {entry['imported_by']}): {', '.join(entry['symbols']) or '—'}"
                 for entry in entries
             )
+        building = _index_building_note(self._retrieval, None)
+        if building:
+            body = f"{building}\n\n{body}"
         return {
             "summary": f"Mapeou {len(entries)} {'arquivo' if len(entries) == 1 else 'arquivos'} centrais",
             "content": body,
@@ -75,6 +81,21 @@ class CodeSearchTools:
             # would mean the index stops updating for the rest of the session
             # with zero trace anywhere — same risk IndexWorker._run logs for.
             logger.exception("could not queue a reindex for %s", paths)
+
+
+def _index_building_note(retrieval: Any, files: int | None) -> str:
+    """Say so when results come from an index the background scan is still filling."""
+    try:
+        if getattr(retrieval, "indexing", False) is not True:
+            return ""
+        if files is None:
+            files = int(retrieval.status().files)
+    except Exception:  # noqa: BLE001
+        return ""
+    return (
+        f"[the project index is still being built in the background ({files} files so far); "
+        "results may be partial — use glob_files/search_files for anything missing]"
+    )
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).

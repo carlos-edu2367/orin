@@ -6,8 +6,11 @@ each ranking, which makes the combination robust without any tuning.
 """
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Callable
 
 from .indexer import ProjectIndexer
 from .models import IndexStatus, SearchHit
@@ -45,6 +48,20 @@ class RetrievalService:
         self._indexer = indexer
         self._embedder = embedder
         self._last_scan_embedded = True
+        # One scan at a time. A tool call never waits on it: the first scan of
+        # a large project takes minutes, and a turn blocked on it looks hung.
+        self._scan_lock = threading.Lock()
+        self._background_refresh: Callable[[], None] | None = None
+        self._refresh_requested_at: float | None = None
+
+    def attach_background_refresh(self, schedule: Callable[[], None]) -> None:
+        """Hand stale-index refreshes to the background worker instead of the tool call."""
+        self._background_refresh = schedule
+
+    @property
+    def indexing(self) -> bool:
+        """True while a scan runs or before the first one has ever finished."""
+        return self._scan_lock.locked() or self._store.status().last_scan_at is None
 
     def search(self, query: str, *, limit: int = 8) -> SearchResult:
         if not isinstance(query, str) or not query.strip():
@@ -90,26 +107,50 @@ class RetrievalService:
         }
 
     def _refresh_if_stale(self, *, embed: bool = True) -> None:
-        """Cover edits made outside Orin, without paying for a scan every call."""
+        """Cover edits made outside Orin, without paying for a scan every call.
+
+        Never blocks on a scan. With a background worker attached the refresh
+        is queued and the caller answers from the index as it stands; without
+        one (tests, one-off use) the scan runs inline unless another one is
+        already running, in which case the caller also answers right away.
+        """
         last = self._store.status().last_scan_at
-        if last is not None and datetime.now(UTC) - last < STALE_AFTER:
-            if embed and not self._last_scan_embedded:
-                try:
-                    self._indexer.scan(embed=True)
-                    self._last_scan_embedded = True
-                except OSError:
-                    pass
+        fresh = last is not None and datetime.now(UTC) - last < STALE_AFTER
+        if fresh and (not embed or self._last_scan_embedded):
+            return
+        if self._background_refresh is not None:
+            self._schedule_background_refresh()
+            return
+        if not self._scan_lock.acquire(blocking=False):
             return
         try:
             self._indexer.scan(embed=embed)
             self._last_scan_embedded = bool(embed)
         except OSError:
             return
+        finally:
+            self._scan_lock.release()
+
+    def _schedule_background_refresh(self) -> None:
+        if self._scan_lock.locked():
+            return
+        now = time.monotonic()
+        requested = self._refresh_requested_at
+        if requested is not None and now - requested < STALE_AFTER.total_seconds():
+            return
+        self._refresh_requested_at = now
+        try:
+            self._background_refresh()  # type: ignore[misc]
+        except Exception:  # noqa: BLE001 - a refresh request never fails a tool call
+            self._refresh_requested_at = None
 
     def reindex(self, paths: list[str] | None = None, *, embed: bool = True) -> None:
-        self._indexer.scan(only=paths, embed=embed)
-        if embed:
-            self._last_scan_embedded = True
+        with self._scan_lock:
+            if paths is None:
+                self._refresh_requested_at = None
+            self._indexer.scan(only=paths, embed=embed)
+            if embed:
+                self._last_scan_embedded = True
 
     def status(self) -> IndexStatus:
         return self._store.status()

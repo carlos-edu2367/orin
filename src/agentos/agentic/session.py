@@ -412,6 +412,9 @@ def build_retrieval_for_turn(*, workspace_id: str, local_root: str | None, data_
     if service is None:
         return None
     worker = IndexWorker(service)
+    # Stale-index refreshes go to this thread, never inline in a tool call:
+    # the first scan of a big project takes minutes and would hang the turn.
+    service.attach_background_refresh(worker.enqueue_full_scan)
     worker.start()
     worker.enqueue_full_scan()
     return RetrievalBundle(service=service, worker=worker)
