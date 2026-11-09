@@ -66,6 +66,8 @@ OWNED = {
     ("GET", "/v1/conversations/{conversation_id}/commands"), ("POST", "/v1/conversations/{conversation_id}/statusline"),
     ("POST", "/v1/conversations/{conversation_id}/fork"), ("PATCH", "/v1/conversations/{conversation_id}/title"),
     ("POST", "/v1/conversations/{conversation_id}/shell"),
+    ("POST", "/v1/conversations/{conversation_id}/preview/start"),
+    ("PUT", "/v1/custom-agents/{name}"), ("DELETE", "/v1/custom-agents/{name}"),
     ("GET", "/v1/conversations/{conversation_id}/events"),
     ("GET", "/v1/skills/{skill_id}"), ("PUT", "/v1/skills/{skill_id}"),
     ("DELETE", "/v1/skills/{skill_id}/versions/{version}"), ("GET", "/v1/skills/{skill_id}/agents"),
@@ -87,7 +89,7 @@ LISTING = {
     ("GET", "/v1/conversations"), ("GET", "/v1/schedules"), ("GET", "/v1/projects"), ("GET", "/v1/projects/sidebar"),
     ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/skills"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
     ("GET", "/v1/plugins/marketplaces"), ("GET", "/v1/mcp/servers"), ("GET", "/v1/executions"),
-    ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"),
+    ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"), ("GET", "/v1/custom-agents"),
     *{("GET", f"/v1/{resource}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},
 }
 SCOPED = {
@@ -116,6 +118,7 @@ CREATE = {
     ("POST", "/v1/schedules"), ("POST", "/v1/projects"), ("POST", "/v1/skills"), ("POST", "/v1/plugins/inspect"),
     ("POST", "/v1/plugins/library/infer-mcp"), ("POST", "/v1/plugins/marketplaces"), ("POST", "/v1/mcp/servers"),
     ("POST", "/v1/events/streams"), ("POST", "/v1/files/folders"), ("POST", "/v1/files/import"),
+    ("POST", "/v1/custom-agents"),
 }
 INSTANCE = {
     ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
@@ -128,6 +131,8 @@ INSTANCE = {
     ("GET", "/v1/installation/autostart"), ("PUT", "/v1/installation/autostart"),
     ("POST", "/v1/providers/omniroute/test"), ("POST", "/v1/providers/omniroute/install"), ("GET", "/v1/providers/omniroute/install"),
     ("GET", "/v1/providers/omniroute/runtime"), ("PUT", "/v1/providers/omniroute/runtime"), ("POST", "/v1/providers/omniroute/runtime/actions"),
+    # Whether a vendor CLI is installed and signed in is a fact about this machine, not about a profile.
+    *{("GET", f"/v1/providers/{cli}/status") for cli in ("openai-codex", "codex-cli", "google-antigravity", "antigravity-cli", "claude-cli")},
     # Bound to a single-use state value created by the profile that started the sign-in.
     ("GET", "/v1/mcp/oauth/callback"),
     # W7: host settings files (local profile only; a shared server answers 404 to every one of them).
@@ -188,6 +193,8 @@ def _seed(world, a):
     upload = a.api.post("/v1/uploads", files={"file": ("a.txt", f"{SECRET} upload".encode(), "text/plain")}, headers=a.headers())
     assert upload.status_code == 201, upload.text
     a.api.post("/v1/files/folders", json={"parent": "", "name": "segredo-a"}, headers=a.headers())
+    agent = a.api.post("/v1/custom-agents", json={"name": "agente-a", "description": f"{SECRET} agente", "prompt": "faça"}, headers=a.headers())
+    assert agent.status_code == 201, agent.text
     return {
         "project_id": project.project_id,
         "conversation_id": conversation.conversation_id,
@@ -199,10 +206,11 @@ def _seed(world, a):
         "tool_name": "anything",
         "upload_id": upload.json()["upload_id"],
         "path": "notes.md",
+        "name": "agente-a",
     }
 
 
-SEEDED_PARAMS = {"project_id", "conversation_id", "memory_id", "schedule_id", "skill_id", "version", "server_id", "tool_name", "upload_id", "path"}
+SEEDED_PARAMS = {"project_id", "conversation_id", "memory_id", "schedule_id", "skill_id", "version", "server_id", "tool_name", "upload_id", "path", "name"}
 
 
 def _fill(path: str, seeds: dict[str, str]) -> tuple[str, bool]:
@@ -219,7 +227,8 @@ def _fill(path: str, seeds: dict[str, str]) -> tuple[str, bool]:
 
 def _snapshot(a, seeds):
     paths = [f"/v1/projects/{seeds['project_id']}", f"/v1/conversations/{seeds['conversation_id']}",
-             f"/v1/skills/{seeds['skill_id']}", f"/v1/mcp/servers/{seeds['server_id']}", "/v1/memories", "/v1/schedules"]
+             f"/v1/skills/{seeds['skill_id']}", f"/v1/mcp/servers/{seeds['server_id']}", "/v1/memories", "/v1/schedules",
+             "/v1/custom-agents"]
     snapshot = {}
     for path in paths:
         response = a.api.get(path)

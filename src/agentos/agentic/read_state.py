@@ -9,7 +9,7 @@ import threading
 
 from agentos.agentic.tools._shared import EXTERNAL_CHANGE_HASH_LIMIT_BYTES, ReadFileRecord
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError
-from agentos.pathsafety import is_drive_path
+from agentos.pathsafety import absolute_inside, is_drive_path
 
 
 MAX_TRACKED_CONVERSATIONS = 64
@@ -46,6 +46,22 @@ def copy_read_state(state: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def _awaits_additional_directory(key: str, workspace: ConversationWorkspace) -> bool:
+    """An absolute key outside the root and every folder granted so far.
+
+    Checked lexically on purpose: on POSIX ``resolve`` reads ``/x/y`` outside the root as
+    root-relative (``<root>/x/y``) instead of failing, so the read looked like a missing file
+    and was dropped.
+    """
+    if getattr(workspace, "unrestricted", False):
+        return False
+    if not (is_drive_path(key) or key.startswith("/")):
+        return False
+    if absolute_inside(key, workspace.root) is not None:
+        return False
+    return all(absolute_inside(key, extra) is None for extra in workspace.additional_roots)
+
+
 def prepare_carried_state(state: MutableMapping[str, object], workspace: ConversationWorkspace) -> int:
     """Prune stale, oversized, missing, or excess entries and clear ``explicit_read`` on survivors."""
     items = list(state.items())
@@ -64,6 +80,11 @@ def prepare_carried_state(state: MutableMapping[str, object], workspace: Convers
         removed += 1
 
     for key, record in valid_records[:MAX_CARRIED_READS]:
+        if _awaits_additional_directory(key, workspace):
+            # The turn grants its additional folders after this state is carried in. Keep the
+            # read (the edit guard re-checks the digest anyway) rather than silently dropping it.
+            record.explicit_read = False
+            continue
         try:
             try:
                 target = workspace.resolve(key)

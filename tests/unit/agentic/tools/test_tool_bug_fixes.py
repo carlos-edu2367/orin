@@ -26,9 +26,13 @@ def _outside_toolset(tmp_path: Path, state: dict | None = None) -> tuple[AgentTo
 # --- A: read/edit outside the root -------------------------------------------------------------
 def test_edit_outside_root_after_read_with_either_separator(tmp_path: Path) -> None:
     toolset, target = _outside_toolset(tmp_path)
-    for variant in (str(target), str(target).replace("\\", "/"), str(target).replace("/", "\\")):
+    # A backslash is an ordinary filename character on POSIX, so only Windows has two spellings.
+    spellings = [str(target), str(target).replace("\\", "/")]
+    if os.name == "nt":
+        spellings.append(str(target).replace("/", "\\"))
+    for index, variant in enumerate(dict.fromkeys(spellings)):
         assert toolset.invoke("read_file", {"path": variant, "force_reload": True}).status == "succeeded"
-        new = f"x{abs(hash(variant)) % 1000}"
+        new = f"x{index}"
         old = target.read_text(encoding="utf-8").splitlines()[1]
         out = toolset.invoke("edit_file", {"path": variant, "old_text": old, "new_text": new})
         assert out.status == "succeeded", out.content
