@@ -45,7 +45,10 @@ class AntigravityCliAdapter:
     capabilities: CliCapabilities = CliCapabilities(
         native_tool_loop=True,
         tool_list_changed=False,
-        images_in_tool_results=False,
+        # agy forwards an image block of an MCP tool result to the model
+        # (it offloads the bytes to a file and attaches them), so Orin's
+        # view_file can hand Gemini and Claude the picture itself.
+        images_in_tool_results=True,
         persistent_stdin=True,
         reports_tool_inventory=True,
         forbidden_item_kinds=FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS,

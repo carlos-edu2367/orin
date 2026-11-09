@@ -25,85 +25,47 @@ def _infer_supported_efforts(slug: str) -> tuple[str, ...]:
     return _EFFORTS_STD
 
 
+# Gemini and Claude read images. Antigravity's stream-json input accepts only
+# text, but an image returned by an MCP tool result (Orin's view_file) reaches
+# the model, so these models see attachments through that tool. gpt-oss is
+# text-only, and an unknown family stays text-only until proven otherwise.
+_IMAGE_FAMILIES: tuple[str, ...] = ("gemini-", "claude-")
+
+
+def antigravity_input_modalities(slug: str) -> tuple[str, ...]:
+    """Input modalities of an Antigravity model, inferred from its family."""
+    lower = slug.strip().lower()
+    if lower.startswith("google-antigravity/"):
+        lower = lower[len("google-antigravity/") :]
+    if lower.startswith(_IMAGE_FAMILIES):
+        return ("text", "image")
+    return ("text",)
+
+
+def _model(slug: str, context_window: int) -> CliModelInfo:
+    return CliModelInfo(
+        slug,
+        f"{slug} {_ANTIGRAVITY_LABEL_SUFFIX}",
+        context_window,
+        _infer_supported_efforts(slug),
+        antigravity_input_modalities(slug),
+    )
+
+
 FALLBACK_ANTIGRAVITY_MODELS: tuple[CliModelInfo, ...] = (
-    CliModelInfo(
-        "gemini-4-argon-medium",
-        "gemini-4-argon-medium (Assinatura Antigravity)",
-        1_000_000,
-        _infer_supported_efforts("gemini-4-argon-medium"),
-    ),
-    CliModelInfo(
-        "gemini-4-argon-high",
-        "gemini-4-argon-high (Assinatura Antigravity)",
-        1_000_000,
-        _infer_supported_efforts("gemini-4-argon-high"),
-    ),
-    CliModelInfo(
-        "gemini-4-argon-low",
-        "gemini-4-argon-low (Assinatura Antigravity)",
-        1_000_000,
-        _infer_supported_efforts("gemini-4-argon-low"),
-    ),
-    CliModelInfo(
-        "gemini-3.8-flash-high",
-        "gemini-3.8-flash-high (Assinatura Antigravity)",
-        1_000_000,
-        _infer_supported_efforts("gemini-3.8-flash-high"),
-    ),
-    CliModelInfo(
-        "gemini-3.8-flash-medium",
-        "gemini-3.8-flash-medium (Assinatura Antigravity)",
-        1_000_000,
-        _infer_supported_efforts("gemini-3.8-flash-medium"),
-    ),
-    CliModelInfo(
-        "gemini-3.8-flash-low",
-        "gemini-3.8-flash-low (Assinatura Antigravity)",
-        1_000_000,
-        _infer_supported_efforts("gemini-3.8-flash-low"),
-    ),
-    CliModelInfo(
-        "claude-opus-5-5-low",
-        "claude-opus-5-5-low (Assinatura Antigravity)",
-        200_000,
-        _infer_supported_efforts("claude-opus-5-5-low"),
-    ),
-    CliModelInfo(
-        "claude-opus-5-5-medium",
-        "claude-opus-5-5-medium (Assinatura Antigravity)",
-        200_000,
-        _infer_supported_efforts("claude-opus-5-5-medium"),
-    ),
-    CliModelInfo(
-        "claude-opus-5-5-high",
-        "claude-opus-5-5-high (Assinatura Antigravity)",
-        200_000,
-        _infer_supported_efforts("claude-opus-5-5-high"),
-    ),
-    CliModelInfo(
-        "claude-sonnet-5-5-low",
-        "claude-sonnet-5-5-low (Assinatura Antigravity)",
-        200_000,
-        _infer_supported_efforts("claude-sonnet-5-5-low"),
-    ),
-    CliModelInfo(
-        "claude-sonnet-5-5-medium",
-        "claude-sonnet-5-5-medium (Assinatura Antigravity)",
-        200_000,
-        _infer_supported_efforts("claude-sonnet-5-5-medium"),
-    ),
-    CliModelInfo(
-        "claude-sonnet-5-5-high",
-        "claude-sonnet-5-5-high (Assinatura Antigravity)",
-        200_000,
-        _infer_supported_efforts("claude-sonnet-5-5-high"),
-    ),
-    CliModelInfo(
-        "gpt-oss-120b-medium",
-        "gpt-oss-120b-medium (Assinatura Antigravity)",
-        128_000,
-        _infer_supported_efforts("gpt-oss-120b-medium"),
-    ),
+    _model("gemini-4-argon-medium", 1_000_000),
+    _model("gemini-4-argon-high", 1_000_000),
+    _model("gemini-4-argon-low", 1_000_000),
+    _model("gemini-3.8-flash-high", 1_000_000),
+    _model("gemini-3.8-flash-medium", 1_000_000),
+    _model("gemini-3.8-flash-low", 1_000_000),
+    _model("claude-opus-5-5-low", 200_000),
+    _model("claude-opus-5-5-medium", 200_000),
+    _model("claude-opus-5-5-high", 200_000),
+    _model("claude-sonnet-5-5-low", 200_000),
+    _model("claude-sonnet-5-5-medium", 200_000),
+    _model("claude-sonnet-5-5-high", 200_000),
+    _model("gpt-oss-120b-medium", 128_000),
 )
 
 _FALLBACK_BY_ID: dict[str, CliModelInfo] = {
@@ -183,6 +145,7 @@ def discover_antigravity_models(
                 display_name=f"{slug} {_ANTIGRAVITY_LABEL_SUFFIX}",
                 context_window=_infer_context_window(slug),
                 supported_efforts=_infer_supported_efforts(slug),
+                input_modalities=antigravity_input_modalities(slug),
             )
         )
 
@@ -216,6 +179,7 @@ def context_window_for(
 __all__ = [
     "DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW",
     "FALLBACK_ANTIGRAVITY_MODELS",
+    "antigravity_input_modalities",
     "context_window_for",
     "discover_antigravity_models",
 ]

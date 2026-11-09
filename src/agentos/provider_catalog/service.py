@@ -330,6 +330,15 @@ class ProviderModelCatalogService:
                     items = self._repository.list(context, normalized_provider, favorites_only)
                 except Exception:
                     pass
+        if normalized_provider == "google-antigravity" and items and _antigravity_modalities_are_stale(items):
+            # A catalog stored before Orin knew these models see images keeps
+            # saying "text"; the composer and view_file would keep routing
+            # pictures to another model. The catalog is static, so refresh it.
+            try:
+                self.refresh(context, normalized_provider)
+                items = self._repository.list(context, normalized_provider, favorites_only)
+            except Exception:
+                pass
         if normalized_provider in {"openai-codex", "google-antigravity"} and not items and not favorites_only:
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True:
@@ -378,12 +387,17 @@ class ProviderModelCatalogService:
                 if norm not in explicit:
                     explicit.append(norm)
         resolved_output = tuple(explicit) if explicit else infer_output_modalities(normalized_id)
+        resolved_input: tuple[str, ...] = ("text",)
+        if normalized_provider == "google-antigravity":
+            from agentos.providers.antigravity_cli.catalog import antigravity_input_modalities
+
+            resolved_input = antigravity_input_modalities(normalized_id)
         return self._repository.add_custom(
             context,
             normalized_provider,
             ProviderModelRecord(
                 provider=normalized_provider, model_id=normalized_id, display_name=normalized_name,
-                context_window=None, capabilities=(), input_modalities=("text",), output_modalities=resolved_output,
+                context_window=None, capabilities=(), input_modalities=resolved_input, output_modalities=resolved_output,
                 pricing=None, refreshed_at=self._now(), is_custom=True,
             ),
         )
@@ -392,6 +406,19 @@ class ProviderModelCatalogService:
         if not isinstance(model_id, str) or not model_id.strip():
             raise LookupError("model_id is required")
         self._repository.remove_custom(context, _provider(provider), model_id.strip())
+
+
+def _antigravity_modalities_are_stale(items: Sequence[ProviderModelRecord]) -> bool:
+    """True when a stored Antigravity row's input modalities lag the current catalog."""
+    from agentos.providers.antigravity_cli.catalog import antigravity_input_modalities
+
+    # A refresh never rewrites a custom row, so a custom row must not count:
+    # it would ask for a refresh on every listing.
+    return any(
+        set(antigravity_input_modalities(item.model_id)) - set(item.input_modalities)
+        for item in items
+        if not item.is_custom
+    )
 
 
 def _provider(value: str) -> str:
