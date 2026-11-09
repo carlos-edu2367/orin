@@ -273,7 +273,8 @@ describe('ChatPage', () => {
 
     renderChat()
 
-    await screen.findByRole('button', { name: 'Parar execução' })
+    // The first render of the whole chat takes about 1s in jsdom, right at findBy's default timeout.
+    await screen.findByRole('button', { name: 'Parar execução' }, { timeout: 5000 })
     emitTerminal()
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Parar execução' })).not.toBeInTheDocument())
     await waitFor(() => expect(screen.queryByText('Pensando')).not.toBeInTheDocument())

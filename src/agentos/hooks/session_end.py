@@ -20,6 +20,12 @@ def clear_registry() -> None:
         _REGISTRY.clear()
 
 
+def forget_session(conversation_id: str) -> None:
+    """A deleted conversation is no longer a session to end."""
+    with _LOCK:
+        _REGISTRY.pop(conversation_id, None)
+
+
 def register_session(conversation_id: str, *, workspace_root: Path | str, user_id: str, trusted: bool) -> None:
     if not conversation_id:
         return
@@ -76,4 +82,4 @@ def end_sessions(reason: str = "other", *, timeout_seconds: float = 5.0) -> int:
     return count[0]
 
 
-__all__ = ["clear_registry", "emit_session_end", "end_sessions", "register_session"]
+__all__ = ["clear_registry", "emit_session_end", "end_sessions", "forget_session", "register_session"]

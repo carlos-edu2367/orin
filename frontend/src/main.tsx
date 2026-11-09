@@ -8,6 +8,7 @@ import './styles/index.css'
 // preflight without any !important.
 import './styles/agentos.css'
 import './styles/live.css'
+import './styles/sessions.css'
 
 initThemeDom()
 

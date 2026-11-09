@@ -1188,6 +1188,12 @@ class PostgresChatStore:
         return {"conversation_id": new_id, "title": clean_title, "prompt": prompt, "messages": len(kept),
                 "project_id": row["project_id"], "source_conversation_id": conversation_id}
 
+    def delete(self, conversation_id: str, user_id: str) -> dict[str, object]:
+        """Hard delete with every row that only exists for it; files on disk stay (see conversations/deletion.py)."""
+        from agentos.conversations.deletion import delete_conversation
+
+        return delete_conversation(self._engine, conversation_id, user_id)
+
     def rename(self, conversation_id: str, user_id: str, title: str) -> dict[str, object]:
         # W7: control and format characters (escapes, bidi overrides) never reach a title.
         clean = " ".join("".join(char for char in str(title or "") if char.isprintable() or char.isspace()).split())[:160]
@@ -3184,6 +3190,18 @@ class PostgresChatStore:
         return f"exe_{sha256(turn_id.encode()).hexdigest()}"
 
 
+def _forget_runtime_state(conversation_id: str) -> None:
+    """Best effort after a delete: drop the in-process registries that still name the conversation."""
+    try:
+        from agentos.conversations.code_milestone_watcher import get_milestone_watcher_registry
+        from agentos.hooks.session_end import forget_session
+
+        get_milestone_watcher_registry().remove(conversation_id)
+        forget_session(conversation_id)
+    except Exception:  # noqa: BLE001 - the rows are already gone; a stale cache entry is harmless
+        _LOGGER.debug("could not drop runtime state of %s", conversation_id, exc_info=True)
+
+
 class ChatApplication:
     """Gateway port backed by an atomic conversation/Execution command."""
     def __init__(self, store: PostgresChatStore, executions=None) -> None:
@@ -3236,6 +3254,10 @@ class ChatApplication:
         return self.store.fork(conversation_id, user_id, before_message_id=before_message_id, title=title)
     def rename(self, conversation_id: str, user_id: str, title: str):
         return self.store.rename(conversation_id, user_id, title)
+    def delete(self, conversation_id: str, user_id: str):
+        result = self.store.delete(conversation_id, user_id)
+        _forget_runtime_state(conversation_id)
+        return result
     def shell(self, user_id: str, conversation_id: str, command: str, idempotency_key: str):
         """`!command` (W7): a turn that runs the person's command in the Code session's folder, without the model."""
         text = str(command or "").strip()

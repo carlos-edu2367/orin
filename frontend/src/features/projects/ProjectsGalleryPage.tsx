@@ -5,6 +5,7 @@ import { ensureFriendConversation } from '../../api/conversations'
 import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../../api/projects'
 import { OrinActivityCenter } from '../../components/OrinActivityCenter'
 import { WorkspaceNavigation } from './WorkspaceNavigation'
+import { PinnedSessionTabs } from '../sessions/PinnedSessionTabs'
 
 export type ProjectsGalleryPageProps = {
   client?: ApiClient
@@ -131,7 +132,7 @@ export function ProjectsGalleryPage({ client }: ProjectsGalleryPageProps) {
       <main className="projects-gallery">
         <header className="projects-gallery__topbar canvas-header" data-testid="canvas-header">
           <div className="canvas-header__left" />
-          <div className="canvas-header__center" />
+          <div className="canvas-header__center"><PinnedSessionTabs client={apiClient} /></div>
           <div className="canvas-header__right">
             <button
               type="button"

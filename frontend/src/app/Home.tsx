@@ -21,8 +21,10 @@ import { OrinMascot } from '../components/OrinMascot'
 import { OrinActivityCenter } from '../components/OrinActivityCenter'
 import { Composer } from '../features/conversations/Composer'
 import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
+import { newSessionDraftKey, useComposerDraft } from '../features/conversations/useComposerDraft'
 import { inspectNewWorkspaceFolder, type WorkspaceState } from '../api/workspace'
 import { WorkspaceNavigation, type WorkspaceNavigationConversationSummary } from '../features/projects/WorkspaceNavigation'
+import { PinnedSessionTabs } from '../features/sessions/PinnedSessionTabs'
 import { PreferencesModal } from '../features/settings/PreferencesModal'
 import { useTheme } from './ThemeContext'
 
@@ -95,6 +97,11 @@ export function Home({ client, bootstrap }: HomeProps) {
   const requestedModeParam = searchParams.get('mode')
   const requestedPromptParam = searchParams.get('prompt')
   const [message, setMessage] = useState(() => requestedPromptParam ?? '')
+  // The half-written prompt survives a trip to another session and back (and an app restart).
+  // One draft per project scope: switching Chat/Code keeps the text, as it always did.
+  const { clearDraft } = useComposerDraft(newSessionDraftKey(projectId), message, setMessage, {
+    skipRestore: requestedPromptParam !== null,
+  })
   const [codeMode, setCodeMode] = useState<ConversationMode>(() => (requestedModeParam === 'code' ? 'code' : 'chat'))
   const [serverPermissionMode, setServerPermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
@@ -286,6 +293,7 @@ export function Home({ client, bootstrap }: HomeProps) {
       writeStored(PROVIDER_STORAGE_KEY, provider)
       writeStored(MODEL_STORAGE_KEY, modelId)
       resetAttachments()
+      clearDraft()
       navigate(projectId
         ? `/projects/${encodeURIComponent(projectId)}/chats/${encodeURIComponent(receipt.conversation_id)}`
         : `/chats/${encodeURIComponent(receipt.conversation_id)}`)
@@ -340,7 +348,7 @@ export function Home({ client, bootstrap }: HomeProps) {
             disabled={submitting}
           />
         </div>
-        <div className="canvas-header__center" />
+        <div className="canvas-header__center"><PinnedSessionTabs client={apiClient} /></div>
         <div className="canvas-header__right">
           <button
             type="button"

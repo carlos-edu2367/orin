@@ -85,13 +85,16 @@ class ApplicationConflictError(RuntimeError):
         current_state_version: int = 0,
         *,
         code: str = "execution_conflict",
+        message: str | None = None,
         retryable: bool = True,
     ) -> None:
         self.execution_id = execution_id
         self.current_state_version = current_state_version
+        # A conflict that is not a version race (e.g. deleting a running conversation) names itself and tells the person why.
         self.code = code
+        self.message = message
         self.retryable = retryable
-        super().__init__(f"execution {execution_id} is at version {current_state_version}")
+        super().__init__(message or f"execution {execution_id} is at version {current_state_version}")
 
 
 class ApplicationIndeterminateError(RuntimeError):

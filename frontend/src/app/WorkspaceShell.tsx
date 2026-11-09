@@ -7,6 +7,7 @@ import {
   type WorkspaceNavigationConversationSummary,
 } from '../features/projects/WorkspaceNavigation'
 import { PreferencesModal, type PreferencesTab } from '../features/settings/PreferencesModal'
+import { PinnedSessionTabs } from '../features/sessions/PinnedSessionTabs'
 
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'orin.sidebar.collapsed'
 
@@ -140,7 +141,7 @@ export function WorkspaceShell({
       <div className="workspace-shell__canvas">
         <header className="canvas-header" data-testid="canvas-header">
           <div className="canvas-header__left">{headerLeft}</div>
-          <div className="canvas-header__center">{headerCenter}</div>
+          <div className="canvas-header__center">{headerCenter ?? <PinnedSessionTabs client={apiClient} />}</div>
           <div className="canvas-header__right">
             {headerRight}
             <button

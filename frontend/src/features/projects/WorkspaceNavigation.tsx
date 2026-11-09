@@ -1,6 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { ensureFriendConversation, listConversations, type Conversation, type ConversationMode } from '../../api/conversations'
 import { createProject, listProjectSidebar, type ProjectSidebarItem } from '../../api/projects'
@@ -9,6 +9,10 @@ import { useTheme } from '../../app/ThemeContext'
 import { Brand } from '../../components/Brand'
 import { OrinMascot } from '../../components/OrinMascot'
 import { ProfileMenu } from '../auth/ProfileMenu'
+import { SessionActionsHost } from '../sessions/SessionActionsHost'
+import { SessionContextMenu, useSessionMenu } from '../sessions/SessionContextMenu'
+import { SessionNavRow } from '../sessions/SessionNavRow'
+import { syncSessions, useSessionStore, type SessionLiveInfo } from '../sessions/sessionStore'
 
 export type WorkspaceNavigationConversationSummary = Pick<Conversation, 'conversation_id' | 'title' | 'state'> & {
   mode?: ConversationMode
@@ -172,6 +176,15 @@ export function WorkspaceNavigation({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => readStoredCollapsedProjects())
 
   const paletteShortcut = useMemo(() => (detectApplePlatform() ? '⌘K' : 'Ctrl+K'), [])
+  const sessionStore = useSessionStore()
+  const { menu: sessionMenu, open: openSessionMenu, close: closeSessionMenu } = useSessionMenu('nav')
+  // Sessions waiting out the "Desfazer" window are already gone from the person's point of view.
+  const visibleChats = useMemo(() => chats.filter((chat) => !sessionStore.hidden.includes(chat.conversation_id)), [chats, sessionStore.hidden])
+  const visibleProjects = useMemo(() => (
+    sessionStore.hidden.length === 0
+      ? projects
+      : projects.map((project) => ({ ...project, chats: project.chats.filter((chat) => !sessionStore.hidden.includes(chat.conversation_id)) }))
+  ), [projects, sessionStore.hidden])
 
   const locationKey = `${location.pathname}${location.search}`
   const [previousLocationKey, setPreviousLocationKey] = useState(locationKey)
@@ -257,6 +270,14 @@ export function WorkspaceNavigation({
     setChats(nextChats)
     onChatsChange?.(nextChats)
     setProjects(nextProjects)
+    const live: SessionLiveInfo[] = [
+      ...nextChats.map((chat) => ({ id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: null })),
+      ...nextProjects.flatMap((project) => project.chats.map((chat) => ({
+        id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: project.project_id,
+      }))),
+    ]
+    // Both lists are complete, so a pinned tab missing from them was deleted elsewhere.
+    syncSessions(live, { complete: Array.isArray(conversationList?.items) && Array.isArray(sidebar?.items) })
   }, [apiClient, onChatsChange])
 
   const activeSessionCount = useMemo(() => {
@@ -609,7 +630,7 @@ export function WorkspaceNavigation({
               />
             </svg>
             <span>Conversas</span>
-            <small>{chats.length}</small>
+            <small>{visibleChats.length}</small>
           </button>
           <button
             type="button"
@@ -653,34 +674,21 @@ export function WorkspaceNavigation({
               >
                 <div className="project-navigation__section-heading">
                   <span>Conversas recentes</span>
-                  {chats.length > 0 && <small>{chats.length} {chats.length === 1 ? 'conversa' : 'conversas'}</small>}
+                  {visibleChats.length > 0 && <small>{visibleChats.length} {visibleChats.length === 1 ? 'conversa' : 'conversas'}</small>}
                 </div>
-                {chats.length > 0 ? (
-                  chats.map((chat) => (
-                    <NavLink
+                {visibleChats.length > 0 ? (
+                  visibleChats.map((chat) => (
+                    <SessionNavRow
                       key={chat.conversation_id}
+                      client={apiClient}
+                      session={{ id: chat.conversation_id, title: chat.title, mode: chat.mode, projectId: null }}
                       to={`/chats/${encodeURIComponent(chat.conversation_id)}`}
-                      title={chat.title}
-                      onClick={() => setMobileOpen(false)}
-                      className={({ isActive }) => (isActive ? 'project-navigation__chat is-active' : 'project-navigation__chat')}
-                    >
-                      <ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />
-                      <span className="project-navigation__chat-title" title={chat.title}>{chat.title}</span>
-                      {chat.state !== 'running' && (
-                        <span
-                          className="project-navigation__chat-time"
-                          data-testid={`conversation-time-${chat.conversation_id}`}
-                        >
-                          {formatRelativeShort(chat.updated_at)}
-                        </span>
-                      )}
-                      <span
-                        className="project-navigation__chat-state"
-                        data-testid={`conversation-state-${chat.conversation_id}`}
-                        data-state={chat.state}
-                        aria-hidden="true"
-                      />
-                    </NavLink>
+                      state={chat.state}
+                      time={formatRelativeShort(chat.updated_at)}
+                      badge={<ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />}
+                      onNavigate={() => setMobileOpen(false)}
+                      onOpenMenu={openSessionMenu}
+                    />
                   ))
                 ) : (
                   <p className="project-navigation__empty">
@@ -725,8 +733,8 @@ export function WorkspaceNavigation({
                     Ver todos os projetos
                   </Link>
                 </div>
-                {projects.length > 0 ? (
-                  projects.map((project, projectIdx) => (
+                {visibleProjects.length > 0 ? (
+                  visibleProjects.map((project, projectIdx) => (
                     <section key={project.project_id} className="project-navigation__project">
                       <div className={activeProjectId === project.project_id ? 'project-navigation__project-heading is-active' : 'project-navigation__project-heading'}>
                         {!hideProjectChatSublist && (
@@ -777,26 +785,17 @@ export function WorkspaceNavigation({
                       </div>
                       {!hideProjectChatSublist && !collapsed.has(project.project_id) &&
                         project.chats.map((chat) => (
-                          <NavLink
+                          <SessionNavRow
                             key={chat.conversation_id}
+                            client={apiClient}
+                            session={{ id: chat.conversation_id, title: chat.title, mode: chat.mode, projectId: project.project_id }}
                             to={`/projects/${encodeURIComponent(project.project_id)}/chats/${encodeURIComponent(chat.conversation_id)}`}
-                            title={chat.title}
-                            onClick={() => setMobileOpen(false)}
-                            className={({ isActive }) => (
-                              isActive
-                                ? 'project-navigation__chat project-navigation__chat--project is-active'
-                                : 'project-navigation__chat project-navigation__chat--project'
-                            )}
-                          >
-                            <ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />
-                            <span className="project-navigation__chat-title" title={chat.title}>{chat.title}</span>
-                            <span
-                              className="project-navigation__chat-state"
-                              data-testid={`conversation-state-${chat.conversation_id}`}
-                              data-state={chat.state}
-                              aria-hidden="true"
-                            />
-                          </NavLink>
+                            state={chat.state}
+                            extraClassName="project-navigation__chat--project"
+                            badge={<ModeBadge mode={chat.mode} conversationId={chat.conversation_id} />}
+                            onNavigate={() => setMobileOpen(false)}
+                            onOpenMenu={openSessionMenu}
+                          />
                         ))}
                       {!hideProjectChatSublist && !collapsed.has(project.project_id) && project.chats.length === 0 && (
                         <p className="project-navigation__empty project-navigation__empty--project">Ainda não há chats neste projeto.</p>
@@ -986,6 +985,8 @@ export function WorkspaceNavigation({
           </form>
         </div>
       )}
+      <SessionContextMenu menu={sessionMenu} onClose={closeSessionMenu} />
+      <SessionActionsHost client={apiClient} />
     </>
   )
 }

@@ -542,11 +542,13 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.exception_handler(ApplicationConflictError)
     async def conflict_error(_: Request, exc: ApplicationConflictError) -> JSONResponse:
+        message = getattr(exc, "message", None)
         return _error(
             409,
             "CONFLICT",
             getattr(exc, "code", "execution_conflict") or "execution_conflict",
             retryable=bool(getattr(exc, "retryable", True)),
+            details={"message": message} if message else None,
         )
 
     @app.exception_handler(ApplicationIndeterminateError)

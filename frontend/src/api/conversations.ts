@@ -1824,3 +1824,14 @@ export function connectLiveVoiceSession(
     },
   }
 }
+
+/** Deletes a conversation and its history. 409 while a turn is running; the Orin Friend cannot be deleted. */
+export function deleteConversation(client: ApiClient, conversationId: string, intent = client.createMutationIntent()): Promise<void> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}`,
+    method: 'DELETE',
+    expectedStatus: 204,
+    intent,
+    parse: () => undefined,
+  })
+}

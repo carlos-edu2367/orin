@@ -83,6 +83,10 @@ import type { ConversationActivityEvent, StructuredPatchHunk, ToolPermissionDeci
 import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
+import { conversationDraftKey, useComposerDraft } from './useComposerDraft'
+import { StickyUserMessage } from './StickyUserMessage'
+import { PinnedSessionTabs } from '../sessions/PinnedSessionTabs'
+import { useSessionStore } from '../sessions/sessionStore'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
 const MAX_MESSAGE_CHARACTERS = 16000
@@ -173,6 +177,7 @@ export function ChatPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const client = useMemo(() => createBrowserApiClient(), [])
+  const sessionTitles = useSessionStore().titles
   const reduced = useReducedMotion()
 
   const [conversation, setConversation] = useState<Conversation | null>(null)
@@ -647,6 +652,11 @@ export function ChatPage() {
     setPrefillApplied(conversationId)
     setMessage(prefill)
   }
+  // Per-conversation draft: what was typed here survives a visit to another session. A send that
+  // empties the composer forgets it; a failed send puts the text back and keeps it.
+  useComposerDraft(conversationId ? conversationDraftKey(conversationId) : null, message, setMessage, {
+    skipRestore: typeof prefill === 'string' && prefill.length > 0,
+  })
 
   const refreshQueue = useCallback(async () => {
     if (!conversationId) return
@@ -2265,6 +2275,8 @@ export function ChatPage() {
 
 
   const activeConvProjectId = conversation?.project_id ?? projectId ?? null
+  // A rename from the sidebar or a tab shows up here before the conversation reloads.
+  const headerTitle = (conversationId ? sessionTitles[conversationId] : undefined) ?? conversation?.title ?? 'Conversa'
   const activeConvProjectName =
     conversation?.project_name
     ?? conversation?.workspace?.projectName
@@ -2467,7 +2479,13 @@ export function ChatPage() {
         </div>
 
         <div className="chat__title canvas-header__center">
-          <h1 title={conversation?.title ?? 'Conversa'}>{conversation?.title ?? 'Conversa'}</h1>
+          <PinnedSessionTabs
+            client={client}
+            current={conversation && conversationId ? {
+              id: conversationId, title: conversation.title, mode: conversationMode, projectId: activeConvProjectId,
+            } : null}
+            fallback={<h1 title={headerTitle}>{headerTitle}</h1>}
+          />
           {conversation && <span className="chat__model visually-hidden">{conversation.provider} · {conversation.model_id}</span>}
         </div>
 
@@ -2738,6 +2756,15 @@ export function ChatPage() {
             void loadOlderActivities()
           }
         }}>
+          {!sceneOpen && !loadFailure && (
+            <StickyUserMessage
+              scrollRef={scrollRef}
+              reducedMotion={Boolean(reduced)}
+              items={messages
+                .filter((item) => item.role === 'user' && (item.content.trim().length > 0 || item.attachments.length > 0))
+                .map((item) => ({ id: item.message_id, content: item.content, attachments: item.attachments }))}
+            />
+          )}
           {sceneOpen ? (
             <SceneView
               events={sceneEvents}
@@ -2858,6 +2885,7 @@ export function ChatPage() {
                 <motion.article
                   key={item.message_id}
                   className={`bubble bubble--${item.role}`}
+                  data-sticky-user-id={item.role === 'user' ? item.message_id : undefined}
                   initial={reduced ? false : { opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}

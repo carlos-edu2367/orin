@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.redaction import redact_text
@@ -236,6 +236,17 @@ def register_conversation_routes(
         except ValueError as error:
             raise ApplicationValidationError(str(error)) from error
         return JSONResponse(result)
+
+    @app.delete("/v1/conversations/{conversation_id}", status_code=204)
+    async def delete_conversation(conversation_id: str, request: Request) -> Response:
+        """Delete a conversation and its history (404 if not the person's, 409 while it runs or for the Friend).
+        Files on disk stay where they are."""
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.delete")
+        await run_in_threadpool(services.conversation_application.delete, conversation_id, principal.user_id)
+        _STATUSLINE_CACHE.pop(conversation_id, None)
+        _STATUSLINE_LOCKS.pop(conversation_id, None)
+        return Response(status_code=204)
 
     @app.post("/v1/conversations/{conversation_id}/shell", status_code=201)
     async def shell(conversation_id: str, payload: ShellRequest, request: Request) -> JSONResponse:

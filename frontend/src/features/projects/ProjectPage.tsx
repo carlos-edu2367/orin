@@ -13,6 +13,7 @@ import {
 import { inspectNewWorkspaceFolder } from '../../api/workspace'
 import { OrinActivityCenter } from '../../components/OrinActivityCenter'
 import { WorkspaceNavigation } from './WorkspaceNavigation'
+import { PinnedSessionTabs } from '../sessions/PinnedSessionTabs'
 
 export type ProjectPageProps = {
   client?: ApiClient
@@ -251,7 +252,7 @@ export function ProjectPage({ client }: ProjectPageProps) {
               <strong className="project-dashboard__breadcrumb-current">{project.name}</strong>
             </nav>
           </div>
-          <div className="canvas-header__center" />
+          <div className="canvas-header__center"><PinnedSessionTabs client={apiClient} /></div>
           <div className="canvas-header__right">
             <button
               type="button"
