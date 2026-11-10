@@ -6081,12 +6081,14 @@ progress.orin-progress::-moz-progress-bar,
 
 /* ---- Orin Code Split Workbench (ref-08.png) ---- */
 @media (min-width: 1024px) {
+  /* The chat column follows the splitter (--chat-pane-width, set on <main> by useChatPaneWidth). This file loads
+     after codeWorkbench.css in the bundle, so the columns live only here. */
   .chat.chat--code-split {
-    grid-template-columns: 264px minmax(380px, 460px) minmax(0, 1fr);
+    grid-template-columns: 264px var(--chat-pane-width, 420px) minmax(0, 1fr);
   }
 
   .chat.chat--code-split:has([data-rail-collapsed="true"]) {
-    grid-template-columns: 64px minmax(380px, 460px) minmax(0, 1fr);
+    grid-template-columns: 64px var(--chat-pane-width, 420px) minmax(0, 1fr);
   }
 
   .chat.chat--code-split > .chat__bar {
@@ -6110,7 +6112,8 @@ progress.orin-progress::-moz-progress-bar,
     min-width: 0;
     min-height: 0;
     overflow: hidden;
-    border-left: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
+    /* The splitter draws the line between the chat and the Bancada. */
+    border-left: 0;
   }
 }
 

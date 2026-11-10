@@ -990,24 +990,13 @@
 }
 
 @media (min-width: 1024px) {
-  .chat.chat--code-split {
-    grid-template-columns: 264px var(--chat-pane-width, 420px) minmax(0, 1fr);
-  }
-
-  .chat.chat--code-split:has([data-rail-collapsed="true"]) {
-    grid-template-columns: 64px var(--chat-pane-width, 420px) minmax(0, 1fr);
-  }
-
+  /* The grid columns (with --chat-pane-width) are in styles/agentos.css, which loads after this file. */
   .chat.chat--code-split > .pane-splitter {
     grid-column: 3;
     grid-row: 2 / 4;
     justify-self: start;
     align-self: stretch;
     margin-left: -4px;
-  }
-
-  .chat.chat--code-split > .code-workbench {
-    border-left: 0;
   }
 }
 
