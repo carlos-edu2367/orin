@@ -24,9 +24,9 @@ from agentos.providers.antigravity_cli import (
     resolve_antigravity_binary,
     wire_antigravity_tool_server,
 )
+from agentos.providers.antigravity_cli.command import ANTIGRAVITY_OMITTED_MEDIA_NOTE
 from agentos.providers.claude_cli.errors import (
     CliSecurityAbort,
-    NativeLoopUnavailable,
 )
 from agentos.providers.claude_cli.native_loop import (
     NativeTurnRequest,
@@ -209,47 +209,64 @@ def test_status_waiting_or_canceled_is_not_success(
         {"type": "video", "data": "AAAA"},
     ],
 )
-def test_image_content_rejected_before_spawn(
-    tmp_path: Path,
+def test_media_content_becomes_a_text_note_never_bytes_nor_an_error(
     bad_block: dict[str, Any],
 ) -> None:
+    """agy takes only text in a user message: media becomes a note (raising killed every restarted turn)."""
     adapter = AntigravityCliAdapter()
     content = [{"type": "text", "text": "describe this"}, bad_block]
 
-    with pytest.raises(ValueError, match=r"(?i)(texto|imagem|mídia|stream-json)"):
-        encode_antigravity_user_turn(content)
+    for encoded in (encode_antigravity_user_turn(content), adapter.encode_user_turn(content)):
+        packet = json.loads(encoded.decode("utf-8"))
+        blocks = packet["message"]["content"]
+        assert all(set(block) == {"type", "text"} and block["type"] == "text" for block in blocks)
+        assert blocks[0]["text"] == "describe this"
+        assert blocks[-1]["text"] == ANTIGRAVITY_OMITTED_MEDIA_NOTE
+        raw = encoded.decode("utf-8")
+        assert "AAAA" not in raw and "example.com" not in raw
 
-    with pytest.raises(ValueError, match=r"(?i)(texto|imagem|mídia|stream-json)"):
-        adapter.encode_user_turn(content)
 
-    spawn_calls: list[Any] = []
+def test_consecutive_media_blocks_collapse_into_one_note() -> None:
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+    content = [{"type": "text", "text": "Conteúdo visual do arquivo solicitado:"}, image, image, {"type": "text", "text": "[User]\nok"}]
+    blocks = json.loads(encode_antigravity_user_turn(content).decode("utf-8"))["message"]["content"]
+    assert [block["text"] for block in blocks] == [
+        "Conteúdo visual do arquivo solicitado:",
+        ANTIGRAVITY_OMITTED_MEDIA_NOTE,
+        "[User]\nok",
+    ]
 
-    def _forbidden_popen(*args: Any, **kwargs: Any) -> Any:
-        spawn_calls.append((args, kwargs))
-        raise AssertionError("subprocess.Popen must not be called when image content is rejected")
 
-    provider = ClaudeCliProvider(
-        binary=FAKE_ANTIGRAVITY_SCRIPT,
-        adapter=adapter,
-        popen_factory=_forbidden_popen,
-    )
+def test_native_turn_whose_history_holds_a_viewed_image_starts_and_completes(tmp_path: Path) -> None:
+    """Regression (10/11/2026): a turn restarted after a view_file of an image replays that image in its first
+    message; the ValueError opened the native-loop circuit breaker for every agy conversation. The fake agy
+    rejects any non-text block just like agy 1.5.x, so this only passes when no media reaches stdin."""
+    adapter = AntigravityCliAdapter()
+    provider = ClaudeCliProvider(binary=FAKE_ANTIGRAVITY_SCRIPT, adapter=adapter)
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
     req = NativeTurnRequest(
         model="gemini-3.8-flash-low",
         system_prompt="You are Orin.",
-        user_content=content,
+        user_content=[
+            {"type": "text", "text": "[Tool Result id=call_1 name=view_file status=ok]\nA imagem está anexada logo abaixo.\n[/Tool Result]"},
+            {"type": "text", "text": "Conteúdo visual do arquivo solicitado:"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            {"type": "text", "text": "[User]\nHello Turn 1"},
+        ],
         executor=_EchoExecutor(),
         cancel_check=lambda: False,
-        deadline_monotonic=time.monotonic() + 20.0,
+        deadline_monotonic=time.monotonic() + 30.0,
         max_turns=2,
-        cwd=tmp_path / "workdir",
+        cwd=cwd,
     )
-    with pytest.raises((ValueError, NativeLoopUnavailable)) as exc_info:
-        start_native_turn_for_provider(provider, req)
-    assert any(
-        term in str(exc_info.value).lower()
-        for term in ("texto", "imagem", "mídia", "stream-json")
-    )
-    assert spawn_calls == []
+    handle = start_native_turn_for_provider(provider, req)
+    try:
+        outcome = handle.run_until_result(_RecordingSink())
+        assert outcome.result is not None and not outcome.result.is_error
+        assert outcome.final_text.startswith("PONG_AGY")
+    finally:
+        handle.close()
 
 
 def test_tool_call_sequence_and_id_format() -> None:

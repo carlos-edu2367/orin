@@ -848,47 +848,56 @@ def build_antigravity_command(
     return cmd
 
 
+ANTIGRAVITY_OMITTED_MEDIA_NOTE = (
+    "[Imagem/mídia omitida: o Antigravity CLI não recebe imagens na mensagem. "
+    "Para ver um arquivo visual, chame a ferramenta view_file com o caminho dele.]"
+)
+
+_MEDIA_KEYS: tuple[str, ...] = (
+    "image",
+    "image_url",
+    "input_image",
+    "document",
+    "audio",
+    "video",
+)
+
+
 def encode_antigravity_user_turn(
     content: list[dict[str, Any]] | str,
 ) -> bytes:
-    """Encode a user turn for `agy --input-format stream-json`, rejecting non-text/media blocks before sending."""
+    """Encode a user turn for `agy --input-format stream-json`: text only.
+
+    agy 1.5.x rejects any non-text block in a user message (`only "text"`); it sees an
+    image only as an MCP tool result (view_file). A media block here is history replayed
+    after a restart (the image a view_file call returned, kept as a user message) or the
+    text-protocol fallback: it becomes a short text note, never bytes and never an error.
+    Raising here made every restart of a turn that had viewed an image fail and opened
+    the native-loop circuit breaker for every agy conversation.
+    """
     text_blocks: list[dict[str, str]] = []
     if isinstance(content, str):
         text_blocks.append({"type": "text", "text": content})
     elif isinstance(content, Sequence):
+        omitted_pending = False
         for block in content:
             if isinstance(block, str):
                 text_blocks.append({"type": "text", "text": block})
                 continue
             if not isinstance(block, Mapping):
-                raise ValueError(
-                    "O Antigravity CLI (agy) aceita apenas blocos de texto no modo stream-json; "
-                    "envio de imagens ou mídia não é suportado."
-                )
+                omitted_pending = True
+                continue
             btype = str(block.get("type") or "text").strip().lower()
-            if btype in _UNSUPPORTED_MEDIA_TYPES or btype not in (
-                "text",
-                "input_text",
+            if (
+                btype in _UNSUPPORTED_MEDIA_TYPES
+                or btype not in ("text", "input_text")
+                or any(media_key in block for media_key in _MEDIA_KEYS)
             ):
-                raise ValueError(
-                    "O Antigravity CLI (agy) aceita apenas blocos de texto no modo stream-json; "
-                    "envio de imagens ou mídia não é suportado."
-                )
-            if any(
-                media_key in block
-                for media_key in (
-                    "image",
-                    "image_url",
-                    "input_image",
-                    "document",
-                    "audio",
-                    "video",
-                )
-            ):
-                raise ValueError(
-                    "O Antigravity CLI (agy) aceita apenas blocos de texto no modo stream-json; "
-                    "envio de imagens ou mídia não é suportado."
-                )
+                omitted_pending = True
+                continue
+            if omitted_pending:
+                text_blocks.append({"type": "text", "text": ANTIGRAVITY_OMITTED_MEDIA_NOTE})
+                omitted_pending = False
             text_val = block.get("text")
             text_blocks.append(
                 {
@@ -896,6 +905,8 @@ def encode_antigravity_user_turn(
                     "text": "" if text_val is None else str(text_val),
                 }
             )
+        if omitted_pending:
+            text_blocks.append({"type": "text", "text": ANTIGRAVITY_OMITTED_MEDIA_NOTE})
     else:
         raise ValueError(
             "O Antigravity CLI (agy) aceita apenas blocos de texto no modo stream-json; "
