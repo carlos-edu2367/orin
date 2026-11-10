@@ -156,6 +156,27 @@ test.describe('Visual & Functional E2E Verification — All Visual Cases (1, 3, 
 
     await page.screenshot({ path: screenshotPath(testInfo, 'verify-case1-code-expanded.png') })
 
+    // Dragging the splitter really resizes the chat column (a real browser applies the cascade jsdom skips).
+    const splitter = page.getByRole('separator', { name: 'Redimensionar chat e Bancada' })
+    await expect(splitter).toBeVisible()
+    const chatBody = page.locator('main.chat > .chat__body')
+    const widthBefore = (await chatBody.boundingBox())!.width
+    const handle = (await splitter.boundingBox())!
+    const startX = handle.x + handle.width / 2
+    const startY = handle.y + handle.height / 2
+    await page.mouse.move(startX, startY)
+    await page.mouse.down()
+    await page.mouse.move(startX + 100, startY, { steps: 5 })
+    await page.mouse.move(startX + 200, startY, { steps: 5 })
+    await page.mouse.up()
+    await expect.poll(async () => (await chatBody.boundingBox())!.width).toBeGreaterThan(widthBefore + 150)
+    const savedWidth = Number(await page.evaluate(() => window.localStorage.getItem('orin.layout.chatPaneWidth')))
+    expect(savedWidth).toBeGreaterThan(widthBefore + 150)
+    // Double click goes back to the default width and forgets the preference.
+    await splitter.dblclick()
+    await expect.poll(async () => Math.abs((await chatBody.boundingBox())!.width - widthBefore)).toBeLessThan(4)
+    expect(await page.evaluate(() => window.localStorage.getItem('orin.layout.chatPaneWidth'))).toBeNull()
+
     // Click close button inside workbench
     await page.getByTestId('code-workbench-close').click()
     await expect(page.getByTestId('code-workbench-panel')).toHaveCount(0)

@@ -5,6 +5,7 @@ import { ThemeProvider } from '../../../app/ThemeContext'
 import { ChatPage } from '../ChatPage'
 import { PaneSplitter } from '../PaneSplitter'
 import codeWorkbenchCss from '../codeWorkbench.css?raw'
+import agentosCss from '../../../styles/agentos.css?raw'
 import {
   CHAT_PANE_DEFAULT_WIDTH,
   CHAT_PANE_MIN_WIDTH,
@@ -523,8 +524,12 @@ describe('ChatPage + Bancada resizable split integration', () => {
   })
 
   it('defines CSS rules for --chat-pane-width grid columns, iframe pointer-events lock during drag, and reduced motion', () => {
-    expect(codeWorkbenchCss).toContain('grid-template-columns: 264px var(--chat-pane-width, 420px) minmax(0, 1fr)')
-    expect(codeWorkbenchCss).toContain('grid-template-columns: 64px var(--chat-pane-width, 420px) minmax(0, 1fr)')
+    // agentos.css loads after codeWorkbench.css in the bundle: its split columns are the ones that apply, so they
+    // must follow the splitter, and no stylesheet may keep the old fixed chat column (it silently wins).
+    expect(agentosCss).toContain('grid-template-columns: 264px var(--chat-pane-width, 420px) minmax(0, 1fr)')
+    expect(agentosCss).toContain('grid-template-columns: 64px var(--chat-pane-width, 420px) minmax(0, 1fr)')
+    expect(agentosCss).not.toContain('minmax(380px, 460px)')
+    expect(codeWorkbenchCss).not.toContain('minmax(380px, 460px)')
     expect(codeWorkbenchCss).toContain('.chat.chat--resizing iframe')
     expect(codeWorkbenchCss).toContain('pointer-events: none')
     expect(codeWorkbenchCss).toContain('prefers-reduced-motion: reduce')

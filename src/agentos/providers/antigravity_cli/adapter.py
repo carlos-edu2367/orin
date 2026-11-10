@@ -45,6 +45,11 @@ from agentos.providers.cli_adapter import (
     ToolServerWiring,
 )
 
+# The functions as imported, before any test patches this module or the source modules: a name here that is
+# still this object is not an override, so the source module's (possibly patched) function is the one to call.
+_CANONICAL_RESOLVE_BINARY = resolve_antigravity_binary
+_CANONICAL_DISCOVER_MODELS = discover_antigravity_models
+
 
 class AntigravityCliAdapter:
     """Adapter for Google's `agy` CLI running in isolated `--input-format stream-json --output-format stream-json` mode."""
@@ -98,8 +103,7 @@ class AntigravityCliAdapter:
             return self._binary
         resolve_fn = (
             resolve_antigravity_binary
-            if resolve_antigravity_binary
-            is not _command_mod.resolve_antigravity_binary
+            if resolve_antigravity_binary is not _CANONICAL_RESOLVE_BINARY
             else _command_mod.resolve_antigravity_binary
         )
         return resolve_fn(self._effective_env(env))
@@ -207,8 +211,7 @@ class AntigravityCliAdapter:
         self._last_binary = binary
         discover_fn = (
             discover_antigravity_models
-            if discover_antigravity_models
-            is not _catalog_mod.discover_antigravity_models
+            if discover_antigravity_models is not _CANONICAL_DISCOVER_MODELS
             else _catalog_mod.discover_antigravity_models
         )
         try:
