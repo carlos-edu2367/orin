@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
+import time
 from typing import Mapping, Sequence
 
 from agentos.providers.antigravity_cli.command import (
@@ -12,9 +14,13 @@ from agentos.providers.antigravity_cli.command import (
 from agentos.providers.cli_adapter import CliModelInfo
 
 DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW: int = 1_000_000
+ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS: float = 30 * 60.0
 _ANTIGRAVITY_LABEL_SUFFIX = "(Assinatura Antigravity)"
 
 _EFFORTS_STD: tuple[str, ...] = ("low", "medium", "high")
+
+_MODELS_CACHE_LOCK = threading.Lock()
+_MODELS_CACHE: dict[str, tuple[float, tuple[CliModelInfo, ...]]] = {}
 
 
 def _infer_supported_efforts(slug: str) -> tuple[str, ...]:
@@ -42,10 +48,20 @@ def antigravity_input_modalities(slug: str) -> tuple[str, ...]:
     return ("text",)
 
 
-def _model(slug: str, context_window: int) -> CliModelInfo:
+def _format_antigravity_display_name(
+    slug: str, label: str | None = None
+) -> str:
+    cleaned_label = (label or "").strip()
+    base = cleaned_label if cleaned_label else slug
+    if base.endswith(_ANTIGRAVITY_LABEL_SUFFIX):
+        return base
+    return f"{base} {_ANTIGRAVITY_LABEL_SUFFIX}"
+
+
+def _model(slug: str, label: str, context_window: int) -> CliModelInfo:
     return CliModelInfo(
         slug,
-        f"{slug} {_ANTIGRAVITY_LABEL_SUFFIX}",
+        _format_antigravity_display_name(slug, label),
         context_window,
         _infer_supported_efforts(slug),
         antigravity_input_modalities(slug),
@@ -53,24 +69,73 @@ def _model(slug: str, context_window: int) -> CliModelInfo:
 
 
 FALLBACK_ANTIGRAVITY_MODELS: tuple[CliModelInfo, ...] = (
-    _model("gemini-4-argon-medium", 1_000_000),
-    _model("gemini-4-argon-high", 1_000_000),
-    _model("gemini-4-argon-low", 1_000_000),
-    _model("gemini-3.8-flash-high", 1_000_000),
-    _model("gemini-3.8-flash-medium", 1_000_000),
-    _model("gemini-3.8-flash-low", 1_000_000),
-    _model("claude-opus-5-5-low", 200_000),
-    _model("claude-opus-5-5-medium", 200_000),
-    _model("claude-opus-5-5-high", 200_000),
-    _model("claude-sonnet-5-5-low", 200_000),
-    _model("claude-sonnet-5-5-medium", 200_000),
-    _model("claude-sonnet-5-5-high", 200_000),
-    _model("gpt-oss-120b-medium", 128_000),
+    _model("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", 1_000_000),
+    _model("gemini-4-carbon-high", "Gemini 4 Carbon (High)", 1_000_000),
+    _model("gemini-4-carbon-low", "Gemini 4 Carbon (Low)", 1_000_000),
+    _model("gemini-4-argon-medium", "Gemini 4 Argon (Medium)", 1_000_000),
+    _model("gemini-4-argon-high", "Gemini 4 Argon (High)", 1_000_000),
+    _model("gemini-4-argon-low", "Gemini 4 Argon (Low)", 1_000_000),
+    _model("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", 1_000_000),
+    _model("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", 1_000_000),
+    _model("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)", 1_000_000),
+    _model("claude-opus-5-5-low", "Claude Opus 5.5 (Low)", 200_000),
+    _model("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)", 200_000),
+    _model("claude-opus-5-5-high", "Claude Opus 5.5 (High)", 200_000),
+    _model("claude-sonnet-5-5-low", "Claude Sonnet 5.5 (Low)", 200_000),
+    _model("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)", 200_000),
+    _model("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)", 200_000),
+    _model("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)", 128_000),
 )
 
 _FALLBACK_BY_ID: dict[str, CliModelInfo] = {
     m.id: m for m in FALLBACK_ANTIGRAVITY_MODELS
 }
+
+
+def get_cached_antigravity_models(
+    binary: str | None,
+    *,
+    now: float | None = None,
+) -> tuple[CliModelInfo, ...] | None:
+    """Return cached live-discovered models for `binary` if present and within TTL."""
+    if not binary:
+        return None
+    key = str(binary).strip()
+    if not key:
+        return None
+    current_time = time.monotonic() if now is None else now
+    with _MODELS_CACHE_LOCK:
+        entry = _MODELS_CACHE.get(key)
+        if entry is None:
+            return None
+        cached_at, models = entry
+        if (current_time - cached_at) >= ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS:
+            _MODELS_CACHE.pop(key, None)
+            return None
+        return models
+
+
+def set_cached_antigravity_models(
+    binary: str,
+    models: Sequence[CliModelInfo],
+    *,
+    now: float | None = None,
+) -> tuple[CliModelInfo, ...]:
+    """Store live-discovered models for `binary` in the process-wide cache."""
+    key = str(binary).strip()
+    snapshot = tuple(models)
+    if not key or not snapshot:
+        return snapshot
+    current_time = time.monotonic() if now is None else now
+    with _MODELS_CACHE_LOCK:
+        _MODELS_CACHE[key] = (current_time, snapshot)
+    return snapshot
+
+
+def clear_antigravity_models_cache() -> None:
+    """Clear the process-wide Antigravity models cache."""
+    with _MODELS_CACHE_LOCK:
+        _MODELS_CACHE.clear()
 
 
 def _infer_context_window(slug: str) -> int:
@@ -129,10 +194,9 @@ def discover_antigravity_models(
 
     discovered: list[CliModelInfo] = []
     for raw_line in (completed.stdout or "").splitlines():
-        line = raw_line.strip()
-        if not line or "\t" not in line:
+        if not raw_line.strip() or "\t" not in raw_line:
             continue
-        raw_slug, _label = line.split("\t", 1)
+        raw_slug, raw_label = raw_line.split("\t", 1)
         try:
             slug = clean_antigravity_model_id(raw_slug)
         except ValueError:
@@ -142,7 +206,7 @@ def discover_antigravity_models(
         discovered.append(
             CliModelInfo(
                 id=slug,
-                display_name=f"{slug} {_ANTIGRAVITY_LABEL_SUFFIX}",
+                display_name=_format_antigravity_display_name(slug, raw_label),
                 context_window=_infer_context_window(slug),
                 supported_efforts=_infer_supported_efforts(slug),
                 input_modalities=antigravity_input_modalities(slug),
@@ -177,9 +241,14 @@ def context_window_for(
 
 
 __all__ = [
+    "ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS",
     "DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW",
     "FALLBACK_ANTIGRAVITY_MODELS",
+    "_infer_supported_efforts",
     "antigravity_input_modalities",
+    "clear_antigravity_models_cache",
     "context_window_for",
     "discover_antigravity_models",
+    "get_cached_antigravity_models",
+    "set_cached_antigravity_models",
 ]

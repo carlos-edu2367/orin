@@ -25,6 +25,7 @@ function makeAgent(overrides: Partial<SceneAgent> & { id: string; name: string }
     task: overrides.task ?? 'Implementar módulo',
     currentTool: overrides.currentTool ?? 'Bash',
     lastThought: overrides.lastThought ?? '',
+    lastSpeech: overrides.lastSpeech ?? '',
     bubble: overrides.bubble ?? null,
     activities: overrides.activities ?? [],
     durationLabel: overrides.durationLabel ?? '2s',

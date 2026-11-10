@@ -19,7 +19,7 @@ const PRIMARY_CATEGORIES: readonly PrimaryCategory[] = [
     id: 'general',
     label: 'Geral',
     to: '/settings/general',
-    matchPrefixes: ['/settings/general', '/settings/workspace', '/settings/background', '/settings/browser'],
+    matchPrefixes: ['/settings/general', '/settings/characters', '/settings/workspace', '/settings/background', '/settings/browser'],
     icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <path

@@ -173,6 +173,9 @@ export function PermissionsSection() {
   const [codeModeFlags, setCodeModeFlags] = useState({
     system_notifications: false,
     monitoring_enabled: true,
+    notify_permissions: true,
+    notify_completion: true,
+    notification_sound: true,
   })
 
   // Background hydration for code-mode autonomy and server trusted folders (Rule B: never render role="alert" on failure)
@@ -184,6 +187,9 @@ export function PermissionsSection() {
         setCodeModeFlags({
           system_notifications: Boolean(res.system_notifications),
           monitoring_enabled: res.monitoring_enabled !== false,
+          notify_permissions: res.notify_permissions !== false,
+          notify_completion: res.notify_completion !== false,
+          notification_sound: res.notification_sound !== false,
         })
         if (initialPermState.hasExplicitStorage) return
         const mode = toRef15PermissionMode(res.autonomy)
@@ -296,6 +302,9 @@ export function PermissionsSection() {
       autonomy: permissionModeToAutonomy(permissionMode),
       system_notifications: codeModeFlags.system_notifications,
       monitoring_enabled: codeModeFlags.monitoring_enabled,
+      notify_permissions: codeModeFlags.notify_permissions,
+      notify_completion: codeModeFlags.notify_completion,
+      notification_sound: codeModeFlags.notification_sound,
     }).catch(() => undefined)
   }
 

@@ -20,6 +20,17 @@ def test_settings_default_to_safe_approval_and_opt_in_notifications():
     assert settings.autonomy is CodeAutonomy.APPROVAL_REQUIRED
     assert settings.requires_plan_approval is True
     assert settings.system_notifications is False
+    assert settings.notify_permissions is True
+    assert settings.notify_completion is True
+    assert settings.notification_sound is True
+    assert settings.as_dict() == {
+        "autonomy": "approval_required",
+        "system_notifications": False,
+        "monitoring_enabled": True,
+        "notify_permissions": True,
+        "notify_completion": True,
+        "notification_sound": True,
+    }
 
 
 def test_explicit_push_authorization_is_narrow_and_activates_code_mode():

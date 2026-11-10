@@ -67,6 +67,9 @@ export interface ScenePendingCardsProps {
   openQuestionTurnIds?: ReadonlySet<string>
   onSelectAgent: (agentId: string | null) => void
   sectionRef?: Ref<HTMLElement>
+  variant?: 'hud' | 'modal'
+  testIdPrefix?: string
+  hideSelectButton?: boolean
 }
 
 function isEventSettled(event: ConversationActivityEvent): boolean {
@@ -313,15 +316,23 @@ export function ScenePendingCards({
   openQuestionTurnIds,
   onSelectAgent,
   sectionRef,
+  variant = 'hud',
+  testIdPrefix = 'scene-pending',
+  hideSelectButton = false,
 }: ScenePendingCardsProps): JSX.Element | null {
   if (pending.length === 0) return null
+
+  const sectionClassName =
+    variant === 'modal'
+      ? 'scene-hud__card scene-hud__pending-section scene-agent-modal__pending-section'
+      : 'scene-hud__card scene-hud__pending-section'
 
   return (
     <section
       ref={sectionRef}
       tabIndex={-1}
-      className="scene-hud__card scene-hud__pending-section"
-      data-testid="scene-pending-section"
+      className={sectionClassName}
+      data-testid={`${testIdPrefix}-section`}
       aria-label="Esperando você"
     >
       <div className="scene-hud__section-header">
@@ -347,19 +358,21 @@ export function ScenePendingCards({
             <div
               key={item.id}
               className="scene-hud__pending-card"
-              data-testid={`scene-pending-item-${cleanId}`}
+              data-testid={`${testIdPrefix}-item-${cleanId}`}
               data-pending-kind={item.kind}
             >
               <div className="scene-hud__pending-header">
                 <span className="scene-hud__pending-agent">{agentName}</span>
-                <button
-                  type="button"
-                  className="scene-hud__btn scene-hud__btn--compact"
-                  data-testid={`scene-pending-select-${cleanId}`}
-                  onClick={() => onSelectAgent(item.agentId)}
-                >
-                  Ver na cena
-                </button>
+                {!hideSelectButton ? (
+                  <button
+                    type="button"
+                    className="scene-hud__btn scene-hud__btn--compact"
+                    data-testid={`${testIdPrefix}-select-${cleanId}`}
+                    onClick={() => onSelectAgent(item.agentId)}
+                  >
+                    Ver na cena
+                  </button>
+                ) : null}
               </div>
               <div className="scene-hud__pending-body">
                 {renderPendingCardBody(

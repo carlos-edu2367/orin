@@ -115,10 +115,14 @@ describe('Phase 7 — ref-15.png: Segurança e controle (PermissionsSection)', (
 
     await waitFor(() => {
       const putCall = calls.find((c) => c.url.includes('/v1/code-mode/settings') && c.method === 'PUT')
+      // The notification sub-options travel with the settings so saving permissions never resets them.
       expect(putCall?.body).toEqual({
         autonomy: 'plan_mode',
         system_notifications: false,
         monitoring_enabled: true,
+        notify_permissions: true,
+        notify_completion: true,
+        notification_sound: true,
       })
     })
   })

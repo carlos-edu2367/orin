@@ -9,7 +9,7 @@ interface OrinDesktopBridge {
   /** What closing the window does: ask, keep running in the tray, or quit. */
   getPreferences?: () => Promise<{ closeBehavior: 'ask' | 'background' | 'quit' } | null>
   setPreferences?: (preferences: { closeBehavior: 'ask' | 'background' | 'quit' }) => Promise<{ closeBehavior: 'ask' | 'background' | 'quit' } | null>
-  notifyCodeMode?: (notification: { title: string; body: string }) => Promise<boolean>
+  notifyCodeMode?: (notification: { title: string; body: string; silent?: boolean }) => Promise<boolean>
   wakeToLiveFriend?: () => Promise<boolean>
   onToggleLiveVoice?: (callback: () => void) => () => void
 }

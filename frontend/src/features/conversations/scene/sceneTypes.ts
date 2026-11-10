@@ -41,8 +41,10 @@ export type SceneAgentStatus =
 
 export interface SceneBubble {
   kind: 'thought' | 'speech' | 'error'
-  /** Already sanitized and cut to ~60 chars. */
+  /** Sanitized text cut to ~60 chars (head with trailing "…" for speech/error; tail with leading "…" for thought). */
   text: string
+  /** Complete sanitized text of the bubble (kept for the detail view). */
+  fullText?: string
   /** Event that produced it, so the canvas can restart its pop-in animation once. */
   eventId: string
 }
@@ -54,12 +56,30 @@ export interface SceneActivity {
   timestamp?: string
 }
 
+export interface SceneCustomCharacterPoses {
+  idle: string
+  think?: string
+  work?: string
+  wait?: string
+  scared?: string
+}
+
+export interface SceneCustomCharacter {
+  id: string
+  name: string
+  poses: SceneCustomCharacterPoses
+}
+
 export interface SceneAgent {
   /** The raw agentId of the events (main agent normalized to `MAIN_AGENT_ID`). */
   id: string
   isMain: boolean
   name: string
   subagentType?: string
+  /** Resolved or event-provided character display name shown on top of the technical tag. */
+  characterName?: string
+  /** Custom pixel-art character sprites when bound or matched by name. */
+  customCharacter?: SceneCustomCharacter
   /** Agent that started this one; `MAIN_AGENT_ID` for agents the Orin started; null for the Orin. */
   parentId: string | null
   /** 0 for the Orin, 1 for an agent the Orin started, 2 for one that agent started... */
@@ -72,6 +92,7 @@ export interface SceneAgent {
   task: string
   currentTool: string | null
   lastThought: string
+  lastSpeech: string
   bubble: SceneBubble | null
   activities: SceneActivity[]
   durationLabel: string

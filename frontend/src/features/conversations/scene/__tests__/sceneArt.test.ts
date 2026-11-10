@@ -53,6 +53,7 @@ function agent(id: string, name: string): SceneAgent {
     task: 'Ler arquivos',
     currentTool: 'Read',
     lastThought: '',
+    lastSpeech: '',
     bubble: null,
     activities: [],
     durationLabel: '1s',

@@ -4,9 +4,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from agentos.providers.antigravity_cli import catalog as _catalog_mod
+from agentos.providers.antigravity_cli import command as _command_mod
 from agentos.providers.antigravity_cli.catalog import (
+    FALLBACK_ANTIGRAVITY_MODELS,
+    _infer_supported_efforts,
     context_window_for,
     discover_antigravity_models,
+    get_cached_antigravity_models,
+    set_cached_antigravity_models,
 )
 from agentos.providers.antigravity_cli.command import (
     DEFAULT_ANTIGRAVITY_MODEL,
@@ -62,13 +68,42 @@ class AntigravityCliAdapter:
         max_user_message_bytes=190_791,
     )
 
+    def __init__(
+        self,
+        *,
+        binary: str | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        self._binary = binary
+        self._env = dict(env) if env is not None else None
+        self._last_binary: str | None = binary
+
+    def _effective_env(
+        self, env: Mapping[str, str] | None = None
+    ) -> Mapping[str, str] | None:
+        return env if env is not None else self._env
+
+    def _resolve_binary_path(
+        self, env: Mapping[str, str] | None = None
+    ) -> str | None:
+        if self._binary:
+            return self._binary
+        resolve_fn = (
+            resolve_antigravity_binary
+            if resolve_antigravity_binary
+            is not _command_mod.resolve_antigravity_binary
+            else _command_mod.resolve_antigravity_binary
+        )
+        return resolve_fn(self._effective_env(env))
+
     def resolve_binary(
         self, env: Mapping[str, str] | None = None
     ) -> tuple[str | None, tuple[int, int, int] | None]:
-        binary = resolve_antigravity_binary(env)
+        effective_env = self._effective_env(env)
+        binary = self._resolve_binary_path(effective_env)
         if not binary:
             return None, None
-        version = antigravity_version(binary, env=env)
+        version = antigravity_version(binary, env=effective_env)
         return binary, version
 
     def binary_version(
@@ -112,6 +147,8 @@ class AntigravityCliAdapter:
             if info.id == cleaned_model:
                 supported_efforts = info.supported_efforts
                 break
+        if supported_efforts is None:
+            supported_efforts = _infer_supported_efforts(cleaned_model)
         return build_antigravity_command(
             request,
             wiring,
@@ -144,7 +181,42 @@ class AntigravityCliAdapter:
         return classify_antigravity_error(result, rate_limit)
 
     def models(self) -> Sequence[CliModelInfo]:
-        return discover_antigravity_models()
+        binary = self._resolve_binary_path() or self._last_binary
+        if binary:
+            cached = get_cached_antigravity_models(binary)
+            if cached is not None:
+                return cached
+        return FALLBACK_ANTIGRAVITY_MODELS
+
+    def refresh_models(
+        self, env: Mapping[str, str] | None = None
+    ) -> Sequence[CliModelInfo]:
+        effective_env = self._effective_env(env)
+        binary = self._resolve_binary_path(effective_env)
+        if not binary:
+            return FALLBACK_ANTIGRAVITY_MODELS
+
+        self._last_binary = binary
+        discover_fn = (
+            discover_antigravity_models
+            if discover_antigravity_models
+            is not _catalog_mod.discover_antigravity_models
+            else _catalog_mod.discover_antigravity_models
+        )
+        try:
+            discovered = discover_fn(
+                binary,
+                run_models_cmd=True,
+                timeout=15.0,
+                env=effective_env,
+            )
+        except Exception:
+            return FALLBACK_ANTIGRAVITY_MODELS
+
+        if discovered and discovered is not FALLBACK_ANTIGRAVITY_MODELS:
+            return set_cached_antigravity_models(binary, discovered)
+
+        return FALLBACK_ANTIGRAVITY_MODELS
 
     def context_window(self, model_id: str | None) -> int:
         return context_window_for(model_id, self.models())

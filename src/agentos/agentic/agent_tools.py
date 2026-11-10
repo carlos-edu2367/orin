@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Collection, Iterable, Iterator, Literal, Mapping
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
@@ -49,6 +49,7 @@ from .diagnostics import (
     parse_file_diagnostics,
     summarize_diagnostics,
 )
+from .agent_context import bind_agent_id, get_current_agent_id
 from .call_context import ActiveInvocation
 from .workspace import MAX_LIST_DEPTH, MAX_SEARCH_RESULTS, ConversationWorkspace, WorkspaceError
 from .models import MAX_USER_QUESTION_ITEMS
@@ -1040,7 +1041,9 @@ class AgentToolset(
             if cmd_arg:
                 err_payload["command"] = cmd_arg
         try:
-            result = definition.handler(**dict(arguments))
+            ctx_agent_id = str(self._lifecycle_context.get("agent_id") or "").strip() or None
+            with bind_agent_id(ctx_agent_id) if ctx_agent_id and get_current_agent_id() is None else nullcontext():
+                result = definition.handler(**dict(arguments))
         except (AgentToolError, WorkspaceError) as error:
             error_code = getattr(error, "error_code", "TOOL_REFUSED") or "TOOL_REFUSED"
             return ToolOutcome("failed", str(error)[:240], str(error), err_payload, error_code)
@@ -1333,7 +1336,11 @@ class AgentToolset(
             except Exception:
                 pass
         if self._mcp_provider is not None:
-            self._mcp_provider.close()
+            subagent_id = str(self._lifecycle_context.get("agent_id") or "").strip()
+            if not subagent_id or subagent_id == "main":
+                self._mcp_provider.close()
+            elif callable(release_agent := getattr(self._mcp_provider, "release_agent", None)):
+                release_agent(subagent_id)  # a subagent closes only its own browser sessions
 
     # -- skills --------------------------------------------------------
 

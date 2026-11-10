@@ -17,6 +17,9 @@ export type CodeModeSettings = {
   autonomy: CodeAutonomy
   system_notifications: boolean
   monitoring_enabled: boolean
+  notify_permissions?: boolean
+  notify_completion?: boolean
+  notification_sound?: boolean
 }
 
 export const CODE_PERMISSION_MODES: ReadonlyArray<{
@@ -104,10 +107,16 @@ function parse(value: unknown): CodeModeSettings {
   const autonomy = data.autonomy
   if (typeof autonomy !== 'string' || !VALID_AUTONOMY.has(autonomy)) throw invalidResponseError()
   if (typeof data.system_notifications !== 'boolean' || typeof data.monitoring_enabled !== 'boolean') throw invalidResponseError()
+  if (data.notify_permissions !== undefined && typeof data.notify_permissions !== 'boolean') throw invalidResponseError()
+  if (data.notify_completion !== undefined && typeof data.notify_completion !== 'boolean') throw invalidResponseError()
+  if (data.notification_sound !== undefined && typeof data.notification_sound !== 'boolean') throw invalidResponseError()
   return {
     autonomy: autonomy as CodeAutonomy,
     system_notifications: data.system_notifications,
     monitoring_enabled: data.monitoring_enabled,
+    notify_permissions: data.notify_permissions !== false,
+    notify_completion: data.notify_completion !== false,
+    notification_sound: data.notification_sound !== false,
   }
 }
 
@@ -116,7 +125,15 @@ export function getCodeModeSettings(client: ApiClient, signal?: AbortSignal): Pr
 }
 
 export function setCodeModeSettings(client: ApiClient, settings: CodeModeSettings, intent = client.createMutationIntent()): Promise<CodeModeSettings> {
-  return client.request({ path: '/v1/code-mode/settings', method: 'PUT', body: settings, intent, parse })
+  const body: CodeModeSettings = {
+    autonomy: settings.autonomy,
+    system_notifications: settings.system_notifications,
+    monitoring_enabled: settings.monitoring_enabled,
+    notify_permissions: settings.notify_permissions ?? true,
+    notify_completion: settings.notify_completion ?? true,
+    notification_sound: settings.notification_sound ?? true,
+  }
+  return client.request({ path: '/v1/code-mode/settings', method: 'PUT', body, intent, parse })
 }
 
 export type WorktreeInfo = {

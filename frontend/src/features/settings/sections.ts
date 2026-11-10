@@ -20,6 +20,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     title: 'Sessão',
     items: [
       { id: 'general', label: 'General', path: '/settings/general', lede: 'Preferências locais e limites de execução do runtime.' },
+      { id: 'characters', label: 'Personagens', path: '/settings/characters', lede: 'Nomes, sprites pixel art e vínculos dos subagentes na Cena.' },
       { id: 'memory', label: 'Memory', path: '/settings/memory', lede: 'Fatos que o agente lembra entre conversas.', badge: 'memory' },
     ],
   },

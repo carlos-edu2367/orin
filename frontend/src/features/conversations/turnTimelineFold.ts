@@ -4,10 +4,13 @@ import {
   codeModeRunGroup,
   codeModeRunKey,
   computeSettledEventIds,
+  computeSubagentDelegationStatus,
   groupLabel,
   groupingKey,
   isCodeModeEvent,
   isRenderable,
+  isSubagentDelegationFailed,
+  isWaitingModelEvent,
   normalizeGeneratingArgumentsEvent,
 } from './activitySummary'
 
@@ -207,12 +210,13 @@ export function resolveTurnId(events: ConversationActivityEvent[], messageId: st
 }
 
 function extractThoughtDelta(event: ConversationActivityEvent): string {
+  const detail = event.detail && event.detail !== 'Pensando' ? event.detail : undefined
   const raw =
     event.payload?.delta ??
-    event.detail ??
     event.delta ??
     event.content ??
     event.payload?.content ??
+    detail ??
     ''
   return String(raw ?? '')
 }
@@ -310,6 +314,7 @@ export function buildTurnTimeline(
   )
   const isTurnCompleted = explicitTurnCompleted || hasTerminalTurnEvent
   const settled = computeSettledEventIds(turnEvents, isTurnCompleted, { keepOpenToolProgress: true })
+  const subagentDelegationStatus = computeSubagentDelegationStatus(turnEvents)
 
   const primaryAgentId = turnEvents.find(
     (event) => !event.parentAgentId && event.type !== 'agent.created' && event.agentId,
@@ -488,23 +493,31 @@ export function buildTurnTimeline(
     const key = groupingKey(event)
     if (subagentEvent && event.kind === 'tool' && key.startsWith('tool:')) {
       flushGroup()
+      const delegationFailed = isSubagentDelegationFailed(
+        subagentDelegationStatus,
+        event.agentId,
+        event.agentName,
+        event.turnId,
+      )
       const existingWaveItem = subagentWaveItems.get(key)
       if (existingWaveItem) {
         applyEventToGroup(existingWaveItem.group, event)
+        existingWaveItem.group.failed = delegationFailed
         existingWaveItem.toolCall = event
         existingWaveItem.event = event
         continue
       }
+      const waitingModel = isWaitingModelEvent(event)
       const createdGroup: ActivityGroup = {
         id: key,
         kind: event.kind,
         state: event.state,
         label: '',
-        count: 1,
+        count: waitingModel ? 0 : 1,
         events: [event],
         agentId: event.agentId,
         agentName: event.agentName,
-        failed: event.state === 'failed',
+        failed: delegationFailed,
       }
       createdGroup.label = groupLabel(createdGroup)
       const waveItem: TimelineActivityItem = {
@@ -520,19 +533,38 @@ export function buildTurnTimeline(
     }
     if (group && group.id === key && group.kind === event.kind) {
       applyEventToGroup(group, event)
+      if (subagentEvent && event.kind === 'tool') {
+        group.failed = isSubagentDelegationFailed(
+          subagentDelegationStatus,
+          group.agentId,
+          group.agentName,
+          event.turnId,
+        )
+      }
       continue
     }
     flushGroup()
+    const waitingModel = isWaitingModelEvent(event)
     group = {
       id: key,
       kind: event.kind,
       state: event.state,
       label: '',
-      count: 1,
+      count: waitingModel ? 0 : 1,
       events: [event],
       agentId: event.agentId,
       agentName: event.agentName,
-      failed: event.state === 'failed',
+      failed:
+        subagentEvent && event.kind === 'tool'
+          ? isSubagentDelegationFailed(
+              subagentDelegationStatus,
+              event.agentId,
+              event.agentName,
+              event.turnId,
+            )
+          : waitingModel
+            ? false
+            : event.state === 'failed',
     }
     group.label = groupLabel(group)
   }

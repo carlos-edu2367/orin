@@ -936,4 +936,83 @@
   .wb-tree__chevron svg {
     transition: none;
   }
+
+  .chat,
+  .home,
+  .chat.chat--code-split > .pane-splitter::before {
+    transition: none !important;
+  }
+}
+
+/* ---- Resizable Split between Chat and Bancada ---------------------------- */
+.pane-splitter {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  width: 8px;
+  position: relative;
+  z-index: 25;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  outline: none;
+}
+
+.pane-splitter::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
+  transition: background-color 120ms ease, width 120ms ease, box-shadow 120ms ease;
+  pointer-events: none;
+}
+
+.pane-splitter:hover::before,
+.pane-splitter:focus-visible::before,
+.pane-splitter.is-dragging::before {
+  width: 2px;
+  background: var(--orin-accent, #B4A4EF);
+  box-shadow: 0 0 0 1px rgba(180, 164, 239, 0.22);
+}
+
+.chat.chat--resizing {
+  transition: none !important;
+  user-select: none;
+  cursor: col-resize;
+}
+
+.chat.chat--resizing iframe {
+  pointer-events: none;
+}
+
+@media (min-width: 1024px) {
+  .chat.chat--code-split {
+    grid-template-columns: 264px var(--chat-pane-width, 420px) minmax(0, 1fr);
+  }
+
+  .chat.chat--code-split:has([data-rail-collapsed="true"]) {
+    grid-template-columns: 64px var(--chat-pane-width, 420px) minmax(0, 1fr);
+  }
+
+  .chat.chat--code-split > .pane-splitter {
+    grid-column: 3;
+    grid-row: 2 / 4;
+    justify-self: start;
+    align-self: stretch;
+    margin-left: -4px;
+  }
+
+  .chat.chat--code-split > .code-workbench {
+    border-left: 0;
+  }
+}
+
+@media (max-width: 1023px) {
+  .chat.chat--code-split .pane-splitter {
+    display: none;
+  }
 }

@@ -125,7 +125,7 @@ export class ApiClient {
     throw invalidResponseError()
   }
 
-  async upload<T>(options: { path: string; body: FormData; expectedStatus?: number; parse: (value: unknown) => T }): Promise<T> {
+  async upload<T>(options: { path: string; method?: 'POST' | 'PATCH' | 'PUT'; body: FormData; expectedStatus?: number; parse: (value: unknown) => T }): Promise<T> {
     // No Content-Type header is set here: the browser must generate the
     // multipart boundary itself from the FormData body.
     const url = this.safeUrl(options.path)
@@ -134,7 +134,7 @@ export class ApiClient {
     const csrfToken = this.csrf()
     if (csrfToken) headers.set('X-CSRF-Token', csrfToken)
     const response = await this.fetchImpl.call(globalThis, url, {
-      method: 'POST',
+      method: options.method ?? 'POST',
       headers,
       credentials: 'same-origin',
       body: options.body,

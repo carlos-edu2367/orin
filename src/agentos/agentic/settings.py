@@ -80,6 +80,9 @@ class AgentRuntimeSettingsStore:
                 autonomy=autonomy,
                 system_notifications=record.get("code_system_notifications") is True,
                 monitoring_enabled=record.get("code_monitoring_enabled") is not False,
+                notify_permissions=record.get("code_notify_permissions") is not False,
+                notify_completion=record.get("code_notify_completion") is not False,
+                notification_sound=record.get("code_notification_sound") is not False,
             )
 
     def set_code_mode(
@@ -89,12 +92,18 @@ class AgentRuntimeSettingsStore:
         autonomy: CodeAutonomy | str,
         system_notifications: bool,
         monitoring_enabled: bool,
+        notify_permissions: bool = True,
+        notify_completion: bool = True,
+        notification_sound: bool = True,
     ) -> CodeModeSettings:
         self._validate_user(user_id)
         settings = CodeModeSettings(
             autonomy=CodeAutonomy(autonomy),
             system_notifications=system_notifications,
             monitoring_enabled=monitoring_enabled,
+            notify_permissions=notify_permissions,
+            notify_completion=notify_completion,
+            notification_sound=notification_sound,
         )
         with self._lock:
             values = self._read()
@@ -104,6 +113,9 @@ class AgentRuntimeSettingsStore:
                 "code_autonomy": settings.autonomy.value,
                 "code_system_notifications": settings.system_notifications,
                 "code_monitoring_enabled": settings.monitoring_enabled,
+                "code_notify_permissions": settings.notify_permissions,
+                "code_notify_completion": settings.notify_completion,
+                "code_notification_sound": settings.notification_sound,
             })
             values[user_id] = record
             self._write(values)

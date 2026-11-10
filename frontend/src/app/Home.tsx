@@ -108,6 +108,9 @@ export function Home({ client, bootstrap }: HomeProps) {
   const userChangedPermissionRef = useRef(false)
   const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
   const [codeMonitoringEnabled, setCodeMonitoringEnabled] = useState(true)
+  const [codeNotifyPermissions, setCodeNotifyPermissions] = useState(true)
+  const [codeNotifyCompletion, setCodeNotifyCompletion] = useState(true)
+  const [codeNotificationSound, setCodeNotificationSound] = useState(true)
   const { attachments, onAttach, onRemoveAttachment, canSend: attachmentsReady, readyUploadIds, reset: resetAttachments } = useComposerAttachments(apiClient)
   const [provider, setProvider] = useState<ProviderName>(() => readStored(PROVIDER_STORAGE_KEY, 'openrouter') as ProviderName)
   const [models, setModels] = useState<ProviderModel[]>([])
@@ -222,6 +225,9 @@ export function Home({ client, bootstrap }: HomeProps) {
         }
         setCodeSystemNotifications(codeSettings.value.system_notifications)
         setCodeMonitoringEnabled(codeSettings.value.monitoring_enabled)
+        setCodeNotifyPermissions(codeSettings.value.notify_permissions !== false)
+        setCodeNotifyCompletion(codeSettings.value.notify_completion !== false)
+        setCodeNotificationSound(codeSettings.value.notification_sound !== false)
       }
     })
     return () => controller.abort()
@@ -234,8 +240,11 @@ export function Home({ client, bootstrap }: HomeProps) {
       autonomy: permissionModeToAutonomy(next),
       system_notifications: codeSystemNotifications,
       monitoring_enabled: codeMonitoringEnabled,
+      notify_permissions: codeNotifyPermissions,
+      notify_completion: codeNotifyCompletion,
+      notification_sound: codeNotificationSound,
     }).catch(() => undefined)
-  }, [apiClient, codeMonitoringEnabled, codeSystemNotifications])
+  }, [apiClient, codeMonitoringEnabled, codeNotificationSound, codeNotifyCompletion, codeNotifyPermissions, codeSystemNotifications])
 
   function changeProvider(next: ProviderName) {
     if (next === provider) return
@@ -264,6 +273,9 @@ export function Home({ client, bootstrap }: HomeProps) {
           autonomy: permissionModeToAutonomy(resolvedPermissionMode),
           system_notifications: codeSystemNotifications,
           monitoring_enabled: codeMonitoringEnabled,
+          notify_permissions: codeNotifyPermissions,
+          notify_completion: codeNotifyCompletion,
+          notification_sound: codeNotificationSound,
         }).catch(() => undefined)
       }
       let effectiveMessage = text

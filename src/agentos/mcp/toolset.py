@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import os
 import threading
+import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
+from agentos.agentic.agent_context import get_current_agent_id
 from agentos.agentic.agent_tools import ToolOutcome, _bounded
 from .models import McpAuthKind, McpServerConfig, McpToolDescriptor, McpTransport, qualified_tool_name
 from .sanitize import MAX_DESCRIPTION_CHARS
@@ -23,6 +26,30 @@ MAX_MCP_RESULT_CHARS = 100_000
 MAX_MCP_RAW_RESULT_CHARS = 500_000
 MAX_IMAGES_PER_CALL = 4
 DEFAULT_MCP_OUTPUT_TOKENS = 25_000
+BROWSER_SERVER_MARKERS: tuple[str, ...] = ("@playwright/mcp",)
+BROWSER_TIMEOUT_SECONDS = 120.0
+MAX_BROWSER_SESSIONS = 4
+DEFAULT_BROWSER_SLOT_TIMEOUT_SECONDS = 30.0
+
+SessionKey = tuple[str, str | None]
+
+
+def _is_browser_server(config: McpServerConfig) -> bool:
+    """True when ``config`` launches a browser MCP server (such as ``@playwright/mcp``)."""
+    tokens = (str(config.command or ""), *(str(arg or "") for arg in (config.args or ())))
+    for token in tokens:
+        lowered = token.strip().lower()
+        if any(marker in lowered for marker in BROWSER_SERVER_MARKERS):
+            return True
+    return False
+
+
+def _with_isolated_arg(config: McpServerConfig) -> McpServerConfig:
+    """Append ``--isolated`` to ``config.args`` when not already present."""
+    args = tuple(config.args or ())
+    if any(str(arg).strip() == "--isolated" or str(arg).strip().startswith("--isolated=") for arg in args):
+        return config
+    return replace(config, args=(*args, "--isolated"))
 
 
 def mcp_output_limit_chars() -> int:
@@ -46,7 +73,7 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
     from .transport_http import HttpTransport
     from .transport_sse import SseTransport
     from .transport_sdk import SdkRelayTransport
-    from .transport_stdio import StdioTransport
+    from .transport_stdio import DEFAULT_TIMEOUT_SECONDS, StdioTransport
     from .transport_ws import WebSocketTransport
 
     # W5: a server from a configuration file was written by the person (or approved from the repository), not
@@ -56,8 +83,9 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
     if config.transport is McpTransport.SDK:
         return McpClient(SdkRelayTransport(server_name=config.display_name, relay_key=str(secrets.get("relay") or "")))
     if config.transport is McpTransport.STDIO:
+        stdio_timeout = BROWSER_TIMEOUT_SECONDS if _is_browser_server(config) else DEFAULT_TIMEOUT_SECONDS
         transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets), cwd=config.cwd,
-                                   allow_any_command=from_file)
+                                   timeout=stdio_timeout, allow_any_command=from_file)
     elif config.transport is McpTransport.SSE:
         transport = SseTransport(url=str(config.url), headers=file_headers if from_file else {}, allow_local=from_file)
     elif config.transport is McpTransport.WEBSOCKET:
@@ -102,16 +130,28 @@ def connector_for(oauth: "McpOAuth | None") -> Connector:
 
 
 class McpToolProvider:
-    def __init__(self, bundles: Iterable[ServerBundle], client_factory: Callable[..., Any] = build_client,
-                 oauth: "McpOAuth | None" = None) -> None:
+    def __init__(
+        self,
+        bundles: Iterable[ServerBundle],
+        client_factory: Callable[..., Any] = build_client,
+        oauth: "McpOAuth | None" = None,
+        *,
+        max_browser_sessions: int = MAX_BROWSER_SESSIONS,
+        browser_slot_timeout: float = DEFAULT_BROWSER_SLOT_TIMEOUT_SECONDS,
+    ) -> None:
         self._bundles = list(bundles)
         self._client_factory = client_factory
         self._oauth = oauth
-        self._sessions: dict[str, Any] = {}
+        self._sessions: dict[SessionKey, Any] = {}
         # Subagents run in threads and share this provider; one MCP session is
         # not safe to drive from two threads, and a refresh must not race itself.
-        self._locks: dict[str, threading.Lock] = {}
+        # Browser servers get a dedicated session and lock per (server_id, agent_id).
+        self._locks: dict[SessionKey, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._max_browser_sessions = max(1, int(max_browser_sessions))
+        self._browser_slot_timeout = max(0.0, float(browser_slot_timeout))
+        self._browser_keys: set[SessionKey] = set()
+        self._browser_cond = threading.Condition()
         # W5: answers a server's request for input during a call: (server slug, request params) -> answer.
         self.elicitation_handler: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None
 
@@ -148,16 +188,26 @@ class McpToolProvider:
         found = self.find_server(server)
         return [found] if found is not None else []
 
+    def _session_key(self, config: McpServerConfig) -> SessionKey:
+        if _is_browser_server(config):
+            return (config.server_id, get_current_agent_id())
+        return (config.server_id, None)
+
+    @staticmethod
+    def _normalize_key(key: SessionKey | str) -> SessionKey:
+        return (key, None) if isinstance(key, str) else key
+
     def _with_session(self, config: McpServerConfig, secrets: Mapping[str, str], action: Callable[[Any], Any]) -> Any:
         from .protocol import McpProtocolError
 
-        with self._lock(config.server_id):
+        key = self._session_key(config)
+        with self._lock(key):
             try:
-                client = self._session(config, secrets)
+                client = self._session(config, secrets, key=key)
                 return action(client)
             except RuntimeError as error:
                 if not isinstance(error, McpProtocolError):
-                    self._evict_session(config.server_id)
+                    self._evict_session(key)
                 raise
 
     def list_resources(self, server: str | None = None) -> list[dict[str, Any]]:
@@ -236,39 +286,94 @@ class McpToolProvider:
         except Exception:  # noqa: BLE001 - the old list stays; RefreshMcpTools can try again
             pass
 
-    def _lock(self, server_id: str) -> threading.Lock:
+    def _lock(self, key: SessionKey | str) -> threading.Lock:
+        normalized = self._normalize_key(key)
         with self._locks_guard:
-            return self._locks.setdefault(server_id, threading.Lock())
+            return self._locks.setdefault(normalized, threading.Lock())
 
-    def _session(self, config: McpServerConfig, secrets: Mapping[str, str]) -> Any:
-        client = self._sessions.get(config.server_id)
+    def _acquire_browser_slot(self, key: SessionKey, config: McpServerConfig) -> None:
+        deadline = time.monotonic() + self._browser_slot_timeout
+        with self._browser_cond:
+            while key not in self._browser_keys and len(self._browser_keys) >= self._max_browser_sessions:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"Limite de {self._max_browser_sessions} sessões simultâneas de navegador atingido "
+                        f"({config.display_name}). Use menos subagentes em paralelo com o navegador ou "
+                        f"execute testes via `npx playwright test` (Too many concurrent browser sessions; "
+                        f"use fewer subagents with the browser or run `npx playwright test`)."
+                    )
+                self._browser_cond.wait(timeout=remaining)
+            self._browser_keys.add(key)
+
+    def _release_browser_slot(self, key: SessionKey) -> None:
+        with self._browser_cond:
+            if key in self._browser_keys:
+                self._browser_keys.discard(key)
+                self._browser_cond.notify_all()
+
+    def _session(self, config: McpServerConfig, secrets: Mapping[str, str], *, key: SessionKey | None = None) -> Any:
+        resolved_key = key if key is not None else self._session_key(config)
+        client = self._sessions.get(resolved_key)
         if client is None:
-            if self._oauth is not None and config.auth_kind is McpAuthKind.OAUTH:
-                client = self._client_factory(config, secrets, token_source=self._oauth.token_source(config))
-            else:
-                client = self._client_factory(config, secrets)
-            setter = getattr(client, "set_elicitation_handler", None)
-            if callable(setter) and self.elicitation_handler is not None:
-                handler = self.elicitation_handler
-                setter(lambda params, slug=config.slug: handler(slug, params))
+            is_browser = _is_browser_server(config)
+            effective_config = (
+                _with_isolated_arg(config)
+                if (is_browser and resolved_key[1] is not None)
+                else config
+            )
+            if is_browser:
+                self._acquire_browser_slot(resolved_key, effective_config)
             try:
-                client.initialize()
-            except Exception:
+                if self._oauth is not None and effective_config.auth_kind is McpAuthKind.OAUTH:
+                    client = self._client_factory(
+                        effective_config, secrets, token_source=self._oauth.token_source(effective_config)
+                    )
+                else:
+                    client = self._client_factory(effective_config, secrets)
+                setter = getattr(client, "set_elicitation_handler", None)
+                if callable(setter) and self.elicitation_handler is not None:
+                    handler = self.elicitation_handler
+                    setter(lambda params, slug=effective_config.slug: handler(slug, params))
                 try:
-                    client.close()
+                    client.initialize()
                 except Exception:
-                    pass
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    raise
+                self._sessions[resolved_key] = client
+            except Exception:
+                if is_browser:
+                    self._release_browser_slot(resolved_key)
                 raise
-            self._sessions[config.server_id] = client
         return client
 
-    def _evict_session(self, server_id: str) -> None:
-        broken = self._sessions.pop(server_id, None)
+    def _evict_session(self, key: SessionKey | str) -> None:
+        normalized = self._normalize_key(key)
+        broken = self._sessions.pop(normalized, None)
+        self._release_browser_slot(normalized)
         if broken is not None:
             try:
                 broken.close()
             except Exception:
                 pass
+
+    def release_agent(self, agent_id: str | None) -> None:
+        """Close and remove any MCP sessions opened on behalf of ``agent_id``."""
+        target = str(agent_id or "").strip()
+        if not target or target == "main":
+            return
+        with self._locks_guard:
+            candidate_keys = [
+                key
+                for key in set(self._sessions.keys()) | set(self._locks.keys())
+                if key[1] == target
+            ]
+        for key in candidate_keys:
+            with self._lock(key):
+                self._evict_session(key)
 
     def _handler(self, config: McpServerConfig, secrets: Mapping[str, str], tool: McpToolDescriptor):
         def call(**arguments: Any) -> ToolOutcome:
@@ -276,18 +381,19 @@ class McpToolProvider:
             from .token_source import McpReauthRequired
 
             payload = {"tool_kind": "mcp", "mcp_server": config.slug, "mcp_tool": tool.name}
+            key = self._session_key(config)
             try:
-                with self._lock(config.server_id):
+                with self._lock(key):
                     try:
-                        client = self._session(config, secrets)
+                        client = self._session(config, secrets, key=key)
                         result = client.call_tool(tool.name, arguments)
                         self._follow_changes(config, client)
                     except McpReauthRequired:
-                        self._evict_session(config.server_id)
+                        self._evict_session(key)
                         raise
                     except RuntimeError as error:
                         if not isinstance(error, McpProtocolError):
-                            self._evict_session(config.server_id)
+                            self._evict_session(key)
                         raise
             except McpReauthRequired as error:
                 message = str(error)
@@ -423,6 +529,9 @@ class McpToolProvider:
             except Exception:  # closing must never fail a finished turn
                 pass
         self._sessions.clear()
+        with self._browser_cond:
+            self._browser_keys.clear()
+            self._browser_cond.notify_all()
 
 
 def _render_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
@@ -458,5 +567,18 @@ def _render(content: Sequence[Mapping[str, Any]]) -> tuple[str, list[dict[str, s
     return text, images
 
 
-__all__ = ["Connector", "MAX_MCP_RESULT_CHARS", "McpToolProvider", "ServerBundle", "build_client", "connector_for", "discover"]
+__all__ = [
+    "BROWSER_SERVER_MARKERS",
+    "BROWSER_TIMEOUT_SECONDS",
+    "Connector",
+    "DEFAULT_BROWSER_SLOT_TIMEOUT_SECONDS",
+    "MAX_BROWSER_SESSIONS",
+    "MAX_MCP_RESULT_CHARS",
+    "McpToolProvider",
+    "ServerBundle",
+    "_is_browser_server",
+    "build_client",
+    "connector_for",
+    "discover",
+]
 

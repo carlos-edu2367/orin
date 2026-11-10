@@ -1,0 +1,205 @@
+.characters-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.characters-section__card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.characters-section__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.characters-section__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  flex: 1;
+}
+
+.characters-section__field label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.characters-section__input,
+.characters-section__select {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.12));
+  background: var(--orin-surface-1, #141419);
+  color: var(--orin-text-primary, #F4F3F8);
+  font-size: 13px;
+}
+
+.characters-section__btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.14));
+  background: var(--orin-surface-2, #1D1D25);
+  color: var(--orin-text-primary, #F4F3F8);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.characters-section__btn--primary {
+  background: var(--orin-accent-bg, rgba(180, 164, 239, 0.18));
+  border-color: var(--orin-accent, #B4A4EF);
+  color: var(--orin-text-primary, #F4F3F8);
+}
+
+.characters-section__btn--danger {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #FCA5A5;
+}
+
+.characters-section__btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.characters-section__names-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.characters-section__name-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--orin-surface-1, #141419);
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.1));
+  font-size: 12px;
+}
+
+.characters-section__chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--orin-text-secondary, #9A98A6);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.characters-section__poses-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.characters-section__pose-upload {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--orin-surface-1, #141419);
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.characters-section__sprite-preview-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+}
+
+.characters-section__sprite-preview {
+  max-width: 48px;
+  max-height: 48px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  object-fit: contain;
+}
+
+.characters-section__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.characters-section__char-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--orin-surface-1, #141419);
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.1));
+}
+
+.characters-section__char-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.characters-section__char-poses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.characters-section__char-pose-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--orin-text-secondary, #9A98A6);
+}
+
+.characters-section__error {
+  margin: 0;
+  font-size: 12px;
+  color: #FCA5A5;
+}
+
+.characters-section__status {
+  margin: 0;
+  font-size: 12px;
+  color: #86EFAC;
+}
+
+.characters-section__bindings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.characters-section__binding-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--orin-surface-1, #141419);
+  border: 1px solid var(--orin-border-subtle, rgba(255, 255, 255, 0.08));
+  font-size: 13px;
+}

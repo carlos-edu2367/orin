@@ -34,7 +34,8 @@ EXPECTED = {
     "fetch_url": ({"url", "prompt", "offset"}, ["url", "prompt"]),
     "web_search": ({"query", "allowed_domains", "blocked_domains"}, ["query"]),
     "run_subagent": (
-        {"description", "prompt", "subagent_type", "model", "run_in_background", "resume", "name", "team_name"},
+        {"description", "prompt", "subagent_type", "model", "run_in_background", "resume", "name", "team_name",
+         "character_name"},
         ["description", "prompt"],
     ),
     "send_message": ({"to", "message", "summary"}, ["to", "message"]),

@@ -5,6 +5,7 @@ import '../../../../styles/theme.css'
 import '../../../../styles/index.css'
 import '../../../../styles/agentos.css'
 import '../../../../styles/live.css'
+import { DEFAULT_FALLBACK_CHARACTER_NAMES, seedSceneCharactersCache } from '../../../../api/sceneCharacters'
 import { SceneView } from '../SceneView'
 import {
   buildDemoSequence,
@@ -13,6 +14,13 @@ import {
 } from './sceneDemoScript'
 
 initThemeDom()
+// The demo runs without a backend: give it the default cast the server would serve.
+seedSceneCharactersCache({
+  names: [...DEFAULT_FALLBACK_CHARACTER_NAMES],
+  defaultNames: [...DEFAULT_FALLBACK_CHARACTER_NAMES],
+  characters: [],
+  bindings: {},
+})
 
 const STEP_INTERVAL_MS = 1800
 

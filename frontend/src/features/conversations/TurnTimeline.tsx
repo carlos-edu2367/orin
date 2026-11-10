@@ -9,7 +9,7 @@ import type { CodePermissionMode } from '../../api/codeMode'
 import { rewindTurn, type ConversationMode } from '../../api/conversations'
 import type { ProviderModel, ProviderName } from '../../api/providers'
 import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
-import { formatTurnWorkDuration, summarizeActivities } from './activitySummary'
+import { formatTurnWorkDuration, isWaitingModelEvent, summarizeActivities } from './activitySummary'
 import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimelineFold'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
@@ -131,7 +131,7 @@ function isCodeToolEvent(
   ) {
     return false
   }
-  if (event.kind === 'artifact' || event.toolKind === 'browser') return false
+  if (event.kind === 'artifact' || event.toolKind === 'browser' || isWaitingModelEvent(event)) return false
   const toolName = resolveEventToolName(event)
   if (
     event.type === 'code_mode.file_edited' ||
@@ -487,6 +487,7 @@ function SubagentTaskContainer({
   agentId,
   agentName,
   count,
+  failedCount = 0,
   failed = false,
   running = false,
   children,
@@ -494,6 +495,7 @@ function SubagentTaskContainer({
   agentId?: string
   agentName: string
   count: number
+  failedCount?: number
   failed?: boolean
   running?: boolean
   children: ReactNode
@@ -541,6 +543,14 @@ function SubagentTaskContainer({
           <span className="ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
             {count} {count === 1 ? 'ação' : 'ações'}
           </span>
+          {failedCount > 0 && (
+            <span
+              className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-300"
+              data-testid="subagent-task-failures"
+            >
+              {failedCount} {failedCount === 1 ? 'falha' : 'falhas'}
+            </span>
+          )}
           <span
             className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${statusBadgeClass}`}
             data-testid="subagent-task-status"
@@ -889,7 +899,17 @@ export function TurnTimeline({
       first.agentName ||
       group.events.find((ev) => ev.agentName)?.agentName ||
       group.agentId
-    const toolCount = group.events.filter((ev) => ev.kind === 'tool').length || group.events.length
+    const realToolEvents = group.events.filter(
+      (ev) => ev.kind === 'tool' && !isWaitingModelEvent(ev),
+    )
+    const nonWaitingEvents = group.events.filter((ev) => !isWaitingModelEvent(ev))
+    const toolCount =
+      realToolEvents.length > 0
+        ? realToolEvents.length
+        : nonWaitingEvents.length
+    const failedToolCount = realToolEvents.filter(
+      (ev) => ev.state === 'failed' || ev.status === 'failed' || ev.type === 'tool.failed',
+    ).length
     const isSubagentRunning =
       !turnCompleted &&
       group.events.some((ev) => resolveVisualStatus(ev) === 'running')
@@ -899,6 +919,7 @@ export function TurnTimeline({
         agentId={group.agentId}
         agentName={subagentLabel}
         count={toolCount}
+        failedCount={failedToolCount}
         failed={group.failed}
         running={isSubagentRunning}
       >

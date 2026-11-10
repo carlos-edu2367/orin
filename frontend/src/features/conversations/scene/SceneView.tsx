@@ -9,7 +9,11 @@ import {
   type TeamPendingDecision,
   type TeamRecentActivityEntry,
 } from '../teamActivityModel'
+import { useSceneCharacters } from '../../../api/sceneCharacters'
+import { useSceneAgentControls } from './SceneAgentActions'
+import { SceneAgentModal } from './SceneAgentModal'
 import { SceneCanvas } from './SceneCanvas'
+import { resolveCharacters } from './sceneCharacters'
 import { SceneHud, type SceneAgentControlResult } from './SceneHud'
 import type { SceneActionHandlers } from './ScenePendingCards'
 import {
@@ -71,13 +75,30 @@ export function SceneView({
   onViewAllActivities,
 }: SceneViewProps): JSX.Element {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
+  const [modalAgentId, setModalAgentId] = useState<string | null>(null)
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() =>
     readSceneSoundPreference(),
   )
 
-  const scene = useMemo(
+  const agentControls = useSceneAgentControls({
+    onStopAgent,
+    onMessageAgent,
+    onSendToOrin,
+  })
+
+  const { config: charactersConfig } = useSceneCharacters()
+
+  const rawScene = useMemo(
     () => foldScene(events, { running }),
     [events, running],
+  )
+
+  const scene = useMemo(
+    () => ({
+      ...rawScene,
+      agents: resolveCharacters(rawScene.agents, charactersConfig),
+    }),
+    [rawScene, charactersConfig],
   )
 
   // Drop selection automatically if the selected agent is no longer in the scene state
@@ -133,7 +154,14 @@ export function SceneView({
           <SceneCanvas
             scene={scene}
             selectedAgentId={effectiveSelectedAgentId}
-            onSelectAgent={(agentId) => setSelectedAgentId(agentId)}
+            onSelectAgent={(agentId) => {
+              setSelectedAgentId(agentId)
+              setModalAgentId(agentId)
+            }}
+            onOpenAgentModal={(agentId) => {
+              setSelectedAgentId(agentId)
+              setModalAgentId(agentId)
+            }}
             soundEnabled={soundEnabled}
           />
         </div>
@@ -146,8 +174,14 @@ export function SceneView({
             onSendToOrin={onSendToOrin}
             onStopAgent={onStopAgent}
             onMessageAgent={onMessageAgent}
+            agentControls={agentControls}
             selectedAgentId={effectiveSelectedAgentId}
             onSelectAgent={setSelectedAgentId}
+            onOpenAgentModal={(agentId) => {
+              setSelectedAgentId(agentId)
+              setModalAgentId(agentId)
+            }}
+            modalOpenAgentId={modalAgentId}
             paused={paused}
             soundEnabled={soundEnabled}
             onToggleSound={handleToggleSound}
@@ -163,6 +197,20 @@ export function SceneView({
           />
         </div>
       </div>
+
+      <SceneAgentModal
+        agentId={modalAgentId}
+        scene={scene}
+        onClose={() => setModalAgentId(null)}
+        events={events}
+        actions={actions}
+        openQuestionTurnIds={openQuestionTurnIds}
+        onSendToOrin={onSendToOrin}
+        onStopAgent={onStopAgent}
+        onMessageAgent={onMessageAgent}
+        controls={agentControls}
+        onSelectAgent={setSelectedAgentId}
+      />
     </section>
   )
 }

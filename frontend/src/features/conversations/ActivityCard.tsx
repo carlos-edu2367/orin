@@ -3,7 +3,7 @@ import { useEffect, useId, useState } from 'react'
 import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { resumeConversationTurn } from '../../api/conversations'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
-import { activityStateLabel, formatActivityCount, formatElapsed, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
+import { activityStateLabel, formatActivityCount, formatElapsed, isWaitingModelEvent, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
 import { StructuredDiffView, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
 type ActivityCardProps = {
@@ -48,7 +48,9 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
         : group.kind
   const glyph = GLYPHS[glyphKey] ?? '◦'
   const running = group.state === 'waiting_tool' || group.state === 'working' || group.state === 'waiting_agent'
-  const failedCalls = group.events.filter((event) => event.state === 'failed').length
+  const failedCalls = group.events.filter(
+    (event) => event.state === 'failed' && !isWaitingModelEvent(event),
+  ).length
   const liveStreamEvent = running
     ? [...group.events].reverse().find((event) => Boolean(event.outputTail))
     : undefined

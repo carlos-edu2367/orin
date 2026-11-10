@@ -398,6 +398,9 @@ class CodeModeSettingsRequest(_RequestModel):
     )
     system_notifications: bool = False
     monitoring_enabled: bool = True
+    notify_permissions: bool = True
+    notify_completion: bool = True
+    notification_sound: bool = True
 
 
 class ToolPermissionDecisionRequest(_RequestModel):
@@ -2606,12 +2609,24 @@ def create_app(services: ApiServices) -> FastAPI:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="runtime.configure", resource_id="code-mode", purpose="code_mode.configure")
         _idempotency(request)
-        settings = _require_port(services.agentic_runtime).set_code_mode(
-            principal.user_id,
-            autonomy=CodeAutonomy(payload.autonomy),
-            system_notifications=payload.system_notifications,
-            monitoring_enabled=payload.monitoring_enabled,
-        )
+        port = _require_port(services.agentic_runtime)
+        try:
+            settings = port.set_code_mode(
+                principal.user_id,
+                autonomy=CodeAutonomy(payload.autonomy),
+                system_notifications=payload.system_notifications,
+                monitoring_enabled=payload.monitoring_enabled,
+                notify_permissions=payload.notify_permissions,
+                notify_completion=payload.notify_completion,
+                notification_sound=payload.notification_sound,
+            )
+        except TypeError:
+            settings = port.set_code_mode(
+                principal.user_id,
+                autonomy=CodeAutonomy(payload.autonomy),
+                system_notifications=payload.system_notifications,
+                monitoring_enabled=payload.monitoring_enabled,
+            )
         return JSONResponse(settings.as_dict())
 
     @app.get("/v1/runtime/quality")
@@ -2892,6 +2907,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_friend_routes(app, services, principal_for)
     from .custom_agent_routes import register_custom_agent_routes
     register_custom_agent_routes(app, services, principal_for)
+    from .scene_character_routes import register_scene_character_routes
+    register_scene_character_routes(app, services, principal_for)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
 

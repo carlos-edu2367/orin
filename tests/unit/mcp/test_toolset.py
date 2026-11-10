@@ -303,4 +303,345 @@ def test_provider_exposes_server_summaries_and_inspection():
     assert hits[0].qualified_name == "mcp__notion__create_page"
 
 
+def _browser_config(*, args: tuple[str, ...] = ("-y", "@playwright/mcp@latest")) -> McpServerConfig:
+    return McpServerConfig(
+        server_id="pw-1",
+        user_id="u1",
+        slug="playwright",
+        display_name="Playwright",
+        transport=McpTransport.STDIO,
+        command="npx",
+        args=args,
+        state=McpServerState.ACTIVE,
+    )
+
+
+def _stdio_non_browser_config() -> McpServerConfig:
+    return McpServerConfig(
+        server_id="fs-1",
+        user_id="u1",
+        slug="filesystem",
+        display_name="Filesystem",
+        transport=McpTransport.STDIO,
+        command="npx",
+        args=("-y", "@modelcontextprotocol/server-filesystem", "."),
+        state=McpServerState.ACTIVE,
+    )
+
+
+def test_browser_server_opens_distinct_sessions_for_main_and_subagents_with_isolated_arg():
+    from agentos.agentic.agent_context import bind_agent_id
+
+    created_configs: list[tuple[str | None, McpServerConfig, FakeClient]] = []
+
+    def factory(config: McpServerConfig, secrets):
+        client = FakeClient()
+        from agentos.agentic.agent_context import get_current_agent_id
+
+        created_configs.append((get_current_agent_id(), config, client))
+        return client
+
+    tools = (McpToolDescriptor(name="browser_navigate", description="Navigate", input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_browser_config(), tools, {})], client_factory=factory)
+    handler = provider.definitions()[0].handler
+
+    # Main agent uses original args (without forcing --isolated onto saved config)
+    assert handler(url="http://localhost:5173").status == "succeeded"
+    # Subagent 1 gets its own session with --isolated appended once
+    with bind_agent_id("agent:sub-1"):
+        assert handler(url="http://localhost:5173/a").status == "succeeded"
+        assert handler(url="http://localhost:5173/a2").status == "succeeded"
+    # Subagent 2 gets a third distinct session
+    with bind_agent_id("agent:sub-2"):
+        assert handler(url="http://localhost:5173/b").status == "succeeded"
+
+    assert provider.open_session_count == 3
+    assert len(created_configs) == 3
+
+    main_agent, main_cfg, main_client = created_configs[0]
+    sub1_agent, sub1_cfg, sub1_client = created_configs[1]
+    sub2_agent, sub2_cfg, sub2_client = created_configs[2]
+
+    assert main_agent is None
+    assert main_cfg.args == ("-y", "@playwright/mcp@latest")
+    assert sub1_agent == "agent:sub-1"
+    assert sub1_cfg.args == ("-y", "@playwright/mcp@latest", "--isolated")
+    assert sub2_agent == "agent:sub-2"
+    assert sub2_cfg.args == ("-y", "@playwright/mcp@latest", "--isolated")
+    assert len({id(main_client), id(sub1_client), id(sub2_client)}) == 3
+    assert len(sub1_client.calls) == 2
+
+
+def test_subagent_browser_session_does_not_duplicate_isolated_flag():
+    from agentos.agentic.agent_context import bind_agent_id
+
+    seen_args: list[tuple[str, ...]] = []
+
+    def factory(config: McpServerConfig, secrets):
+        seen_args.append(config.args)
+        return FakeClient()
+
+    tools = (McpToolDescriptor(name="browser_snapshot", description="Snapshot", input_schema={"type": "object"}),)
+    provider = McpToolProvider(
+        [(_browser_config(args=("-y", "@playwright/mcp@latest", "--isolated")), tools, {})],
+        client_factory=factory,
+    )
+    handler = provider.definitions()[0].handler
+
+    with bind_agent_id("agent:sub-1"):
+        assert handler().status == "succeeded"
+
+    assert seen_args == [("-y", "@playwright/mcp@latest", "--isolated")]
+
+
+def test_parallel_subagent_browser_calls_do_not_block_each_other():
+    from agentos.agentic.agent_context import bind_agent_id
+
+    barrier = threading.Barrier(2, timeout=2.0)
+    overlapped = {"ok": False}
+
+    class ConcurrentClient(FakeClient):
+        def call_tool(self, name, arguments):
+            try:
+                barrier.wait()
+                overlapped["ok"] = True
+            except threading.BrokenBarrierError:
+                pass
+            return super().call_tool(name, arguments)
+
+    tools = (McpToolDescriptor(name="browser_click", description="Click", input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_browser_config(), tools, {})], client_factory=lambda cfg, sec: ConcurrentClient())
+    handler = provider.definitions()[0].handler
+
+    def run_for(agent_id: str) -> None:
+        with bind_agent_id(agent_id):
+            outcome = handler(ref="e1")
+            assert outcome.status == "succeeded"
+
+    t1 = threading.Thread(target=run_for, args=("agent:sub-1",))
+    t2 = threading.Thread(target=run_for, args=("agent:sub-2",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=3.0)
+    t2.join(timeout=3.0)
+
+    assert overlapped["ok"] is True
+
+
+def test_browser_session_limit_and_release_agent_frees_slot():
+    from agentos.agentic.agent_context import bind_agent_id
+
+    clients_by_agent: dict[str | None, FakeClient] = {}
+
+    def factory(config: McpServerConfig, secrets):
+        from agentos.agentic.agent_context import get_current_agent_id
+
+        client = FakeClient()
+        clients_by_agent[get_current_agent_id()] = client
+        return client
+
+    tools = (McpToolDescriptor(name="browser_navigate", description="Nav", input_schema={"type": "object"}),)
+    provider = McpToolProvider(
+        [(_browser_config(), tools, {})],
+        client_factory=factory,
+        max_browser_sessions=2,
+        browser_slot_timeout=0.05,
+    )
+    handler = provider.definitions()[0].handler
+
+    with bind_agent_id("agent:sub-1"):
+        assert handler(url="http://localhost:1").status == "succeeded"
+    with bind_agent_id("agent:sub-2"):
+        assert handler(url="http://localhost:2").status == "succeeded"
+
+    # A 3rd concurrent browser session exceeds max_browser_sessions=2 and fails clearly
+    with bind_agent_id("agent:sub-3"):
+        blocked = handler(url="http://localhost:3")
+    assert blocked.status == "failed"
+    assert "npx playwright test" in blocked.content
+    assert provider.open_session_count == 2
+
+    # Releasing sub-1 closes only sub-1's session and frees the slot for sub-3
+    provider.release_agent("agent:sub-1")
+    assert clients_by_agent["agent:sub-1"].closed is True
+    assert clients_by_agent["agent:sub-2"].closed is False
+    assert provider.open_session_count == 1
+
+    with bind_agent_id("agent:sub-3"):
+        allowed = handler(url="http://localhost:3")
+    assert allowed.status == "succeeded"
+    assert provider.open_session_count == 2
+
+
+def test_subagent_browser_error_evicts_only_that_subagent_session():
+    from agentos.agentic.agent_context import bind_agent_id
+
+    clients_by_agent: dict[str | None, FakeClient] = {}
+
+    class MaybeFailingClient(FakeClient):
+        def __init__(self, fail: bool) -> None:
+            super().__init__()
+            self.fail = fail
+
+        def call_tool(self, name, arguments):
+            if self.fail:
+                raise RuntimeError("timed out after 120s waiting for Playwright")
+            return super().call_tool(name, arguments)
+
+    def factory(config: McpServerConfig, secrets):
+        from agentos.agentic.agent_context import get_current_agent_id
+
+        agent_id = get_current_agent_id()
+        client = MaybeFailingClient(fail=(agent_id == "agent:sub-bad"))
+        clients_by_agent[agent_id] = client
+        return client
+
+    tools = (McpToolDescriptor(name="browser_click", description="Click", input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_browser_config(), tools, {})], client_factory=factory)
+    handler = provider.definitions()[0].handler
+
+    assert handler(ref="main").status == "succeeded"
+    with bind_agent_id("agent:sub-good"):
+        assert handler(ref="good").status == "succeeded"
+    with bind_agent_id("agent:sub-bad"):
+        failed = handler(ref="bad")
+    assert failed.status == "failed"
+
+    assert clients_by_agent["agent:sub-bad"].closed is True
+    assert clients_by_agent[None].closed is False
+    assert clients_by_agent["agent:sub-good"].closed is False
+    assert provider.open_session_count == 2
+
+
+def test_non_browser_server_continues_sharing_single_session_across_subagents():
+    from agentos.agentic.agent_context import bind_agent_id
+
+    created: list[FakeClient] = []
+
+    def factory(config: McpServerConfig, secrets):
+        client = FakeClient()
+        created.append(client)
+        return client
+
+    tools = (McpToolDescriptor(name="read_file", description="Read", input_schema={"type": "object"}),)
+    provider = McpToolProvider([(_stdio_non_browser_config(), tools, {})], client_factory=factory)
+    handler = provider.definitions()[0].handler
+
+    assert handler(path="a.txt").status == "succeeded"
+    with bind_agent_id("agent:sub-1"):
+        assert handler(path="b.txt").status == "succeeded"
+    with bind_agent_id("agent:sub-2"):
+        assert handler(path="c.txt").status == "succeeded"
+
+    assert len(created) == 1
+    assert provider.open_session_count == 1
+    assert len(created[0].calls) == 3
+    provider.release_agent("agent:sub-1")
+    assert created[0].closed is False
+
+
+def test_build_client_uses_120s_timeout_only_for_browser_server():
+    from agentos.mcp.toolset import BROWSER_TIMEOUT_SECONDS, build_client
+    from agentos.mcp.transport_stdio import DEFAULT_TIMEOUT_SECONDS
+
+    browser_client = build_client(_browser_config(), {})
+    other_client = build_client(_stdio_non_browser_config(), {})
+
+    assert browser_client._transport._timeout == BROWSER_TIMEOUT_SECONDS == 120.0
+    assert other_client._transport._timeout == DEFAULT_TIMEOUT_SECONDS == 45.0
+
+
+def test_contextvar_propagates_to_runtime_worker_threads_and_waiting_model_is_tagged(tmp_path):
+    from datetime import timedelta
+    from agentos.agentic.agent_context import bind_agent_id, get_current_agent_id
+    from agentos.agentic.agent_tools import ToolDefinition, ToolOutcome
+    from agentos.agentic.events import AgentActivityEventType
+    from agentos.agentic.runtime import AgenticLimits, AgenticTurnRuntime
+    from agentos.agentic.session import TurnSession
+    from agentos.agentic.workspace import ConversationWorkspace
+
+    seen_agents: list[str | None] = []
+    seen_threads: set[int] = set()
+    guard = threading.Lock()
+
+    def make_recording_tool(name: str) -> ToolDefinition:
+        def _handler(**kwargs):
+            with guard:
+                seen_agents.append(get_current_agent_id())
+                seen_threads.add(threading.get_ident())
+            return ToolOutcome("succeeded", f"{name} ok", "ok", {"tool_kind": "mcp"})
+
+        return ToolDefinition(
+            name=name,
+            description="test tool",
+            parameters={"type": "object", "properties": {}},
+            handler=_handler,
+            kind="mcp",
+            read_only=True,
+        )
+
+    class _Toolset:
+        def definitions(self):
+            return (make_recording_tool("mcp__playwright__a"), make_recording_tool("mcp__playwright__b"))
+
+        def is_read_only(self, name):
+            return True
+
+        def is_concurrency_safe(self, name, arguments):
+            return True
+
+        def invoke(self, name, arguments, *, invocation_id=None):
+            for d in self.definitions():
+                if d.name == name:
+                    return d.handler(**arguments)
+            raise KeyError(name)
+
+    class _Store:
+        def __init__(self) -> None:
+            self.turn = {"turn_id": "t1", "conversation_id": "c1", "model_id": "m1", "provider": "test"}
+
+    store = _Store()
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=object(),
+        toolset=_Toolset(),
+        system_prompt="test",
+        limits=AgenticLimits(max_iterations=4, max_actions=6, deadline=timedelta(minutes=1)),
+        tool_kinds={"mcp__playwright__a": "mcp", "mcp__playwright__b": "mcp"},
+    )
+    with bind_agent_id("agent:sub-parallel"):
+        results = runtime._run_toolset(
+            store.turn,
+            [
+                {"id": "c1", "name": "mcp__playwright__a", "arguments": "{}"},
+                {"id": "c2", "name": "mcp__playwright__b", "arguments": "{}"},
+            ],
+        )
+    assert [r["status"] for r in results] == ["succeeded", "succeeded"]
+    assert seen_agents == ["agent:sub-parallel", "agent:sub-parallel"]
+    assert threading.get_ident() not in seen_threads
+
+    # Also verify TurnSession tags waiting_model events with phase="waiting_model" and waiting_model=True
+    recorded: list[tuple] = []
+
+    class _ActivityStore:
+        def record(self, turn, event_type, summary, payload, **kw):
+            recorded.append((event_type, summary, payload, kw))
+
+    session = TurnSession(
+        turn={"turn_id": "t1", "conversation_id": "conv-wait", "user_id": "u1", "model_id": "m1", "provider": "test"},
+        store=_ActivityStore(),
+        workspace_root=tmp_path,
+    )
+    session.emit_lifecycle("waiting_model", seconds=20, iteration=1, agent_id="agent:sub-1", agent_name="general-1")
+    assert len(recorded) == 1
+    ev_type, summary, payload, kw = recorded[0]
+    assert ev_type == AgentActivityEventType.TOOL_PROGRESSED
+    assert summary == "pensando há 20 s"
+    assert payload.get("phase") == "waiting_model"
+    assert payload.get("waiting_model") is True
+    assert kw.get("agent_id") == "agent:sub-1"
+
+
+
 

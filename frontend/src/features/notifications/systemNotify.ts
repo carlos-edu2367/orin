@@ -4,7 +4,15 @@
  * never asks for permission by itself (only `requestSystemNotifications`, called from that setting, does).
  */
 
-export type SystemNotice = { title: string; body: string }
+import { playNotifySound, type NotifySoundKind } from './notifySound'
+
+export type SystemNotice = {
+  title: string
+  body: string
+  kind?: NotifySoundKind
+  sound?: boolean
+  silent?: boolean
+}
 
 const TITLE_MAX = 80
 const BODY_MAX = 180
@@ -23,15 +31,37 @@ export function notifySystem(notice: SystemNotice): boolean {
   const title = clip(notice.title, TITLE_MAX)
   const body = clip(notice.body, BODY_MAX)
   if (!title || !body) return false
+
+  const shouldPlayOrinSound = notice.sound === true || (notice.sound === undefined && notice.kind !== undefined)
+  const explicitSilent =
+    notice.silent !== undefined
+      ? notice.silent
+      : shouldPlayOrinSound
+        ? true
+        : notice.sound === false
+          ? false
+          : undefined
+
   if (window.orinDesktop?.notifyCodeMode) {
-    void window.orinDesktop.notifyCodeMode({ title, body })
+    const payload = explicitSilent !== undefined ? { title, body, silent: explicitSilent } : { title, body }
+    void window.orinDesktop.notifyCodeMode(payload)
+    if (shouldPlayOrinSound) {
+      playNotifySound(notice.kind ?? 'attention', true)
+    }
     return true
   }
   const Api = browserNotifications()
   if (!Api || Api.permission !== 'granted') return false
   try {
-    const notification = new Api(title, { body, tag: 'orin' })
+    const notification = new Api(title, {
+      body,
+      tag: 'orin',
+      ...(explicitSilent !== undefined ? { silent: explicitSilent } : {}),
+    })
     notification.onclick = () => { window.focus(); notification.close() }
+    if (shouldPlayOrinSound) {
+      playNotifySound(notice.kind ?? 'attention', true)
+    }
     return true
   } catch {
     return false // some browsers allow notifications only from a service worker
@@ -51,7 +81,10 @@ export async function requestSystemNotifications(): Promise<'granted' | 'denied'
   }
 }
 
-/** A window the person is not looking at (a hidden tab or a minimized window), as the desktop app has always used. */
+/** A window the person is not looking at: a hidden tab, minimized window, or an unfocused window. */
 export function windowIsAway(): boolean {
-  return document.visibilityState !== 'visible'
+  if (typeof document === 'undefined') return false
+  if (document.visibilityState !== 'visible') return true
+  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return true
+  return false
 }

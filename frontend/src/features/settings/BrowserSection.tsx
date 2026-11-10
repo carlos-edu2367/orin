@@ -12,7 +12,7 @@ import {
 } from '../../api/mcp'
 import { SettingsSection } from './SettingsSection'
 
-const PLAYWRIGHT_COMMAND = 'npx -y @playwright/mcp@latest'
+const PLAYWRIGHT_COMMAND = 'npx -y @playwright/mcp@latest --isolated'
 
 function findPlaywrightServer(servers: McpServerSummary[]): McpServerSummary | null {
   return (
@@ -92,7 +92,7 @@ export function BrowserSection({ client: providedClient }: { client?: ApiClient 
           slug: 'playwright',
           transport: 'stdio',
           command: 'npx',
-          args: ['-y', '@playwright/mcp@latest'],
+          args: ['-y', '@playwright/mcp@latest', '--isolated'],
           secret_names: [],
         })
         setServer(current)

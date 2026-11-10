@@ -170,6 +170,7 @@ export type ConversationActivityEvent = {
   state: ActivityState
   agentId: string
   agentName?: string
+  characterName?: string
   parentAgentId?: string | null
   turnId?: string
   messageId?: string

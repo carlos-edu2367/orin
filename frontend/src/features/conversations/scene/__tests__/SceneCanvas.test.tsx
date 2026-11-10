@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { SceneCanvas } from '../SceneCanvas'
+import { bubbleDisplayText, SceneCanvas } from '../SceneCanvas'
 import { MAIN_AGENT_ID, type SceneState } from '../sceneTypes'
 
 const sampleScene: SceneState = {
@@ -23,6 +23,7 @@ const sampleScene: SceneState = {
       task: 'Rodar verificações',
       currentTool: 'Bash',
       lastThought: 'Vou rodar os testes.',
+      lastSpeech: '',
       bubble: {
         kind: 'thought',
         text: 'Rodando testes...',
@@ -45,6 +46,7 @@ const sampleScene: SceneState = {
       task: 'Inspecionar arquivos',
       currentTool: 'Read',
       lastThought: 'Lendo especificação.',
+      lastSpeech: '',
       bubble: null,
       activities: [],
       durationLabel: '2s',
@@ -63,6 +65,7 @@ const sampleScene: SceneState = {
       task: 'Revisar entrega',
       currentTool: null,
       lastThought: 'Tudo certo.',
+      lastSpeech: '',
       bubble: null,
       activities: [],
       durationLabel: '3s',
@@ -259,5 +262,24 @@ describe('SceneCanvas', () => {
         value: origRO,
       })
     }
+  })
+
+  describe('bubbleDisplayText', () => {
+    it('mantém o começo de um texto longo e coloca reticências apenas no fim', () => {
+      const longSpeech = 'Vou analisar a estrutura do projeto e rodar os testes da cena agora mesmo.'
+      const displayed = bubbleDisplayText(longSpeech)
+      expect(displayed.length).toBeLessThanOrEqual(26)
+      expect(displayed.startsWith('Vou analisar a estrutura')).toBe(true)
+      expect(displayed.endsWith('…')).toBe(true)
+      expect(displayed.startsWith('…')).toBe(false)
+    })
+
+    it('não duplica reticências nas duas pontas quando recebe pensamento com "…" inicial', () => {
+      const longThought = '…verificando cada transição de estado na máquina pura da cena pixel art'
+      const displayed = bubbleDisplayText(longThought)
+      expect(displayed.length).toBeLessThanOrEqual(26)
+      expect(displayed.startsWith('…') && displayed.endsWith('…')).toBe(false)
+      expect(displayed).toBe('…na pura da cena pixel art')
+    })
   })
 })

@@ -22,6 +22,7 @@ import { useSettingsBadges } from '../features/settings/useSettingsBadges'
 import { AboutSection } from '../features/settings/AboutSection'
 import { BackgroundSection } from '../features/settings/BackgroundSection'
 import { BrowserSection } from '../features/settings/BrowserSection'
+import { CharactersSection } from '../features/settings/CharactersSection'
 import { VoiceSettingsSection } from '../features/settings/VoiceSettingsSection'
 import { WorkspaceSection } from '../features/settings/WorkspaceSection'
 import { MemoryPage } from '../features/memory/MemoryPage'
@@ -68,6 +69,7 @@ export const routes: RouteDefinition[] = [
   { path: '/connections', element: <WorkspaceShell><IntegrationsHubPage initialTab="mcp" /></WorkspaceShell> },
   { path: '/settings', element: <Navigate to="/settings/general" replace /> },
   { path: '/settings/general', element: <SettingsRoute><RuntimeSettingsPage embedded /></SettingsRoute> },
+  { path: '/settings/characters', element: <SettingsRoute><CharactersSection /></SettingsRoute> },
   { path: '/settings/memory', element: <SettingsRoute><MemoryPage embedded /></SettingsRoute> },
   { path: '/settings/providers', element: <ProviderSettingsRoute /> },
   { path: '/settings/providers/:provider', element: <ProviderSettingsRoute /> },

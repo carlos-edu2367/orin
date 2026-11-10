@@ -1,4 +1,5 @@
-import { DOOR, FIGURE_HALF_WIDTH, figureHeight, stationSlot } from './sceneLayout'
+import { DOOR, FIGURE_HALF_WIDTH, SCENE_HEIGHT, figureHeight, stationSlot } from './sceneLayout'
+import { layoutLabels, type PlacedSceneLabelBox, type SceneLabelBox } from './sceneLabels'
 import type { SceneSoundCue } from './sceneAudio'
 import {
   ART_PERSON_LOOKS,
@@ -11,6 +12,7 @@ import {
   MAIN_AGENT_ID,
   type SceneAgentStatus,
   type SceneBubble,
+  type SceneCustomCharacter,
   type SceneEffectKind,
   type ScenePose,
   type SceneState,
@@ -37,6 +39,9 @@ export interface AnimatedAgent {
   id: string
   isMain: boolean
   name: string
+  subagentType?: string
+  characterName?: string
+  customCharacter?: SceneCustomCharacter
   status: SceneAgentStatus
   statusLabel: string
   station: SceneStationId
@@ -256,6 +261,9 @@ export function syncAnimator(
         id: src.id,
         isMain,
         name: src.name,
+        subagentType: src.subagentType,
+        characterName: src.characterName,
+        customCharacter: src.customCharacter,
         status: src.status,
         statusLabel: src.statusLabel,
         station: effectiveStation,
@@ -316,6 +324,9 @@ export function syncAnimator(
 
     existing.isMain = isMain
     existing.name = src.name
+    existing.subagentType = src.subagentType
+    existing.characterName = src.characterName
+    existing.customCharacter = src.customCharacter
     existing.status = src.status
     existing.statusLabel = src.statusLabel
     existing.station = effectiveStation
@@ -671,12 +682,74 @@ function handY(agent: AnimatedAgent): number {
   return agent.y - Math.round(figureHeight(agent.isMain) / 2)
 }
 
+export interface AgentNameTagMeta {
+  primaryLabel: string
+  secondaryLabel: string | null
+  twoLine: boolean
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export function formatShortSceneName(name: string): string {
+  return name.length > 11 ? `${name.slice(0, 10)}…` : name
+}
+
 /**
- * Returns the `agentId` of the topmost visible character at logical coordinates `(x, y)`,
+ * Computes the name tag box for an agent:
+ * - Single-line (`height: 8`) when the agent is Orin or has no resolved `characterName` distinct from `name`.
+ * - Two-line (`height: 14`) with the character name on top and the smaller technical tag underneath.
+ */
+export function computeAgentNameTagMeta(
+  agent: Pick<AnimatedAgent, 'isMain' | 'name' | 'characterName' | 'x' | 'y'>,
+): AgentNameTagMeta {
+  const cleanTech = (agent.name || (agent.isMain ? 'Orin' : 'Subagente')).trim()
+  const cleanChar = !agent.isMain && agent.characterName ? agent.characterName.trim() : ''
+  const twoLine = Boolean(
+    cleanChar && cleanChar.toLowerCase() !== cleanTech.toLowerCase(),
+  )
+  const primaryLabel = formatShortSceneName(twoLine ? cleanChar : cleanTech)
+  const secondaryLabel = twoLine ? formatShortSceneName(cleanTech) : null
+  const primaryW = primaryLabel.length * 4 + 4
+  const secondaryW = secondaryLabel ? Math.ceil(secondaryLabel.length * 3.4) + 4 : 0
+  const width = Math.max(18, primaryW, secondaryW)
+  const height = twoLine ? 14 : 8
+  const footX = Math.round(agent.x)
+  const footY = Math.round(agent.y)
+  // No room under the feet at the bottom edge (door, lounge chairs): the tag sits over the legs.
+  const y = footY + height + 1 > SCENE_HEIGHT - 1 ? footY - height - 1 : footY + 1
+  const x = Math.round(footX - width / 2)
+  return {
+    primaryLabel,
+    secondaryLabel,
+    twoLine,
+    x,
+    y,
+    width,
+    height,
+  }
+}
+
+export function computeNameTagStepY(boxes: readonly Pick<SceneLabelBox, 'height'>[]): number {
+  for (let i = 0; i < boxes.length; i += 1) {
+    if ((boxes[i]?.height ?? 8) > 8) return 15
+  }
+  return 9
+}
+
+/**
+ * Returns the `agentId` of the topmost visible character (or its name tag) at logical coordinates `(x, y)`,
  * or `null` if no character is hit. Front-most characters (larger `y`) win ties.
  */
-export function hitTest(anim: SceneAnimatorState, x: number, y: number): string | null {
+export function hitTest(
+  anim: SceneAnimatorState,
+  x: number,
+  y: number,
+  selectedAgentId: string | null = null,
+): string | null {
   const visible = Array.from(anim.agents.values()).filter((a) => !a.exited)
+  if (visible.length === 0) return null
   // Sort ascending by y, then iterate from end (front-most) to start
   visible.sort((a, b) => a.y - b.y)
 
@@ -689,6 +762,34 @@ export function hitTest(anim: SceneAnimatorState, x: number, y: number): string 
     const bottom = agent.y + 2
     if (x >= left && x <= right && y >= top && y <= bottom) {
       return agent.id
+    }
+  }
+
+  // Also hit-test character name tags (including 2-line tags and anti-collision shifts).
+  const tagInputs: SceneLabelBox[] = visible.map((agent) => {
+    const meta = computeAgentNameTagMeta(agent)
+    return {
+      id: agent.id,
+      x: meta.x,
+      y: meta.y,
+      width: meta.width,
+      height: meta.height,
+      priority: agent.id === selectedAgentId,
+    }
+  })
+  const placedTags: PlacedSceneLabelBox[] = layoutLabels(tagInputs, {
+    minY: 2,
+    maxY: SCENE_HEIGHT - 1,
+    stepY: computeNameTagStepY(tagInputs),
+    maxAttempts: 3,
+    direction: 'down',
+    hideOnOverflow: true,
+  })
+  for (let i = placedTags.length - 1; i >= 0; i -= 1) {
+    const box = placedTags[i]!
+    if (!box.visible) continue
+    if (x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) {
+      return box.id
     }
   }
 

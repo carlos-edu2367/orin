@@ -565,6 +565,8 @@ def test_emit_lifecycle_maps_thinking_delta_and_generating_tool_call(tmp_path: P
     )
 
     session.emit_lifecycle("thinking_delta", {"delta": "Analisando dependências...", "iteration": 2})
+    session.emit_lifecycle("thinking_delta", {"delta": "", "iteration": 2})
+    session.emit_lifecycle("thinking_delta", {"delta": "   \n\t  ", "iteration": 2})
     session.emit_lifecycle(
         "generating_tool_call",
         {

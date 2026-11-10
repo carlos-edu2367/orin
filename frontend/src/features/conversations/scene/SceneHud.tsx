@@ -1,5 +1,4 @@
 import {
-  useEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -7,6 +6,7 @@ import {
   type JSX,
   type KeyboardEvent,
 } from 'react'
+import { Link, useInRouterContext } from 'react-router-dom'
 import type { ConversationActivityEvent } from '../activityTypes'
 import {
   sanitizeText,
@@ -16,71 +16,19 @@ import {
   type TeamStepperData,
 } from '../teamActivityModel'
 import {
+  SceneAgentActions,
+  useSceneAgentControls,
+  type SceneAgentControlResult,
+  type SceneAgentControlsState,
+} from './SceneAgentActions'
+import {
   ScenePendingCards,
   type SceneActionHandlers,
 } from './ScenePendingCards'
 import { STATION_LABELS } from './sceneStations'
-import type { SceneAgent, SceneAgentStatus, SceneState } from './sceneTypes'
+import type { SceneAgent, SceneState } from './sceneTypes'
 
-export type SceneAgentControlResult =
-  | { ok: true }
-  | { ok: false; reason: 'not_running' | 'error'; message?: string }
-
-const CONTROLLABLE_SUBAGENT_STATUSES: ReadonlySet<SceneAgentStatus> = new Set([
-  'working',
-  'thinking',
-  'waiting_agent',
-  'waiting_user',
-  // 'queued' is left out on purpose: the backend keeps a subagent waiting for a slot as idle and answers 409.
-])
-
-type AgentMessageFeedback =
-  | { kind: 'success'; text: string }
-  | {
-      kind: 'not_running'
-      text: string
-      agentId: string
-      agentName: string
-      resumeMessage: string
-    }
-  | { kind: 'error'; text: string }
-
-function normalizeControlOutcome(
-  result: SceneAgentControlResult | void,
-  defaultError: string,
-): SceneAgentControlResult {
-  if (!result || result.ok) {
-    return { ok: true }
-  }
-  if (result.reason === 'not_running') {
-    return { ok: false, reason: 'not_running' }
-  }
-  return {
-    ok: false,
-    reason: 'error',
-    message: sanitizeText(result.message) || defaultError,
-  }
-}
-
-function normalizeThrownControlError(
-  err: unknown,
-  defaultError: string,
-): SceneAgentControlResult {
-  if (err && typeof err === 'object') {
-    const rec = err as { status?: unknown; code?: unknown; message?: unknown }
-    const code = typeof rec.code === 'string' ? rec.code.toUpperCase() : ''
-    if (rec.status === 409 && code === 'AGENT_NOT_RUNNING') {
-      return { ok: false, reason: 'not_running' }
-    }
-  }
-  const msg =
-    err instanceof Error && err.message ? sanitizeText(err.message) : ''
-  return {
-    ok: false,
-    reason: 'error',
-    message: msg || defaultError,
-  }
-}
+export type { SceneAgentControlResult } from './SceneAgentActions'
 
 export interface SceneHudProps {
   scene: SceneState
@@ -95,8 +43,11 @@ export interface SceneHudProps {
     agentId: string,
     message: string,
   ) => Promise<SceneAgentControlResult | void> | SceneAgentControlResult | void
+  agentControls?: SceneAgentControlsState
   selectedAgentId: string | null
   onSelectAgent: (agentId: string | null) => void
+  onOpenAgentModal?: (agentId: string) => void
+  modalOpenAgentId?: string | null
   paused?: boolean
   soundEnabled: boolean
   onToggleSound: () => void
@@ -119,8 +70,11 @@ export function SceneHud({
   onSendToOrin,
   onStopAgent,
   onMessageAgent,
+  agentControls: externalControls,
   selectedAgentId,
   onSelectAgent,
+  onOpenAgentModal,
+  modalOpenAgentId = null,
   paused = false,
   soundEnabled,
   onToggleSound,
@@ -135,21 +89,17 @@ export function SceneHud({
   onViewAllActivities,
 }: SceneHudProps): JSX.Element {
   const pendingSectionRef = useRef<HTMLElement | null>(null)
-  const agentMessageTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const inRouter = useInRouterContext()
   const [messageText, setMessageText] = useState('')
   const [sendingMessage, setSendingMessage] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
 
-  const [stopConfirmAgentId, setStopConfirmAgentId] = useState<string | null>(null)
-  const [stoppingAgentId, setStoppingAgentId] = useState<string | null>(null)
-  const [stopErrorByAgent, setStopErrorByAgent] = useState<Record<string, string | null>>({})
-
-  const [messageOpenAgentId, setMessageOpenAgentId] = useState<string | null>(null)
-  const [agentMessageDrafts, setAgentMessageDrafts] = useState<Record<string, string>>({})
-  const [sendingAgentMessageId, setSendingAgentMessageId] = useState<string | null>(null)
-  const [agentFeedbackByAgent, setAgentFeedbackByAgent] = useState<
-    Record<string, AgentMessageFeedback | null>
-  >({})
+  const internalControls = useSceneAgentControls({
+    onStopAgent,
+    onMessageAgent,
+    onSendToOrin,
+  })
+  const controls = externalControls ?? internalControls
 
   const subagents = scene.agents.filter((ag) => !ag.isMain)
   const selectedAgent: SceneAgent | undefined =
@@ -159,15 +109,9 @@ export function SceneHud({
   const selectedPending = selectedAgent
     ? scene.pending.filter((item) => item.agentId === selectedAgent.id)
     : []
-
-  const isSelectedMessageOpen =
-    Boolean(selectedAgent) && messageOpenAgentId === selectedAgent?.id
-
-  useEffect(() => {
-    if (isSelectedMessageOpen && agentMessageTextareaRef.current) {
-      agentMessageTextareaRef.current.focus()
-    }
-  }, [isSelectedMessageOpen, selectedAgent?.id])
+  const hudVisiblePending = modalOpenAgentId
+    ? scene.pending.filter((item) => item.agentId !== modalOpenAgentId)
+    : scene.pending
 
   const handleViewAll = onViewAllActivities ?? onBackToChat
   const trimmedMessage = messageText.trim()
@@ -211,101 +155,6 @@ export function SceneHud({
   const handleMessageSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     void handleSendToOrin()
-  }
-
-  const handleConfirmStop = async (agent: SceneAgent) => {
-    if (!onStopAgent || stoppingAgentId === agent.id) return
-    const cleanName = sanitizeText(agent.name, 'Subagente')
-    setStoppingAgentId(agent.id)
-    setStopErrorByAgent((prev) => ({ ...prev, [agent.id]: null }))
-    let outcome: SceneAgentControlResult
-    try {
-      const res = await onStopAgent(agent.id)
-      outcome = normalizeControlOutcome(
-        res,
-        'Não foi possível parar o subagente.',
-      )
-    } catch (err) {
-      outcome = normalizeThrownControlError(
-        err,
-        'Não foi possível parar o subagente.',
-      )
-    } finally {
-      setStoppingAgentId((cur) => (cur === agent.id ? null : cur))
-    }
-
-    if (outcome.ok) {
-      setStopConfirmAgentId((cur) => (cur === agent.id ? null : cur))
-    } else if (outcome.reason === 'not_running') {
-      setStopConfirmAgentId((cur) => (cur === agent.id ? null : cur))
-      setStopErrorByAgent((prev) => ({
-        ...prev,
-        [agent.id]: `${cleanName} já terminou.`,
-      }))
-    } else {
-      setStopErrorByAgent((prev) => ({
-        ...prev,
-        [agent.id]:
-          outcome.message || 'Não foi possível parar o subagente.',
-      }))
-    }
-  }
-
-  const handleSubmitAgentMessage = async (agent: SceneAgent) => {
-    const draft = (agentMessageDrafts[agent.id] ?? '').trim()
-    if (!onMessageAgent || sendingAgentMessageId === agent.id || !draft) return
-    const cleanName = sanitizeText(agent.name, 'Subagente')
-    setSendingAgentMessageId(agent.id)
-    setAgentFeedbackByAgent((prev) => ({ ...prev, [agent.id]: null }))
-    let outcome: SceneAgentControlResult
-    try {
-      const res = await onMessageAgent(agent.id, draft)
-      outcome = normalizeControlOutcome(
-        res,
-        'Não foi possível enviar a mensagem ao subagente.',
-      )
-    } catch (err) {
-      outcome = normalizeThrownControlError(
-        err,
-        'Não foi possível enviar a mensagem ao subagente.',
-      )
-    } finally {
-      setSendingAgentMessageId((cur) => (cur === agent.id ? null : cur))
-    }
-
-    if (outcome.ok) {
-      setAgentMessageDrafts((prev) => ({ ...prev, [agent.id]: '' }))
-      setMessageOpenAgentId((cur) => (cur === agent.id ? null : cur))
-      setAgentFeedbackByAgent((prev) => ({
-        ...prev,
-        [agent.id]: {
-          kind: 'success',
-          text: `Mensagem entregue a ${cleanName}; ele lê no próximo passo.`,
-        },
-      }))
-    } else if (outcome.reason === 'not_running') {
-      setMessageOpenAgentId((cur) => (cur === agent.id ? null : cur))
-      setAgentFeedbackByAgent((prev) => ({
-        ...prev,
-        [agent.id]: {
-          kind: 'not_running',
-          text: `${cleanName} já terminou.`,
-          agentId: agent.id,
-          agentName: cleanName,
-          resumeMessage: draft,
-        },
-      }))
-    } else {
-      setAgentFeedbackByAgent((prev) => ({
-        ...prev,
-        [agent.id]: {
-          kind: 'error',
-          text:
-            outcome.message ||
-            'Não foi possível enviar a mensagem ao subagente.',
-        },
-      }))
-    }
   }
 
   return (
@@ -382,7 +231,7 @@ export function SceneHud({
 
       {/* Pending user approvals / questions */}
       <ScenePendingCards
-        pending={scene.pending}
+        pending={hudVisiblePending}
         agents={scene.agents}
         events={events}
         actions={actions}
@@ -515,11 +364,30 @@ export function SceneHud({
       >
         <div className="scene-hud__section-header">
           <h3 className="scene-hud__section-title">Personagens</h3>
-          <span className="scene-hud__section-meta">
-            {scene.agents.length === 1
-              ? '1 agente'
-              : `${scene.agents.length} agentes`}
-          </span>
+          <div className="scene-hud__section-header-right">
+            <span className="scene-hud__section-meta">
+              {scene.agents.length === 1
+                ? '1 agente'
+                : `${scene.agents.length} agentes`}
+            </span>
+            {inRouter ? (
+              <Link
+                to="/settings/characters"
+                className="scene-hud__customize-link"
+                data-testid="scene-customize-characters-link"
+              >
+                Personalizar personagens
+              </Link>
+            ) : (
+              <a
+                href="/settings/characters"
+                className="scene-hud__customize-link"
+                data-testid="scene-customize-characters-link"
+              >
+                Personalizar personagens
+              </a>
+            )}
+          </div>
         </div>
 
         <div className="scene-hud__agents-list" data-testid="scene-agents-list">
@@ -531,8 +399,15 @@ export function SceneHud({
               agent.name,
               agent.isMain ? 'Orin' : 'Subagente',
             )
+            const cleanCharName = !agent.isMain
+              ? sanitizeText(agent.characterName)
+              : ''
+            const hasDistinctCharacter =
+              Boolean(cleanCharName) &&
+              cleanCharName.toLowerCase() !== cleanName.toLowerCase()
+            const primaryName = hasDistinctCharacter ? cleanCharName : cleanName
             const cleanStatus =
-              stoppingAgentId === agent.id
+              controls.stoppingAgentId === agent.id
                 ? 'parando…'
                 : sanitizeText(agent.statusLabel, 'Descansando')
             const cleanTask = sanitizeText(agent.task)
@@ -562,8 +437,18 @@ export function SceneHud({
                 onClick={() => onSelectAgent(agent.id)}
               >
                 <div className="scene-hud__agent-main">
-                  <span className="scene-hud__agent-name">{cleanName}</span>
-                  {agent.subagentType ? (
+                  <span className="scene-hud__agent-name">{primaryName}</span>
+                  {hasDistinctCharacter ? (
+                    <span
+                      className="scene-hud__agent-tag"
+                      data-testid={`scene-agent-tech-tag-${sanitizeText(agent.id)}`}
+                    >
+                      {cleanName}
+                    </span>
+                  ) : null}
+                  {agent.subagentType &&
+                  sanitizeText(agent.subagentType).toLowerCase() !==
+                    cleanName.toLowerCase() ? (
                     <span className="scene-hud__agent-type">
                       {sanitizeText(agent.subagentType)}
                     </span>
@@ -602,34 +487,63 @@ export function SceneHud({
         <section
           className="scene-hud__card scene-hud__inspector"
           data-testid="scene-agent-panel"
-          aria-label={`Detalhes de ${sanitizeText(selectedAgent.name)}`}
+          aria-label={
+            !selectedAgent.isMain &&
+            selectedAgent.characterName &&
+            sanitizeText(selectedAgent.characterName).toLowerCase() !==
+              sanitizeText(selectedAgent.name).toLowerCase()
+              ? `Detalhes de ${sanitizeText(selectedAgent.characterName)} (${sanitizeText(selectedAgent.name)})`
+              : `Detalhes de ${sanitizeText(selectedAgent.name)}`
+          }
         >
           <div className="scene-hud__inspector-header">
             <div className="scene-hud__inspector-title-group">
               <h3 className="scene-hud__inspector-name">
-                {sanitizeText(selectedAgent.name)}
+                {!selectedAgent.isMain && selectedAgent.characterName
+                  ? sanitizeText(selectedAgent.characterName)
+                  : sanitizeText(selectedAgent.name)}
               </h3>
+              {!selectedAgent.isMain &&
+              selectedAgent.characterName &&
+              sanitizeText(selectedAgent.characterName).toLowerCase() !==
+                sanitizeText(selectedAgent.name).toLowerCase() ? (
+                <span className="scene-hud__inspector-tag">
+                  {sanitizeText(selectedAgent.name)}
+                </span>
+              ) : null}
               {selectedAgent.subagentType ? (
                 <span className="scene-hud__inspector-badge">
                   {sanitizeText(selectedAgent.subagentType)}
                 </span>
               ) : null}
             </div>
-            <button
-              type="button"
-              className="scene-hud__btn scene-hud__btn--compact"
-              data-testid="scene-agent-panel-close"
-              onClick={() => onSelectAgent(null)}
-            >
-              Fechar painel
-            </button>
+            <div className="scene-hud__inspector-actions">
+              {onOpenAgentModal ? (
+                <button
+                  type="button"
+                  className="scene-hud__btn scene-hud__btn--compact"
+                  data-testid="scene-agent-open-modal"
+                  onClick={() => onOpenAgentModal(selectedAgent.id)}
+                >
+                  Abrir detalhes
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="scene-hud__btn scene-hud__btn--compact"
+                data-testid="scene-agent-panel-close"
+                onClick={() => onSelectAgent(null)}
+              >
+                Fechar painel
+              </button>
+            </div>
           </div>
 
           <dl className="scene-hud__inspector-grid">
             <div className="scene-hud__inspector-field">
               <dt>Estado</dt>
               <dd>
-                {stoppingAgentId === selectedAgent.id
+                {controls.stoppingAgentId === selectedAgent.id
                   ? 'parando…'
                   : sanitizeText(selectedAgent.statusLabel)}
               </dd>
@@ -668,246 +582,15 @@ export function SceneHud({
             </div>
           </dl>
 
-          {(() => {
-            const cleanSelectedName = sanitizeText(
-              selectedAgent.name,
-              selectedAgent.isMain ? 'Orin' : 'Subagente',
-            )
-            const canControlSelected =
-              !selectedAgent.isMain &&
-              CONTROLLABLE_SUBAGENT_STATUSES.has(selectedAgent.status) &&
-              Boolean(onStopAgent || onMessageAgent)
-            const isStoppingSelected = stoppingAgentId === selectedAgent.id
-            const isConfirmingStop = stopConfirmAgentId === selectedAgent.id
-            const isMessagingSelected = messageOpenAgentId === selectedAgent.id
-            const isSendingSelectedMsg =
-              sendingAgentMessageId === selectedAgent.id
-            const currentDraft = agentMessageDrafts[selectedAgent.id] ?? ''
-            const trimmedDraft = currentDraft.trim()
-            const stopErr = stopErrorByAgent[selectedAgent.id] ?? null
-            const msgFeedback = agentFeedbackByAgent[selectedAgent.id] ?? null
-
-            if (!canControlSelected && !stopErr && !msgFeedback) {
-              return null
-            }
-
-            return (
-              <div
-                className="scene-hud__agent-controls-area"
-                data-testid="scene-agent-controls-area"
-              >
-                {canControlSelected ? (
-                  <div
-                    className="scene-hud__agent-control-actions"
-                    data-testid="scene-agent-controls"
-                  >
-                    {onStopAgent ? (
-                      <button
-                        type="button"
-                        className="scene-hud__btn scene-hud__btn--compact scene-hud__btn--danger"
-                        data-testid="scene-agent-stop-button"
-                        aria-label={`Parar ${cleanSelectedName}`}
-                        disabled={isStoppingSelected}
-                        onClick={() => {
-                          setStopConfirmAgentId(selectedAgent.id)
-                          setMessageOpenAgentId(null)
-                          setStopErrorByAgent((prev) => ({
-                            ...prev,
-                            [selectedAgent.id]: null,
-                          }))
-                        }}
-                      >
-                        {isStoppingSelected ? 'parando…' : 'Parar'}
-                      </button>
-                    ) : null}
-
-                    {onMessageAgent ? (
-                      <button
-                        type="button"
-                        className="scene-hud__btn scene-hud__btn--compact"
-                        data-testid="scene-agent-message-button"
-                        aria-label={`Mensagem para ${cleanSelectedName}`}
-                        disabled={isStoppingSelected}
-                        onClick={() => {
-                          setMessageOpenAgentId(selectedAgent.id)
-                          setStopConfirmAgentId(null)
-                          setAgentFeedbackByAgent((prev) => ({
-                            ...prev,
-                            [selectedAgent.id]: null,
-                          }))
-                        }}
-                      >
-                        Mensagem
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-
-                {canControlSelected && isConfirmingStop && onStopAgent ? (
-                  <div
-                    className="scene-hud__agent-stop-confirm"
-                    data-testid="scene-agent-stop-confirm"
-                    onKeyDown={(e) => {
-                      if (e.key === 'Escape' && !isStoppingSelected) {
-                        e.preventDefault()
-                        setStopConfirmAgentId(null)
-                      }
-                    }}
-                  >
-                    <p className="scene-hud__agent-stop-prompt">
-                      Parar {cleanSelectedName}? Ele interrompe o que está
-                      fazendo e para os agentes que ele iniciou.
-                    </p>
-                    <div className="scene-hud__agent-control-actions">
-                      <button
-                        type="button"
-                        className="scene-hud__btn scene-hud__btn--compact scene-hud__btn--danger"
-                        data-testid="scene-agent-stop-confirm-button"
-                        aria-label={`Parar agora ${cleanSelectedName}`}
-                        disabled={isStoppingSelected}
-                        onClick={() => void handleConfirmStop(selectedAgent)}
-                      >
-                        {isStoppingSelected ? 'parando…' : 'Parar agora'}
-                      </button>
-                      <button
-                        type="button"
-                        className="scene-hud__btn scene-hud__btn--compact"
-                        data-testid="scene-agent-stop-cancel-button"
-                        aria-label={`Cancelar parada de ${cleanSelectedName}`}
-                        disabled={isStoppingSelected}
-                        onClick={() => setStopConfirmAgentId(null)}
-                      >
-                        Cancelar
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-
-                {stopErr ? (
-                  <p
-                    className="scene-hud__composer-error"
-                    data-testid="scene-agent-stop-error"
-                    role="alert"
-                  >
-                    {stopErr}
-                  </p>
-                ) : null}
-
-                {canControlSelected && isMessagingSelected && onMessageAgent ? (
-                  <form
-                    className="scene-hud__composer-form scene-hud__agent-message-form"
-                    data-testid="scene-agent-message-form"
-                    onSubmit={(e) => {
-                      e.preventDefault()
-                      void handleSubmitAgentMessage(selectedAgent)
-                    }}
-                  >
-                    <textarea
-                      ref={agentMessageTextareaRef}
-                      className="scene-hud__composer-textarea"
-                      data-testid="scene-agent-message-input"
-                      aria-label={`Mensagem para ${cleanSelectedName}`}
-                      rows={2}
-                      placeholder={`Envie uma mensagem para ${cleanSelectedName}…`}
-                      value={currentDraft}
-                      disabled={isSendingSelectedMsg}
-                      onChange={(e) => {
-                        const val = e.target.value
-                        setAgentMessageDrafts((prev) => ({
-                          ...prev,
-                          [selectedAgent.id]: val,
-                        }))
-                        if (msgFeedback?.kind === 'error') {
-                          setAgentFeedbackByAgent((prev) => ({
-                            ...prev,
-                            [selectedAgent.id]: null,
-                          }))
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') {
-                          e.preventDefault()
-                          setMessageOpenAgentId(null)
-                          return
-                        }
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault()
-                          void handleSubmitAgentMessage(selectedAgent)
-                        }
-                      }}
-                    />
-                    <div className="scene-hud__composer-actions">
-                      <button
-                        type="button"
-                        className="scene-hud__btn scene-hud__btn--compact"
-                        data-testid="scene-agent-message-cancel"
-                        aria-label={`Cancelar mensagem para ${cleanSelectedName}`}
-                        disabled={isSendingSelectedMsg}
-                        onClick={() => setMessageOpenAgentId(null)}
-                      >
-                        Cancelar
-                      </button>
-                      <button
-                        type="submit"
-                        className="scene-hud__btn scene-hud__btn--compact scene-hud__btn--active"
-                        data-testid="scene-agent-message-submit"
-                        aria-label={`Enviar mensagem para ${cleanSelectedName}`}
-                        disabled={isSendingSelectedMsg || !trimmedDraft}
-                      >
-                        {isSendingSelectedMsg ? 'Enviando…' : 'Enviar'}
-                      </button>
-                    </div>
-                  </form>
-                ) : null}
-
-                {msgFeedback?.kind === 'success' ? (
-                  <p
-                    className="scene-hud__agent-feedback scene-hud__agent-feedback--success"
-                    data-testid="scene-agent-message-success"
-                    role="status"
-                  >
-                    {msgFeedback.text}
-                  </p>
-                ) : null}
-
-                {msgFeedback?.kind === 'error' ? (
-                  <p
-                    className="scene-hud__composer-error"
-                    data-testid="scene-agent-message-error"
-                    role="alert"
-                  >
-                    {msgFeedback.text}
-                  </p>
-                ) : null}
-
-                {msgFeedback?.kind === 'not_running' ? (
-                  <div
-                    className="scene-hud__agent-feedback scene-hud__agent-feedback--not-running"
-                    data-testid="scene-agent-not-running"
-                    role="alert"
-                  >
-                    <p className="scene-hud__composer-error">
-                      {msgFeedback.text}
-                    </p>
-                    <button
-                      type="button"
-                      className="scene-hud__btn scene-hud__btn--compact scene-hud__btn--active"
-                      data-testid="scene-agent-resume-button"
-                      aria-label={`Pedir ao Orin para retomá-lo (${msgFeedback.agentName})`}
-                      onClick={() => {
-                        const resumePrompt = `Retome o agente "${msgFeedback.agentName}" (agent_id ${msgFeedback.agentId}) com esta mensagem: ${msgFeedback.resumeMessage}`
-                        Promise.resolve(onSendToOrin?.(resumePrompt)).catch(
-                          () => undefined,
-                        )
-                      }}
-                    >
-                      Pedir ao Orin para retomá-lo
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            )
-          })()}
+          <SceneAgentActions
+            agent={selectedAgent}
+            controls={controls}
+            onStopAgent={onStopAgent}
+            onMessageAgent={onMessageAgent}
+            onSendToOrin={onSendToOrin}
+            testIdPrefix={modalOpenAgentId ? 'scene-hud-agent' : 'scene-agent'}
+            variant="hud"
+          />
 
           {selectedPending.length > 0 ? (
             <div

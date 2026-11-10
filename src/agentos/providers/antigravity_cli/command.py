@@ -775,11 +775,18 @@ def build_antigravity_command(
             if lower_model.endswith(f"-{eff_name}"):
                 model_effort_suffix = eff_name
                 break
-        allowed_by_model = (
-            supported_efforts is None
-            or len(supported_efforts) == 0
-            or effort in supported_efforts
-        ) and (model_effort_suffix is None or effort == model_effort_suffix)
+        effective_efforts: Sequence[str] = (
+            supported_efforts
+            if supported_efforts is not None and len(supported_efforts) > 0
+            else (
+                (model_effort_suffix,)
+                if model_effort_suffix is not None
+                else ("low", "medium", "high")
+            )
+        )
+        allowed_by_model = effort in effective_efforts and (
+            model_effort_suffix is None or effort == model_effort_suffix
+        )
         if allowed_by_model:
             cmd.extend(["--effort", effort])
 

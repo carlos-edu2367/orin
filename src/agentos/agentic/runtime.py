@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import contextvars
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -2934,7 +2935,10 @@ class AgenticTurnRuntime:
                 )
                 batch_max_workers = MAX_PARALLEL_SUBAGENT_TOOLS if has_subagent_calls else MAX_PARALLEL_TOOLS
                 with ThreadPoolExecutor(max_workers=min(len(run_indexes), batch_max_workers)) as pool:
-                    futures = {i: pool.submit(invoke, i) for i in run_indexes}
+                    futures = {
+                        i: pool.submit(contextvars.copy_context().run, invoke, i)
+                        for i in run_indexes
+                    }
                     for i, future in futures.items():
                         try:
                             outcomes[i] = future.result()

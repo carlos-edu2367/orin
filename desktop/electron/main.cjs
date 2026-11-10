@@ -102,6 +102,11 @@ app.whenReady().then(async () => {
     },
   })
   protectNavigation(mainWindow)
+  mainWindow.on('focus', () => {
+    if (mainWindow && !mainWindow.isDestroyed() && typeof mainWindow.flashFrame === 'function') {
+      mainWindow.flashFrame(false)
+    }
+  })
   mainWindow.on('close', (event) => {
     if (closing) return
     event.preventDefault()
@@ -154,9 +159,20 @@ function registerIpc() {
   })
   ipcMain.handle('desktop:notify-code-mode', (event, payload) => {
     if (!fromApp(event) || !Notification.isSupported() || !safeCodeModeNotification(payload)) return false
-    const notification = new Notification({ title: payload.title, body: payload.body, icon: iconPath, silent: false })
+    const notification = new Notification({
+      title: payload.title,
+      body: payload.body,
+      icon: iconPath,
+      silent: payload.silent === true,
+    })
     notification.on('click', () => showWindow())
     notification.show()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const focused = typeof mainWindow.isFocused === 'function' ? mainWindow.isFocused() : false
+      if (!focused && typeof mainWindow.flashFrame === 'function') {
+        mainWindow.flashFrame(true)
+      }
+    }
     return true
   })
   ipcMain.handle('desktop:wake-live-voice', (event) => {
@@ -169,6 +185,7 @@ function registerIpc() {
 function safeCodeModeNotification(value) {
   if (!value || typeof value !== 'object') return false
   if (typeof value.title !== 'string' || typeof value.body !== 'string') return false
+  if (value.silent !== undefined && typeof value.silent !== 'boolean') return false
   // Notification text must remain a short status, never a path, log, token or diff.
   return value.title.length > 0 && value.title.length <= 80 && value.body.length > 0 && value.body.length <= 180
 }

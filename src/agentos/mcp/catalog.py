@@ -169,7 +169,7 @@ CATALOG: tuple[McpCatalogEntry, ...] = (
         summary="Navegador automatizado via Playwright MCP para abrir páginas dinâmicas, clicar, preencher formulários e capturar telas.",
         transport=McpTransport.STDIO,
         command="npx",
-        args=("-y", "@playwright/mcp@latest"),
+        args=("-y", "@playwright/mcp@latest", "--isolated"),
         setup_instructions="Requer Node.js (npx) disponível no ambiente. Nenhuma chave ou credencial é necessária.",
         keywords=("playwright", "browser", "navegador", "web", "chromium", "automacao", "pagina"),
     ),

@@ -40,6 +40,8 @@ import {
   type CodeWorkbenchTerminalEntry,
   type CodeWorkbenchTab,
 } from './CodeWorkbenchPanel'
+import { PaneSplitter } from './PaneSplitter'
+import { useChatPaneWidth } from './useChatPaneWidth'
 import { normalizeWorkbenchPath } from './workbenchTreeModel'
 import { deriveFileChangeToken, derivePreviewFromEvents } from './workbenchPreview'
 import { CommandInfoDialog } from '../commands/CommandInfoDialog'
@@ -74,6 +76,7 @@ import { SceneView, type SceneAgentControlResult } from './scene/SceneView'
 import { TranscriptView } from './TranscriptView'
 import { useKeybindingHandlers } from '../keybindings/engine'
 import { useTheme } from '../../app/ThemeContext'
+import { noticeForEvent } from '../notifications/agentNotices'
 import { notifySystem, windowIsAway } from '../notifications/systemNotify'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
@@ -164,14 +167,6 @@ function asProviderName(value: string): ProviderName | null {
   return PROVIDER_NAMES.includes(value as ProviderName) ? value as ProviderName : null
 }
 
-function codeModeNotification(type: string): { title: string; body: string } | null {
-  if (type === 'code_mode.completed') return { title: 'Modo Code concluído', body: 'A entrega está pronta para sua revisão.' }
-  if (type === 'code_mode.completed_with_caveats') return { title: 'Modo Code concluído com ressalvas', body: 'A entrega está pronta, mas há uma limitação documentada.' }
-  if (type === 'code_mode.blocked') return { title: 'Modo Code bloqueado', body: 'O Orin encontrou um bloqueio que precisa da sua decisão.' }
-  if (type === 'code_mode.decision_required') return { title: 'Decisão necessária no Modo Code', body: 'O Orin precisa da sua confirmação para continuar.' }
-  return null
-}
-
 /**
  * The conversation itself.
  *
@@ -196,6 +191,7 @@ export function ChatPage() {
   useEffect(() => { composerTextRef.current = message }, [message])
   const [codePermissionMode, setCodePermissionMode] = useState<CodePermissionMode>('ask_permissions')
   const [codeSystemNotifications, setCodeSystemNotifications] = useState(false)
+  const codeNoticePrefsRef = useRef({ notify_permissions: true, notify_completion: true, notification_sound: true })
   const [pushNotice, setPushNotice] = useState<PushNotice | null>(null)
   const shownNoticesRef = useRef(new Set<string>())
   const dismissPushNotice = useCallback(() => setPushNotice(null), [])
@@ -427,12 +423,16 @@ export function ChatPage() {
               }
             }
             dispatch({ type: 'event', event })
-            if (codeSystemNotifications && windowIsAway() && !event.parentAgentId) {
-              // W7: Code mode's own moments, a chat turn that finished, and a turn waiting for the person.
-              const notification = codeModeNotification(event.type)
-                ?? (event.type === 'turn.completed' && conversationModeRef.current !== 'code' ? { title: 'Orin respondeu', body: 'A resposta está pronta.' } : null)
-                ?? (event.type === 'turn.waiting_user' ? { title: 'O Orin está esperando você', body: 'Há uma pergunta para você responder na conversa.' } : null)
-              if (notification) notifySystem(notification)
+            const notice = noticeForEvent(event, {
+              mode: conversationModeRef.current,
+              away: windowIsAway(),
+              shownIds: shownNoticesRef.current,
+              system_notifications: codeSystemNotifications,
+              notify_permissions: codeNoticePrefsRef.current.notify_permissions,
+              notify_completion: codeNoticePrefsRef.current.notify_completion,
+            })
+            if (notice) {
+              notifySystem({ ...notice, sound: codeNoticePrefsRef.current.notification_sound })
             }
             // PushNotification: a system notification while the window is hidden, otherwise a toast. Only a
             // fresh event pops up, once; the timeline keeps the record either way.
@@ -512,6 +512,11 @@ export function ChatPage() {
     void getCodeModeSettings(client, controller.signal).then((settings) => {
       if (!controller.signal.aborted) {
         setCodeSystemNotifications(settings.system_notifications)
+        codeNoticePrefsRef.current = {
+          notify_permissions: settings.notify_permissions !== false,
+          notify_completion: settings.notify_completion !== false,
+          notification_sound: settings.notification_sound !== false,
+        }
       }
     }).catch(() => undefined)
     return () => controller.abort()
@@ -2439,8 +2444,32 @@ export function ChatPage() {
     setWorkbenchTab('preview')
   }, [conversationMode, running, workbenchPreview?.token])
 
+  const isCodeSplit = conversationMode === 'code' && workbenchOpen
+  const chatMainRef = useRef<HTMLElement | null>(null)
+  const {
+    width: chatPaneWidth,
+    minWidth: chatPaneMinWidth,
+    maxWidth: chatPaneMaxWidth,
+    isResizing: chatPaneResizing,
+    setIsResizing: setChatPaneResizing,
+    previewWidth: previewChatPaneWidth,
+    commitWidth: commitChatPaneWidth,
+    resetWidth: resetChatPaneWidth,
+    style: chatPaneStyle,
+  } = useChatPaneWidth({ enabled: isCodeSplit, containerRef: chatMainRef })
+
   return (
-    <main className={conversationMode === 'code' && workbenchOpen ? 'chat chat--code-split' : 'chat'}>
+    <main
+      ref={chatMainRef}
+      className={
+        isCodeSplit
+          ? chatPaneResizing
+            ? 'chat chat--code-split chat--resizing'
+            : 'chat chat--code-split'
+          : 'chat'
+      }
+      style={chatPaneStyle}
+    >
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
       {tasksOpen && <TasksPanel client={client} conversationId={conversationId} onClose={() => setTasksOpen(false)} />}
@@ -3429,22 +3458,33 @@ export function ChatPage() {
         <StatusLineBar client={client} conversationId={conversationId} refreshKey={`${running ? 'running' : 'idle'}:${conversation?.turns.length ?? 0}`} />
       </footer>}
       {!loadFailure && conversationMode === 'code' && workbenchOpen && (
-        <CodeWorkbenchPanel
-          files={codeWorkbenchFiles}
-          terminalEntries={codeWorkbenchTerminalEntries}
-          activeTab={workbenchTab}
-          onTabChange={setWorkbenchTab}
-          initialPreviewUrl={detectedPreviewUrl}
-          preview={workbenchPreview ?? null}
-          conversationId={conversationId}
-          onStartPreview={() => startConversationPreview(client, conversationId)}
-          fileChangeToken={workbenchFileChangeToken}
-          rootName={conversation?.workspace?.folderName ?? conversation?.workspace?.path?.split(/[\\/]/).filter(Boolean).pop() ?? null}
-          running={running}
-          selectedFilePath={selectedWorkbenchFile}
-          onSelectFile={setSelectedWorkbenchFile}
-          onClose={() => setWorkbenchOpen(false)}
-        />
+        <>
+          <PaneSplitter
+            value={chatPaneWidth}
+            min={chatPaneMinWidth}
+            max={chatPaneMaxWidth}
+            onChange={previewChatPaneWidth}
+            onCommit={commitChatPaneWidth}
+            onReset={resetChatPaneWidth}
+            onResizingChange={setChatPaneResizing}
+          />
+          <CodeWorkbenchPanel
+            files={codeWorkbenchFiles}
+            terminalEntries={codeWorkbenchTerminalEntries}
+            activeTab={workbenchTab}
+            onTabChange={setWorkbenchTab}
+            initialPreviewUrl={detectedPreviewUrl}
+            preview={workbenchPreview ?? null}
+            conversationId={conversationId}
+            onStartPreview={() => startConversationPreview(client, conversationId)}
+            fileChangeToken={workbenchFileChangeToken}
+            rootName={conversation?.workspace?.folderName ?? conversation?.workspace?.path?.split(/[\\/]/).filter(Boolean).pop() ?? null}
+            running={running}
+            selectedFilePath={selectedWorkbenchFile}
+            onSelectFile={setSelectedWorkbenchFile}
+            onClose={() => setWorkbenchOpen(false)}
+          />
+        </>
       )}
       {oversizedInput && (
         <div className="input-limit-dialog__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !sendingOversizedInput) setOversizedInput(null) }}>

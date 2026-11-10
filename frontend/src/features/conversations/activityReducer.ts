@@ -384,7 +384,15 @@ function isAssistantDeltaEvent(event: ConversationActivityEvent): boolean {
 
 function extractDeltaText(event: ConversationActivityEvent): string {
   if (isThoughtDeltaEvent(event)) {
-    return String(event.payload?.delta ?? event.payload?.content ?? event.detail ?? event.delta ?? event.content ?? '')
+    const detail = event.detail && event.detail !== 'Pensando' ? event.detail : undefined
+    return String(
+      event.payload?.delta ??
+        event.delta ??
+        event.content ??
+        event.payload?.content ??
+        detail ??
+        '',
+    )
   }
   if (isAssistantDeltaEvent(event)) {
     return String(event.content ?? event.payload?.content ?? '')

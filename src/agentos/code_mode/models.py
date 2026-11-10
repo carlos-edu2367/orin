@@ -154,10 +154,19 @@ class CodeModeSettings:
     autonomy: CodeAutonomy = CodeAutonomy.APPROVAL_REQUIRED
     system_notifications: bool = False
     monitoring_enabled: bool = True
+    notify_permissions: bool = True
+    notify_completion: bool = True
+    notification_sound: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "autonomy", CodeAutonomy(self.autonomy))
-        if not isinstance(self.system_notifications, bool) or not isinstance(self.monitoring_enabled, bool):
+        if (
+            not isinstance(self.system_notifications, bool)
+            or not isinstance(self.monitoring_enabled, bool)
+            or not isinstance(self.notify_permissions, bool)
+            or not isinstance(self.notify_completion, bool)
+            or not isinstance(self.notification_sound, bool)
+        ):
             raise ValueError("code mode boolean settings are invalid")
 
     @property
@@ -177,6 +186,9 @@ class CodeModeSettings:
             "autonomy": self.autonomy.value,
             "system_notifications": self.system_notifications,
             "monitoring_enabled": self.monitoring_enabled,
+            "notify_permissions": self.notify_permissions,
+            "notify_completion": self.notify_completion,
+            "notification_sound": self.notification_sound,
         }
 
 

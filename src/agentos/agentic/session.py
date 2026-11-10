@@ -52,6 +52,7 @@ from agentos.retrieval.bundle import RetrievalBundle
 from agentos.retrieval.factory import retrieval_service_for
 from agentos.retrieval.worker import IndexWorker
 
+from .agent_context import bind_agent_id
 from .agent_tools import AgentToolset, ToolOutcome, is_verification_command
 from .background_agents import BACKGROUND_AGENTS, BackgroundAgentEntry
 from .contract import parse as parse_contract
@@ -1594,7 +1595,16 @@ class TurnSession:
         recorder = getattr(self.store, "record", None)
         if recorder is None:
             return
-        recorder(self.turn, event_type, summary, payload or {}, agent_id=agent_id or self.main_agent_id, parent_agent_id=parent_agent_id)
+        effective_payload = dict(payload) if payload else {}
+        if "agent_name" in effective_payload and "character_name" not in effective_payload:
+            from agentos.agentic.tools.agents.agent import resolve_subagent_character_name
+            char_name = resolve_subagent_character_name(
+                str(self.turn.get("conversation_id") or ""), self.main_agent_id,
+                getattr(self, "_subagent_records", None) or {}, agent_id, effective_payload,
+            )
+            if char_name:
+                effective_payload["character_name"] = char_name
+        recorder(self.turn, event_type, summary, effective_payload, agent_id=agent_id or self.main_agent_id, parent_agent_id=parent_agent_id)
 
     def record_usage(self, turn: dict[str, object], *, input_tokens: int | None, output_tokens: int | None, total_tokens: int | None, agent_id: str | None = None) -> None:
         self.agents_store.record_usage(
@@ -1630,7 +1640,17 @@ class TurnSession:
         base: dict[str, object] = {"state": state}
         if agent_name:
             base["agent_name"] = agent_name
+            from agentos.agentic.tools.agents.agent import resolve_subagent_character_name
+            char_name = resolve_subagent_character_name(
+                str(self.turn.get("conversation_id") or ""), self.main_agent_id,
+                getattr(self, "_subagent_records", None) or {}, actor, base,
+            )
+            if char_name:
+                base["character_name"] = char_name
         if state == "thinking_delta":
+            delta_text = str(payload.get("delta") or "")
+            if not delta_text.strip():
+                return
             thought_event_type = getattr(
                 AgentActivityEventType,
                 "AGENT_THOUGHT_DELTA",
@@ -1642,7 +1662,7 @@ class TurnSession:
                 {
                     **base,
                     "title": "Pensando",
-                    "delta": str(payload.get("delta") or ""),
+                    "delta": delta_text,
                     "iteration": payload.get("iteration"),
                 },
                 agent_id=actor,
@@ -2009,6 +2029,8 @@ class TurnSession:
                 **base,
                 "seconds": seconds,
                 "iteration": payload.get("iteration"),
+                "phase": "waiting_model",
+                "waiting_model": True,
             }
             if is_subagent:
                 self._record(
@@ -2584,6 +2606,7 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        character_name: str | None = None,
         caller: SubagentCaller | None = None,
     ) -> ToolOutcome:
         if teammate_name and caller is not None and not caller.is_main:
@@ -2595,7 +2618,7 @@ class TurnSession:
         if not teammate_name:
             return self._start_subagent(
                 subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
-                run_in_background=run_in_background, hook_cancel=hook_cancel, caller=caller,
+                run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
         if refusal is not None:
@@ -2604,7 +2627,7 @@ class TurnSession:
         try:
             outcome = self._start_subagent(
                 subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
-                run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name,
+                run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
             )
         except BaseException:
             self._release_teammate(clean_name)  # a start that raised never began
@@ -2625,6 +2648,7 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        character_name: str | None = None,
         caller: SubagentCaller | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
@@ -2658,6 +2682,7 @@ class TurnSession:
             hook_cancel=hook_cancel,
             teammate_name=str(teammate_name).strip().lower() if teammate_name else None,
             team_name=str(team_name or "").strip()[:64] or None,
+            character_name=character_name,
             caller=caller,
         )
 
@@ -2673,6 +2698,7 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        character_name: str | None = None,
         caller: SubagentCaller | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
@@ -2853,6 +2879,12 @@ class TurnSession:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
             self._subagent_runs += 1
         agent_id, task_text = str(record["agent_id"]), str(task)
+        from agentos.agentic.tools.agents.agent import remember_subagent_character_name
+        with self._subagent_lock:
+            prior_char = self._subagent_records.get(agent_id, {}).get("character_name")
+        remember_subagent_character_name(
+            str(self.turn.get("conversation_id") or ""), agent_id, record, character_name, prior_char,
+        )
         self._adopt_subagent(record, caller.agent_id)
         if builtin_spec is not None and record.get("model_id") != child_model_id:
             record["model_id"] = child_model_id
@@ -3348,6 +3380,12 @@ class TurnSession:
             )
         finally:
             try:
+                release_agent = getattr(getattr(self, "mcp_provider", None), "release_agent", None)
+                if callable(release_agent):
+                    release_agent(agent_id)
+            except Exception:
+                pass
+            try:
                 watcher.finalize()
             finally:
                 slot.release()
@@ -3628,7 +3666,9 @@ class TurnSession:
                 effort=self._definition_effort(definition, active_model_id, provider_name),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
             )
-            result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
+            with bind_agent_id(agent_id):
+                with bind_agent_id(agent_id):
+                    result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
 
             def failed_before_acting(outcome: Any) -> bool:
                 return (
@@ -3818,6 +3858,12 @@ class TurnSession:
                     )
                 except Exception:
                     pass
+            try:
+                release_agent = getattr(getattr(self, "mcp_provider", None), "release_agent", None)
+                if callable(release_agent):
+                    release_agent(agent_id)
+            except Exception:
+                pass
 
     def _pinned_models_failed(
         self, clean: str, agent_id: str, caller: SubagentCaller, provider: str, tried: Sequence[str], reason: str,

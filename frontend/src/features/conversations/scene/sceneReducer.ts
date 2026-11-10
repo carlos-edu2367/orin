@@ -22,9 +22,10 @@ const MAX_AGENT_ACTIVITIES = 30
 const RECENT_EVENT_WINDOW = 40
 const MAX_BUBBLE_CHARS = 60
 const MAX_THOUGHT_CHARS = 200
-// Raw tail kept from streamed text. Sanitizing the whole buffer on every delta made each fold O(k^2).
+const MAX_SPEECH_CHARS = 2000
+// Raw tail/head kept from streamed text. Sanitizing the whole buffer on every delta made each fold O(k^2).
 const THOUGHT_BUFFER_CHARS = MAX_THOUGHT_CHARS * 2
-const SPEECH_BUFFER_CHARS = MAX_BUBBLE_CHARS * 4
+const SPEECH_BUFFER_CHARS = MAX_SPEECH_CHARS * 2
 
 // Events that say something happened to the turn or arrived to an agent, not what the agent is doing.
 const NON_TASK_EVENT_TYPES = new Set<string>([
@@ -59,6 +60,14 @@ function appendTail(buffer: string, chunk: string, maxChars: number): string {
   return joined.slice(-maxChars).replace(/^[\uDC00-\uDFFF]/, '')
 }
 
+function appendHead(buffer: string, chunk: string, maxChars: number): string {
+  if (!chunk || buffer.length >= maxChars) return buffer
+  const joined = buffer + chunk
+  if (joined.length <= maxChars) return joined
+  // Drop a high surrogate orphaned by the cut.
+  return joined.slice(0, maxChars).replace(/[\uD800-\uDBFF]$/, '')
+}
+
 const STATUS_LABELS: Record<SceneAgentStatus, string> = {
   working: 'Trabalhando',
   thinking: 'Pensando',
@@ -80,6 +89,7 @@ interface MutableAgent {
   isMain: boolean
   name: string
   subagentType?: string
+  characterName?: string
   parentId: string | null
   depth: number
   station: SceneStationId
@@ -88,6 +98,7 @@ interface MutableAgent {
   task: string
   currentTool: string | null
   lastThought: string
+  lastSpeech: string
   thoughtBuffer: string
   speechBuffer: string
   bubble: SceneBubble | null
@@ -127,8 +138,8 @@ function truncateTail(
   return `…${cleaned.slice(-(maxChars - 1))}`
 }
 
-function truncateHead(text: string, maxChars: number): string {
-  const cleaned = sanitizeText(text)
+function truncateHead(text: string, maxChars: number, alreadySanitized = false): string {
+  const cleaned = alreadySanitized ? text : sanitizeText(text)
   if (!cleaned) return ''
   if (cleaned.length <= maxChars) return cleaned
   return `${cleaned.slice(0, maxChars - 1)}…`
@@ -253,6 +264,7 @@ export function foldScene(
     task: '',
     currentTool: null,
     lastThought: '',
+    lastSpeech: '',
     thoughtBuffer: '',
     speechBuffer: '',
     bubble: null,
@@ -278,6 +290,7 @@ export function foldScene(
       task: '',
       currentTool: null,
       lastThought: '',
+      lastSpeech: '',
       thoughtBuffer: '',
       speechBuffer: '',
       bubble: null,
@@ -354,6 +367,12 @@ export function foldScene(
         const candidateName = sanitizeText(ev.agentName)
         if (candidateName) {
           actor.name = candidateName
+        }
+        const candidateCharName = sanitizeText(
+          ev.characterName ?? ev.payload?.character_name ?? ev.payload?.characterName,
+        ).slice(0, 32)
+        if (candidateCharName) {
+          actor.characterName = candidateCharName
         }
       }
       const subType = sanitizeText(ev.payload?.subagent_type)
@@ -550,10 +569,10 @@ export function foldScene(
           (typeof ev.payload?.delta === 'string' && ev.payload.delta) ||
           (typeof ev.content === 'string' && ev.content) ||
           (typeof ev.payload?.content === 'string' && ev.payload.content) ||
-          (typeof ev.detail === 'string' && ev.detail) ||
-          (typeof ev.summary === 'string' && ev.summary) ||
           ''
-        actor.thoughtBuffer = appendTail(actor.thoughtBuffer, chunk, THOUGHT_BUFFER_CHARS)
+        if (chunk) {
+          actor.thoughtBuffer = appendTail(actor.thoughtBuffer, chunk, THOUGHT_BUFFER_CHARS)
+        }
         actor.pose = 'think'
         actor.status = 'thinking'
         const nextEv = turnEvents[i + 1]
@@ -563,14 +582,16 @@ export function foldScene(
           nextEv.agentId === ev.agentId
         if (!nextSameThought) {
           const cleanThought = sanitizeText(actor.thoughtBuffer)
-          actor.lastThought =
+          const fullThought =
             cleanThought.length > MAX_THOUGHT_CHARS
               ? cleanThought.slice(-MAX_THOUGHT_CHARS)
               : cleanThought
+          actor.lastThought = fullThought
           const bubbleText = truncateTail(cleanThought, MAX_BUBBLE_CHARS, true, true) || '…'
           actor.bubble = {
             kind: 'thought',
             text: bubbleText,
+            ...(fullThought ? { fullText: fullThought } : {}),
             eventId: evId,
           }
         }
@@ -584,7 +605,7 @@ export function foldScene(
           (typeof ev.payload?.delta === 'string' && ev.payload.delta) ||
           (typeof ev.summary === 'string' && ev.summary) ||
           ''
-        actor.speechBuffer = appendTail(actor.speechBuffer, chunk, SPEECH_BUFFER_CHARS)
+        actor.speechBuffer = appendHead(actor.speechBuffer, chunk, SPEECH_BUFFER_CHARS)
         actor.pose = 'idle'
         actor.status = 'working'
         const nextEv = turnEvents[i + 1]
@@ -593,9 +614,15 @@ export function foldScene(
         if (!nextSameSpeech) {
           const cleanSpeech = sanitizeText(actor.speechBuffer)
           if (cleanSpeech) {
+            const fullSpeech =
+              cleanSpeech.length > MAX_SPEECH_CHARS
+                ? cleanSpeech.slice(0, MAX_SPEECH_CHARS).replace(/[\uD800-\uDBFF]$/, '').trimEnd()
+                : cleanSpeech
+            actor.lastSpeech = fullSpeech
             actor.bubble = {
               kind: 'speech',
-              text: truncateTail(cleanSpeech, MAX_BUBBLE_CHARS, false, true),
+              text: truncateHead(fullSpeech, MAX_BUBBLE_CHARS, true),
+              fullText: fullSpeech,
               eventId: evId,
             }
           }
@@ -758,6 +785,10 @@ export function foldScene(
           }
           const candidateName = sanitizeText(ev.agentName)
           if (candidateName) child.name = candidateName
+          const candidateCharName = sanitizeText(
+            ev.characterName ?? ev.payload?.character_name ?? ev.payload?.characterName,
+          ).slice(0, 32)
+          if (candidateCharName) child.characterName = candidateCharName
           const subType = sanitizeText(ev.payload?.subagent_type)
           if (subType) child.subagentType = subType
         }
@@ -829,6 +860,12 @@ export function foldScene(
             const recipientName = sanitizeText(ev.agentName)
             if (recipientName) {
               recipient.name = recipientName
+            }
+            const recipientCharName = sanitizeText(
+              ev.characterName ?? ev.payload?.character_name ?? ev.payload?.characterName,
+            ).slice(0, 32)
+            if (recipientCharName) {
+              recipient.characterName = recipientCharName
             }
             const subType = sanitizeText(ev.payload?.subagent_type)
             if (subType) {
@@ -1047,6 +1084,7 @@ export function foldScene(
         isMain: ag.isMain,
         name: ag.name || (ag.isMain ? 'Orin' : 'Subagente'),
         ...(ag.subagentType ? { subagentType: ag.subagentType } : {}),
+        ...(!ag.isMain && ag.characterName ? { characterName: ag.characterName } : {}),
         parentId: ag.isMain ? null : ag.parentId ?? MAIN_AGENT_ID,
         depth,
         station: ag.station === 'lounge' ? 'meeting' : ag.station,
@@ -1056,6 +1094,7 @@ export function foldScene(
         task: ag.task,
         currentTool: null,
         lastThought: ag.lastThought,
+        lastSpeech: ag.lastSpeech,
         bubble: null,
         activities: ag.activities,
         durationLabel: computeDurationLabel(ag.validTimestamps, ag.totalElapsedMs),
@@ -1069,6 +1108,7 @@ export function foldScene(
       isMain: ag.isMain,
       name: ag.name || (ag.isMain ? 'Orin' : 'Subagente'),
       ...(ag.subagentType ? { subagentType: ag.subagentType } : {}),
+      ...(!ag.isMain && ag.characterName ? { characterName: ag.characterName } : {}),
       parentId: ag.isMain ? null : ag.parentId ?? MAIN_AGENT_ID,
       depth,
       station: finalStation,
@@ -1078,6 +1118,7 @@ export function foldScene(
       task: ag.task,
       currentTool: running ? ag.currentTool : null,
       lastThought: ag.lastThought,
+      lastSpeech: ag.lastSpeech,
       bubble: running ? ag.bubble : null,
       activities: ag.activities,
       durationLabel: computeDurationLabel(ag.validTimestamps, ag.totalElapsedMs),

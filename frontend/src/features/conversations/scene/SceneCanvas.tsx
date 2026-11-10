@@ -2,10 +2,13 @@ import {
   useEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type JSX,
 } from 'react'
 import {
+  computeAgentNameTagMeta,
+  computeNameTagStepY,
   createAnimator,
   drainSoundCues,
   hitTest,
@@ -20,6 +23,11 @@ import { playSceneSound } from './sceneAudio'
 import { SCENE_ART_RACK_LEDS } from './assets/sceneArtManifest'
 import { getSceneArt, loadSceneArt, placeArtCharacter, type SceneArtImages } from './sceneArt'
 import {
+  computeFallbackIdleBobOffset,
+  selectCustomCharacterPose,
+} from './sceneCharacters'
+import {
+  FIGURE_HEIGHT,
   SCENE_HEIGHT,
   SCENE_SCREENS,
   SCENE_TILE,
@@ -44,6 +52,7 @@ export interface SceneCanvasProps {
   scene: SceneState
   selectedAgentId?: string | null
   onSelectAgent?: (agentId: string) => void
+  onOpenAgentModal?: (agentId: string) => void
   soundEnabled?: boolean
   reducedMotion?: boolean
   className?: string
@@ -82,10 +91,6 @@ function setScratchBox(
   } else {
     list[index] = { id, x, y, width, height, priority }
   }
-}
-
-function formatShortName(name: string): string {
-  return name.length > 11 ? `${name.slice(0, 10)}…` : name
 }
 
 function readSystemReducedMotion(): boolean {
@@ -135,11 +140,88 @@ export function buildSceneAriaLabel(scene: SceneState): string {
   const subSummary = subagents
     .map((a) => {
       const st = STATION_LABELS[a.station] ?? a.station
-      return `${a.name} ${a.statusLabel} (${st})`
+      const charName = a.characterName?.trim()
+      const displayLabel =
+        charName && charName.toLowerCase() !== a.name.trim().toLowerCase()
+          ? `${charName} (${a.name})`
+          : a.name
+      return `${displayLabel} ${a.statusLabel} (${st})`
     })
     .join(', ')
 
   return `Cena do escritório: ${mainSummary}; ${countLabel}: ${subSummary}`
+}
+
+// ─── Custom character sprite cache (per URL) ─────────────────────────────────
+
+interface CustomSpriteEntry {
+  img: HTMLImageElement
+  status: 'loading' | 'loaded' | 'error'
+}
+
+const customSpriteCache = new Map<string, CustomSpriteEntry>()
+const customSpriteListeners = new Set<() => void>()
+
+function notifyCustomSpriteListeners(): void {
+  for (const listener of customSpriteListeners) {
+    listener()
+  }
+}
+
+export function subscribeCustomSpriteLoads(listener: () => void): () => void {
+  customSpriteListeners.add(listener)
+  return () => {
+    customSpriteListeners.delete(listener)
+  }
+}
+
+export function getOrLoadCustomSprite(url: string): HTMLImageElement | null {
+  if (!url) return null
+  const existing = customSpriteCache.get(url)
+  if (existing) {
+    return existing.status === 'loaded' ? existing.img : null
+  }
+  if (typeof Image === 'undefined') return null
+  const img = new Image()
+  const entry: CustomSpriteEntry = { img, status: 'loading' }
+  customSpriteCache.set(url, entry)
+  img.decoding = 'async'
+  img.addEventListener(
+    'load',
+    () => {
+      entry.status = 'loaded'
+      notifyCustomSpriteListeners()
+    },
+    { once: true },
+  )
+  img.addEventListener(
+    'error',
+    () => {
+      entry.status = 'error'
+    },
+    { once: true },
+  )
+  img.src = url
+  if (img.complete && img.naturalWidth > 0) {
+    entry.status = 'loaded'
+    return img
+  }
+  return null
+}
+
+export function primeCustomSpriteCacheForTest(
+  url: string,
+  img: HTMLImageElement | null,
+): void {
+  if (!img) {
+    customSpriteCache.delete(url)
+    return
+  }
+  customSpriteCache.set(url, { img, status: 'loaded' })
+}
+
+export function clearCustomSpriteCacheForTest(): void {
+  customSpriteCache.clear()
 }
 
 function drawBackground(ctx: CanvasRenderingContext2D, nowMs: number, live: boolean): void {
@@ -309,6 +391,98 @@ function drawArtCharacter(
   return place.y
 }
 
+/**
+ * Draws a user-created custom character sprite at the same height as atlas characters (`FIGURE_HEIGHT`),
+ * anchored by the feet at `(agent.x, agent.y)` and flipped horizontally when `facing === 'left'`.
+ * Returns the top Y of the drawn figure, or `null` while the sprite image has not loaded yet.
+ */
+function drawCustomCharacter(
+  ctx: CanvasRenderingContext2D,
+  agent: AnimatedAgent,
+  isSelected: boolean,
+  live: boolean,
+  nowMs: number,
+  reducedMotion: boolean,
+): number | null {
+  if (agent.isMain || !agent.customCharacter?.poses?.idle) return null
+  const selected = selectCustomCharacterPose(agent.customCharacter.poses, agent.pose)
+  let img = getOrLoadCustomSprite(selected.url)
+  let isFallbackIdle = selected.isFallbackIdle
+  if (!img && selected.url !== agent.customCharacter.poses.idle) {
+    img = getOrLoadCustomSprite(agent.customCharacter.poses.idle)
+    isFallbackIdle = agent.pose !== 'idle'
+  }
+  if (!img) return null
+
+  const targetH = FIGURE_HEIGHT
+  const rawW = img.naturalWidth || img.width || 28
+  const rawH = img.naturalHeight || img.height || 44
+  const aspect = rawW > 0 && rawH > 0 ? rawW / rawH : 28 / 44
+  const targetW = Math.max(10, Math.min(44, Math.round(targetH * aspect)))
+  const bob = computeFallbackIdleBobOffset(agent.pose, isFallbackIdle, nowMs, reducedMotion)
+  const footX = Math.round(agent.x)
+  const footY = Math.round(agent.y)
+  const drawX = Math.round(footX - targetW / 2)
+  const drawY = Math.round(footY - targetH + bob)
+
+  ctx.save()
+  ctx.imageSmoothingEnabled = false
+
+  // Ground shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.34)'
+  if (typeof ctx.ellipse === 'function') {
+    ctx.beginPath()
+    ctx.ellipse(agent.x, agent.y - 0.5, 7, 2, 0, 0, Math.PI * 2)
+    ctx.fill()
+  } else {
+    ctx.fillRect(footX - 6, footY - 2, 12, 3)
+  }
+
+  if (isSelected) {
+    ctx.strokeStyle = SCENE_PALETTE.orinBase
+    ctx.lineWidth = 0.75
+    if (typeof ctx.ellipse === 'function') {
+      ctx.beginPath()
+      ctx.ellipse(agent.x, agent.y - 0.5, 10, 3, 0, 0, Math.PI * 2)
+      ctx.stroke()
+    } else {
+      ctx.strokeRect(drawX - 2, drawY - 1, targetW + 4, targetH + 2)
+    }
+  }
+
+  if (agent.facing === 'left') {
+    ctx.save()
+    ctx.translate(agent.x, 0)
+    ctx.scale(-1, 1)
+    ctx.drawImage(img, -targetW / 2, drawY, targetW, targetH)
+    ctx.restore()
+  } else {
+    ctx.drawImage(img, drawX, drawY, targetW, targetH)
+  }
+
+  if (isSelected) {
+    drawSelectionArrow(ctx, agent.x, drawY, nowMs)
+  }
+
+  if (agent.pose === 'raise_hand') {
+    const signSprite = getPropSprite('question_sign')
+    if (signSprite) {
+      ctx.drawImage(signSprite, footX + 3, drawY - 10)
+    }
+  }
+
+  if (agent.pose === 'sit') {
+    const zzzSprite = getPropSprite('zzz')
+    if (zzzSprite && (!live || agent.status === 'resting')) {
+      const floatY = Math.floor(nowMs / 600) % 2
+      ctx.drawImage(zzzSprite, footX + 2, drawY - 8 - floatY)
+    }
+  }
+
+  ctx.restore()
+  return drawY
+}
+
 function drawCharacter(
   ctx: CanvasRenderingContext2D,
   agent: AnimatedAgent,
@@ -382,14 +556,20 @@ function drawCharacterNameTag(
   isSelected: boolean
 ): void {
   if (!box.visible) return
-  const shortName = formatShortName(agent.name)
-  ctx.font = '6px monospace'
+  const meta = computeAgentNameTagMeta(agent)
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
   ctx.fillStyle = isSelected ? 'rgba(180, 164, 239, 0.26)' : 'rgba(16, 16, 20, 0.78)'
   ctx.fillRect(box.x, box.y, box.width, box.height)
+  const centerX = Math.round(box.x + box.width / 2)
+  ctx.font = '6px monospace'
   ctx.fillStyle = isSelected ? SCENE_PALETTE.orinLight : '#F4F3F8'
-  ctx.fillText(shortName, Math.round(box.x + box.width / 2), box.y + 1)
+  ctx.fillText(meta.primaryLabel, centerX, box.y + 1)
+  if (meta.twoLine && meta.secondaryLabel) {
+    ctx.font = '4.8px monospace'
+    ctx.fillStyle = isSelected ? 'rgba(216, 206, 255, 0.78)' : 'rgba(154, 152, 166, 0.78)'
+    ctx.fillText(meta.secondaryLabel, centerX, box.y + 8)
+  }
 }
 
 function drawTransfer(ctx: CanvasRenderingContext2D, tr: ActiveTransfer, propScale: number): void {
@@ -430,7 +610,32 @@ function drawEffect(ctx: CanvasRenderingContext2D, fx: ActiveEffect, propScale: 
   }
 }
 
-function computeBubbleBox(agent: AnimatedAgent, headTop: number): {
+export const MAX_CANVAS_BUBBLE_CHARS = 26
+
+/**
+ * Formats bubble text for the canvas (~26 chars) with a single ellipsis:
+ * keeps the head with a trailing "…" for speech/error, or the tail with a leading "…" for thoughts.
+ */
+export function bubbleDisplayText(text: string, maxChars = MAX_CANVAS_BUBBLE_CHARS): string {
+  const raw = text.trim()
+  if (!raw) return ''
+  if (raw === '…') return '…'
+  if (raw.startsWith('…')) {
+    const cleanTail = raw.replace(/^…+\s*/, '').replace(/\s*…+$/, '')
+    if (!cleanTail) return '…'
+    const sliceLen = Math.max(1, maxChars - 1)
+    if (cleanTail.length <= sliceLen) return `…${cleanTail}`
+    return `…${cleanTail.slice(-sliceLen)}`
+  }
+  if (raw.length <= maxChars) return raw
+  const withoutTrailing = raw.replace(/\s*…+$/, '')
+  return `${withoutTrailing.slice(0, Math.max(1, maxChars - 1))}…`
+}
+
+export function computeBubbleBox(
+  agent: Pick<AnimatedAgent, 'x' | 'y' | 'bubble' | 'bubblePopProgress'>,
+  headTop: number = agent.y - CHARACTER_H
+): {
   boxX: number
   boxY: number
   boxW: number
@@ -438,9 +643,8 @@ function computeBubbleBox(agent: AnimatedAgent, headTop: number): {
 } | null {
   const bubble = agent.bubble
   if (!bubble) return null
-  const rawText = bubble.text.trim()
-  if (!rawText) return null
-  const display = rawText.length > 26 ? `${rawText.slice(0, 25)}…` : rawText
+  const display = bubbleDisplayText(bubble.text)
+  if (!display) return null
   const boxW = Math.min(118, Math.max(28, display.length * 4 + 10))
   const boxH = 13
   const popOffset = Math.round((1 - agent.bubblePopProgress) * 3)
@@ -451,6 +655,82 @@ function computeBubbleBox(agent: AnimatedAgent, headTop: number): {
   const boxX = Math.round(anchorX - boxW / 2)
   const boxY = Math.max(4, Math.round(headTop - boxH - 5 + popOffset))
   return { boxX, boxY, boxW, boxH }
+}
+
+/**
+ * Hit-tests active speech/thought/error bubbles in the scene.
+ * Checks both direct `computeBubbleBox` coordinates and anti-collision placed boxes.
+ */
+export function hitTestBubble(
+  anim: SceneAnimatorState,
+  x: number,
+  y: number,
+  selectedAgentId: string | null = null
+): string | null {
+  const visible = Array.from(anim.agents.values()).filter(
+    (a) => !a.exited && a.bubble !== null
+  )
+  if (visible.length === 0) return null
+  visible.sort((a, b) => a.y - b.y)
+
+  for (let i = visible.length - 1; i >= 0; i -= 1) {
+    const agent = visible[i]!
+    const recordedTop = headTopScratch.get(agent.id)
+    const defaultTop = agent.y - CHARACTER_H
+    const tops =
+      recordedTop !== undefined && recordedTop !== defaultTop
+        ? [recordedTop, defaultTop]
+        : [defaultTop]
+    for (const top of tops) {
+      const box = computeBubbleBox(agent, top)
+      if (
+        box &&
+        x >= box.boxX &&
+        x <= box.boxX + box.boxW &&
+        y >= box.boxY &&
+        y <= box.boxY + box.boxH
+      ) {
+        return agent.id
+      }
+    }
+  }
+
+  const inputs: SceneLabelBox[] = []
+  for (let i = 0; i < visible.length; i += 1) {
+    const agent = visible[i]!
+    const info = computeBubbleBox(
+      agent,
+      headTopScratch.get(agent.id) ?? agent.y - CHARACTER_H
+    )
+    if (!info) continue
+    inputs.push({
+      id: agent.id,
+      x: info.boxX,
+      y: info.boxY,
+      width: info.boxW,
+      height: info.boxH,
+      priority: agent.id === selectedAgentId,
+    })
+  }
+
+  if (inputs.length > 0) {
+    const placed = layoutLabels(inputs, {
+      minY: 2,
+      maxY: SCENE_HEIGHT - 6,
+      stepY: 15,
+      maxAttempts: 4,
+      direction: 'up',
+      hideOnOverflow: false,
+    })
+    for (let i = placed.length - 1; i >= 0; i -= 1) {
+      const b = placed[i]!
+      if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) {
+        return b.id
+      }
+    }
+  }
+
+  return null
 }
 
 /** White rounded bubble with a dark outline, matching the bubbles of the office art. */
@@ -519,9 +799,8 @@ function drawBubble(
 ): void {
   const bubble = agent.bubble
   if (!bubble) return
-  const rawText = bubble.text.trim()
-  if (!rawText) return
-  const display = rawText.length > 26 ? `${rawText.slice(0, 25)}…` : rawText
+  const display = bubbleDisplayText(bubble.text)
+  if (!display) return
 
   if (painted) {
     drawPaintedBubble(ctx, agent.x, bubble.kind, display, boxX, boxY, boxW, boxH)
@@ -626,6 +905,18 @@ function renderSceneFrame(
   for (let i = 0; i < visibleAgentsScratch.length; i += 1) {
     const agent = visibleAgentsScratch[i]!
     const isSelected = agent.id === selectedAgentId
+    const customTop = drawCustomCharacter(
+      ctx,
+      agent,
+      isSelected,
+      anim.live,
+      nowMs,
+      reducedMotion,
+    )
+    if (customTop !== null) {
+      headTopScratch.set(agent.id, customTop)
+      continue
+    }
     const artTop = art ? drawArtCharacter(ctx, art, agent, isSelected, nowMs, reducedMotion) : null
     if (artTop === null) {
       drawCharacter(ctx, agent, isSelected, anim.live, nowMs)
@@ -639,18 +930,29 @@ function renderSceneFrame(
   nameInputScratch.length = visibleAgentsScratch.length
   for (let i = 0; i < visibleAgentsScratch.length; i += 1) {
     const agent = visibleAgentsScratch[i]!
-    const shortName = formatShortName(agent.name)
-    const labelW = Math.max(18, shortName.length * 4 + 4)
-    const footX = Math.round(agent.x)
-    const footY = Math.round(agent.y)
-    // No room under the feet at the bottom edge (door, lounge chairs): the tag sits over the legs.
-    const tagY = footY + 9 > SCENE_HEIGHT - 1 ? footY - 9 : footY + 1
-    setScratchBox(nameInputScratch, i, agent.id, Math.round(footX - labelW / 2), tagY, labelW, 8, agent.id === selectedAgentId)
+    const meta = computeAgentNameTagMeta(agent)
+    setScratchBox(
+      nameInputScratch,
+      i,
+      agent.id,
+      meta.x,
+      meta.y,
+      meta.width,
+      meta.height,
+      agent.id === selectedAgentId,
+    )
   }
 
   const placedNames = layoutLabels(
     nameInputScratch,
-    { minY: 2, maxY: SCENE_HEIGHT - 1, stepY: 9, maxAttempts: 3, direction: 'down', hideOnOverflow: true },
+    {
+      minY: 2,
+      maxY: SCENE_HEIGHT - 1,
+      stepY: computeNameTagStepY(nameInputScratch),
+      maxAttempts: 3,
+      direction: 'down',
+      hideOnOverflow: true,
+    },
     namePlacedScratch
   )
   for (let i = 0; i < placedNames.length; i += 1) {
@@ -706,6 +1008,7 @@ export function SceneCanvas({
   scene,
   selectedAgentId = null,
   onSelectAgent,
+  onOpenAgentModal,
   soundEnabled = false,
   reducedMotion: reducedMotionProp,
   className,
@@ -724,6 +1027,7 @@ export function SceneCanvas({
     scaleRef.current = scale
   }, [scale])
   const [artReady, setArtReady] = useState<boolean>(() => getSceneArt() !== null)
+  const [customSpriteRev, setCustomSpriteRev] = useState<number>(0)
   const [hoveringAgent, setHoveringAgent] = useState<boolean>(false)
   const [isIntersecting, setIsIntersecting] = useState<boolean>(true)
   const [isDocumentVisible, setIsDocumentVisible] = useState<boolean>(() =>
@@ -766,6 +1070,12 @@ export function SceneCanvas({
     if (artReady) return undefined
     return loadSceneArt(() => setArtReady(true))
   }, [artReady])
+
+  useEffect(() => {
+    return subscribeCustomSpriteLoads(() => {
+      setCustomSpriteRev((prev) => prev + 1)
+    })
+  }, [])
 
   // Track the display scale via ResizeObserver: the painted office fills the available
   // width; the hand-drawn fallback uses the largest whole factor so its pixels stay even.
@@ -856,7 +1166,7 @@ export function SceneCanvas({
       now,
       effectiveReducedMotion
     )
-  }, [scene, effectiveReducedMotion, soundEnabled, selectedAgentId, artReady])
+  }, [scene, effectiveReducedMotion, soundEnabled, selectedAgentId, artReady, customSpriteRev])
 
   // Main requestAnimationFrame loop (only runs when 2D context exists and canvas is visible)
   useEffect(() => {
@@ -922,12 +1232,25 @@ export function SceneCanvas({
   }
 
   const handleCanvasClick = (event: ReactMouseEvent<HTMLCanvasElement>) => {
-    if (!onSelectAgent || !animatorRef.current) return
+    if ((!onSelectAgent && !onOpenAgentModal) || !animatorRef.current) return
     const pt = clientToLogical(event)
     if (!pt) return
-    const hitId = hitTest(animatorRef.current, pt.x, pt.y)
+    const hitId =
+      hitTest(animatorRef.current, pt.x, pt.y, selectedAgentId) ??
+      hitTestBubble(animatorRef.current, pt.x, pt.y, selectedAgentId)
     if (hitId) {
-      onSelectAgent(hitId)
+      onSelectAgent?.(hitId)
+      onOpenAgentModal?.(hitId)
+    }
+  }
+
+  const handleCanvasKeyDown = (event: ReactKeyboardEvent<HTMLCanvasElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      if (selectedAgentId) {
+        event.preventDefault()
+        onSelectAgent?.(selectedAgentId)
+        onOpenAgentModal?.(selectedAgentId)
+      }
     }
   }
 
@@ -935,7 +1258,9 @@ export function SceneCanvas({
     if (!animatorRef.current) return
     const pt = clientToLogical(event)
     if (!pt) return
-    const hitId = hitTest(animatorRef.current, pt.x, pt.y)
+    const hitId =
+      hitTest(animatorRef.current, pt.x, pt.y, selectedAgentId) ??
+      hitTestBubble(animatorRef.current, pt.x, pt.y, selectedAgentId)
     setHoveringAgent(Boolean(hitId))
   }
 
@@ -952,6 +1277,7 @@ export function SceneCanvas({
       <canvas
         ref={canvasRef}
         role="img"
+        tabIndex={0}
         aria-label={ariaLabel}
         data-testid="scene-canvas"
         className={canvasClassName}
@@ -962,6 +1288,7 @@ export function SceneCanvas({
           height: `${Math.round(SCENE_HEIGHT * scale)}px`,
         }}
         onClick={handleCanvasClick}
+        onKeyDown={handleCanvasKeyDown}
         onMouseMove={handlePointerMove}
         onMouseLeave={() => setHoveringAgent(false)}
       />

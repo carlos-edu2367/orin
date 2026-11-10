@@ -104,9 +104,26 @@ class FakeAgentRuntimeSettings:
         assert user_id == "user-1"
         return getattr(self, "code_mode", CodeModeSettings())
 
-    def set_code_mode(self, user_id: str, *, autonomy: CodeAutonomy, system_notifications: bool, monitoring_enabled: bool) -> CodeModeSettings:
+    def set_code_mode(
+        self,
+        user_id: str,
+        *,
+        autonomy: CodeAutonomy,
+        system_notifications: bool,
+        monitoring_enabled: bool,
+        notify_permissions: bool = True,
+        notify_completion: bool = True,
+        notification_sound: bool = True,
+    ) -> CodeModeSettings:
         assert user_id == "user-1"
-        self.code_mode = CodeModeSettings(autonomy, system_notifications, monitoring_enabled)
+        self.code_mode = CodeModeSettings(
+            autonomy,
+            system_notifications,
+            monitoring_enabled,
+            notify_permissions=notify_permissions,
+            notify_completion=notify_completion,
+            notification_sound=notification_sound,
+        )
         return self.code_mode
 
 
@@ -461,9 +478,43 @@ def test_code_mode_settings_are_global_and_persisted_through_the_runtime_port() 
         headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "code-mode-settings"},
         json={"autonomy": "code_autonomy", "system_notifications": True, "monitoring_enabled": False},
     )
+    saved_custom = client.put(
+        "/v1/code-mode/settings",
+        headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "code-mode-settings-2"},
+        json={
+            "autonomy": "code_autonomy",
+            "system_notifications": True,
+            "monitoring_enabled": False,
+            "notify_permissions": False,
+            "notify_completion": True,
+            "notification_sound": False,
+        },
+    )
 
-    assert initial.json() == {"autonomy": "approval_required", "system_notifications": False, "monitoring_enabled": True}
-    assert saved.json() == {"autonomy": "code_autonomy", "system_notifications": True, "monitoring_enabled": False}
+    assert initial.json() == {
+        "autonomy": "approval_required",
+        "system_notifications": False,
+        "monitoring_enabled": True,
+        "notify_permissions": True,
+        "notify_completion": True,
+        "notification_sound": True,
+    }
+    assert saved.json() == {
+        "autonomy": "code_autonomy",
+        "system_notifications": True,
+        "monitoring_enabled": False,
+        "notify_permissions": True,
+        "notify_completion": True,
+        "notification_sound": True,
+    }
+    assert saved_custom.json() == {
+        "autonomy": "code_autonomy",
+        "system_notifications": True,
+        "monitoring_enabled": False,
+        "notify_permissions": False,
+        "notify_completion": True,
+        "notification_sound": False,
+    }
 
 
 def test_memory_management_scopes_query_and_does_not_mix_projects() -> None:

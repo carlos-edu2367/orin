@@ -587,7 +587,13 @@ describe('sceneReducer', () => {
 
     const fullSpeech = speechChunks.join('').replace(/\s+/g, ' ').trim()
     const orin = state.agents[0]
-    expect(orin.bubble).toEqual({ kind: 'speech', text: `…${fullSpeech.slice(-59)}`, eventId: 'd1499' })
+    expect(orin.bubble).toEqual({
+      kind: 'speech',
+      text: `${fullSpeech.slice(0, 59)}…`,
+      fullText: fullSpeech.slice(0, 2000).trimEnd(),
+      eventId: 'd1499',
+    })
+    expect(orin.lastSpeech).toBe(fullSpeech.slice(0, 2000).trimEnd())
 
     const fullThought = thoughtChunks.join('').replace(/\s+/g, ' ').trim()
     const sub = state.agents.find((a) => a.id === 'sub-1')!
@@ -805,5 +811,112 @@ describe('sceneReducer', () => {
     expect(
       state.transfers.some((tr) => tr.id === 'e4'),
     ).toBe(false)
+  })
+
+  it('(t) 30 thought_delta seguidos com delta vazio e summary "Pensando" não concatenam "PensandoPensando" no balão; caso misto mostra apenas o texto real', () => {
+    const emptyThoughtEvents: ConversationActivityEvent[] = [
+      makeEvent({ eventId: 'e0', type: 'turn.started' }),
+    ]
+    for (let i = 1; i <= 30; i += 1) {
+      emptyThoughtEvents.push(
+        makeEvent({
+          eventId: `th-${i}`,
+          type: 'agent.thought_delta',
+          summary: 'Pensando',
+          detail: 'Pensando',
+          title: 'Pensando',
+          delta: '',
+          payload: { title: 'Pensando', delta: '' },
+        }),
+      )
+    }
+
+    const emptyState = foldScene(emptyThoughtEvents, { running: true })
+    const orinEmpty = emptyState.agents[0]
+    expect(orinEmpty.pose).toBe('think')
+    expect(orinEmpty.status).toBe('thinking')
+    expect(orinEmpty.lastThought).toBe('')
+    expect(orinEmpty.bubble).not.toBeNull()
+    expect(orinEmpty.bubble?.kind).toBe('thought')
+    expect(orinEmpty.bubble?.text).not.toContain('PensandoPensando')
+    expect(orinEmpty.bubble?.text).toBe('…')
+
+    const mixedEvents: ConversationActivityEvent[] = [
+      makeEvent({ eventId: 'm0', type: 'turn.started' }),
+      makeEvent({
+        eventId: 'm1',
+        type: 'agent.thought_delta',
+        summary: 'Pensando',
+        detail: 'Pensando',
+        delta: '',
+        payload: { delta: '' },
+      }),
+      makeEvent({
+        eventId: 'm2',
+        type: 'agent.thought_delta',
+        summary: 'Pensando',
+        payload: { delta: 'Inspecionando ' },
+      }),
+      makeEvent({
+        eventId: 'm3',
+        type: 'agent.thought_delta',
+        summary: 'Pensando',
+        detail: 'Pensando',
+        delta: '',
+      }),
+      makeEvent({
+        eventId: 'm4',
+        type: 'agent.thought_delta',
+        summary: 'Pensando',
+        delta: 'o reducer da cena.',
+      }),
+      makeEvent({
+        eventId: 'm5',
+        type: 'agent.thought_delta',
+        summary: 'Pensando',
+        payload: { delta: '' },
+      }),
+    ]
+
+    const mixedState = foldScene(mixedEvents, { running: true })
+    const orinMixed = mixedState.agents[0]
+    expect(orinMixed.pose).toBe('think')
+    expect(orinMixed.status).toBe('thinking')
+    expect(orinMixed.lastThought).toBe('Inspecionando o reducer da cena.')
+    expect(orinMixed.bubble).toEqual({
+      kind: 'thought',
+      text: '…Inspecionando o reducer da cena.',
+      fullText: 'Inspecionando o reducer da cena.',
+      eventId: 'm5',
+    })
+  })
+
+  it('(u) fala de 200 chars em assistant.delta mantém o começo no bubble.text com "…" no fim (sem "…" no começo) e preserva a frase inteira em lastSpeech e bubble.fullText', () => {
+    const part1 =
+      'Iniciando a verificação completa dos componentes visuais da Cena pixel art, '
+    const part2 =
+      'garantindo que os balões de fala mostrem o início da frase do agente sem cortar '
+    const part3 =
+      'as primeiras palavras e mantendo o texto completo salvo em lastSpeech.'
+    const fullPhrase = `${part1}${part2}${part3}`
+    expect(fullPhrase.length).toBeGreaterThanOrEqual(200)
+
+    const events: ConversationActivityEvent[] = [
+      makeEvent({ eventId: 's0', type: 'turn.started' }),
+      makeEvent({ eventId: 's1', type: 'assistant.delta', content: part1 }),
+      makeEvent({ eventId: 's2', type: 'assistant.delta', content: part2 }),
+      makeEvent({ eventId: 's3', type: 'assistant.delta', content: part3 }),
+    ]
+
+    const state = foldScene(events, { running: true })
+    const orin = state.agents[0]
+    expect(orin.lastSpeech).toBe(fullPhrase)
+    expect(orin.bubble).not.toBeNull()
+    expect(orin.bubble?.kind).toBe('speech')
+    expect(orin.bubble?.fullText).toBe(fullPhrase)
+    expect(orin.bubble?.text.startsWith('Iniciando a verificação completa')).toBe(true)
+    expect(orin.bubble?.text.endsWith('…')).toBe(true)
+    expect(orin.bubble?.text.startsWith('…')).toBe(false)
+    expect(orin.bubble!.text.length).toBe(60)
   })
 })

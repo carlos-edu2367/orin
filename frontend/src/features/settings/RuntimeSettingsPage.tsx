@@ -7,7 +7,8 @@ import { useTheme } from '../../app/ThemeContext'
 import { CustomSelect } from '../../components/CustomSelect'
 import { SettingsPage } from './SettingsPage'
 import { SettingsSection } from './SettingsSection'
-import { requestSystemNotifications } from '../notifications/systemNotify'
+import { playNotifySound } from '../notifications/notifySound'
+import { notifySystem, requestSystemNotifications } from '../notifications/systemNotify'
 
 const CODE_AUTONOMY_OPTIONS = [
   {
@@ -136,6 +137,31 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
     else if (answer === 'unsupported') setCodeNotice('Este navegador não mostra notificações do sistema.')
   }
 
+  function testNotification() {
+    const sound = codeSettings?.notification_sound ?? true
+    playNotifySound('attention', sound)
+    const shown = notifySystem({
+      title: 'Teste de notificação do Orin',
+      body: 'As notificações do sistema estão funcionando.',
+      silent: sound,
+    })
+    if (!shown) {
+      void requestSystemNotifications().then((answer) => {
+        if (answer === 'granted') {
+          notifySystem({
+            title: 'Teste de notificação do Orin',
+            body: 'As notificações do sistema estão funcionando.',
+            silent: sound,
+          })
+        } else if (answer === 'denied') {
+          setCodeNotice('O navegador bloqueou as notificações deste site; libere-as nas configurações do navegador.')
+        } else if (answer === 'unsupported') {
+          setCodeNotice('Este navegador não mostra notificações do sistema.')
+        }
+      })
+    }
+  }
+
   async function saveCodeSettings() {
     if (!codeSettings || savingCodeSettings) return
     setSavingCodeSettings(true)
@@ -208,6 +234,12 @@ export function RuntimeSettingsPage({ client, embedded = false }: { client?: Api
       </div>
       <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.monitoring_enabled ?? true} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, monitoring_enabled: event.target.checked } : current)} />Acompanhar tarefas longas em segundo plano</label>
       <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.system_notifications ?? false} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => { const checked = event.target.checked; setCodeSettings((current) => current ? { ...current, system_notifications: checked } : current); if (checked) void askNotificationPermission() }} />Receber notificações do sistema ao concluir, bloquear ou precisar de decisão</label>
+      <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.notify_permissions ?? true} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, notify_permissions: event.target.checked } : current)} />Quando um agente pedir permissão ou fizer uma pergunta</label>
+      <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.notify_completion ?? true} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, notify_completion: event.target.checked } : current)} />Quando o Orin terminar ou falhar</label>
+      <label className="provider-panel__toggle"><input type="checkbox" checked={codeSettings?.notification_sound ?? true} disabled={codeSettings === null || savingCodeSettings} onChange={(event) => setCodeSettings((current) => current ? { ...current, notification_sound: event.target.checked } : current)} />Tocar um som</label>
+      <div>
+        <button type="button" className="button button--quiet" disabled={codeSettings === null || savingCodeSettings} onClick={testNotification}>Testar notificação</button>
+      </div>
       <button type="button" className="button button--primary" disabled={codeSettings === null || savingCodeSettings} onClick={() => void saveCodeSettings()}>{savingCodeSettings ? 'Salvando…' : 'Salvar preferências do Modo Code'}</button>
       {codeNotice && <p role="status" className="runtime-settings__notice">{codeNotice}</p>}
     </section>

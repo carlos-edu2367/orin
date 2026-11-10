@@ -71,6 +71,8 @@ OWNED = {
     ("POST", "/v1/conversations/{conversation_id}/shell"),
     ("POST", "/v1/conversations/{conversation_id}/preview/start"),
     ("PUT", "/v1/custom-agents/{name}"), ("DELETE", "/v1/custom-agents/{name}"),
+    ("PATCH", "/v1/scene/characters/{character_id}"), ("DELETE", "/v1/scene/characters/{character_id}"),
+    ("GET", "/v1/scene/characters/{character_id}/{pose}.png"),
     ("GET", "/v1/conversations/{conversation_id}/events"),
     ("GET", "/v1/skills/{skill_id}"), ("PUT", "/v1/skills/{skill_id}"),
     ("DELETE", "/v1/skills/{skill_id}/versions/{version}"), ("GET", "/v1/skills/{skill_id}/agents"),
@@ -93,6 +95,7 @@ LISTING = {
     ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/skills"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
     ("GET", "/v1/plugins/marketplaces"), ("GET", "/v1/mcp/servers"), ("GET", "/v1/executions"),
     ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"), ("GET", "/v1/custom-agents"),
+    ("GET", "/v1/scene/characters"),
     *{("GET", f"/v1/{resource}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},
 }
 SCOPED = {
@@ -112,6 +115,7 @@ SCOPED = {
     ("GET", "/v1/live-voice/capabilities"),
     ("POST", "/v1/live-voice/wake-check"),
     ("GET", "/v1/files/download"),
+    ("PUT", "/v1/scene/characters/names"), ("PUT", "/v1/scene/characters/bindings"),
     # Skill preferences keyed by (caller, agent_id): an agent id names a role,
     # not a record someone owns, so every profile reads and writes its own row.
     ("GET", "/v1/agents/{agent_id}/skills"), ("PUT", "/v1/agents/{agent_id}/skills"),
@@ -122,6 +126,7 @@ CREATE = {
     ("POST", "/v1/plugins/library/infer-mcp"), ("POST", "/v1/plugins/marketplaces"), ("POST", "/v1/mcp/servers"),
     ("POST", "/v1/events/streams"), ("POST", "/v1/files/folders"), ("POST", "/v1/files/import"),
     ("POST", "/v1/custom-agents"),
+    ("POST", "/v1/scene/characters"),
 }
 INSTANCE = {
     ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
@@ -198,6 +203,17 @@ def _seed(world, a):
     a.api.post("/v1/files/folders", json={"parent": "", "name": "segredo-a"}, headers=a.headers())
     agent = a.api.post("/v1/custom-agents", json={"name": "agente-a", "description": f"{SECRET} agente", "prompt": "faça"}, headers=a.headers())
     assert agent.status_code == 201, agent.text
+    import io
+    from PIL import Image
+    png_buf = io.BytesIO()
+    Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(png_buf, format="PNG")
+    character = a.api.post(
+        "/v1/scene/characters",
+        data={"name": f"{SECRET} char"},
+        files={"idle": ("idle.png", png_buf.getvalue(), "image/png")},
+        headers=a.headers(),
+    )
+    assert character.status_code == 201, character.text
     return {
         "project_id": project.project_id,
         "conversation_id": conversation.conversation_id,
@@ -210,10 +226,12 @@ def _seed(world, a):
         "upload_id": upload.json()["upload_id"],
         "path": "notes.md",
         "name": "agente-a",
+        "character_id": character.json()["character"]["id"],
+        "pose": "idle",
     }
 
 
-SEEDED_PARAMS = {"project_id", "conversation_id", "memory_id", "schedule_id", "skill_id", "version", "server_id", "tool_name", "upload_id", "path", "name"}
+SEEDED_PARAMS = {"project_id", "conversation_id", "memory_id", "schedule_id", "skill_id", "version", "server_id", "tool_name", "upload_id", "path", "name", "character_id", "pose"}
 
 
 def _fill(path: str, seeds: dict[str, str]) -> tuple[str, bool]:

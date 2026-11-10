@@ -9,6 +9,79 @@ from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _s
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
+CHARACTER_NAME_MAX_LEN = 32
+CHARACTER_NAME_DESCRIPTION = "Optional character name shown for this subagent in the Cena, e.g. a fun short name"
+_SUBAGENT_CHARACTER_NAMES: dict[tuple[str, str], str] = {}
+
+
+def sanitize_character_name(raw: object) -> str | None:
+    """Trim, strip control characters and bound to <= 32 characters."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    cleaned = "".join(
+        ch for ch in str(raw) if ord(ch) >= 32 and not (0x7F <= ord(ch) <= 0x9F)
+    ).strip()
+    if len(cleaned) > CHARACTER_NAME_MAX_LEN:
+        cleaned = cleaned[:CHARACTER_NAME_MAX_LEN].rstrip()
+    return cleaned or None
+
+
+def remember_subagent_character_name(
+    conversation_id: str,
+    agent_id: str,
+    record: dict[str, object],
+    character_name: object = None,
+    prior: object = None,
+) -> str | None:
+    """Sanitize and persist character_name on the subagent record (preserving prior on resume)."""
+    conv_key = (str(conversation_id or ""), str(agent_id or ""))
+    resolved = sanitize_character_name(character_name) or sanitize_character_name(
+        record.get("character_name") or prior or _SUBAGENT_CHARACTER_NAMES.get(conv_key)
+    )
+    if resolved:
+        record["character_name"] = resolved
+        _SUBAGENT_CHARACTER_NAMES[conv_key] = resolved
+    return resolved
+
+
+def resolve_subagent_character_name(
+    conversation_id: str,
+    main_agent_id: str,
+    records: Mapping[str, Any],
+    agent_id: str | None = None,
+    payload: Mapping[str, object] | None = None,
+) -> str | None:
+    """Look up the character_name for a subagent event payload."""
+    conv_id = str(conversation_id or "")
+    candidate_ids: list[str] = []
+    if isinstance(payload, Mapping):
+        for key in ("to_agent_id", "from_agent_id", "agent_id"):
+            raw_val = payload.get(key)
+            if isinstance(raw_val, str) and raw_val.strip() and raw_val.strip() != main_agent_id:
+                candidate_ids.append(raw_val.strip())
+    if agent_id and agent_id != main_agent_id:
+        candidate_ids.append(str(agent_id))
+    for cid in candidate_ids:
+        rec = records.get(cid)
+        if isinstance(rec, Mapping):
+            cname = sanitize_character_name(rec.get("character_name"))
+            if cname:
+                return cname
+        remembered = _SUBAGENT_CHARACTER_NAMES.get((conv_id, cid))
+        if remembered:
+            return remembered
+    if isinstance(payload, Mapping):
+        raw_name = payload.get("agent_name")
+        if isinstance(raw_name, str) and raw_name.strip():
+            target_name = raw_name.strip()
+            for rec in records.values():
+                if isinstance(rec, Mapping) and str(rec.get("name") or "") == target_name:
+                    cname = sanitize_character_name(rec.get("character_name"))
+                    if cname:
+                        return cname
+    return None
+
+
 class AgentTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
@@ -37,6 +110,7 @@ class AgentTools:
         run_in_background: bool = False,
         teammate_name: str | None = None,
         team_name: str | None = None,
+        character_name: str | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -57,9 +131,16 @@ class AgentTools:
             raise AgentToolError("task must be a non-blank string.")
         clean_agent_id = str(agent_id).strip() if agent_id is not None and str(agent_id).strip() else None
         clean_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else None
+        clean_char_name = sanitize_character_name(character_name)
         if self._run_subagent is not None:
             # W5: a named teammate of an agent team (only passed when asked, so older callables keep working).
-            team = {"teammate_name": str(teammate_name).strip(), "team_name": str(team_name or "").strip()} if teammate_name and str(teammate_name).strip() else {}
+            extra: dict[str, Any] = (
+                {"teammate_name": str(teammate_name).strip(), "team_name": str(team_name or "").strip()}
+                if teammate_name and str(teammate_name).strip()
+                else {}
+            )
+            if clean_char_name is not None:
+                extra["character_name"] = clean_char_name
             try:
                 return self._run_subagent(
                     clean_type,
@@ -68,7 +149,7 @@ class AgentTools:
                     model_id=clean_model_id,
                     agent_id=clean_agent_id,
                     run_in_background=bool(run_in_background),
-                    **team,
+                    **extra,
                 )
             except TypeError:
                 return self._run_subagent(
@@ -107,6 +188,7 @@ class AgentInput(ToolInput):
     resume: str | None = Field(None, description="Id of a previous subagent to continue.")
     name: str | None = Field(None, description="Name a teammate of an agent team, so the team can message it with SendMessage.")
     team_name: str | None = Field(None, description="The team the named teammate belongs to.")
+    character_name: str | None = Field(None, description=CHARACTER_NAME_DESCRIPTION)
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
@@ -165,6 +247,7 @@ SPECS: tuple[ToolSpec, ...] = (
             "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent to inspect or await its output."},
             "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},
             "team_name": {**_TEXT, "description": "Optional team of the named teammate."},
+            "character_name": {**_TEXT, "description": CHARACTER_NAME_DESCRIPTION},
         }, ("subagent_type", "task")),
         handler="run_subagent",
         kind="agent",

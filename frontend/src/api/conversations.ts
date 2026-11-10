@@ -678,6 +678,7 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
     if (candidate !== undefined) event[key] = candidate
   }
   assign('agentName', optionalText(payload.agent_name, 120))
+  assign('characterName', optionalText(payload.character_name, 32))
   assign('parentAgentId', optionalText(item.parent_agent_id, 255))
   assign('turnId', optionalText(item.turn_id, 255))
   assign('messageId', optionalText(payload.message_id, 255))

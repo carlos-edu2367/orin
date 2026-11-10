@@ -15,6 +15,93 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
  * trail. Interactive approvals and browser captures stay separate because they
  * need their own controls and preview.
  */
+export function isWaitingModelEvent(event: ConversationActivityEvent): boolean {
+  const phase = event.payload?.phase ?? event.phase
+  if (phase === 'waiting_model' || event.payload?.waiting_model === true) {
+    return true
+  }
+  if (
+    event.type === 'tool.progressed' &&
+    !event.toolName &&
+    !event.tool &&
+    typeof event.summary === 'string' &&
+    /^pensando(?:\s+há\s+\d+\s*s)?$/i.test(event.summary.trim())
+  ) {
+    return true
+  }
+  return false
+}
+
+export function computeSubagentDelegationStatus(
+  events: ConversationActivityEvent[],
+): Map<string, 'completed' | 'failed'> {
+  const statusByTarget = new Map<string, 'completed' | 'failed'>()
+  const setTarget = (target: unknown, status: 'completed' | 'failed') => {
+    if (typeof target !== 'string') return
+    const clean = target.trim()
+    if (!clean) return
+    statusByTarget.set(clean, status)
+  }
+  for (const event of events) {
+    const turnKey = event.turnId ?? ''
+    const recordForEvent = (status: 'completed' | 'failed') => {
+      const candidates = [
+        event.agentId,
+        event.payload?.from_agent_id,
+        event.payload?.agent_id,
+        event.agentName,
+        event.label,
+        event.payload?.agent_name,
+        event.payload?.sender_name,
+        event.payload?.label,
+      ]
+      for (const candidate of candidates) {
+        if (typeof candidate === 'string' && candidate.trim()) {
+          setTarget(`${turnKey}:${candidate.trim()}`, status)
+          setTarget(candidate.trim(), status)
+        }
+      }
+    }
+    if (
+      event.type === 'delegation.failed' ||
+      event.type === 'DELEGATION_FAILED' ||
+      (event.type === 'turn.failed' && Boolean(event.parentAgentId))
+    ) {
+      recordForEvent('failed')
+    } else if (
+      event.type === 'delegation.completed' ||
+      event.type === 'DELEGATION_COMPLETED' ||
+      event.type === 'agent.message_received' ||
+      event.type === 'AGENT_MESSAGE_RECEIVED' ||
+      (event.type === 'turn.completed' && Boolean(event.parentAgentId))
+    ) {
+      recordForEvent('completed')
+    }
+  }
+  return statusByTarget
+}
+
+export function isSubagentDelegationFailed(
+  statusByTarget: Map<string, 'completed' | 'failed'>,
+  agentId?: string,
+  agentName?: string,
+  turnId?: string,
+): boolean {
+  const turnKey = turnId ?? ''
+  const keys = [
+    agentId ? `${turnKey}:${agentId}` : '',
+    agentName ? `${turnKey}:${agentName}` : '',
+    agentId ?? '',
+    agentName ?? '',
+  ].filter(Boolean)
+  for (const key of keys) {
+    const status = statusByTarget.get(key)
+    if (status === 'completed') return false
+    if (status === 'failed') return true
+  }
+  return false
+}
+
 export function normalizeGeneratingArgumentsEvent(
   event: ConversationActivityEvent,
 ): ConversationActivityEvent {
@@ -46,6 +133,7 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
   const groups: ActivityGroup[] = []
   const renderedCodeRuns = new Set<string>()
   const settled = computeSettledEventIds(events)
+  const subagentDelegationStatus = computeSubagentDelegationStatus(events)
   const firstCodeEventByTurn = new Map<string, ConversationActivityEvent>()
   const primaryAgentByTurn = new Map<string, string>()
   for (const event of events) {
@@ -178,12 +266,20 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
     }
     const key = groupingKey(event)
     if (subagentEvent && event.kind === 'tool' && key.startsWith('tool:')) {
+      const delegationFailed = isSubagentDelegationFailed(
+        subagentDelegationStatus,
+        event.agentId,
+        event.agentName,
+        event.turnId,
+      )
       const existingWaveGroup = subagentWaveGroups.get(key)
       if (existingWaveGroup) {
         applyEventToGroup(existingWaveGroup, event)
+        existingWaveGroup.failed = delegationFailed
         continue
       }
       const created = soloGroup(event)
+      created.failed = delegationFailed
       groups.push(created)
       subagentWaveGroups.set(key, created)
       continue
@@ -191,14 +287,46 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
     const previous = groups[groups.length - 1]
     if (previous && previous.id === key && previous.kind === event.kind) {
       applyEventToGroup(previous, event)
+      if (subagentEvent && event.kind === 'tool') {
+        previous.failed = isSubagentDelegationFailed(
+          subagentDelegationStatus,
+          previous.agentId,
+          previous.agentName,
+          event.turnId,
+        )
+      }
       continue
     }
-    groups.push(soloGroup(event))
+    const created = soloGroup(event)
+    if (subagentEvent && event.kind === 'tool') {
+      created.failed = isSubagentDelegationFailed(
+        subagentDelegationStatus,
+        created.agentId,
+        created.agentName,
+        event.turnId,
+      )
+    }
+    groups.push(created)
   }
   return groups
 }
 
 export function applyEventToGroup(group: ActivityGroup, event: ConversationActivityEvent): void {
+  if (isWaitingModelEvent(event)) {
+    const existingWaitIdx = group.events.findIndex((item) => isWaitingModelEvent(item))
+    if (existingWaitIdx >= 0) {
+      group.events[existingWaitIdx] = event
+    } else {
+      group.events.push(event)
+    }
+    group.state = event.state
+    group.label = groupLabel(group)
+    return
+  }
+  const waitIdx = group.events.findIndex((item) => isWaitingModelEvent(item))
+  if (waitIdx >= 0 && event.kind === 'tool') {
+    group.events.splice(waitIdx, 1)
+  }
   if (event.type === 'tool.progressed') {
     const matchIndex = event.invocationId
       ? group.events.findIndex((item) => item.invocationId === event.invocationId && item.type !== 'tool.finished')
@@ -316,9 +444,10 @@ export function computeSettledEventIds(
         )
         const isPreStartProgress =
           openEvent.type === 'tool.progressed' &&
-          (eventCallId
-            ? openCallId === eventCallId || !openCallId || (isGeneratingArgs && sameToolName)
-            : true)
+          (isWaitingModelEvent(openEvent) ||
+            (eventCallId
+              ? openCallId === eventCallId || !openCallId || (isGeneratingArgs && sameToolName)
+              : true))
         if (isPreStartProgress) {
           if (openEvent.eventId) settled.add(openEvent.eventId)
         } else {
@@ -331,8 +460,21 @@ export function computeSettledEventIds(
     }
     if (event.type === 'tool.progressed') {
       const list = openByTurn.get(turnScope) ?? []
-      list.push(event)
-      openByTurn.set(turnScope, list)
+      if (isWaitingModelEvent(event)) {
+        const remaining: ConversationActivityEvent[] = []
+        for (const openEvent of list) {
+          if (isWaitingModelEvent(openEvent)) {
+            if (openEvent.eventId) settled.add(openEvent.eventId)
+          } else {
+            remaining.push(openEvent)
+          }
+        }
+        remaining.push(event)
+        openByTurn.set(turnScope, remaining)
+      } else {
+        list.push(event)
+        openByTurn.set(turnScope, list)
+      }
       continue
     }
     if (event.type === 'tool.finished' || event.type === 'tool.completed' || event.type === 'tool.failed') {
@@ -349,9 +491,11 @@ export function computeSettledEventIds(
         const sameToolName = Boolean(
           event.toolName && openEvent.toolName && event.toolName === openEvent.toolName,
         )
-        const matchesInvocation = eventCallId
-          ? openCallId === eventCallId || !openCallId || (isGeneratingArgs && sameToolName)
-          : true
+        const matchesInvocation =
+          isWaitingModelEvent(openEvent) ||
+          (eventCallId
+            ? openCallId === eventCallId || !openCallId || (isGeneratingArgs && sameToolName)
+            : true)
         if (matchesInvocation) {
           if (openEvent.eventId) settled.add(openEvent.eventId)
         } else {
@@ -360,6 +504,36 @@ export function computeSettledEventIds(
       }
       openByTurn.set(turnScope, remaining)
       continue
+    }
+    if (
+      event.type === 'delegation.failed' ||
+      event.type === 'DELEGATION_FAILED' ||
+      event.type === 'delegation.completed' ||
+      event.type === 'DELEGATION_COMPLETED' ||
+      event.type === 'agent.message_received' ||
+      event.type === 'AGENT_MESSAGE_RECEIVED'
+    ) {
+      const targetIds = new Set(
+        [
+          event.agentId,
+          typeof event.payload?.from_agent_id === 'string' ? event.payload.from_agent_id : undefined,
+          typeof event.payload?.agent_id === 'string' ? event.payload.agent_id : undefined,
+        ].filter((id): id is string => Boolean(id)),
+      )
+      for (const [scope, list] of openByTurn.entries()) {
+        const [scopeAgentId] = scope.split(':', 1)
+        if (targetIds.has(scopeAgentId)) {
+          const remaining: ConversationActivityEvent[] = []
+          for (const openEvent of list) {
+            if (isWaitingModelEvent(openEvent)) {
+              if (openEvent.eventId) settled.add(openEvent.eventId)
+            } else {
+              remaining.push(openEvent)
+            }
+          }
+          openByTurn.set(scope, remaining)
+        }
+      }
     }
     if (TERMINAL_TURN_TYPES.has(event.type) && !event.parentAgentId) {
       for (const [scope, list] of openByTurn.entries()) {
@@ -383,7 +557,8 @@ export function computeSettledEventIds(
     for (const ev of events) {
       if (
         ev.type === 'tool.progressed' &&
-        (ev.phase === 'generating_arguments' ||
+        (isWaitingModelEvent(ev) ||
+          ev.phase === 'generating_arguments' ||
           ev.payload?.phase === 'generating_arguments' ||
           /^Preparando\b/i.test(ev.summary ?? ''))
       ) {
@@ -396,16 +571,17 @@ export function computeSettledEventIds(
 }
 
 function soloGroup(event: ConversationActivityEvent): ActivityGroup {
+  const waitingModel = isWaitingModelEvent(event)
   const group: ActivityGroup = {
     id: groupingKey(event),
     kind: event.kind,
     state: event.state,
     label: '',
-    count: 1,
+    count: waitingModel ? 0 : 1,
     events: [event],
     agentId: event.agentId,
     agentName: event.agentName,
-    failed: event.state === 'failed',
+    failed: waitingModel ? false : event.state === 'failed',
   }
   group.label = groupLabel(group)
   return group
@@ -653,9 +829,9 @@ const ACTION_PHRASES: Record<ActionClass, [singular: string, plural: string]> = 
 
 const ACTION_ORDER: ActionClass[] = ['read', 'edit', 'command', 'web', 'memory', 'skill', 'tool']
 
-/** The calls a tool group really made; folded `artifact.created` records are not calls. */
+/** The calls a tool group really made; folded `artifact.created` records and `waiting_model` notices are not calls. */
 export function toolCalls(group: ActivityGroup): ConversationActivityEvent[] {
-  return group.events.filter((event) => event.kind === 'tool')
+  return group.events.filter((event) => event.kind === 'tool' && !isWaitingModelEvent(event))
 }
 
 /**

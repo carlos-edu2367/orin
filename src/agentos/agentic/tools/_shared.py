@@ -353,6 +353,7 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "role": "description",
         "background": "run_in_background",
         "resume": "agent_id",
+        "characterName": "character_name",
     },
     "ask_agent": {"prompt": "task", "agent": "name"},
     "read_project_conversation": {"max_messages": "limit"},

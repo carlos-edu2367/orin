@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from agentos.providers.antigravity_cli.adapter import AntigravityCliAdapter
 from agentos.providers.antigravity_cli.catalog import (
+    ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS,
     DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW,
     FALLBACK_ANTIGRAVITY_MODELS,
+    clear_antigravity_models_cache,
     context_window_for,
     discover_antigravity_models,
+    get_cached_antigravity_models,
+    set_cached_antigravity_models,
 )
 from agentos.providers.antigravity_cli.command import (
     DEFAULT_ANTIGRAVITY_MODEL,
@@ -31,6 +35,7 @@ from agentos.providers.antigravity_cli.stream import (
 )
 
 __all__ = [
+    "ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS",
     "AntigravityCliAdapter",
     "AntigravityStreamTranslator",
     "DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW",
@@ -45,12 +50,15 @@ __all__ = [
     "build_isolated_antigravity_env",
     "classify_antigravity_error",
     "clean_antigravity_model_id",
+    "clear_antigravity_models_cache",
     "context_window_for",
     "discover_antigravity_models",
     "encode_antigravity_user_turn",
+    "get_cached_antigravity_models",
     "is_antigravity_version_supported",
     "redact_antigravity_argv",
     "resolve_antigravity_binary",
     "resolve_antigravity_home",
+    "set_cached_antigravity_models",
     "wire_antigravity_tool_server",
 ]

@@ -145,8 +145,12 @@ class ProviderModelCatalogService:
             )
             if adapter is None:
                 raise ProviderCatalogUnavailable("provider catalog is not supported")
+            refresh_models_fn = getattr(adapter, "refresh_models", None)
+            raw_adapter_models = (
+                refresh_models_fn() if callable(refresh_models_fn) else adapter.models()
+            )
             records: list[ProviderModelRecord] = []
-            for item in adapter.models():
+            for item in raw_adapter_models:
                 model_id = str(getattr(item, "id", None) or getattr(item, "model_id", "")).strip()
                 if not model_id:
                     continue

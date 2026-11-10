@@ -83,7 +83,7 @@ def test_catalog_includes_playwright_mcp_entry():
     assert entry.display_name == "Playwright"
     assert entry.transport is McpTransport.STDIO
     assert entry.command == "npx"
-    assert "@playwright/mcp@latest" in entry.args
+    assert entry.args == ("-y", "@playwright/mcp@latest", "--isolated")
     assert entry.secrets == ()
     assert any(item.catalog_id == "playwright" for item in search_catalog("navegador"))
 

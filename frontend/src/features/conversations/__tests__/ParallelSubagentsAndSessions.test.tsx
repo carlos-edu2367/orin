@@ -211,6 +211,19 @@ describe('Parallel Subagents Timeline & Folding', () => {
         command: 'pytest',
         summary: 'pytest failed',
       }),
+      {
+        eventId: 'w2-sub3-delegation-failed',
+        cursor: '7',
+        turnId: 'turn-1',
+        agentId: 'agent:sub-3',
+        parentAgentId: 'agent:main',
+        agentName: 'verifier',
+        kind: 'agent',
+        type: 'delegation.failed',
+        state: 'failed',
+        label: 'verifier',
+        summary: 'verifier não concluiu a tarefa',
+      },
     ]
 
     render(<TurnTimeline events={events} mode="code" turnCompleted={true} />)
@@ -223,6 +236,119 @@ describe('Parallel Subagents Timeline & Folding', () => {
     expect(allSubagentCards[3].getAttribute('data-agent-id')).toBe('agent:sub-3')
     expect(allSubagentCards[3].getAttribute('data-status')).toBe('failed')
     expect(allSubagentCards[3].textContent).toContain('Falhou')
+  })
+
+  it('does not mark a completed subagent card as Falhou when individual tool calls fail, while still showing the tool failure count and excluding waiting_model from actions', () => {
+    const events: ConversationActivityEvent[] = [
+      makeSubagentToolEvent({
+        eventId: 'sub1-wait-1',
+        cursor: '1',
+        agentId: 'agent:sub-1',
+        agentName: 'general-3',
+        type: 'tool.progressed',
+        state: 'working',
+        status: 'running',
+        toolName: '',
+        phase: 'waiting_model',
+        payload: { phase: 'waiting_model', waiting_model: true, seconds: 15 },
+        summary: 'pensando há 15 s',
+      }),
+      makeSubagentToolEvent({
+        eventId: 'sub1-click-timeout',
+        cursor: '2',
+        agentId: 'agent:sub-1',
+        agentName: 'general-3',
+        type: 'tool.finished',
+        state: 'failed',
+        status: 'failed',
+        toolName: 'mcp__playwright__browser_click',
+        summary: 'Playwright: timed out',
+      }),
+      makeSubagentToolEvent({
+        eventId: 'sub1-snapshot-ok',
+        cursor: '3',
+        agentId: 'agent:sub-1',
+        agentName: 'general-3',
+        type: 'tool.finished',
+        state: 'completed',
+        status: 'succeeded',
+        toolName: 'mcp__playwright__browser_snapshot',
+        summary: 'Playwright · browser_snapshot',
+      }),
+      makeSubagentToolEvent({
+        eventId: 'sub1-wait-2',
+        cursor: '4',
+        agentId: 'agent:sub-1',
+        agentName: 'general-3',
+        type: 'tool.progressed',
+        state: 'working',
+        status: 'running',
+        toolName: '',
+        phase: 'waiting_model',
+        payload: { phase: 'waiting_model', waiting_model: true, seconds: 20 },
+        summary: 'pensando há 20 s',
+      }),
+      {
+        eventId: 'sub1-completed',
+        cursor: '5',
+        turnId: 'turn-1',
+        agentId: 'agent:sub-1',
+        parentAgentId: 'agent:main',
+        agentName: 'general-3',
+        kind: 'agent',
+        type: 'agent.message_received',
+        state: 'completed',
+        label: 'general-3',
+        payload: { from_agent_id: 'agent:sub-1', agent_name: 'general-3' },
+        summary: 'Recebeu a resposta de general-3',
+      },
+      makeSubagentToolEvent({
+        eventId: 'sub2-tool-ok',
+        cursor: '6',
+        agentId: 'agent:sub-2',
+        agentName: 'general-4',
+        type: 'tool.finished',
+        state: 'completed',
+        status: 'succeeded',
+        toolName: 'read_file',
+        path: 'src/App.tsx',
+        summary: 'Leu src/App.tsx',
+      }),
+      {
+        eventId: 'sub2-delegation-failed',
+        cursor: '7',
+        turnId: 'turn-1',
+        agentId: 'agent:sub-2',
+        parentAgentId: 'agent:main',
+        agentName: 'general-4',
+        kind: 'agent',
+        type: 'delegation.failed',
+        state: 'failed',
+        label: 'general-4',
+        summary: 'general-4 não concluiu a tarefa',
+      },
+    ]
+
+    const timeline = buildTurnTimeline(events, 'turn-1', 'msg-1', '', true)
+    render(<TurnTimeline items={timeline} events={events} mode="code" turnCompleted={true} />)
+
+    const cards = screen.getAllByTestId('subagent-task-group')
+    expect(cards).toHaveLength(2)
+
+    // Subagent 1: completed delegation with 1 failed tool + 1 succeeded tool + 2 waiting_model notices
+    expect(cards[0].getAttribute('data-agent-id')).toBe('agent:sub-1')
+    expect(cards[0].getAttribute('data-status')).toBe('completed')
+    expect(cards[0].textContent).toContain('Concluído')
+    expect(cards[0].textContent).not.toContain('Falhou')
+    expect(cards[0].textContent).toContain('2 ações')
+    expect(cards[0].textContent).toContain('1 falha')
+    expect(cards[0].textContent).not.toContain('tool.progressed')
+
+    // Subagent 2: failed delegation even though its tool call succeeded
+    expect(cards[1].getAttribute('data-agent-id')).toBe('agent:sub-2')
+    expect(cards[1].getAttribute('data-status')).toBe('failed')
+    expect(cards[1].textContent).toContain('Falhou')
+    expect(cards[1].textContent).toContain('1 ação')
   })
 })
 
