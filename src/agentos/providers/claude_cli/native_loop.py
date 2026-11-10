@@ -18,9 +18,11 @@ from agentos.providers.claude_cli.command import (
     build_claude_command,
     build_isolated_claude_env,
     claude_cli_version,
+    create_process_cwd,
     ensure_isolated_cwd,
     is_version_validated,
     merge_with_system_env,
+    remove_process_cwd,
     user_event_line,
     write_owner_only_temp,
 )
@@ -30,6 +32,7 @@ IDLE_TIMEOUT_SECONDS = _DEFAULT_IDLE_TIMEOUT_SECONDS
 
 from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
 from agentos.providers.claude_cli.errors import (
+    CliBuiltinToolDetour,
     CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
@@ -106,8 +109,22 @@ def find_forbidden_item_kind(
     raw_line: str | None = None,
     tool_name: str | None = None,
 ) -> str | None:
+    matches = find_forbidden_item_kinds(
+        forbidden, raw=raw, raw_line=raw_line, tool_name=tool_name
+    )
+    return matches[0] if matches else None
+
+
+def find_forbidden_item_kinds(
+    forbidden: frozenset[str] | set[str] | Sequence[str],
+    *,
+    raw: Mapping[str, Any] | None = None,
+    raw_line: str | None = None,
+    tool_name: str | None = None,
+) -> list[str]:
+    """Every forbidden kind/tool in the event, first match first (empty when there is none)."""
     if not forbidden:
-        return None
+        return []
     forbidden_set = (
         forbidden
         if isinstance(forbidden, (set, frozenset))
@@ -196,10 +213,11 @@ def find_forbidden_item_kind(
         _collect(payload, 0)
     if tool_name:
         candidates.append(tool_name)
+    matches: list[str] = []
     for cand in candidates:
-        if isinstance(cand, str) and cand in forbidden_set:
-            return cand
-    return None
+        if isinstance(cand, str) and cand in forbidden_set and cand not in matches:
+            matches.append(cand)
+    return matches
 
 
 @dataclass(slots=True)
@@ -314,7 +332,9 @@ class NativeTurnHandle:
         ticket: CliSlotTicket | None = None,
         conversation_id: str = "",
         on_waiting_slot: Callable[..., None] | None = None,
+        process_cwd: Path | None = None,
     ) -> None:
+        self._process_cwd = process_cwd
         self._adapter: CliAgentAdapter = (
             adapter if adapter is not None else ClaudeCliAdapter()
         )
@@ -358,6 +378,11 @@ class NativeTurnHandle:
     @property
     def mcp_url(self) -> str:
         return self._bg_server.handle.url
+
+    @property
+    def process_cwd(self) -> Path | None:
+        """The folder this process alone runs in (None when the CLI shares the request's folder)."""
+        return self._process_cwd
 
     @property
     def in_flight(self) -> int:
@@ -456,23 +481,40 @@ class NativeTurnHandle:
             stdin.write(line)
             stdin.flush()
 
+    def _stop_for_forbidden(self, bad_kinds: Sequence[str]) -> None:
+        """Stop the process for a built-in tool or forbidden item; always raises.
+
+        Only when every forbidden thing in the event is a recoverable built-in tool (read-only or management,
+        see `CliCapabilities.recoverable_builtin_tools`) is it a CliBuiltinToolDetour the runner may resume
+        from; anything else stays a plain security abort.
+        """
+        recoverable = frozenset(
+            getattr(self._adapter.capabilities, "recoverable_builtin_tools", frozenset()) or ()
+        )
+        dangerous = [kind for kind in bad_kinds if kind not in recoverable]
+        if not dangerous:
+            self.refuse_tools(f"built-in tool: {bad_kinds[0]}")
+            self.close()
+            raise CliBuiltinToolDetour(bad_kinds[0])
+        self.refuse_tools(f"forbidden item: {dangerous[0]}")
+        self.close()
+        raise CliSecurityAbort(
+            f"CLI emitted forbidden item kind '{dangerous[0]}' (native tools must remain disabled)."
+        )
+
     def _dispatch_event(
         self,
         ev: CliEvent,
         sink: NativeTurnSink,
         text_parts: list[str],
     ) -> NativeTurnOutcome | None:
-        bad_kind = find_forbidden_item_kind(
+        bad_kinds = find_forbidden_item_kinds(
             self._adapter.capabilities.forbidden_item_kinds,
             raw=ev.raw if isinstance(ev.raw, Mapping) else None,
             tool_name=ev.tool_name,
         )
-        if bad_kind is not None:
-            self.refuse_tools(f"forbidden item: {bad_kind}")
-            self.close()
-            raise CliSecurityAbort(
-                f"CLI emitted forbidden item kind '{bad_kind}' (native tools must remain disabled)."
-            )
+        if bad_kinds:
+            self._stop_for_forbidden(bad_kinds)
 
         if ev.kind == CliEventKind.INIT:
             init = self._parser.init
@@ -845,16 +887,12 @@ class NativeTurnHandle:
             idle_deadline = now_after_line + idle_timeout
             idle_extended = False
             self._record_non_json_line(line)
-            bad_line_kind = find_forbidden_item_kind(
+            bad_line_kinds = find_forbidden_item_kinds(
                 self._adapter.capabilities.forbidden_item_kinds,
                 raw_line=line,
             )
-            if bad_line_kind is not None:
-                self.refuse_tools(f"forbidden item: {bad_line_kind}")
-                self.close()
-                raise CliSecurityAbort(
-                    f"CLI emitted forbidden item kind '{bad_line_kind}' (native tools must remain disabled)."
-                )
+            if bad_line_kinds:
+                self._stop_for_forbidden(bad_line_kinds)
             for ev in self._parser.feed_line(line):
                 outcome = self._dispatch_event(ev, sink, text_parts)
                 if outcome is not None:
@@ -974,6 +1012,12 @@ class NativeTurnHandle:
             for tmp in self._temp_files:
                 try:
                     tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            if self._process_cwd is not None:
+                try:
+                    remove_process_cwd(self._process_cwd)
                 except Exception:
                     pass
 
@@ -1122,19 +1166,26 @@ def start_native_turn_for_provider(
     bg_server: BackgroundTurnToolServer | None = None
     temp_files: list[Path] = []
     proc: Any | None = None
+    process_cwd: Path | None = None
 
     try:
         bg_server = BackgroundTurnToolServer.start(
             TurnToolServer(wrapped_executor, server_name=request.server_name)
         )
         ensure_isolated_cwd(request.cwd)
+        # agy reads `.agents/mcp_config.json` (this turn's tool-server URL and token) from its working folder
+        # when it starts. In a shared folder a process started a moment later overwrote it, and the first
+        # one sent its tool calls to the other turn's server: each process gets a folder of its own.
+        uses_cwd_wiring = bool(
+            getattr(getattr(adapter, "capabilities", None), "per_process_cwd", False)
+            or getattr(adapter, "name", "") == "antigravity"
+        )
+        if uses_cwd_wiring:
+            process_cwd = create_process_cwd(request.cwd)
+        run_cwd = process_cwd if process_cwd is not None else request.cwd
         wire_fn = getattr(adapter, "wire_tool_server", None)
         if callable(wire_fn):
-            wiring_dir = (
-                request.cwd
-                if getattr(adapter, "name", "") == "antigravity"
-                else Path(tempfile.gettempdir())
-            )
+            wiring_dir = run_cwd if uses_cwd_wiring else Path(tempfile.gettempdir())
             wiring = wire_fn(
                 bg_server.handle,
                 wiring_dir,
@@ -1238,7 +1289,7 @@ def start_native_turn_for_provider(
         t0 = provider._clock()
         proc = popen_fn(
             popen_cmd,
-            cwd=str(request.cwd),
+            cwd=str(run_cwd),
             env=isolated_env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -1313,6 +1364,7 @@ def start_native_turn_for_provider(
             ticket=ticket,
             conversation_id=request.conversation_id,
             on_waiting_slot=request.on_waiting_slot,
+            process_cwd=process_cwd,
         )
         wrapped_executor.handle = handle
         return handle
@@ -1333,6 +1385,16 @@ def start_native_turn_for_provider(
         for tmp in temp_files:
             try:
                 tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+        if process_cwd is not None:
+            if proc is not None:
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+            try:
+                remove_process_cwd(process_cwd)
             except Exception:
                 pass
         ticket.release()

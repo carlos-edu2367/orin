@@ -29,7 +29,9 @@ from agentos.providers.antigravity_cli.command import (
 )
 from agentos.providers.antigravity_cli.errors import classify_antigravity_error
 from agentos.providers.antigravity_cli.stream import (
+    ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES,
     FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS,
+    RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS,
     AntigravityStreamTranslator,
 )
 from agentos.providers.cli_adapter import (
@@ -66,6 +68,12 @@ class AntigravityCliAdapter:
         max_tool_call_seconds=180,
         # agy 1.5.x cuts a longer USER_INPUT at the end (re-checked on 1.5.4: 300 KB lost the question).
         max_user_message_bytes=190_791,
+        # agy reads `.agents/mcp_config.json` from its working folder: a shared one crossed tool calls
+        # between turns started seconds apart (real agy 1.5.5: 5 of 6).
+        per_process_cwd=True,
+        # Read-only/management built-ins (manage_task, list_dir...): the process stops, the turn resumes.
+        recoverable_builtin_tools=RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS,
+        builtin_tool_alternatives=ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES,
     )
 
     def __init__(

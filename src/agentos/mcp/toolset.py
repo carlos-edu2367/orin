@@ -7,6 +7,7 @@ with the turn, so a configured-but-unused server costs nothing.
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from dataclasses import replace
@@ -21,6 +22,20 @@ if TYPE_CHECKING:
     from .auth import McpOAuth
     from .client import McpClient
     from .token_source import TokenSource
+
+# Playwright (playwright-core) when the browser channel it was told to use is not installed where it looks.
+_MISSING_BROWSER = re.compile(r"Chromium distribution '([A-Za-z0-9_-]{1,40})' is not found")
+
+
+def _missing_browser_hint(channel: str) -> str:
+    return (
+        f"[Orin] The '{channel}' browser this Playwright server uses was not found on this machine. Do not retry "
+        "the same call. Tell the person to either install Google Chrome (https://www.google.com/chrome/) or "
+        "change the Playwright MCP server's arguments to use Microsoft Edge, which ships with Windows: "
+        "add `--browser msedge` (Configurações > MCP > Playwright). "
+        f"Installing it for Playwright alone also works: `npx playwright install {channel}`."
+    )
+
 
 MAX_MCP_RESULT_CHARS = 100_000
 MAX_MCP_RAW_RESULT_CHARS = 500_000
@@ -403,7 +418,14 @@ class McpToolProvider:
                 return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS], payload, "MCP_UNAVAILABLE")
             text, images = _render(result.content)
             if result.is_error:
-                return ToolOutcome("failed", f"{config.display_name} recusou {tool.name}"[:240],
+                summary = f"{config.display_name} recusou {tool.name}"
+                missing = _MISSING_BROWSER.search(text or "")
+                if missing is not None:
+                    channel = missing.group(1)
+                    summary = (f"{config.display_name}: o navegador '{channel}' não foi encontrado; "
+                               "instale o Google Chrome ou configure o servidor com --browser msedge")
+                    text = f"{text}\n\n{_missing_browser_hint(channel)}"
+                return ToolOutcome("failed", summary[:240],
                                    text or "the server reported a tool error", payload, "MCP_TOOL_ERROR")
             return ToolOutcome("succeeded", f"{config.display_name} · {tool.name}"[:240], text, payload, None, images)
 

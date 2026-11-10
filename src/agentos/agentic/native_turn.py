@@ -20,6 +20,7 @@ from agentos.providers.claude_cli.command import (
     ensure_isolated_cwd,
 )
 from agentos.providers.claude_cli.errors import (
+    CliBuiltinToolDetour,
     CliSecurityAbort,
     NativeLoopUnavailable,
     ProviderTransportError,
@@ -38,6 +39,7 @@ from agentos.providers.claude_cli.text_protocol import (
     TranscriptState,
     _extract_content_text_and_images,
 )
+from agentos.agentic.tools.public_names import public_name as _public_tool_name
 from agentos.providers.cli_tools_mcp import (
     McpToolSpec,
     ToolCallRequest,
@@ -82,6 +84,26 @@ NATIVE_CWD: Path = native_workdir("claude")
 # Prior history a CLI with a stdin message cap (agy: 190,791 bytes) takes whole, with room for
 # multi-byte text and the current request. A CLI without a cap is bounded by its window instead.
 MAX_NATIVE_PRIOR_HISTORY_CHARS: int = 120_000
+# How many times one turn resumes after the CLI called a harmless built-in tool (agy's manage_task, list_dir...)
+# before it fails as it did before: a model that keeps calling it would otherwise restart the CLI forever.
+MAX_BUILTIN_TOOL_DETOURS: int = 2
+
+
+def builtin_tool_reminder(tool_name: str, alternatives: Sequence[str], *, prefix: str = "mcp_orin_") -> str:
+    """What the resumed model reads after it called one of the CLI's own tools."""
+    tool = str(tool_name or "that tool")
+    lines = [
+        f"The tool `{tool}` does not exist here: it is one of the CLI's own tools, which Orin turns off, so "
+        "calling it stopped the CLI. The turn continues from where it was; that call did not run.",
+        f"Use only the tools of the `orin` MCP server (their names start with `{prefix}`) and do not call "
+        f"`{tool}` or any other tool outside that list again.",
+    ]
+    named = [f"`{prefix}{name}`" for name in alternatives if name]
+    if named:
+        lines.append(f"For what `{tool}` does, use {', '.join(named)}.")
+    else:
+        lines.append("Nothing replaces it here: go on with the task using the tools you have.")
+    return "\n".join(lines)
 
 _REFUSAL_REASONS: dict[str, str] = {
     "REPEATED_TOOL_FAILURE": "the same tool call failed 3 times in a row",
@@ -2702,6 +2724,18 @@ class NativeTurnRunner:
                         error_code=stop_code,
                     )
                     return self.runtime._fail(self.turn, stop_code, process_count, executor.action_count)
+                if isinstance(exc, CliBuiltinToolDetour) and self._resume_after_builtin_tool(
+                    exc,
+                    provider_effect_id=provider_effect_id,
+                    executor=executor,
+                    sink=sink,
+                ):
+                    resume_session_id = None
+                    user_content = self._build_initial_user_content(tool_schemas)
+                    sink.reset_for_new_message()
+                    self.runtime._life(self.turn, "running")
+                    next_process = True
+                    continue
                 self._drain_in_flight_tools(executor)
                 if self._stream_did_work(sink, executor):
                     resumed, pause_result = self._handle_stream_interrupted(
@@ -2775,6 +2809,66 @@ class NativeTurnRunner:
                         handle.close()
                     except Exception:
                         pass
+
+    def _resume_after_builtin_tool(
+        self,
+        exc: CliBuiltinToolDetour,
+        *,
+        provider_effect_id: str | None,
+        executor: RuntimeToolExecutor,
+        sink: _RunnerSink,
+    ) -> bool:
+        """After the CLI called one of its own read-only/management tools (agy: manage_task), resume the turn.
+
+        The process is already dead (the built-in never ran past its announcement). The turn goes on from
+        Orin's history, as after a dropped stream, with a note that the tool does not exist and which Orin
+        tools do that job; never with the CLI's own --conversation, which pins the dead process's tool-server
+        URL and token. At most MAX_BUILTIN_TOOL_DETOURS times per turn; after that it fails as before.
+        """
+        self._drain_in_flight_tools(executor)
+        used = int(getattr(self, "_builtin_tool_detours", 0))
+        if (
+            used >= MAX_BUILTIN_TOOL_DETOURS
+            or self.runtime.cancelled(self.turn)
+            or self.runtime.clock() >= self.deadline
+            or self.runtime._has_unresolved_tool_effects(self.turn)
+        ):
+            return False
+        self._builtin_tool_detours = used + 1
+        tool_name = exc.tool_name
+        _LOGGER.warning(
+            "native turn %s: the CLI called its built-in tool %r; resuming from history (%d/%d)",
+            self.turn_id, tool_name, used + 1, MAX_BUILTIN_TOOL_DETOURS,
+        )
+        # The process's model output so far is in the history below; its tool calls were recorded as their own
+        # effects. This process's provider effect did not apply anything of its own.
+        self.runtime._effect_finished(
+            self.turn,
+            provider_effect_id,
+            state="NOT_APPLIED",
+            error_code="PROVIDER_BUILTIN_TOOL_REFUSED",
+        )
+        adapter = getattr(self.provider, "adapter", None)
+        caps = getattr(adapter, "capabilities", None)
+        alternatives = dict(getattr(caps, "builtin_tool_alternatives", ()) or ()).get(tool_name, ())
+        available = set(getattr(executor, "_valid_internal_names", ()) or ())
+        names = self.runtime._names
+        shown = [
+            (_public_tool_name(internal) if names is not None else internal)
+            for internal in alternatives
+            if not available or internal in available
+        ]
+        prefix = "mcp_orin_" if str(getattr(adapter, "name", "")) == "antigravity" else "mcp__orin__"
+        assistant_text = "".join(sink.text_parts).strip()
+        if assistant_text:
+            self.messages.append({"role": "assistant", "content": assistant_text})
+        self.messages.append(
+            {
+                "role": "user",
+                "content": system_reminder(builtin_tool_reminder(tool_name, shown, prefix=prefix)),
+            }
+        )
+        return True
 
     def _drain_in_flight_tools(self, executor: RuntimeToolExecutor) -> None:
         """Let tool calls still running in Orin finish before deciding how a dead CLI process goes on.

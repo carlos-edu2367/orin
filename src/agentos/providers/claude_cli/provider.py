@@ -21,10 +21,12 @@ from agentos.providers.claude_cli.command import (
     build_claude_command,
     build_isolated_claude_env,
     claude_cli_version,
+    create_process_cwd,
     ensure_isolated_cwd,
     is_version_validated,
     merge_with_system_env,
     redact_argv,
+    remove_process_cwd,
     resolve_claude_binary,
     write_owner_only_temp,
 )
@@ -603,6 +605,7 @@ class ClaudeCliProvider:
         stdout_thread: threading.Thread | None = None
         stderr_thread: threading.Thread | None = None
         fallback_wiring = None
+        process_cwd: Path | None = None
         parser = self.adapter.stream_translator()
         mono_started = time.monotonic()
         _ = self._clock()
@@ -640,8 +643,15 @@ class ClaudeCliProvider:
 
             prompt_file = self._ensure_prompt_file(system_prompt)
             safe_cwd_path = ensure_isolated_cwd()
-            safe_cwd = str(safe_cwd_path)
             wire_no_tools_fn = getattr(self.adapter, "wire_no_tools", None)
+            if callable(wire_no_tools_fn) or getattr(
+                self.adapter.capabilities, "per_process_cwd", False
+            ):
+                # The wiring (agy: `.agents/agents/orin.md` with this call's system prompt) lives in the
+                # working folder, so two concurrent calls must not share it.
+                process_cwd = create_process_cwd(safe_cwd_path)
+                safe_cwd_path = process_cwd
+            safe_cwd = str(safe_cwd_path)
             fallback_wiring = (
                 wire_no_tools_fn(safe_cwd_path, system_prompt_file=prompt_file)
                 if callable(wire_no_tools_fn)
@@ -1058,6 +1068,11 @@ class ClaudeCliProvider:
             if stderr_thread is not None:
                 try:
                     stderr_thread.join(timeout=0.5)
+                except Exception:
+                    pass
+            if process_cwd is not None:
+                try:
+                    remove_process_cwd(process_cwd)
                 except Exception:
                     pass
             if cmd:

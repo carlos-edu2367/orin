@@ -56,6 +56,22 @@ class CliSecurityAbort(ProviderTransportError):
         super().__init__(message, status_code=401, exhausted=True)
 
 
+class CliBuiltinToolDetour(CliSecurityAbort):
+    """The CLI called one of its own tools that changes nothing (agy: manage_task, list_dir...).
+
+    The process was stopped exactly as for any built-in tool (a CliSecurityAbort to every caller that does not
+    know better), but the native runner may resume the turn from Orin's history telling the model the tool is
+    not available. `tool_name` is the built-in tool's name.
+    """
+
+    def __init__(self, tool_name: str) -> None:
+        self.tool_name = str(tool_name or "")
+        super().__init__(
+            f"CLI called its built-in tool '{self.tool_name}' (native tools must remain disabled); "
+            "it changes nothing, so the turn can resume."
+        )
+
+
 def format_reset_local(resets_at: float, *, tz: tzinfo | None = None) -> str:
     """Format an epoch reset timestamp in the local timezone (or `tz`) as `%d/%m às %H:%M`."""
     try:

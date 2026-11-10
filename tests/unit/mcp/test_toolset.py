@@ -69,6 +69,26 @@ def test_a_server_side_tool_error_becomes_a_failed_outcome():
     assert outcome.error_code == "MCP_TOOL_ERROR"
 
 
+def test_a_missing_playwright_browser_tells_the_model_and_the_person_what_to_do():
+    client = FakeClient()
+    client.result = McpCallResult(
+        content=({"type": "text", "text": (
+            "### Error\nError: async initializeServer: Chromium distribution 'chrome' is not found at "
+            "C:\\Users\\u\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe\n"
+            "Run \"npx playwright install chrome\""
+        )},),
+        is_error=True,
+    )
+    outcome = _provider(client).definitions()[0].handler(q="x")
+    assert outcome.status == "failed"
+    assert outcome.error_code == "MCP_TOOL_ERROR"
+    assert "Chromium distribution 'chrome' is not found" in outcome.content
+    assert "install Google Chrome" in outcome.content
+    assert "--browser msedge" in outcome.content
+    assert "Do not retry" in outcome.content
+    assert "não foi encontrado" in outcome.summary and "--browser msedge" in outcome.summary
+
+
 def test_an_image_block_becomes_an_image_on_the_outcome():
     client = FakeClient()
     client.result = McpCallResult(content=({"type": "image", "data": "AAAA", "mimeType": "image/png"},), is_error=False)

@@ -182,17 +182,19 @@ def main() -> int:
     mcp_cfg_file = cwd / ".agents" / "mcp_config.json"
     agent_md_file = cwd / ".agents" / "agents" / f"{agent_name or 'orin'}.md"
 
-    mcp_url = ""
-    mcp_headers: dict[str, str] = {}
-    server_name = "orin"
-    if mcp_cfg_file.is_file():
-        cfg_data = json.loads(mcp_cfg_file.read_text(encoding="utf-8"))
-        servers = cfg_data.get("mcpServers") or {}
-        for s_name, s_cfg in servers.items():
-            server_name = str(s_name)
-            mcp_url = str(s_cfg.get("url") or "")
-            mcp_headers = dict(s_cfg.get("headers") or {})
-            break
+    def _read_mcp_config() -> tuple[str, dict[str, str], str]:
+        url, headers, name = "", {}, "orin"
+        if mcp_cfg_file.is_file():
+            cfg_data = json.loads(mcp_cfg_file.read_text(encoding="utf-8"))
+            servers = cfg_data.get("mcpServers") or {}
+            for s_name, s_cfg in servers.items():
+                name = str(s_name)
+                url = str(s_cfg.get("url") or "")
+                headers = dict(s_cfg.get("headers") or {})
+                break
+        return url, headers, name
+
+    mcp_url, mcp_headers, server_name = _read_mcp_config()
 
     if settings_path:
         settings_file = Path(settings_path)
@@ -256,6 +258,42 @@ def main() -> int:
         )
         step_idx += 1
 
+        # agy's own read-only tool next to an Orin tool, as Gemini did (manage_task list + mcp_orin_Bash):
+        # called again on a resumed turn only with BENIGN_BUILTIN_ALWAYS.
+        if "BENIGN_BUILTIN" in prompt_text and (
+            "BENIGN_BUILTIN_ALWAYS" in prompt_text or "does not exist here" not in prompt_text
+        ):
+            _emit(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": conv_id,
+                        "step_index": step_idx,
+                        "state": "ACTIVE",
+                        "step_type": "tool",
+                        "tool_name": "manage_task",
+                        "tool_info": {"name": "manage_task", "parameters": {"Action": "list"}},
+                    },
+                }
+            )
+            step_idx += 1
+            # Orin stops the process here; if it did not, this would be agy's own (wrong) answer.
+            _emit(
+                {
+                    "event": "result",
+                    "result": {
+                        "conversation_id": conv_id,
+                        "status": "SUCCESS",
+                        "response": "No background tasks are currently running.",
+                        "duration_seconds": 0.1,
+                        "num_turns": turn_idx,
+                        "usage": {"input_tokens": 10, "output_tokens": 1, "thinking_tokens": 0,
+                                  "cache_read_tokens": 0, "total_tokens": 11},
+                    },
+                }
+            )
+            continue
+
         if "FORBIDDEN_BUILTIN" in prompt_text:
             _emit(
                 {
@@ -295,6 +333,10 @@ def main() -> int:
             )
             return 0
 
+        if "CALL_MCP" in prompt_text and "REREAD_MCP_CONFIG" in prompt_text:
+            # Read the folder's config again at call time: in a folder another process shares, a later
+            # process's config has replaced this one's by now.
+            mcp_url, mcp_headers, server_name = _read_mcp_config()
         if "CALL_MCP" in prompt_text and mcp_url:
             _mcp_rpc(
                 mcp_url,

@@ -445,6 +445,13 @@ class PublicToolNames:
 
     @staticmethod
     def _message_out(message: Any) -> Any:
+        if isinstance(message, Mapping) and message.get("role") == "tool":
+            # A tool result names its tool too (a CLI transcript prints `[Tool Result ... name=X]`): left
+            # internal, the model read `Bash` in the call and `run_command` in its result.
+            name = message.get("name")
+            if isinstance(name, str) and name and public_name(name) != name:
+                return {**message, "name": public_name(name)}
+            return message
         if not isinstance(message, Mapping) or message.get("role") != "assistant":
             return message
         changed = dict(message)

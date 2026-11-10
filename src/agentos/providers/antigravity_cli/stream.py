@@ -79,6 +79,66 @@ FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+# agy's own tools that still stop the process when the model calls one (Orin's tools are the only ones a
+# turn may use), but that neither change anything nor reach outside it, so the turn resumes from Orin's
+# history with a note instead of failing. The process is killed as soon as the call is announced, so
+# whatever the tool returned never reaches Orin's history nor a next model call. One by one:
+#   manage_task, command_status: list, read or end the tasks/commands agy itself started with run_command;
+#       run_command stops the process before it can start one, so there is never a task to act on.
+#   list_dir, find_by_name, grep_search, view_file: read only, in agy's own empty per-process folder
+#       (`allowNonWorkspaceAccess: false`, `read_file(*)` denied in its settings).
+#   list_resources, read_resource: read the resources of agy's MCP servers, which are only Orin's
+#       (`inheritMcp: false`).
+#   list_permissions, list_plugin_accounts: read agy's own settings and plugin account list.
+#   wait, wait_5_seconds, finish: wait or end agy's task; no effect.
+#   ask_question, ask_permission, ask_custom_permission: ask through agy's UI, which a headless run has
+#       none of; a grant "NEVER grants file, command, network, or tool access" (agy's own description).
+# Everything else stays a security abort, as before: shell and command input (run_command,
+# send_command_input), file writes (write_to_file, replace_file_content, multi_replace_file_content,
+# sed_file, delete_knowledge), the browser (browser_*, open_browser_url, read_browser_page,
+# capture_browser_*, click_browser_pixel, execute_browser_javascript, list_browser_pages), the network
+# (read_url_content, search_web, search_marketplace, generate_image), agy's own subagents (invoke_subagent,
+# define_subagent, manage_subagents, browser_subagent), notebooks (notebook_edit, notebook_execution),
+# other MCP calls (call_mcp_tool), workflows and messages (run_workflow, schedule, send_message,
+# manage_inbox) and any tool not named in the list (forbidden_builtin_tool).
+RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS: frozenset[str] = frozenset(
+    {
+        "manage_task",
+        "command_status",
+        "list_dir",
+        "find_by_name",
+        "grep_search",
+        "view_file",
+        "list_resources",
+        "read_resource",
+        "list_permissions",
+        "list_plugin_accounts",
+        "wait",
+        "wait_5_seconds",
+        "finish",
+        "ask_question",
+        "ask_permission",
+        "ask_custom_permission",
+    }
+)
+
+# Which Orin tools (internal names) do what a recoverable agy tool was called for; the resume note names them.
+ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("manage_task", ("read_process_output", "stop_process", "task_list")),
+    ("command_status", ("read_process_output",)),
+    ("list_dir", ("list_files",)),
+    ("find_by_name", ("glob_files", "list_files")),
+    ("grep_search", ("search_files",)),
+    ("view_file", ("read_file", "view_file")),
+    ("list_resources", ("list_mcp_resources",)),
+    ("read_resource", ("read_mcp_resource",)),
+    ("wait", ("read_process_output", "check_subagent")),
+    ("wait_5_seconds", ("read_process_output", "check_subagent")),
+    ("ask_question", ("ask_user",)),
+    ("ask_permission", ("ask_user",)),
+    ("ask_custom_permission", ("ask_user",)),
+)
+
 _ORIN_TOOL_PREFIXES: tuple[str, ...] = (
     "mcp_orin_",
     "orin/",

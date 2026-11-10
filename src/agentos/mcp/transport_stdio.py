@@ -46,11 +46,36 @@ from .protocol import MAX_SERVER_REQUESTS_PER_CALL, call_ceiling_seconds, dispat
 # the server script ever runs - found live installing obsidian-second-brain's
 # vault server: "Acesso negado ... at path C:\WINDOWS\.tmpXXXX", surfaced to
 # StdioTransport as "the MCP server closed before answering".
+#
+# Where programs are installed is not a secret either, and a server that drives one needs it: Playwright's
+# MCP looks for its 'chrome' channel under %LOCALAPPDATA%, %ProgramFiles%, %ProgramFiles(x86)% and
+# %HOMEDRIVE%\Program Files. Without those it only checked %LOCALAPPDATA% and failed with "Chromium
+# distribution 'chrome' is not found at C:\Users\...\AppData\Local\Google\Chrome\Application\chrome.exe"
+# on machines with Chrome in C:\Program Files. PATHEXT and COMSPEC let npx's .cmd shim and node's own
+# child processes resolve and run commands the way they do in any console.
+WINDOWS_PROGRAM_LOCATIONS = ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "HOMEDRIVE", "HOMEPATH")
+WINDOWS_COMMAND_RESOLUTION = ("PATHEXT", "COMSPEC")
 PLATFORM_ENVIRONMENT_PASSTHROUGH = (
-    ("TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA")
+    ("TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", *WINDOWS_PROGRAM_LOCATIONS, *WINDOWS_COMMAND_RESOLUTION)
     if os.name == "nt"
     else ("HOME", "TMPDIR")
 )
+
+
+def platform_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The small, secret-free base environment every stdio server starts with (its own secrets go on top)."""
+    env_source = os.environ if source is None else source
+    environment = {"PATH": env_source.get("PATH", ""), "SystemRoot": env_source.get("SystemRoot", "")}
+    if os.name == "nt":
+        for sys_name in ("SYSTEMROOT", "SystemDrive", "SYSTEMDRIVE"):
+            sys_value = env_source.get(sys_name)
+            if sys_value:
+                environment[sys_name] = sys_value
+    for name in PLATFORM_ENVIRONMENT_PASSTHROUGH:
+        value = env_source.get(name)
+        if value:
+            environment[name] = value
+    return environment
 
 ALLOWED_COMMANDS = frozenset({"npx", "uvx", "node", "python", "python3", "uv", "deno", "bun"})
 
@@ -130,16 +155,7 @@ class StdioTransport:
         # own runtime, the platform temp/profile variables real launchers
         # need to function at all (see PLATFORM_ENVIRONMENT_PASSTHROUGH),
         # plus the secrets this server was approved with.
-        environment = {"PATH": os.environ.get("PATH", ""), "SystemRoot": os.environ.get("SystemRoot", "")}
-        if os.name == "nt":
-            for sys_name in ("SYSTEMROOT", "SystemDrive", "SYSTEMDRIVE"):
-                sys_value = os.environ.get(sys_name)
-                if sys_value:
-                    environment[sys_name] = sys_value
-        for name in PLATFORM_ENVIRONMENT_PASSTHROUGH:
-            value = os.environ.get(name)
-            if value:
-                environment[name] = value
+        environment = platform_environment()
         environment.update(self._env)
         # W7 (W6-R8): on Windows the server starts suspended, joins its Job Object, and only then runs, so no child it
         # starts can escape the Job (before, it ran first and was assigned after Popen returned).

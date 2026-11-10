@@ -243,6 +243,23 @@ def test_ask_user_options_never_raise_on_hostile_values(options: object) -> None
     assert isinstance(arguments_out("ask_user", internal), dict)
 
 
+def test_messages_out_names_a_tool_result_like_its_call() -> None:
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function", "function": {"name": "run_command", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "name": "run_command", "content": "ok"},
+        {"role": "tool", "tool_call_id": "c2", "name": "mcp__notion__search", "content": "ok"},
+        {"role": "tool", "tool_call_id": "c3", "content": "ok"},
+    ]
+    out = PublicToolNames().messages_out(messages)
+    assert out[0]["tool_calls"][0]["function"]["name"] == "Bash"
+    assert out[1]["name"] == "Bash"
+    assert out[2]["name"] == "mcp__notion__search"
+    assert "name" not in out[3]
+    assert messages[1]["name"] == "run_command"
+
+
 def test_messages_out_keeps_poisoned_history_instead_of_raising() -> None:
     messages = [{
         "role": "assistant",

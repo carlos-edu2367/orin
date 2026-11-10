@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from typing import Mapping, Sequence
 
 from agentos.providers.claude_cli.errors import CliSecurityAbort, ProviderTransportError
@@ -472,6 +474,121 @@ def ensure_isolated_cwd(base: Path | None = None) -> Path:
         if child.is_symlink() or child.exists():
             raise CliSecurityAbort(f"{child} is still in the Claude CLI working directory")
     return root
+
+
+# One folder per CLI process, inside the shared base: `run-<owner pid>-<slot>`. A slot is held by one
+# process at a time and reused after it closes (agy keeps one cache entry per working folder it ran in,
+# `cache/last_conversations.json`, so a new name per process would grow that file without end).
+PROCESS_CWD_RE = re.compile(r"\Arun-(\d{1,10})-(\d{1,4})\Z")
+_MAX_PROCESS_CWD_SLOTS = 10_000
+_ACTIVE_PROCESS_CWDS: set[str] = set()
+_ACTIVE_PROCESS_CWDS_LOCK = threading.Lock()
+
+
+def _owner_alive(pid: int) -> bool:
+    if pid == os.getpid():
+        return True
+    from agentos.code_mode.workspace_lock import _pid_alive
+
+    try:
+        return bool(_pid_alive(pid))
+    except Exception:
+        return True  # unknown: keep the folder rather than pull it from under a live CLI
+
+
+def _remove_tree(path: Path, attempts: int = 5) -> bool:
+    """Remove a per-process folder; Windows may hold a handle for a moment after the process exits."""
+    for attempt in range(attempts):
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if attempt + 1 < attempts:
+                time.sleep(0.1 * (attempt + 1))
+            continue
+        if not (path.is_symlink() or path.exists()):
+            return True
+    return not (path.is_symlink() or path.exists())
+
+
+def sweep_orphan_process_cwds(base: Path) -> int:
+    """Remove `run-*` folders left by a CLI process whose Orin process is gone (or that this process no
+    longer tracks, e.g. after a crash between start and close). Folders of a live process stay."""
+    removed = 0
+    try:
+        children = list(base.iterdir())
+    except OSError:
+        return 0
+    with _ACTIVE_PROCESS_CWDS_LOCK:
+        active = set(_ACTIVE_PROCESS_CWDS)
+    own_pid = os.getpid()
+    for child in children:
+        match = PROCESS_CWD_RE.match(child.name)
+        if match is None or str(child) in active:
+            continue
+        owner = int(match.group(1))
+        if owner != own_pid and _owner_alive(owner):
+            continue
+        if _remove_tree(child, attempts=1):
+            removed += 1
+    return removed
+
+
+def create_process_cwd(base: Path) -> Path:
+    """A new empty folder inside `base` for exactly one CLI process.
+
+    A CLI that reads its configuration from its working folder (agy: `.agents/mcp_config.json` with the turn's
+    tool-server URL and token) must not share that folder: a second process starting a moment later rewrote
+    the file and the first one sent its tool calls to the other turn's server. The base passes the same
+    checks as before (`ensure_isolated_cwd`), and so does the new folder; `remove_process_cwd` deletes it.
+    """
+    ensure_isolated_cwd(base)
+    sweep_orphan_process_cwds(base)
+    own_pid = os.getpid()
+    last_error: OSError | None = None
+    for slot in range(_MAX_PROCESS_CWD_SLOTS):
+        path = base / f"run-{own_pid}-{slot}"
+        with _ACTIVE_PROCESS_CWDS_LOCK:
+            if str(path) in _ACTIVE_PROCESS_CWDS:
+                continue
+            _ACTIVE_PROCESS_CWDS.add(str(path))
+        try:
+            if (path.is_symlink() or path.exists()) and not _remove_tree(path, attempts=1):
+                # Left by a process of this Orin that has not let go of it yet: take the next slot.
+                with _ACTIVE_PROCESS_CWDS_LOCK:
+                    _ACTIVE_PROCESS_CWDS.discard(str(path))
+                continue
+            try:
+                path.mkdir(mode=0o700)
+            except FileExistsError:
+                with _ACTIVE_PROCESS_CWDS_LOCK:
+                    _ACTIVE_PROCESS_CWDS.discard(str(path))
+                continue
+            except OSError as exc:
+                last_error = exc
+                raise CliSecurityAbort(f"Cannot create the CLI process folder {path}: {exc}") from exc
+            return ensure_isolated_cwd(path)
+        except BaseException:
+            remove_process_cwd(path)
+            raise
+    raise CliSecurityAbort(f"No free CLI process folder under {base}: {last_error}")
+
+
+def remove_process_cwd(path: Path | None) -> bool:
+    """Delete a folder made by `create_process_cwd` (only such a folder: the name is checked)."""
+    if path is None:
+        return True
+    target = Path(path)
+    if PROCESS_CWD_RE.match(target.name) is None:
+        return False
+    removed = _remove_tree(target)
+    with _ACTIVE_PROCESS_CWDS_LOCK:
+        _ACTIVE_PROCESS_CWDS.discard(str(target))
+    return removed
 
 
 def _validate_path_arg(value: str | Path, label: str) -> str:

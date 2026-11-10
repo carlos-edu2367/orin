@@ -101,7 +101,7 @@ def test_open_forwards_the_temp_and_profile_variables_real_launchers_need(tmp_pa
         "    frame = json.loads(line)\n"
         "    if 'id' not in frame:\n"
         "        continue\n"
-        "    names = ('TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA') if os.name == 'nt' else ('HOME', 'TMPDIR')\n"
+        f"    names = {tuple(PLATFORM_ENVIRONMENT_PASSTHROUGH)!r}\n"
         "    present = {name: bool(os.environ.get(name)) for name in names}\n"
         "    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': frame['id'], 'result': present}) + '\\n')\n"
         "    sys.stdout.flush()\n",
@@ -124,6 +124,45 @@ def test_open_forwards_the_temp_and_profile_variables_real_launchers_need(tmp_pa
     assert expected, "no platform variable was set in the parent, so this proves nothing"
     missing = [name for name in expected if not present.get(name)]
     assert not missing, f"set in this process but never reached the child: {missing} (child saw {present})"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows program locations")
+def test_windows_program_locations_reach_a_stdio_server_without_any_secret(tmp_path, monkeypatch):
+    """Playwright's MCP finds an installed Chrome through %ProgramFiles%; without it the 'chrome' channel
+    was only looked up under %LOCALAPPDATA% and failed although Chrome was in C:\\Program Files."""
+    wanted = {
+        "ProgramFiles": r"C:\Program Files",
+        "ProgramFiles(x86)": r"C:\Program Files (x86)",
+        "ProgramW6432": r"C:\Program Files",
+        "HOMEDRIVE": "C:",
+        "HOMEPATH": r"\Users\probe",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "COMSPEC": r"C:\Windows\system32\cmd.exe",
+    }
+    secrets = {"GITHUB_TOKEN": "ghp_probe", "OPENAI_API_KEY": "sk-probe", "AWS_SECRET_ACCESS_KEY": "aws-probe"}
+    for name, value in {**wanted, **secrets}.items():
+        monkeypatch.setenv(name, value)
+    script = tmp_path / "env_probe.py"
+    script.write_text(
+        "import json, os, sys\n"
+        "for line in sys.stdin:\n"
+        "    frame = json.loads(line)\n"
+        "    if 'id' not in frame:\n"
+        "        continue\n"
+        "    sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': frame['id'], 'result': dict(os.environ)}) + '\\n')\n"
+        "    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    transport = StdioTransport(command=sys.executable, args=(str(script),), env={}, allow_any_command=True)
+    transport.open()
+    try:
+        reply = transport.send({"jsonrpc": "2.0", "id": 1, "method": "probe"})
+    finally:
+        transport.close()
+    child = {name.upper(): value for name, value in reply["result"].items()}
+    for name, value in wanted.items():
+        assert child.get(name.upper()) == value, f"{name} never reached the server"
+    assert not {name.upper() for name in secrets} & set(child)
 
 
 def test_the_transport_round_trips_a_frame(tmp_path):

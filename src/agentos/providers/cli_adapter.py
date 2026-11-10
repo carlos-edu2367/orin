@@ -222,6 +222,13 @@ class CliCapabilities:
     # Largest stdin user message the CLI reads whole (None: bounded only by the window).
     # A turn's history travels in that first message, so it must fit there.
     max_user_message_bytes: int | None = None
+    # The CLI reads its tool-server wiring from its working folder: every process gets its own folder.
+    per_process_cwd: bool = False
+    # Built-in tools of the CLI that still stop the process (they must stay unused) but neither change
+    # anything nor reach outside, so the turn resumes from Orin's history instead of failing.
+    recoverable_builtin_tools: frozenset[str] = frozenset()
+    # (built-in tool, Orin tools that do that job), named in the note the resumed turn reads.
+    builtin_tool_alternatives: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 AdapterCapabilities = CliCapabilities

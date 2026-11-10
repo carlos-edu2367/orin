@@ -44,6 +44,7 @@ from agentos.agentic.tools._shared import (
     poll_background_popen,
     register_background_popen,
 )
+from agentos.agentic.tools.public_names import public_name
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 def _job_for(process: Any) -> Any:
@@ -279,11 +280,9 @@ class BashTools:
     ) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
-        if len(command) > 4096:
+        if len(command) > MAX_COMMAND_CHARS:
             raise AgentToolError(
-                f"command is too long ({len(command)} > 4096 characters). "
-                "To create or change a file use write_file or edit_file; "
-                "for a long script write it to a file first and run that file."
+                command_too_long_message(len(command), public_names=getattr(self, "name_translator", None) is not None)
             )
         if _BLOCKED_COMMAND.search(command):
             raise AgentToolError("This command is blocked because it would affect the host system.")
@@ -970,6 +969,26 @@ class BashTools:
             self.workspace.write_text(_PROCESS_MANIFEST_PATH, serialized)
 
 
+MAX_COMMAND_CHARS = 4096
+
+
+def command_too_long_message(length: int, *, public_names: bool = False) -> str:
+    """The refusal for an over-long command line: what to do instead, in one step the model can copy.
+
+    It names the tools as the model sees them (``Write`` in Code mode, ``write_file`` otherwise): a refusal
+    is not rewritten to the public names on its way out.
+    """
+    write = public_name("write_file") if public_names else "write_file"
+    edit = public_name("edit_file") if public_names else "edit_file"
+    return (
+        f"command is too long ({length} > {MAX_COMMAND_CHARS} characters); this call did not run. "
+        f"Do not shorten it by splitting it into several commands. Write the script to a file with {write}, "
+        "for example .orin/tmp/<name>.mjs (or .orin/tmp/<name>.py), then run that file: "
+        "`node .orin/tmp/<name>.mjs` (or `python .orin/tmp/<name>.py`). "
+        f"To create or change a project file use {write} or {edit}, not the shell."
+    )
+
+
 class BashInput(ToolInput):
     command: str = Field(description="The command to run.")
     description: str | None = Field(None, description="What the command does, in 5-10 words.")
@@ -1000,7 +1019,9 @@ SPECS: tuple[ToolSpec, ...] = (
         "long-lived process (e.g. a dev server); it returns immediately and you read its output later with read_process_output. "
         "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands. "
         "To wait for a background command, call read_process_output(pid, block=true) instead of sleep; "
-        "for a background subagent, check_subagent(wait_seconds=...).",
+        "for a background subagent, check_subagent(wait_seconds=...). "
+        f"The command line is limited to {MAX_COMMAND_CHARS} characters: write a longer script to a file "
+        "(e.g. .orin/tmp/<name>.mjs) with write_file and run that file.",
         legacy_schema=_schema({
             "command": {**_TEXT, "description": "A single command line, executed non-interactively (stdin is closed)."},
             "description": {**_TEXT, "description": "Short 5-10 word description of what this command does."},
@@ -1015,7 +1036,8 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="terminal",
         input_model=BashInput,
         output_model=BashOutput,
-        public_description='Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and editing files. Give a short description. Use run_in_background for long-lived processes such as dev servers.',
+        public_description='Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and editing files. Give a short description. Use run_in_background for long-lived processes such as dev servers. '
+        f'The command is limited to {MAX_COMMAND_CHARS} characters: write a longer script to a file (e.g. .orin/tmp/<name>.mjs) with Write and run that file.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),
         order=240,
