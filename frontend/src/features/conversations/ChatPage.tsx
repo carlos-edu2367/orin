@@ -149,6 +149,14 @@ function isQueuedInputEvent(event: ConversationActivityEvent): boolean {
 
 const isQueuedAnswerMessage = (message: ConversationMessage) => message.message_id.startsWith(QUEUED_ANSWER_MESSAGE_PREFIX)
 
+/** A subagent's plan approval (exit_plan_mode / plan_ready): its leader reads it, the person never decides it. */
+const isSubagentPlanEvent = (event: ConversationActivityEvent) => Boolean(event.parentAgentId) && (
+  Boolean(event.planApproval)
+  || event.type === 'code_mode.plan_ready'
+  || event.tool === 'exit_plan_mode'
+  || event.toolName === 'exit_plan_mode'
+)
+
 /** An ask_user answer (built by submitQuestionAnswers): it shows once, in the question card / tool result, never as a bubble. */
 const isQuestionAnswerMessage = (message: ConversationMessage) => message.role === 'user' && message.content.trimStart().startsWith(QUESTION_ANSWERS_HEADER)
 
@@ -1077,6 +1085,9 @@ export function ChatPage() {
     )
     for (const event of activity.events) {
       if (!event.turnId || terminalTurnIds.has(event.turnId) || decidedPlanKeys.has(event.turnId) || decidedPlanKeys.has(event.eventId)) continue
+      // A subagent's plan (exit_plan_mode) goes back to its leader, never to the person: it opens no decision of the
+      // turn. Counting it stopped `running` while the leader kept working, so the next message started a new turn.
+      if (isSubagentPlanEvent(event)) continue
       const permReq = event.toolPermission
       const isResolvedPerm = Boolean(
         permReq?.requestId &&
@@ -1188,6 +1199,24 @@ export function ChatPage() {
     () => [...activity.events].reverse().find((event) => !event.parentAgentId) ?? null,
     [activity.events],
   )
+  // Turns a root (non-subagent) terminal event already ended; `anyTurn` when such an event names no turn.
+  const rootTerminalTurns = useMemo(() => {
+    const ids = new Set<string>()
+    let anyTurn = false
+    for (const event of activity.events) {
+      if (event.parentAgentId || terminalConversationState(event) === null) continue
+      if (event.turnId) ids.add(event.turnId)
+      else anyTurn = true
+    }
+    return { ids, anyTurn }
+  }, [activity.events])
+  // A turn that is live now (running, not cancelled, no terminal event). It need not be the last turn: a message
+  // queued as a new turn behind it must not hide that the turn asking a question is still waiting for the answer.
+  const isLiveTurn = useCallback((turnId: string | undefined | null) => {
+    if (!turnId || cancelledTurnIds.has(turnId) || rootTerminalTurns.anyTurn || rootTerminalTurns.ids.has(turnId)) return false
+    const turn = (conversation?.turns ?? []).find((item) => item.turn_id === turnId)
+    return Boolean(turn && RUNNING_STATES.has(turn.state))
+  }, [cancelledTurnIds, conversation?.turns, rootTerminalTurns])
   const lastActivityTurnId = lastRootEvent?.turnId
   const isActivityTerminal =
     (activity.status === 'completed'
@@ -1209,15 +1238,16 @@ export function ChatPage() {
     && !isActivityTerminal
   // A live (native) turn waiting inside the turn for an ask_user answer: it reads only the queue, so the composer
   // sends there and the turn takes that text as the answer. A classic waiting_user turn has ended and is not this.
-  const liveTurnAwaitingAnswer = Boolean(
-    !stopping
-    && activeTurn
-    && RUNNING_STATES.has(activeTurn.state)
-    && openQuestionTurnIds.has(activeTurn.turn_id)
-    && !hasTerminalEventForActiveTurn
-    && !isActivityTerminal
-    && activity.events.some((event) => event.turnId === activeTurn.turn_id && event.questions && !closedQuestionEventIds.has(event.eventId)),
-  )
+  // The turn asking may not be the last one (a message sent earlier can sit queued behind it as its own turn).
+  const liveQuestionTurnId = useMemo(() => {
+    if (stopping) return null
+    for (const event of [...activity.events].reverse()) {
+      if (!event.questions || event.parentAgentId || !event.turnId || closedQuestionEventIds.has(event.eventId)) continue
+      if (openQuestionTurnIds.has(event.turnId) && isLiveTurn(event.turnId)) return event.turnId
+    }
+    return null
+  }, [activity.events, closedQuestionEventIds, isLiveTurn, openQuestionTurnIds, stopping])
+  const liveTurnAwaitingAnswer = liveQuestionTurnId !== null
 
   const friendDisplayName = friendPersona?.display_name || (conversationMode === 'friend' ? conversation?.title : undefined) || 'Orin'
 
@@ -1491,14 +1521,9 @@ export function ChatPage() {
     }
     const response = text.join('\n').trim()
     setError(null)
-    const isLiveActiveTurn = Boolean(
-      conversationId
-      && activeTurn
-      && activeTurn.turn_id === event.turnId
-      && RUNNING_STATES.has(activeTurn.state)
-      && !hasTerminalEventForActiveTurn
-      && !isActivityTerminal,
-    )
+    // The question's own turn, not the last turn: a message queued behind it as a new turn would otherwise send
+    // the answer as yet another turn, and the asking turn would wait until its tool timed out.
+    const isLiveActiveTurn = Boolean(conversationId && isLiveTurn(event.turnId))
     const answeredEventId = event.eventId
     if (isLiveActiveTurn) {
       // The turn reads the answer from the queue and reports it (turn.started with queue_id): no optimistic
@@ -1532,7 +1557,7 @@ export function ChatPage() {
     } finally {
       questionSubmitInFlightRef.current = false
     }
-  }, [activeTurn, client, closedQuestionEventIds, conversationId, hasTerminalEventForActiveTurn, isActivityTerminal, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
+  }, [client, closedQuestionEventIds, conversationId, isLiveTurn, loadSnapshot, openQuestionTurnIds, running, sendChatMessage])
 
   const submitMcpApproval = useCallback(async (event: ConversationActivityEvent, secrets: Record<string, string>) => {
     if (!event.mcpApproval || !event.turnId || !openQuestionTurnIds.has(event.turnId) || running) return
@@ -1860,7 +1885,7 @@ export function ChatPage() {
       }
       // Once the turn waits in the turn, the text it reads is the answer, and it shows then (no optimistic bubble).
       // Before that wait it reads the text as a normal message, so the question stays open.
-      const asAnswer = Boolean(activeTurn && waitingTurnIds.has(activeTurn.turn_id))
+      const asAnswer = Boolean(liveQuestionTurnId && waitingTurnIds.has(liveQuestionTurnId))
       if (!preserveComposer) setMessage('')
       setError(null)
       if (readyUploads.length > 0) setCommandNotice('Espere o turno atual terminar para enviar.')
@@ -2835,8 +2860,11 @@ export function ChatPage() {
                 && item.role === 'assistant'
                 && itemIndex === targetOlderIdx,
               )
-              // An answer a live turn read from the queue does not end that turn.
-              const hasSubsequentUserMessage = messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user' && !isQueuedAnswerMessage(candidate))
+              // An answer a live turn read from the queue does not end that turn, nor does a message queued as a new
+              // turn behind a turn that is still live (its question card must stay answerable).
+              const itemTurnStillLive = item.role === 'assistant' && isLiveTurn(item.turn_id)
+              const hasSubsequentUserMessage = !itemTurnStillLive
+                && messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user' && !isQueuedAnswerMessage(candidate))
               const timelineTurnIds = timeline
                 ? Array.from(
                     new Set(
