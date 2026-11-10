@@ -217,6 +217,14 @@ class CliCapabilities:
     persistent_stdin: bool = False
     reports_tool_inventory: bool = True
     forbidden_item_kinds: frozenset[str] = frozenset()
+    idle_timeout_seconds: int | None = None
+    max_tool_call_seconds: int | None = None
+    # Largest stdin user message the CLI reads whole (None: bounded only by the window).
+    # A turn's history travels in that first message, so it must fit there.
+    max_user_message_bytes: int | None = None
+
+
+AdapterCapabilities = CliCapabilities
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +334,7 @@ class CliAgentAdapter(Protocol):
 
 
 __all__ = [
+    "AdapterCapabilities",
     "CliAgentAdapter",
     "CliCapabilities",
     "CliErrorInfo",

@@ -28,6 +28,7 @@ class AgentActivityEventType(StrEnum):
     FILESYSTEM_WRITE = "filesystem.write"
     TERMINAL_STARTED = "terminal.started"
     TERMINAL_OUTPUT_SUMMARY = "terminal.output_summary"
+    PROCESS_EXITED = "process.exited"
     BROWSER_STARTED = "browser.started"
     BROWSER_NAVIGATED = "browser.navigated"
     BROWSER_ARTIFACT = "browser.artifact"

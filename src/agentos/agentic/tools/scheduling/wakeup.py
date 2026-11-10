@@ -32,24 +32,37 @@ class WakeupTools:
 
     def schedule_wakeup(
         self, delay_seconds: int | float | str | None = None, reason: str = "", prompt: str = "",
-        stop: bool | None = None, noop: bool | None = None,
+        stop: bool | None = None, noop: bool | None = None, wake_on_pid: int | str | None = None,
     ) -> dict[str, Any]:
         context = self._scheduling()
         user_id, conversation_id = context["user_id"], str(self.conversation_id)
         stopping = _flag(stop)
         why = " ".join(str(reason or "").split())[:MAX_REASON_CHARS]
         text = str(prompt or "").strip()
+        parsed_pid: int | None = None
         if not stopping:
             if not why:
                 raise AgentToolError("reason must say, in one short sentence, why this delay was chosen")
             if not text or len(text) > MAX_WAKEUP_PROMPT_CHARS:
                 raise AgentToolError(f"prompt must be a non-blank string of at most {MAX_WAKEUP_PROMPT_CHARS} characters")
-            try:
-                requested = float(delay_seconds)  # type: ignore[arg-type]
-            except (TypeError, ValueError):
-                raise AgentToolError("delaySeconds must be a number of seconds") from None
-            if requested != requested:  # NaN
-                raise AgentToolError("delaySeconds must be a number of seconds")
+            if wake_on_pid is not None:
+                if isinstance(wake_on_pid, bool):
+                    raise AgentToolError("wake_on_pid must be a positive integer PID")
+                try:
+                    parsed_pid = int(str(wake_on_pid).strip()) if isinstance(wake_on_pid, str) else int(wake_on_pid)
+                except (TypeError, ValueError):
+                    raise AgentToolError("wake_on_pid must be a positive integer PID") from None
+                if parsed_pid <= 0:
+                    raise AgentToolError("wake_on_pid must be a positive integer PID")
+            if delay_seconds is None and parsed_pid is not None:
+                requested = float(MAX_DELAY_SECONDS)
+            else:
+                try:
+                    requested = float(delay_seconds)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    raise AgentToolError("delaySeconds must be a number of seconds") from None
+                if requested != requested:  # NaN
+                    raise AgentToolError("delaySeconds must be a number of seconds")
             since = datetime.now(UTC) - timedelta(days=1)
             if self._scheduler.count_created_since(user_id, conversation_id, source="wakeup", since=since) >= MAX_WAKEUPS_PER_DAY:
                 raise AgentToolError(f"This conversation already scheduled {MAX_WAKEUPS_PER_DAY} wakeups in the last 24 hours; stop the loop here.")
@@ -71,24 +84,29 @@ class WakeupTools:
         fire_at = datetime.now(UTC) + timedelta(seconds=clamped)
         request = ScheduledChatInput(
             text, context["provider"], context["model_id"], str(context.get("timezone") or "UTC"), "once",
-            fire_at=fire_at, conversation_id=conversation_id, source="wakeup",
+            fire_at=fire_at, conversation_id=conversation_id, source="wakeup", wake_on_pid=parsed_pid,
         )
         try:
             receipt = self._scheduler.create(user_id, request, idempotency_key=f"wakeup:{conversation_id}:{uuid4().hex}")
         except (LookupError, ValueError) as error:
             raise AgentToolError(f"The wakeup could not be scheduled: {error}") from None
         scheduled_for = int(fire_at.timestamp() * 1000)
+        pid_note = f" (or earlier when background process {parsed_pid} exits)" if parsed_pid is not None else ""
         return {
             "summary": f"Volta em {clamped}s: {why}"[:240],
             "content": (
-                f"Wakeup {receipt['schedule_id']} scheduled in {clamped}s ({fire_at.isoformat().replace('+00:00', 'Z')})"
+                f"Wakeup {receipt['schedule_id']} scheduled in {clamped}s ({fire_at.isoformat().replace('+00:00', 'Z')}){pid_note}"
                 + (f"; the requested delay was clamped to [{MIN_DELAY_SECONDS}, {MAX_DELAY_SECONDS}] seconds" if was_clamped else "")
                 + (f"; {cancelled} earlier wakeup(s) replaced" if cancelled else "") + "."
             ),
-            "payload": {"schedule_id": receipt["schedule_id"], "reason": why, "noop": _flag(noop), "label": why[:120]},
+            "payload": {
+                "schedule_id": receipt["schedule_id"], "reason": why, "noop": _flag(noop), "label": why[:120],
+                **({"wake_on_pid": parsed_pid} if parsed_pid is not None else {}),
+            },
             "tool_output": {
                 "scheduledFor": scheduled_for, "clampedDelaySeconds": clamped, "wasClamped": was_clamped,
                 "stopped": False, "cancelledWakeups": cancelled,
+                **({"wakeOnPid": parsed_pid} if parsed_pid is not None else {}),
             },
         }
 
@@ -99,6 +117,7 @@ class ScheduleWakeupInput(ToolInput):
     prompt: str | None = Field(None, description="What to do when the wakeup fires; it starts a turn in this conversation.")
     stop: bool | None = Field(None, description="Cancel the pending wakeup and stop the loop; the other fields are ignored.")
     noop: bool | None = Field(None, description="True when nothing changed since the last wakeup.")
+    wake_on_pid: int | None = Field(None, description="Optional background process PID; fires immediately when this process exits, or after delaySeconds, whichever comes first.")
 
 
 class ScheduleWakeupOutput(BaseModel):
@@ -108,22 +127,24 @@ class ScheduleWakeupOutput(BaseModel):
     wasClamped: bool
     stopped: bool | None = None
     cancelledWakeups: int | None = None
+    wakeOnPid: int | None = None
 
 
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="schedule_wakeup",
-        description="Continue this conversation after a delay (60 to 3600 seconds) with the given prompt. A new wakeup replaces the pending one; stop=true cancels it.",
+        description="Continue this conversation after a delay (60 to 3600 seconds), or as soon as a background process (wake_on_pid) exits, with the given prompt. A new wakeup replaces the pending one; stop=true cancels it.",
         legacy_schema=_schema({
             "delay_seconds": {"type": "number", "description": "Seconds from now; clamped to [60, 3600]."},
             "reason": _TEXT,
             "prompt": _TEXT,
             "stop": {"type": "boolean"},
             "noop": {"type": "boolean"},
+            "wake_on_pid": {"type": "integer", "description": "Optional background process PID; fires when that process exits or at delay_seconds, whichever comes first."},
         }),
         handler="schedule_wakeup", kind="planning",
         input_model=ScheduleWakeupInput, output_model=ScheduleWakeupOutput,
-        public_description="Continue this conversation after a delay of 60 to 3600 seconds with the given prompt. A new wakeup replaces the pending one; stop cancels it.",
+        public_description="Continue this conversation after a delay of 60 to 3600 seconds (or immediately when wake_on_pid exits) with the given prompt. A new wakeup replaces the pending one; stop cancels it.",
         available=lambda toolset: toolset._scheduler is not None and bool(toolset.conversation_id), order=1040,
     ),
 )

@@ -60,3 +60,39 @@ def test_journal_scope_prevents_cross_user_checkpoint_read() -> None:
 
     assert journal.latest_safe(_scope(user_id="user-2")) is None
     assert journal.latest_safe(scope).checkpoint_id == "checkpoint:safe"
+
+
+def test_acknowledge_unresolved_transitions_effects_to_unknown_acked_and_clears_unresolved() -> None:
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    journal = PostgresExecutionJournal(engine)
+    scope = _scope()
+    effect = journal.prepare(_effect(scope))
+    journal.mark_in_flight(effect.effect_id, scope, now=datetime(2026, 8, 27, 1, tzinfo=UTC))
+
+    acked_at = datetime(2026, 8, 27, 3, tzinfo=UTC)
+    acknowledged = journal.acknowledge_unresolved(
+        scope,
+        reconciliation_ref="user_resumed:turn-1:100",
+        now=acked_at,
+    )
+
+    assert len(acknowledged) == 1
+    assert acknowledged[0].effect_id == effect.effect_id
+    assert acknowledged[0].state is ExecutionEffectState.UNKNOWN_ACKED
+    assert acknowledged[0].reconciliation_ref == "user_resumed:turn-1:100"
+    assert acknowledged[0].resolved_at == acked_at
+    assert acknowledged[0].version == 4  # prepare(1) -> in_flight(2) -> unknown(3) -> unknown_acked(4)
+    assert journal.unresolved(scope) == ()
+    assert journal.mark_unresolved_unknown(scope, now=datetime(2026, 8, 27, 4, tzinfo=UTC)) == ()
+    assert journal.acknowledge_unresolved(scope, reconciliation_ref="again", now=acked_at) == ()
+
+    # Terminal immutability: resolving an already UNKNOWN_ACKED effect is a no-op.
+    after_resolve = journal.resolve(
+        effect.effect_id,
+        scope,
+        state=ExecutionEffectState.APPLIED,
+        now=datetime(2026, 8, 27, 5, tzinfo=UTC),
+    )
+    assert after_resolve.state is ExecutionEffectState.UNKNOWN_ACKED
+    assert after_resolve.version == 4

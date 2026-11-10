@@ -55,6 +55,7 @@ class ScheduledChatInput:
     conversation_id: str | None = None
     ends_at: datetime | None = None
     source: str = "user"
+    wake_on_pid: int | None = None
 
 
 def _utc(value: datetime) -> datetime:
@@ -277,6 +278,7 @@ class ScheduledChatService:
             "kind": request.recurrence, "fire_at": next_fire.isoformat() if request.fire_at else None,
             "time_of_day": request.time_of_day, "weekday": request.weekday,
             "anchor_at": next_fire.isoformat(), "cron": request.cron, "source": request.source,
+            **({"wake_on_pid": int(request.wake_on_pid)} if request.wake_on_pid is not None else {}),
         }
 
     @staticmethod
@@ -320,8 +322,58 @@ class ScheduledChatService:
             out.append({
                 **self._public(row), "message": row["message"], "cron": rule.get("cron"),
                 "source": rule.get("source"), "ends_at": _iso_utc(row["ends_at"]), "timezone": str(row["timezone"]),
+                "wake_on_pid": rule.get("wake_on_pid"),
             })
         return out
+
+    def trigger_wakeup_for_pid(
+        self,
+        user_id: str,
+        conversation_id: str,
+        pid: int,
+        *,
+        exit_notice: str = "",
+        worker_id: str = "process-watch",
+    ) -> str | None:
+        """Fire an active wakeup bound to ``pid`` immediately through ``run_due`` with ``exit_notice`` appended."""
+        now = _utc(self._clock())
+        target_schedule_id: str | None = None
+        with self._engine.begin() as connection:
+            rows = connection.execute(
+                select(schedules, scheduled_chat_tasks.c.task_id, scheduled_chat_tasks.c.message)
+                .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
+                .where(
+                    schedules.c.user_id == user_id,
+                    scheduled_chat_tasks.c.conversation_id == conversation_id,
+                    schedules.c.state == "ACTIVE",
+                )
+                .order_by(schedules.c.created_at)
+            ).mappings().all()
+            for row in rows:
+                rule = dict(row["rule"] or {})
+                if str(rule.get("source") or "user") != "wakeup":
+                    continue
+                if rule.get("wake_on_pid") != pid:
+                    continue
+                target_schedule_id = str(row["schedule_id"])
+                base_msg = str(row["message"] or "").strip()
+                clean_notice = str(exit_notice or "").strip()
+                new_msg = f"{base_msg}\n\n{clean_notice}"[:16000] if clean_notice else base_msg
+                connection.execute(
+                    update(scheduled_chat_tasks)
+                    .where(scheduled_chat_tasks.c.task_id == row["task_id"])
+                    .values(message=new_msg, updated_at=now)
+                )
+                connection.execute(
+                    update(schedules)
+                    .where(schedules.c.schedule_id == target_schedule_id, schedules.c.state == "ACTIVE")
+                    .values(next_fire_at=now, updated_at=now)
+                )
+                break
+        if target_schedule_id is None:
+            return None
+        self.run_due(worker_id=worker_id, due_before=now)
+        return target_schedule_id
 
     def count_created_since(self, user_id: str, conversation_id: str, *, source: str, since: datetime) -> int:
         """How many schedules a tool made for this conversation since ``since``, in any state (W4 wakeup cap)."""

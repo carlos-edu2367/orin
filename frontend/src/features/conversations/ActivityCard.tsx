@@ -1,5 +1,7 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
 import { useEffect, useId, useState } from 'react'
+import { createBrowserApiClient, type ApiClient } from '../../api/client'
+import { resumeConversationTurn } from '../../api/conversations'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
 import { activityStateLabel, formatActivityCount, formatElapsed, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
 import { StructuredDiffView, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
@@ -8,6 +10,8 @@ type ActivityCardProps = {
   group: ActivityGroup
   conversationId?: string
   onPreview?: WorkspaceFilePreviewHandler
+  client?: ApiClient
+  onResumeTurn?: (conversationId: string, turnId: string) => Promise<unknown>
 }
 
 const GLYPHS: Record<string, string> = {
@@ -29,12 +33,20 @@ const GLYPHS: Record<string, string> = {
  * technical record: every underlying event, its status and its identifiers. The
  * chat never shows the second form unless it is asked for.
  */
-export function ActivityCard({ group, conversationId, onPreview }: ActivityCardProps) {
+export function ActivityCard({ group, conversationId, onPreview, client, onResumeTurn }: ActivityCardProps) {
   const [open, setOpen] = useState(false)
+  const [resumeState, setResumeState] = useState<'idle' | 'working' | 'resumed' | 'failed'>('idle')
   const panelId = useId()
   const reduced = useReducedMotion()
   const firstTool = group.events.find((event) => event.kind === 'tool') ?? group.events[0]
-  const glyph = GLYPHS[group.kind === 'tool' ? (firstTool.toolKind ?? 'lifecycle') : group.kind] ?? '◦'
+  const latestEvent = group.events[group.events.length - 1] ?? group.events[0]
+  const glyphKey =
+    group.kind === 'tool'
+      ? (firstTool.toolKind ?? 'lifecycle')
+      : latestEvent?.type === 'process.exited'
+        ? 'terminal'
+        : group.kind
+  const glyph = GLYPHS[glyphKey] ?? '◦'
   const running = group.state === 'waiting_tool' || group.state === 'working' || group.state === 'waiting_agent'
   const failedCalls = group.events.filter((event) => event.state === 'failed').length
   const liveStreamEvent = running
@@ -43,7 +55,34 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
 
   const isTool = group.kind === 'tool'
   const elapsed = useElapsedSeconds(isTool && running, group.events[0]?.occurredAt)
-  const title = isTool && !running ? toolBatchOverview(group) : group.label
+  const payloadMessage = typeof latestEvent?.payload?.message === 'string' ? latestEvent.payload.message.trim() : ''
+  const rawTitle = isTool && !running ? toolBatchOverview(group) : group.label
+  const title =
+    payloadMessage && (!rawTitle || rawTitle === 'Aguardando reconciliação de efeito externo')
+      ? payloadMessage
+      : rawTitle
+  const resumableTurnId = latestEvent?.turnId
+  const isResumablePause = Boolean(
+    !isTool &&
+      conversationId &&
+      resumableTurnId &&
+      (latestEvent?.payload?.state === 'paused' ||
+        latestEvent?.payload?.resumable === true ||
+        latestEvent?.summary === 'Aguardando reconciliação de efeito externo' ||
+        latestEvent?.errorCode === 'PROVIDER_STREAM_INTERRUPTED' ||
+        latestEvent?.errorCode === 'EFFECT_RECONCILIATION_REQUIRED' ||
+        latestEvent?.errorCode === 'CHECKPOINT_RESUME_REQUIRED'),
+  )
+  const handleResume = () => {
+    if (!conversationId || !resumableTurnId || resumeState === 'working' || resumeState === 'resumed') return
+    setResumeState('working')
+    const runResume =
+      onResumeTurn ??
+      ((cid: string, tid: string) => resumeConversationTurn(client ?? createBrowserApiClient(), cid, tid))
+    runResume(conversationId, resumableTurnId)
+      .then(() => setResumeState('resumed'))
+      .catch(() => setResumeState('failed'))
+  }
 
   return (
     <motion.article
@@ -79,6 +118,23 @@ export function ActivityCard({ group, conversationId, onPreview }: ActivityCardP
       </button>
       {!open && liveStreamEvent?.outputTail && (
         <pre className="activity-detail__terminal-stream" aria-live="polite">{liveStreamEvent.outputTail}</pre>
+      )}
+      {isResumablePause && (
+        <div className="activity-card__actions">
+          <button
+            type="button"
+            className="activity-card__resume-button workspace-trust__action"
+            onClick={handleResume}
+            disabled={resumeState === 'working' || resumeState === 'resumed'}
+          >
+            {resumeState === 'working' ? 'Retomando...' : resumeState === 'resumed' ? 'Retomado' : 'Retomar'}
+          </button>
+          {resumeState === 'failed' && (
+            <span role="alert" className="activity-card__resume-error workspace-trust__error">
+              Não foi possível retomar o turno.
+            </span>
+          )}
+        </div>
       )}
       <AnimatePresence initial={false}>
         {open && (
@@ -153,6 +209,15 @@ function ActivityDetailRow({ event, conversationId, onPreview, folded = [] }: { 
   )
   const hasStats = event.addedLines !== undefined || event.removedLines !== undefined
   const hasPatch = Boolean(event.structuredPatch && event.structuredPatch.length > 0)
+  const outputTail =
+    event.outputTail ??
+    (typeof event.payload?.output_tail === 'string' && event.payload.output_tail.trim()
+      ? event.payload.output_tail
+      : undefined)
+  const logPath =
+    event.type === 'process.exited'
+      ? (event.path ?? (typeof event.payload?.log_path === 'string' ? event.payload.log_path : undefined))
+      : undefined
   return (
     <>
       <li className="activity-detail" data-state={event.state}>
@@ -173,6 +238,7 @@ function ActivityDetailRow({ event, conversationId, onPreview, folded = [] }: { 
         </div>
         <span className="activity-detail__meta">
           {event.toolName && <code>{event.toolName}</code>}
+          {logPath && <code>{logPath}</code>}
           {event.label && event.label !== event.summary && <span className="activity-detail__label">{event.label}</span>}
           {hasStats && (
             <span className="activity-detail__diff-stats" aria-label={`Diff +${event.addedLines ?? 0} -${event.removedLines ?? 0}`}>
@@ -185,8 +251,8 @@ function ActivityDetailRow({ event, conversationId, onPreview, folded = [] }: { 
           {event.occurredAt && <time dateTime={event.occurredAt}>{formatTime(event.occurredAt)}</time>}
         </span>
         {event.content && <p className="activity-detail__content">{event.content}</p>}
-        {event.outputTail && (
-          <pre className="activity-detail__terminal-stream" aria-live="polite">{event.outputTail}</pre>
+        {outputTail && (
+          <pre className="activity-detail__terminal-stream" aria-live="polite">{outputTail}</pre>
         )}
         {hasPatch && event.structuredPatch && (
           <div className="activity-detail__diff">

@@ -58,3 +58,44 @@ def test_a_compaction_restarts_the_snapshot_and_the_session() -> None:
     starts = [dict(event.payload) for event in events if event.name is HookEvent.SESSION_START]
     assert [item["source"] for item in starts] == ["compact"]
     assert [item.text for item in runtime.reminders.drain()] == ["re-check the build"]
+
+
+def test_the_summary_carries_the_working_state_the_runtime_knows(tmp_path: Path) -> None:
+    """Live background jobs, files written and the last actions survive a compaction (they used to be lost)."""
+    import time
+
+    from agentos.agentic.tools._shared import _terminate_pid
+
+    workspace = ConversationWorkspace(tmp_path, "conv-state")
+    toolset = AgentToolset(workspace, code_mode_active=True)
+    assert toolset.invoke("write_file", {"path": "out/report.md", "content": "# ok\n"}).status == "succeeded"
+    started = toolset.invoke(
+        "run_command",
+        {"command": "python -c \"import time; print('TTS_PROGRESS 3/10', flush=True); time.sleep(60)\"", "background": True},
+    )
+    assert started.status == "succeeded"
+    pid = int(started.payload.get("pid") or started.payload.get("process_id"))
+    try:
+        time.sleep(1.5)
+        block = toolset.post_compact_enrichment()
+    finally:
+        _terminate_pid(pid)
+
+    assert "### Working State (from the runtime)" in block
+    assert f"pid {pid}" in block and "TTS_PROGRESS 3/10" in block
+    assert "`out/report.md`" in block
+    assert "Last actions:\n- Write (succeeded): Escreveu out/report.md\n- Bash (succeeded):" in block
+
+
+def test_a_third_read_of_the_same_unchanged_range_tells_the_model_to_stop(tmp_path: Path) -> None:
+    workspace = ConversationWorkspace(tmp_path, "conv-reread")
+    toolset = AgentToolset(workspace, code_mode_active=True)
+    (workspace.root / "a.py").write_text("A = 1\n", encoding="utf-8")
+
+    first = toolset.invoke("read_file", {"path": "a.py"})
+    second = toolset.invoke("read_file", {"path": "a.py"})
+    third = toolset.invoke("read_file", {"path": "a.py"})
+
+    assert "A = 1" in first.content
+    assert "unchanged since last read" in second.content and "do not read it again" not in second.content
+    assert "do not read it again" in third.content and "3 times" in third.content

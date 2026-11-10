@@ -1321,6 +1321,7 @@ class TurnSession:
         child_model_ids: tuple[str, ...] = (),
         child_model_authorizer: Callable[[str], bool] | None = None,
         agent_model_authorizer: Callable[[str, str], bool] | None = None,
+        subagent_context_limits: Callable[[str, str], tuple[int, int | None]] | None = None,
         child_provider_factory: Callable[[str], object] | None = None,
         mcp_provider=None,
         mcp_service=None,
@@ -1438,6 +1439,9 @@ class TurnSession:
         self._child_provider_factory = child_provider_factory or (lambda _model_id, **_routing: self.provider_factory())
         # An agent with pinned models: (model_id, provider) -> whether this person may run it there now.
         self._agent_model_authorizer = agent_model_authorizer
+        # (model_id, provider) -> (max_context_tokens, context_window_tokens) of that model, so a subagent
+        # compacts at its own window instead of inheriting the parent's.
+        self._subagent_context_limits = subagent_context_limits
         # Best-effort: a store that does not expose attachments (most test
         # doubles) simply means this turn carries none for the pre-read path.
         attachments_reader = getattr(store, "attachments_for_turn", None)
@@ -3375,13 +3379,31 @@ class TurnSession:
         lines.append(f'Resume with run_subagent(agent_id="{agent_id}", task=...).')
         return "\n".join(lines)
 
-    def _subagent_limits(self, *, max_iterations: int | None, max_actions: int | None, code_mode: bool) -> AgenticLimits:
-        """A subagent's limits. In Code mode it shares the turn's deadline, retries and budget (W3-R7); Chat keeps its own."""
+    def _subagent_limits(
+        self, *, max_iterations: int | None, max_actions: int | None, code_mode: bool,
+        model_id: str | None = None, provider: str | None = None,
+    ) -> AgenticLimits:
+        """A subagent's limits. In Code mode it shares the turn's deadline, retries and budget (W3-R7); Chat keeps its own.
+
+        Its context follows its own model's window when the worker can tell it, else the parent's budget.
+        """
+        max_context, window = self.limits.max_context_tokens, None
+        resolver = getattr(self, "_subagent_context_limits", None)
+        if resolver is not None and model_id:
+            try:
+                resolved = resolver(model_id, provider or str(self.turn.get("provider") or ""))
+            except Exception:  # noqa: BLE001 - sizing never blocks a delegation
+                logger.warning("subagent context limits failed for %s", model_id, exc_info=True)
+                resolved = None
+            if resolved and int(resolved[0] or 0) >= 1_000:
+                max_context = int(resolved[0])
+                window = int(resolved[1]) if resolved[1] and int(resolved[1]) >= 1_000 else None
         common = {
             "max_iterations": max_iterations,
             "max_actions": max_actions,
             "max_output_tokens": SUBAGENT_MAX_OUTPUT_TOKENS,
-            "max_context_tokens": self.limits.max_context_tokens,
+            "max_context_tokens": max_context,
+            "context_window_tokens": window,
         }
         if not code_mode:
             return AgenticLimits(deadline=self.limits.deadline, **common)
@@ -3594,7 +3616,10 @@ class TurnSession:
                 provider=child_provider_instance,
                 toolset=subagent_tools,
                 system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
-                limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
+                limits=self._subagent_limits(
+                    max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode,
+                    model_id=active_model_id, provider=provider_name,
+                ),
                 tool_kinds={item.name: item.kind for item in sub_definitions},
                 hook_engine=self.hook_engine,
                 phase_controller=None,
@@ -3644,7 +3669,10 @@ class TurnSession:
                     provider=fallback_provider_instance,
                     toolset=subagent_tools,
                     system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
-                    limits=self._subagent_limits(max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode),
+                    limits=self._subagent_limits(
+                        max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode,
+                        model_id=active_model_id, provider=provider_name,
+                    ),
                     tool_kinds={item.name: item.kind for item in sub_definitions},
                     hook_engine=self.hook_engine,
                     phase_controller=None,

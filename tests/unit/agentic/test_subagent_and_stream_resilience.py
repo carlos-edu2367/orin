@@ -609,3 +609,40 @@ def test_a_code_subagent_inherits_the_turn_deadline_retries_and_budget(tmp_path:
     assert child.deadline == CODE_TURN_DEADLINE  # a 24 h turn's subagent is not cut at the Chat-era hour
     assert child.max_budget_usd == Decimal("0.5")
     assert child.max_provider_retries == 8 and child.retry_base_delay_seconds == 0.5
+
+
+def test_a_subagent_compacts_at_its_own_models_window(tmp_path: Path) -> None:
+    """A Gemini 1M subagent of a 200k parent used to inherit the parent's budget and its 82% fallback."""
+    store = _SimpleStore()
+    asked: list[tuple[str, str]] = []
+
+    def limits_for(model_id: str, provider: str) -> tuple[int, int | None]:
+        asked.append((model_id, provider))
+        return (936_000, 1_000_000) if model_id == "gemini-4-argon-high" else (180_000, 200_000)
+
+    session = TurnSession(
+        turn=dict(store.turn),
+        store=store,
+        agents_store=_MemoryAgentsStore(),
+        memory_store=None,
+        provider_factory=lambda: None,
+        workspace_root=tmp_path,
+        limits=AgenticLimits(max_iterations=None, max_actions=None, max_context_tokens=180_000, context_window_tokens=200_000),
+        subagent_context_limits=limits_for,
+    )
+
+    own = session._subagent_limits(
+        max_iterations=None, max_actions=None, code_mode=False, model_id="gemini-4-argon-high", provider="google-antigravity",
+    )
+    assert (own.max_context_tokens, own.context_window_tokens) == (936_000, 1_000_000)
+    assert asked == [("gemini-4-argon-high", "google-antigravity")]
+    from agentos.agentic.runtime import AgenticTurnRuntime
+
+    assert AgenticTurnRuntime(store=object(), provider=object(), limits=own)._autocompact_threshold() == 400_000
+    # Without a resolver (or a model) it keeps the parent's budget, as before.
+    plain = TurnSession(
+        turn=dict(store.turn), store=store, agents_store=_MemoryAgentsStore(), memory_store=None,
+        provider_factory=lambda: None, workspace_root=tmp_path,
+        limits=AgenticLimits(max_iterations=None, max_actions=None, max_context_tokens=180_000),
+    )._subagent_limits(max_iterations=None, max_actions=None, code_mode=False, model_id="x")
+    assert (plain.max_context_tokens, plain.context_window_tokens) == (180_000, None)

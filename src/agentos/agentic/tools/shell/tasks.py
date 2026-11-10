@@ -1,6 +1,7 @@
 """Tasks tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Any, Mapping, Literal
@@ -12,19 +13,145 @@ from agentos.agentic.tools._shared import (
     AgentToolError,
     MAX_PROCESS_LOG_TAIL_CHARS,
     ToolOutcome,
+    _DEV_SERVER_CMD_RE,
+    _SERVER_READY_RE,
     _process_is_running,
     _terminate_pid,
     _schema,
+    poll_background_popen,
 )
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
+
+
+# A process that is meant to keep running (a server, a watcher) is never waited for at the end of a turn.
+_LONG_LIVED_CMD_RE = re.compile(r"(--watch\b|\s-w\b|\bwatch\b|\bnodemon\b|tail\s+-f\b|Get-Content\b.*-Wait\b|\bserve\b)", re.IGNORECASE)
+MAX_PROCESS_WAIT_SECONDS = 600
+PROCESS_NOTICE_TAIL_CHARS = 1_500
 
 
 class ShellTaskTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
 
+    def _background_entry(self, pid: int) -> Mapping[str, Any] | None:
+        for entry in self._background_shells.values():
+            if isinstance(entry, Mapping) and entry.get("pid") == pid:
+                return entry
+        return None
+
+    def _background_status(self, pid: int) -> tuple[bool, int | None]:
+        """(running, exit code). The ``Popen`` this toolset kept answers both, cheaply and without losing the code.
+
+        Without it (a process from an earlier run) only liveness is known, from the pid.
+        """
+        entry = self._background_entry(pid)
+        process = entry.get("process") if entry is not None else None
+        if process is not None and hasattr(process, "poll"):
+            try:
+                code = process.poll()
+            except Exception:  # noqa: BLE001 - fall back to the pid check
+                code = None
+            else:
+                return code is None, code
+        polled = poll_background_popen(pid)
+        if polled is not None:
+            return polled
+        return _process_is_running(pid), None
+
+    def _background_log_text(self, log_path: str) -> str:
+        if not log_path:
+            return ""
+        try:
+            content, _ = self.workspace.read_text(log_path)
+        except WorkspaceError:
+            return ""
+        return content
+
+    def _is_long_lived(self, entry: Mapping[str, Any]) -> bool:
+        """A server or watcher the model started on purpose to keep running; a turn does not wait for one."""
+        if entry.get("backgrounded_by_tool_cap"):
+            return False  # a foreground job that outgrew one tool call: it is meant to finish
+        command = str(entry.get("command") or "")
+        if entry.get("detected_url") or _DEV_SERVER_CMD_RE.search(command) or _LONG_LIVED_CMD_RE.search(command):
+            return True
+        return bool(_SERVER_READY_RE.search(self._background_log_text(str(entry.get("log_path") or ""))[-8_000:]))
+
+    def awaited_background_processes(self) -> list[dict[str, Any]]:
+        """This turn's background jobs that are still running and meant to finish (not servers or watchers)."""
+        rows: list[dict[str, Any]] = []
+        for pid in sorted(getattr(self, "_turn_background_pids", ()) or ()):
+            entry = self._background_entry(pid)
+            if entry is None or entry.get("status") == "stopped" or self._is_long_lived(entry):
+                continue
+            running, _ = self._background_status(pid)
+            if running:
+                rows.append({"pid": pid, "label": str(entry.get("description") or entry.get("command") or "")[:80]})
+        return rows
+
+    def _finished_unnotified_pids(self) -> list[int]:
+        finished: list[int] = []
+        for pid in sorted(getattr(self, "_turn_background_pids", ()) or ()):
+            if pid in self._notified_exited_pids:
+                continue
+            entry = self._background_entry(pid)
+            if entry is None or entry.get("status") == "stopped":
+                continue
+            running, _ = self._background_status(pid)
+            if not running:
+                finished.append(pid)
+        return finished
+
+    def _emit_wait_progress(self, pid: int, output_tail: str) -> None:
+        """While a wait is blocked, the log tail is the progress the UI shows (and keeps the turn from looking idle)."""
+        callback = getattr(self, "_on_tool_progress", None)
+        if not callable(callback) or not output_tail:
+            return
+        payload = {
+            "tool_name": "read_process_output", "tool_kind": "terminal",
+            "invocation_id": getattr(self, "_active_invocation_id", None) or "",
+            "pid": pid, "output_tail": output_tail,
+        }
+        try:
+            callback("read_process_output", f"Aguardando o processo {pid}", payload)
+        except Exception:  # noqa: BLE001 - progress is best effort
+            pass
+
+    def has_finished_background_process(self) -> bool:
+        return bool(self._finished_unnotified_pids())
+
+    def _mark_exit_notified(self, pid: int) -> None:
+        self._notified_exited_pids.add(pid)
+        manifest = self._load_process_manifest()
+        info = manifest.get(str(pid))
+        if isinstance(info, Mapping) and (not info.get("notified_exit") or not info.get("exit_event_recorded")):
+            _, code = self._background_status(pid)
+            updated = {**dict(info), "notified_exit": True, "exit_event_recorded": True}
+            if code is not None and updated.get("exit_code") is None:
+                updated["exit_code"] = code
+            manifest[str(pid)] = updated
+            try:
+                self._save_process_manifest(manifest)
+            except Exception:  # noqa: BLE001 - the in-memory set still holds it
+                pass
+
+    def take_finished_process_notices(self) -> str:
+        """One line per job of this turn that ended since the model last heard of it: exit code and output tail."""
+        notices: list[str] = []
+        for pid in self._finished_unnotified_pids():
+            entry = self._background_entry(pid) or {}
+            _, code = self._background_status(pid)
+            self._mark_exit_notified(pid)
+            label = str(entry.get("description") or entry.get("command") or "")[:120]
+            outcome = "finished" if code is None else ("finished (exit 0)" if code == 0 else f"failed (exit {code})")
+            tail = self._background_log_text(str(entry.get("log_path") or ""))[-PROCESS_NOTICE_TAIL_CHARS:].strip()
+            notices.append(
+                f"Background process {pid} ({label}) {outcome}."
+                + (f" Last output:\n{tail}" if tail else " It printed nothing.")
+            )
+        return "\n\n".join(notices)
+
     def read_process_output(
         self, pid: int | str | None = None, tail_chars: int = MAX_PROCESS_LOG_TAIL_CHARS,
-        block: bool = False, wait_seconds: int = 30,
+        block: bool = False, wait_seconds: int = 30, until_pattern: str | None = None,
     ) -> dict[str, Any] | ToolOutcome:
         """List every tracked background process, or read one's output.
 
@@ -131,23 +258,47 @@ class ShellTaskTools:
         # first biases the race the other way — worst case, a process that
         # finishes a moment later is reported "still running" with output
         # that is already complete, which a follow-up call corrects.
-        running = _process_is_running(pid)
+        pattern: re.Pattern[str] | None = None
+        if until_pattern:
+            try:
+                pattern = re.compile(str(until_pattern))
+            except re.error as exc:
+                raise AgentToolError(f"until_pattern is not a valid regular expression: {exc}") from exc
+            block = True
+        running, exit_code = self._background_status(pid)
+        matched = False
         if block and running:
-            deadline = time.monotonic() + max(0, min(int(wait_seconds or 0), 600))
+            deadline = time.monotonic() + max(0, min(int(wait_seconds or 0), MAX_PROCESS_WAIT_SECONDS))
+            next_progress = time.monotonic() + 5.0
             while running and time.monotonic() < deadline and not self._cancel_requested():
+                if pattern is not None and pattern.search(self._background_log_text(log_path)):
+                    matched = True
+                    break
                 time.sleep(0.25)
-                running = _process_is_running(pid)
-        try:
-            content, _ = self.workspace.read_text(log_path)
-        except WorkspaceError:
-            content = ""
+                running, exit_code = self._background_status(pid)
+                if running and time.monotonic() >= next_progress:
+                    next_progress = time.monotonic() + 5.0
+                    self._emit_wait_progress(pid, self._background_log_text(log_path)[-2_000:].strip())
+        content = self._background_log_text(log_path)
+        if pattern is not None and not matched:
+            matched = bool(pattern.search(content))
+        if not running:
+            self._mark_exit_notified(pid)
         window = max(1, min(int(tail_chars), MAX_PROCESS_LOG_TAIL_CHARS))
         tail = content[-window:]
         body = tail if tail.strip() else "[no output yet]"
+        status_text = "running" if running else ("exited" if exit_code is None else f"exited exit={exit_code}")
+        header = f"pid={pid} status={status_text}"
+        if pattern is not None:
+            header += f" until_pattern={'matched' if matched else 'not matched'}"
         return {
             "summary": f"Leu saída do processo {pid} ({'ainda rodando' if running else 'encerrado'})",
-            "content": f"pid={pid} status={'running' if running else 'exited'}\n{body}",
-            "payload": {"pid": pid, "running": running, "log_path": log_path},
+            "content": f"{header}\n{body}",
+            "payload": {
+                "pid": pid, "running": running, "log_path": log_path,
+                **({"exit_code": exit_code} if exit_code is not None else {}),
+                **({"pattern_matched": matched} if pattern is not None else {}),
+            },
             "tool_output": {
                 "task_id": f"bash_{pid}", "task_type": "local_bash", "status": "running" if running else "exited",
                 "output": tail, "command": str(info.get("command") or ""),
@@ -209,6 +360,7 @@ class ShellTaskTools:
         if isinstance(info, Mapping):
             updated = dict(info)
             updated["notified_exit"] = True
+            updated["exit_event_recorded"] = True
             manifest[str(pid)] = updated
             try:
                 self._save_process_manifest(manifest)
@@ -272,6 +424,15 @@ SPECS: tuple[ToolSpec, ...] = (
             "tail_chars": {
                 "type": "integer", "minimum": 1, "maximum": MAX_PROCESS_LOG_TAIL_CHARS,
                 "description": "How many trailing characters of output to return when pid is set. Defaults to the maximum.",
+            },
+            "block": {"type": "boolean", "description": "Wait for the process to finish before returning, instead of sleeping and polling."},
+            "wait_seconds": {
+                "type": "integer", "minimum": 0, "maximum": MAX_PROCESS_WAIT_SECONDS,
+                "description": "How long block waits at most. Defaults to 30.",
+            },
+            "until_pattern": {
+                "type": "string",
+                "description": "Regular expression: return as soon as the output matches it (e.g. 'Ready|ERROR'), or when the process ends.",
             },
         }),
         handler="read_process_output",

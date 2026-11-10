@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from agentos.installation.paths import orin_paths
 from agentos.providers.claude_cli.command import (
-    IDLE_TIMEOUT_SECONDS,
+    IDLE_TIMEOUT_SECONDS as _DEFAULT_IDLE_TIMEOUT_SECONDS,
     VALIDATED_CLI_RANGE,
     build_claude_command,
     build_isolated_claude_env,
@@ -25,6 +25,8 @@ from agentos.providers.claude_cli.command import (
     write_owner_only_temp,
 )
 import tempfile
+
+IDLE_TIMEOUT_SECONDS = _DEFAULT_IDLE_TIMEOUT_SECONDS
 
 from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
 from agentos.providers.claude_cli.errors import (
@@ -235,6 +237,13 @@ class NativeTurnSink(Protocol):
     def on_assistant_usage(self, message_id: str, usage: CliUsage) -> None: ...
     def on_compacted(self) -> None: ...
     def on_rate_limit(self, state: RateLimitState) -> None: ...
+    def on_waiting_model(
+        self, seconds: int, *, extended: bool = False
+    ) -> None: ...
+
+
+OUTPUT_TAIL_MAX_LINES = 20
+OUTPUT_TAIL_MAX_CHARS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +252,12 @@ class NativeTurnOutcome:
     init: CliInit | None
     final_text: str
     exit_code: int | None
+    end_reason: str | None = None
+    output_tail: str = ""
+
+    @property
+    def stderr_tail(self) -> str:
+        return self.output_tail
 
 
 class _SlotReleasingExecutor:
@@ -329,6 +344,8 @@ class NativeTurnHandle:
         self._tool_names: dict[str, str] = {}
         self._had_visible_output = False
         self._exit_code: int | None = None
+        self._end_reason: str | None = None
+        self._non_json_stdout_lines: list[str] = []
 
         self._slot_lock = threading.Lock()
         self._slot_cond = threading.Condition(self._slot_lock)
@@ -499,19 +516,27 @@ class NativeTurnHandle:
             return None
 
         if ev.kind == CliEventKind.ERROR:
+            self._end_reason = "stream_error"
             self.refuse_tools("stream error")
             err_msg = ev.text or "Claude CLI stream error"
             self.close()
+            tail = self._build_output_tail()
             if not self._had_visible_output and self._parser.init is None:
                 raise NativeLoopUnavailable(
                     err_msg,
                     status_code=503,
                     exhausted=False,
+                    end_reason="stream_error",
+                    output_tail=tail,
+                    exit_code=self._exit_code,
                 )
             raise ProviderTransportError(
                 err_msg,
                 status_code=502,
                 exhausted=False,
+                end_reason="stream_error",
+                output_tail=tail,
+                exit_code=self._exit_code,
             )
 
         if self._parser.init is None:
@@ -526,19 +551,30 @@ class NativeTurnHandle:
                 and res_before_init.is_error
                 and res_before_init.subtype != "error_max_turns"
             ):
+                self._end_reason = "error_result"
                 self.refuse_tools("turn round error before init")
                 err_info = self._adapter.classify_error(
                     res_before_init, self._parser.rate_limit
                 )
                 err = error_info_to_transport_error(err_info)
                 self.close()
+                tail = self._build_output_tail()
+                err.end_reason = "error_result"
+                err.output_tail = tail
+                err.stderr_tail = tail
+                err.exit_code = self._exit_code
                 raise err
+            self._end_reason = "stream_error"
             self.refuse_tools("missing init")
             self.close()
+            tail = self._build_output_tail()
             raise NativeLoopUnavailable(
                 f"Claude CLI emitted {ev.kind.value!r} before system/init validation.",
                 status_code=503,
                 exhausted=False,
+                end_reason="stream_error",
+                output_tail=tail,
+                exit_code=self._exit_code,
             )
 
         if ev.message_id and hasattr(sink, "on_message_id"):
@@ -606,20 +642,89 @@ class NativeTurnHandle:
             if res is not None:
                 self.refuse_tools("turn round completed")
                 if res.is_error and res.subtype != "error_max_turns":
+                    self._end_reason = "error_result"
                     err_info = self._adapter.classify_error(
                         res, self._parser.rate_limit
                     )
                     err = error_info_to_transport_error(err_info)
                     self.close()
+                    tail = self._build_output_tail()
+                    err.end_reason = "error_result"
+                    err.output_tail = tail
+                    err.stderr_tail = tail
+                    err.exit_code = self._exit_code
                     raise err
+                if res.is_error:
+                    self._end_reason = "error_result"
                 final_text = "".join(text_parts) or res.result_text
                 return NativeTurnOutcome(
                     result=res,
                     init=self._parser.init,
                     final_text=final_text,
                     exit_code=self._proc.poll(),
+                    end_reason=self._end_reason,
+                    output_tail=self._build_output_tail(),
                 )
         return None
+
+    def _record_non_json_line(self, raw_line: str) -> None:
+        stripped = raw_line.strip()
+        if not stripped:
+            return
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, dict):
+                    return
+            except Exception:
+                pass
+        self._non_json_stdout_lines.append(raw_line.rstrip("\r\n"))
+        if len(self._non_json_stdout_lines) > OUTPUT_TAIL_MAX_LINES * 2:
+            self._non_json_stdout_lines = self._non_json_stdout_lines[
+                -OUTPUT_TAIL_MAX_LINES:
+            ]
+
+    def _build_output_tail(self) -> str:
+        combined_lines: list[str] = []
+        if self._non_json_stdout_lines:
+            combined_lines.extend(self._non_json_stdout_lines)
+        stderr_text = "".join(self._stderr_chunks)
+        if stderr_text:
+            combined_lines.extend(stderr_text.splitlines())
+        tail_lines = combined_lines[-OUTPUT_TAIL_MAX_LINES:]
+        tail = "\n".join(tail_lines).strip()
+        if len(tail) > OUTPUT_TAIL_MAX_CHARS:
+            tail = tail[-OUTPUT_TAIL_MAX_CHARS:]
+        return tail
+
+    def _effective_idle_timeout_seconds(self) -> float:
+        caps = getattr(self._adapter, "capabilities", None)
+        cap_idle = getattr(caps, "idle_timeout_seconds", None)
+        if (
+            isinstance(cap_idle, (int, float))
+            and not isinstance(cap_idle, bool)
+            and cap_idle > 0
+        ):
+            if (
+                IDLE_TIMEOUT_SECONDS != _DEFAULT_IDLE_TIMEOUT_SECONDS
+                and getattr(self._adapter, "name", "claude") == "claude"
+                and cap_idle == _DEFAULT_IDLE_TIMEOUT_SECONDS
+            ):
+                return float(IDLE_TIMEOUT_SECONDS)
+            return float(cap_idle)
+        return float(IDLE_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _emit_waiting_model(
+        sink: NativeTurnSink, *, seconds: int, extended: bool
+    ) -> None:
+        fn = getattr(sink, "on_waiting_model", None)
+        if not callable(fn):
+            return
+        try:
+            fn(seconds, extended=extended)
+        except TypeError:
+            fn(seconds)
 
     def run_until_result(self, sink: NativeTurnSink) -> NativeTurnOutcome:
         reset_fn = getattr(self._parser, "reset_result", None)
@@ -631,10 +736,14 @@ class NativeTurnHandle:
             except AttributeError:
                 pass
         text_parts: list[str] = []
-        idle_deadline = self._clock() + float(IDLE_TIMEOUT_SECONDS)
+        idle_timeout = self._effective_idle_timeout_seconds()
+        idle_started_at = self._clock()
+        idle_deadline = idle_started_at + idle_timeout
+        idle_extended = False
 
         while True:
             if self._cancel_check():
+                self._end_reason = "cancelled"
                 self.refuse_tools("turn cancelled")
                 self.close()
                 cancelled_res = CliResult(
@@ -654,33 +763,75 @@ class NativeTurnHandle:
                     init=self._parser.init,
                     final_text="".join(text_parts),
                     exit_code=self._exit_code,
+                    end_reason="cancelled",
+                    output_tail=self._build_output_tail(),
                 )
 
-            now = self._clock()
-            if now >= self._deadline_monotonic:
-                self.refuse_tools("turn deadline exceeded")
-                self.close()
-                raise ProviderTransportError(
-                    "TURN_DEADLINE_EXCEEDED: Claude CLI native turn exceeded deadline",
-                    status_code=None,
-                    exhausted=False,
-                )
-
-            if self.in_flight > 0:
-                idle_deadline = now + float(IDLE_TIMEOUT_SECONDS)
-            elif now >= idle_deadline:
-                self.refuse_tools("idle timeout")
-                self.close()
-                raise ProviderTransportError(
-                    f"Claude CLI sem saída por {IDLE_TIMEOUT_SECONDS}s",
-                    status_code=None,
-                    exhausted=False,
-                )
-
+            has_queued_line = False
+            line: str | None = None
             try:
-                line = self._stdout_queue.get(timeout=0.05)
+                line = self._stdout_queue.get_nowait()
+                has_queued_line = True
             except queue.Empty:
-                continue
+                pass
+
+            if not has_queued_line:
+                now = self._clock()
+                if now >= self._deadline_monotonic:
+                    self._end_reason = "deadline"
+                    self.refuse_tools("turn deadline exceeded")
+                    self.close()
+                    tail = self._build_output_tail()
+                    raise ProviderTransportError(
+                        "TURN_DEADLINE_EXCEEDED: Claude CLI native turn exceeded deadline",
+                        status_code=None,
+                        exhausted=False,
+                        end_reason="deadline",
+                        output_tail=tail,
+                        exit_code=self._exit_code,
+                    )
+
+                if self.in_flight > 0:
+                    idle_started_at = now
+                    idle_deadline = now + idle_timeout
+                    idle_extended = False
+                elif now >= idle_deadline:
+                    if (
+                        not idle_extended
+                        and self._proc.poll() is None
+                        and now < self._deadline_monotonic
+                    ):
+                        idle_extended = True
+                        idle_deadline = now + (idle_timeout / 2.0)
+                        elapsed_idle = max(
+                            int(idle_timeout),
+                            int(round(now - idle_started_at)),
+                        )
+                        self._emit_waiting_model(
+                            sink, seconds=elapsed_idle, extended=True
+                        )
+                    else:
+                        self._end_reason = "idle_timeout"
+                        self.refuse_tools("idle timeout")
+                        self.close()
+                        tail = self._build_output_tail()
+                        elapsed_idle = max(
+                            int(idle_timeout),
+                            int(round(now - idle_started_at)),
+                        )
+                        raise ProviderTransportError(
+                            f"Claude CLI sem saída por {elapsed_idle}s",
+                            status_code=None,
+                            exhausted=False,
+                            end_reason="idle_timeout",
+                            output_tail=tail,
+                            exit_code=self._exit_code,
+                        )
+
+                try:
+                    line = self._stdout_queue.get(timeout=0.05)
+                except queue.Empty:
+                    continue
 
             if line is None:
                 for ev in self._parser.flush_pending():
@@ -689,7 +840,11 @@ class NativeTurnHandle:
                         return outcome
                 break
 
-            idle_deadline = self._clock() + float(IDLE_TIMEOUT_SECONDS)
+            now_after_line = self._clock()
+            idle_started_at = now_after_line
+            idle_deadline = now_after_line + idle_timeout
+            idle_extended = False
+            self._record_non_json_line(line)
             bad_line_kind = find_forbidden_item_kind(
                 self._adapter.capabilities.forbidden_item_kinds,
                 raw_line=line,
@@ -706,6 +861,7 @@ class NativeTurnHandle:
                     return outcome
 
         if self._cancel_check():
+            self._end_reason = "cancelled"
             self.close()
             cancelled_res = CliResult(
                 subtype="cancelled",
@@ -724,25 +880,35 @@ class NativeTurnHandle:
                 init=self._parser.init,
                 final_text="".join(text_parts),
                 exit_code=self._exit_code,
+                end_reason="cancelled",
+                output_tail=self._build_output_tail(),
             )
 
+        self._end_reason = "stdout_eof"
         try:
             self._exit_code = self._proc.wait(timeout=1.0)
         except Exception:
             self._exit_code = self._proc.poll()
 
-        stderr_tail = "".join(self._stderr_chunks).strip()
         self.close()
+        tail = self._build_output_tail()
+        stderr_tail = "".join(self._stderr_chunks).strip() or tail
         if not self._had_visible_output and self._parser.init is None:
             raise NativeLoopUnavailable(
                 f"Claude CLI exited before initialization (code={self._exit_code}): {stderr_tail}",
                 status_code=503,
                 exhausted=False,
+                end_reason="stdout_eof",
+                output_tail=tail,
+                exit_code=self._exit_code,
             )
         raise ProviderTransportError(
             f"Claude CLI exited without result packet (code={self._exit_code}): {stderr_tail}",
             status_code=502,
             exhausted=False,
+            end_reason="stdout_eof",
+            output_tail=tail,
+            exit_code=self._exit_code,
         )
 
     def close(self) -> None:
@@ -819,6 +985,7 @@ class NativeTurnHandle:
 
             duration_s = max(0.0, self._clock() - self._t0)
             loggable_fn = getattr(self._adapter, "loggable_command", None)
+            combined_tail = self._build_output_tail()
             try:
                 self._log_run_fn(
                     mode="native",
@@ -829,21 +996,36 @@ class NativeTurnHandle:
                     usage=self._parser.latest_usage(),
                     duration_s=duration_s,
                     exit_code=self._exit_code,
-                    stderr_tail="".join(self._stderr_chunks),
+                    stderr_tail=combined_tail,
                     loggable_command=loggable_fn,
+                    end_reason=self._end_reason,
                 )
             except TypeError:
-                self._log_run_fn(
-                    mode="native",
-                    argv=loggable_fn(self._cmd) if callable(loggable_fn) else self._cmd,
-                    requested_model=self._requested_model,
-                    init=self._parser.init,
-                    result=self._parser.result,
-                    usage=self._parser.latest_usage(),
-                    duration_s=duration_s,
-                    exit_code=self._exit_code,
-                    stderr_tail="".join(self._stderr_chunks),
-                )
+                try:
+                    self._log_run_fn(
+                        mode="native",
+                        argv=self._cmd,
+                        requested_model=self._requested_model,
+                        init=self._parser.init,
+                        result=self._parser.result,
+                        usage=self._parser.latest_usage(),
+                        duration_s=duration_s,
+                        exit_code=self._exit_code,
+                        stderr_tail=combined_tail,
+                        loggable_command=loggable_fn,
+                    )
+                except TypeError:
+                    self._log_run_fn(
+                        mode="native",
+                        argv=loggable_fn(self._cmd) if callable(loggable_fn) else self._cmd,
+                        requested_model=self._requested_model,
+                        init=self._parser.init,
+                        result=self._parser.result,
+                        usage=self._parser.latest_usage(),
+                        duration_s=duration_s,
+                        exit_code=self._exit_code,
+                        stderr_tail=combined_tail,
+                    )
 
 
 def start_native_turn_for_provider(
@@ -923,6 +1105,20 @@ def start_native_turn_for_provider(
         )
 
     wrapped_executor = _SlotReleasingExecutor(request.executor)
+    # The adapter's cap is the client's default per-call limit; the real one is set below.
+    cap_tool_s = getattr(
+        getattr(adapter, "capabilities", None), "max_tool_call_seconds", None
+    )
+    cap_targets = [
+        bind_cap
+        for target_ts in (
+            getattr(request.executor, "toolset", None),
+            getattr(getattr(request.executor, "runtime", None), "toolset", None),
+        )
+        if callable(bind_cap := getattr(target_ts, "set_max_tool_call_seconds", None))
+    ]
+    for bind_cap in cap_targets:
+        bind_cap(cap_tool_s)
     bg_server: BackgroundTurnToolServer | None = None
     temp_files: list[Path] = []
     proc: Any | None = None
@@ -966,6 +1162,12 @@ def start_native_turn_for_provider(
         now = provider._clock()
         remaining_s = max(1.0, request.deadline_monotonic - now)
         mcp_tool_timeout_ms = max(1_000, int(remaining_s * 1000))
+        if cap_tool_s is not None:
+            # build_command raises the client's per-call limit to this value (agy:
+            # timeoutSeconds in mcp_config.json, checked against agy 1.5.4), so a
+            # foreground command only needs to go to the background before it.
+            for bind_cap in cap_targets:
+                bind_cap(mcp_tool_timeout_ms / 1000)
 
         isolated_env = dict(
             adapter.environment(

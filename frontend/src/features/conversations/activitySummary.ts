@@ -451,8 +451,15 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
   if (event.type.startsWith('context.')) return false
   if (event.kind === 'message') return false
   // A lifecycle "turn started/working" line adds nothing next to the tool rows
-  // that follow it, so only terminal lifecycle states earn a row.
-  if (event.kind === 'lifecycle' && event.type === 'turn.started') return false
+  // that follow it, so only terminal lifecycle states or stream-resume notices earn a row.
+  if (
+    event.kind === 'lifecycle' &&
+    event.type === 'turn.started' &&
+    event.payload?.stream_resuming !== true &&
+    !event.summary.startsWith('Conexão com o modelo caiu; retomando')
+  ) {
+    return false
+  }
   // `turn.waiting_user` always accompanies an `ask_user` tool call in the same
   // turn, and the interactive question card built from that tool call already
   // shows this state (and, unlike this static line, keeps showing it correctly
@@ -499,7 +506,46 @@ export function groupingKey(event: ConversationActivityEvent): string {
   }
   if (event.kind === 'agent') return `agent:${event.agentId}:${event.turnId ?? ''}:${event.type}:${event.label ?? ''}`
   if (event.kind === 'artifact') return `artifact:${event.agentId}:${event.turnId ?? ''}:${event.label ?? ''}`
+  if (event.type === 'process.exited') {
+    const pid = event.pid ?? (typeof event.payload?.pid === 'number' ? event.payload.pid : undefined)
+    return `process:${event.agentId}:${event.turnId ?? ''}:${pid ?? event.eventId}`
+  }
   return `lifecycle:${event.agentId}:${event.turnId ?? ''}:${event.type}`
+}
+
+export function processExitedLabel(event: ConversationActivityEvent): string {
+  const summary = (event.summary ?? '').trim()
+  if (summary.startsWith('Processo ')) {
+    return summary
+  }
+  const pid =
+    event.pid ??
+    (typeof event.payload?.pid === 'number' && Number.isInteger(event.payload.pid) ? event.payload.pid : undefined)
+  const rawLabel =
+    event.label ??
+    event.description ??
+    event.command ??
+    (typeof event.payload?.label === 'string' ? event.payload.label : undefined) ??
+    (typeof event.payload?.description === 'string' ? event.payload.description : undefined) ??
+    (typeof event.payload?.command === 'string' ? event.payload.command : undefined) ??
+    ''
+  const cleanLabel = rawLabel.trim().replace(/\s+/g, ' ').slice(0, 120)
+  const prefix = pid !== undefined
+    ? (cleanLabel ? `Processo ${pid} (${cleanLabel})` : `Processo ${pid}`)
+    : (cleanLabel ? `Processo (${cleanLabel})` : 'Processo')
+  const exitCode =
+    event.exitCode !== undefined
+      ? event.exitCode
+      : typeof event.payload?.exit_code === 'number' && Number.isInteger(event.payload.exit_code)
+        ? event.payload.exit_code
+        : null
+  if (exitCode !== null && exitCode !== undefined) {
+    if (exitCode !== 0) {
+      return `${prefix} terminou com erro (exit ${exitCode})`
+    }
+    return `${prefix} terminou (exit 0)`
+  }
+  return `${prefix} terminou`
 }
 
 export function groupLabel(group: ActivityGroup): string {
@@ -507,7 +553,15 @@ export function groupLabel(group: ActivityGroup): string {
   if (group.kind === 'tool') return toolGroupLabel(group)
   if (group.kind === 'agent') return agentLabel(first)
   if (group.kind === 'artifact') return first.label ? `Criou ${first.label}` : 'Criou um artefato'
-  return first.summary || activityStateLabel(group.state)
+  const latest = group.events[group.events.length - 1] ?? first
+  if (latest.type === 'process.exited') {
+    return processExitedLabel(latest)
+  }
+  const payloadMessage = typeof latest.payload?.message === 'string' ? latest.payload.message.trim() : ''
+  if (payloadMessage && (!latest.summary || latest.summary === 'Aguardando reconciliação de efeito externo')) {
+    return payloadMessage
+  }
+  return latest.summary || first.summary || activityStateLabel(group.state)
 }
 
 function toolGroupLabel(group: ActivityGroup): string {

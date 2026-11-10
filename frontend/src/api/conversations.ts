@@ -308,6 +308,33 @@ export function cancelConversation(
   })
 }
 
+export function resumeConversationTurn(
+  client: ApiClient,
+  conversationId: string,
+  turnId: string,
+  intent: MutationIntent = client.createMutationIntent(),
+): Promise<{ resumed: boolean; conversation_id: string; turn_id: string; state: string; acknowledged_effects: string[] }> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/turns/${encodeURIComponent(turnId)}/resume`,
+    method: 'POST',
+    expectedStatus: 202,
+    intent,
+    body: {},
+    parse: (value) => {
+      const data = record(value)
+      return {
+        resumed: Boolean(data.resumed ?? true),
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        turn_id: typeof data.turn_id === 'string' ? data.turn_id : turnId,
+        state: typeof data.state === 'string' ? data.state : 'queued',
+        acknowledged_effects: Array.isArray(data.acknowledged_effects)
+          ? data.acknowledged_effects.map((item) => String(item))
+          : [],
+      }
+    },
+  })
+}
+
 export type StopConversationAgentResponse = {
   agent_id: string
   status: string
@@ -758,6 +785,23 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (senderName) extraPayload.sender_name = senderName
   if (recipientName) extraPayload.recipient_name = recipientName
   if (errorCode) extraPayload.error_code = errorCode
+  const endReason = optionalText(payload.end_reason, 64)
+  const pauseMessage = optionalText(payload.message, 1000)
+  const payloadState = optionalText(payload.state, 32)
+  if (endReason) extraPayload.end_reason = endReason
+  if (pauseMessage) extraPayload.message = pauseMessage
+  if (payloadState) extraPayload.state = payloadState
+  if (payload.resumable === true) extraPayload.resumable = true
+  if (payload.stream_resuming === true) extraPayload.stream_resuming = true
+  if (payload.resumed === true) extraPayload.resumed = true
+  if (typeof payload.attempt === 'number' && Number.isFinite(payload.attempt)) extraPayload.attempt = payload.attempt
+  if (typeof payload.max_attempts === 'number' && Number.isFinite(payload.max_attempts)) extraPayload.max_attempts = payload.max_attempts
+  if (
+    pauseMessage &&
+    (!event.summary || event.summary === 'Aguardando reconciliação de efeito externo')
+  ) {
+    event.summary = pauseMessage
+  }
   if (payload.in_turn === true) extraPayload.in_turn = true
   if (payload.waiting_subagents === true || payload.state === 'waiting_subagents') {
     extraPayload.waiting_subagents = true
@@ -785,6 +829,31 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
     if (typeof payload.blocked === 'boolean') extraPayload.blocked = payload.blocked
     if (typeof payload.duration_ms === 'number' && Number.isFinite(payload.duration_ms) && payload.duration_ms >= 0) {
       extraPayload.duration_ms = Math.round(payload.duration_ms)
+    }
+  }
+  if (type === 'process.exited') {
+    if (typeof payload.pid === 'number' && Number.isInteger(payload.pid) && payload.pid > 0) {
+      event.pid = payload.pid
+      extraPayload.pid = payload.pid
+    }
+    if (typeof payload.exit_code === 'number' && Number.isInteger(payload.exit_code)) {
+      event.exitCode = payload.exit_code
+      extraPayload.exit_code = payload.exit_code
+      if (payload.exit_code !== 0) {
+        event.state = 'failed'
+      }
+    } else if (payload.exit_code === null) {
+      event.exitCode = null
+      extraPayload.exit_code = null
+    }
+    if (payload.failed === true) {
+      event.state = 'failed'
+      extraPayload.failed = true
+    }
+    const logPath = optionalText(payload.log_path, 512)
+    if (logPath) {
+      if (!event.path) event.path = logPath
+      extraPayload.log_path = logPath
     }
   }
   if (Object.keys(extraPayload).length > 0) {

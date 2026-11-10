@@ -24,7 +24,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import socket
@@ -36,7 +35,6 @@ import time
 from contextlib import contextmanager
 from typing import Any, Callable, Collection, Iterable, Iterator, Literal, Mapping
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
-from uuid import uuid4
 
 import httpx
 
@@ -81,6 +79,7 @@ from agentos.agentic.tools.shell.confirmation import guard_sensitive_command, ne
 from agentos.agentic.tools.shell.publish import publish_actions  # noqa: F401 - re-exported for callers and tests
 from agentos.agentic.tools.shell.powershell import PowerShellTools
 from agentos.agentic.tools.shell.tasks import ShellTaskTools
+from agentos.agentic.tools.orin.working_state import WorkingStateTools
 from agentos.agentic.tools.orin.verify import VerifyTools
 from agentos.agentic.tools.web.fetch import FetchTools
 from agentos.agentic.tools.web.search import WebSearchTools
@@ -160,6 +159,7 @@ class AgentToolset(
     BashTools,
     PowerShellTools,
     ShellTaskTools,
+    WorkingStateTools,
     VerifyTools,
     FetchTools,
     WebSearchTools,
@@ -265,6 +265,7 @@ class AgentToolset(
         schedule_context: Mapping[str, str] | None = None,
         on_notification: Callable[[str], None] | None = None,
         notification_budget: NotificationBudget | None = None,
+        max_tool_call_seconds: int | float | None = None,
     ) -> None:
         from agentos.code_mode.checkpoints import FileCheckpointStore
         from agentos.code_mode.models import CodePermissionMode, normalize_permission_mode
@@ -275,6 +276,7 @@ class AgentToolset(
         # Asked while a foreground command runs: True stops the command (the turn was interrupted).
         self._cancel_check = cancel_check
         self._call_abandoned_check: Callable[[], bool] | None = None
+        self.set_max_tool_call_seconds(max_tool_call_seconds)
         # Per-message file history (W4): what each file held before this user message's turn first changed it.
         self._file_history = file_history
         self._history_message_id = str(user_message_id or turn_id or "") or None
@@ -384,10 +386,12 @@ class AgentToolset(
         self._original_workspace_root: Path = self.workspace.root
         self._active_worktree_name: str | None = None
         self._notified_exited_pids: set[int] = set()
+        self._turn_background_pids: set[int] = set()  # this turn's jobs: the turn waits for these
         # Tracked unconditionally (see _observe_mutation_outcome): the general
         # verify-before-responding gate in the runtime applies to every turn,
         # not only Code mode.
         self._changed_paths: set[str] = set()
+        self._recent_actions: list[str] = []  # for the compaction summary's working state
         self._change_events = 0
         self._tool_calls_count = 0
         # A Code-mode completion is evidence-led. A command string containing
@@ -694,6 +698,7 @@ class AgentToolset(
             outcome = self._invoke_unobserved(name, arguments, call_id=call_id, invocation_id=invocation_id)
             if outcome.status == "succeeded":
                 self.discover(FOLLOW_UP_TOOLS.get(internal, ()))
+            self._note_recent_action(internal, outcome)
             return self._speak_public(outcome)
         try:
             # Idempotent: an Orin-shaped call passes through, a Claude Code-shaped one is mapped, in every mode.
@@ -782,6 +787,7 @@ class AgentToolset(
             if failure is not None:
                 reminders.extend(failure.additional_context)
             _append_reminder(outcome, reminders, result_char_limit)
+        self._note_recent_action(internal, outcome)
         return self._speak_public(outcome)
 
     def _tool_kind_for_hooks(self, internal: str) -> str:
@@ -1092,26 +1098,12 @@ class AgentToolset(
                 outcome.content += coercion_note
         if name in {"write_file", "edit_file"} and outcome.status == "succeeded":
             outcome = self._with_file_diagnostic(outcome, arguments)
-        if not (name in {"run_command", "powershell"} and bool(arguments.get("background"))) and name not in {"read_process_output", "stop_process", "list_files"}:
+        if not (name in {"run_command", "powershell"} and bool(arguments.get("background"))) and name not in {"stop_process", "list_files"}:
             bg_notice = self._check_exited_background_processes()
             if bg_notice and len(outcome.content) + len(bg_notice) <= limit:
                 outcome.content += bg_notice
         self._observe_mutation_outcome(name, arguments, outcome)
         return outcome
-
-    def _persist_truncated_output(self, tool_name: str, full_content: str) -> str | None:
-        """Persist full untruncated tool output inside .orin/tool-outputs/ for paged inspection."""
-        try:
-            rel_dir = ".orin/tool-outputs"
-            out_dir = self.workspace.resolve(rel_dir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = re.sub(r"[^A-Za-z0-9_-]", "_", tool_name)[:32] or "tool"
-            rel_path = f"{rel_dir}/{safe_name}-{uuid4().hex[:12]}.txt"
-            target = self.workspace.resolve(rel_path)
-            target.write_text(full_content, encoding="utf-8", errors="replace")
-            return rel_path
-        except Exception:
-            return None
 
     def _with_file_diagnostic(self, outcome: ToolOutcome, arguments: Mapping[str, Any]) -> ToolOutcome:
         """Append a fast, single-file lint/typecheck result to a write's own output.
@@ -1380,6 +1372,9 @@ class AgentToolset(
                 active = f" ({item['active_form']})" if status == "in_progress" and item.get("active_form") else ""
                 todo_lines.append(f"- {marker} {item.get('id', '')}: {item.get('content', '')}{active}")
             sections.append("### Current Todo List\n" + "\n".join(todo_lines))
+        working_state = self._working_state_section()
+        if working_state:
+            sections.append(working_state)
         try:
             plans_dir = self.workspace.root / ".orin" / "plans"
             plan_files = (

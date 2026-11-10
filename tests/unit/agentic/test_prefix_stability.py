@@ -150,11 +150,21 @@ def test_compaction_is_the_only_thing_that_rewrites_the_prefix() -> None:
         assert any(COMPACTION_HEADING in str(item.get("content", "")) for item in provider.requests[index])
 
 
-def test_a_provider_without_caching_still_shrinks_old_results() -> None:
-    """Without a cache to protect, shrinking is pure gain and must be kept."""
-    provider = _RecordingProvider(tool_calls=10)
-    _run(provider, turn_provider="ollama")
+def test_a_provider_without_caching_still_shrinks_old_results_once_the_window_is_near_full() -> None:
+    """Without a cache to protect, shrinking is pure gain near the limit and must be kept."""
+    provider = _RecordingProvider(tool_calls=20)
+    _run(provider, turn_provider="ollama", max_context_tokens=16_000)
 
     last = provider.requests[-1]
     aged = [item for item in _tool_results(last) if "compressed" in str(item.get("content", ""))]
     assert aged, "an uncached provider should still see old results compressed"
+
+
+def test_a_provider_without_caching_keeps_old_results_whole_below_the_threshold() -> None:
+    """Shrinking far below the window only made the model read the same files again."""
+    provider = _RecordingProvider(tool_calls=10)
+    _run(provider, turn_provider="ollama")
+
+    last = provider.requests[-1]
+    results = _tool_results(last)
+    assert results and all("compressed" not in str(item.get("content", "")) for item in results)

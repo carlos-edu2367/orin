@@ -346,12 +346,23 @@ def _validate_mcp_server_params(
     return srv, clean_url, clean_token
 
 
+def _coerce_timeout_seconds(tool_timeout_ms: int | None) -> int | None:
+    if (
+        isinstance(tool_timeout_ms, int)
+        and not isinstance(tool_timeout_ms, bool)
+        and tool_timeout_ms > 0
+    ):
+        return max(1, -(-tool_timeout_ms // 1000))
+    return None
+
+
 def _render_orin_agent_md(
     *,
     server_name: str,
     url: str,
     token: str,
     system_prompt: str,
+    timeout_seconds: int | None = None,
 ) -> str:
     srv, clean_url, clean_token = _validate_mcp_server_params(
         server_name=server_name,
@@ -359,6 +370,13 @@ def _render_orin_agent_md(
         token=token,
     )
     auth_val = f"Bearer {clean_token}"
+    timeout_line = (
+        f"    timeoutSeconds: {int(timeout_seconds)}\n"
+        if isinstance(timeout_seconds, int)
+        and not isinstance(timeout_seconds, bool)
+        and timeout_seconds > 0
+        else ""
+    )
     return (
         "---\n"
         "name: orin\n"
@@ -371,6 +389,7 @@ def _render_orin_agent_md(
         f"    url: {json.dumps(clean_url, ensure_ascii=True)}\n"
         "    headers:\n"
         f"      Authorization: {json.dumps(auth_val, ensure_ascii=True)}\n"
+        f"{timeout_line}"
         "---\n\n"
         "# Instructions\n\n"
         f"{system_prompt.strip()}\n"
@@ -380,6 +399,8 @@ def _render_orin_agent_md(
 def _update_agent_md_instructions(
     agent_md_path: Path,
     system_prompt: str,
+    *,
+    timeout_seconds: int | None = None,
 ) -> None:
     if agent_md_path.is_symlink():
         raise ValueError(f"Refusing to write to symlink: {agent_md_path}")
@@ -395,10 +416,45 @@ def _update_agent_md_instructions(
     marker = "# Instructions"
     if marker in existing:
         prefix = existing.split(marker, 1)[0]
+        if (
+            isinstance(timeout_seconds, int)
+            and not isinstance(timeout_seconds, bool)
+            and timeout_seconds > 0
+            and "timeoutSeconds:" not in prefix
+            and "\n---\n" in prefix
+        ):
+            head, tail = prefix.rsplit("\n---\n", 1)
+            prefix = f"{head}\n    timeoutSeconds: {int(timeout_seconds)}\n---\n{tail}"
         updated = f"{prefix}{marker}\n\n{system_prompt.strip()}\n"
     else:
         updated = f"{existing.rstrip()}\n\n{marker}\n\n{system_prompt.strip()}\n"
     _write_owner_only_file(agent_md_path, updated)
+
+
+def _update_mcp_config_timeout(
+    mcp_config_path: Path,
+    timeout_seconds: int,
+) -> None:
+    if mcp_config_path.is_symlink():
+        raise ValueError(f"Refusing to write to symlink: {mcp_config_path}")
+    if not mcp_config_path.is_file():
+        return
+    try:
+        payload = json.loads(mcp_config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    servers = payload.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+    for srv_cfg in servers.values():
+        if isinstance(srv_cfg, dict):
+            srv_cfg["timeoutSeconds"] = int(timeout_seconds)
+    _write_owner_only_file(
+        mcp_config_path,
+        json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
+    )
 
 
 def wire_antigravity_tool_server(
@@ -407,6 +463,7 @@ def wire_antigravity_tool_server(
     *,
     server_name: str = "orin",
     system_prompt_file: Path | None = None,
+    tool_timeout_ms: int | None = None,
 ) -> ToolServerWiring:
     """Create isolated `.agents/agents/orin.md`, `.agents/mcp_config.json`, and `.agents/orin_settings.json`."""
     srv, clean_url, clean_token = _validate_mcp_server_params(
@@ -414,6 +471,12 @@ def wire_antigravity_tool_server(
         url=getattr(handle, "url", None),
         token=getattr(handle, "token", None),
     )
+    eff_timeout_ms = (
+        tool_timeout_ms
+        if tool_timeout_ms is not None
+        else getattr(handle, "tool_timeout_ms", None)
+    )
+    timeout_seconds = _coerce_timeout_seconds(eff_timeout_ms)
 
     _validate_path_arg(directory, "directory")
     workdir = Path(directory)
@@ -468,17 +531,17 @@ def wire_antigravity_tool_server(
             url=clean_url,
             token=clean_token,
             system_prompt=sys_prompt,
+            timeout_seconds=timeout_seconds,
         )
         _write_owner_only_file(agent_md_path, agent_md_content)
 
-        mcp_config_payload = {
-            "mcpServers": {
-                srv: {
-                    "url": clean_url,
-                    "headers": {"Authorization": f"Bearer {clean_token}"},
-                }
-            }
+        srv_entry: dict[str, Any] = {
+            "url": clean_url,
+            "headers": {"Authorization": f"Bearer {clean_token}"},
         }
+        if timeout_seconds is not None:
+            srv_entry["timeoutSeconds"] = timeout_seconds
+        mcp_config_payload = {"mcpServers": {srv: srv_entry}}
         _write_owner_only_file(
             mcp_config_path,
             json.dumps(mcp_config_payload, ensure_ascii=True, indent=2) + "\n",
@@ -761,6 +824,7 @@ def build_antigravity_command(
                     f"ToolServerWiring for Antigravity CLI only permits '--agent orin' and '--settings <path>', got: {token!r}"
                 )
 
+    req_timeout_seconds = _coerce_timeout_seconds(request.tool_timeout_ms)
     if prompt_file.is_file():
         try:
             prompt_text = prompt_file.read_text(encoding="utf-8").strip()
@@ -769,8 +833,17 @@ def build_antigravity_command(
         if prompt_text and eff_wiring is not None:
             for fpath in eff_wiring.files:
                 if Path(fpath).name == "orin.md":
-                    _update_agent_md_instructions(Path(fpath), prompt_text)
+                    _update_agent_md_instructions(
+                        Path(fpath),
+                        prompt_text,
+                        timeout_seconds=req_timeout_seconds,
+                    )
                     break
+    if req_timeout_seconds is not None and eff_wiring is not None:
+        for fpath in eff_wiring.files:
+            if Path(fpath).name == "mcp_config.json":
+                _update_mcp_config_timeout(Path(fpath), req_timeout_seconds)
+                break
 
     return cmd
 

@@ -621,6 +621,22 @@ def test_wire_tool_server_and_build_command_isolation(tmp_path: Path) -> None:
     assert f"Bearer {handle.token}" in md_text
     assert "SYSTEM_PROMPT_SECRET_CONTENT" in md_text
 
+    # Verify per-adapter timeout capabilities and timeoutSeconds wiring in mcp_config.json / orin.md
+    assert AntigravityCliAdapter.capabilities.idle_timeout_seconds == 600
+    assert AntigravityCliAdapter.capabilities.max_tool_call_seconds == 180
+    # agy cuts a longer stdin user message at the end, so a turn's history must fit in it.
+    assert AntigravityCliAdapter.capabilities.max_user_message_bytes == 190_791
+    wiring_with_timeout = wire_antigravity_tool_server(
+        handle,
+        workdir,
+        server_name="orin",
+        system_prompt_file=sys_file,
+        tool_timeout_ms=240_000,
+    )
+    mcp_cfg_data = json.loads(mcp_cfg.read_text(encoding="utf-8"))
+    assert mcp_cfg_data["mcpServers"]["orin"]["timeoutSeconds"] == 240
+    assert "timeoutSeconds: 240" in agent_md.read_text(encoding="utf-8")
+
     settings_data = json.loads(settings_json.read_text(encoding="utf-8"))
     assert settings_data["allowNonWorkspaceAccess"] is False
     assert settings_data["enableTerminalSandbox"] is True

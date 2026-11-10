@@ -442,12 +442,20 @@ def test_runtime_pauses_for_reconciliation_when_a_stream_breaks_after_output() -
 
     provider = InterruptedProvider()
     store = Store()
-    result = AgenticTurnRuntime(store=store, provider=provider, limits=AgenticLimits(max_provider_retries=1)).run("turn-1")
+    result = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        limits=AgenticLimits(max_provider_retries=1),
+        sleep=lambda _s: None,
+    ).run("turn-1")
 
     assert result.state == "reconciliation_required"
     assert result.error_code == "PROVIDER_STREAM_INTERRUPTED"
-    assert provider.calls == 1
-    assert store.deltas == ["partial response"]
+    # 1 initial call + MAX_STREAM_RESUMES (2) clean-ledger auto-resumes before pausing.
+    assert provider.calls == 3
+    assert store.deltas == ["partial response", "partial response", "partial response"]
+    assert result.end_reason is not None
+    assert result.message is not None
 
 
 def test_runtime_allows_an_unlimited_tool_iteration_budget() -> None:
@@ -934,3 +942,271 @@ def test_runtime_close_forwards_to_the_toolset() -> None:
     runtime.close()
 
     assert toolset.closed == 1
+
+
+def test_stream_interrupted_auto_resumes_with_clean_ledger_and_completes() -> None:
+    from agentos.providers.claude_cli.errors import ProviderTransportError
+
+    class DropThenCompleteProvider:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, object]] = []
+
+        def stream(self, request):
+            self.requests.append(dict(request))
+            if len(self.requests) == 1:
+                yield NormalizedStreamItem(StreamKind.TEXT, 1, text="Parte 1. ")
+                raise ProviderTransportError(
+                    "CLI sem saída por 180s",
+                    end_reason="idle_timeout",
+                )
+            yield NormalizedStreamItem(StreamKind.TEXT, 1, text="Parte 2 concluída.")
+            yield NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")
+
+    provider = DropThenCompleteProvider()
+    store = Store()
+    sleeps: list[float] = []
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        sleep=lambda seconds: sleeps.append(seconds),
+    )
+
+    result = runtime.run("turn-1")
+
+    assert result.state == "completed"
+    assert len(provider.requests) == 2
+    assert "".join(store.deltas) == "Parte 1. Parte 2 concluída."
+    assert sum(sleeps) == pytest.approx(2.0)
+    resuming_events = [payload for state, payload in store.events if state == "stream_resuming"]
+    assert len(resuming_events) == 1
+    assert resuming_events[0]["summary"] == "Conexão com o modelo caiu; retomando (1/2)"
+    second_messages = provider.requests[1]["messages"]
+    assert any(m.get("role") == "assistant" and "Parte 1." in str(m.get("content")) for m in second_messages)
+    assert any("previous model connection was interrupted" in str(m.get("content")) for m in second_messages)
+
+
+def test_stream_interrupted_with_unresolved_tool_effect_pauses_immediately() -> None:
+    from agentos.providers.claude_cli.errors import ProviderTransportError
+
+    class InterruptedAfterToolProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            yield NormalizedStreamItem(StreamKind.TEXT, 1, text="partial before drop")
+            raise ProviderTransportError(
+                "CLI encerrou sem evento result (exit=9).",
+                end_reason="stdout_eof",
+                exit_code=9,
+            )
+
+    class UnresolvedToolStore(Store):
+        def has_unresolved_tool_effects(self, turn) -> bool:
+            return True
+
+    provider = InterruptedAfterToolProvider()
+    store = UnresolvedToolStore()
+    result = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        sleep=lambda _s: None,
+    ).run("turn-1")
+
+    assert result.state == "reconciliation_required"
+    assert result.error_code == "PROVIDER_STREAM_INTERRUPTED"
+    assert result.end_reason == "stdout_eof"
+    assert "código 9" in (result.message or "")
+    assert provider.calls == 1
+
+
+def test_subagent_stream_interrupted_auto_resumes_once_then_stops() -> None:
+    from agentos.providers.claude_cli.errors import ProviderTransportError
+
+    class SubagentStore(Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.text: list[str] = []
+            self.agent_id = "sub-1"
+
+        def delta(self, turn: dict[str, object], text: str) -> None:
+            super().delta(turn, text)
+            self.text.append(text)
+
+    # Case 1: Subagent drops once and succeeds on the 1 allowed auto-resume.
+    class DropOnceSubagentProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                yield NormalizedStreamItem(StreamKind.TEXT, 1, text="Subagent partial. ")
+                raise ProviderTransportError("EOF", end_reason="stdout_eof", exit_code=1)
+            yield NormalizedStreamItem(StreamKind.TEXT, 1, text="Subagent finished.")
+            yield NormalizedStreamItem(StreamKind.FINISH, 2, finish_reason="stop")
+
+    sub_store_ok = SubagentStore()
+    provider_ok = DropOnceSubagentProvider()
+    res_ok = AgenticTurnRuntime(
+        store=sub_store_ok,
+        provider=provider_ok,
+        sleep=lambda _s: None,
+    ).run("turn-sub-1", turn={"turn_id": "turn-sub-1", "assistant_message_id": "msg-sub-1", "is_subagent": True})
+    assert res_ok.state == "completed"
+    assert provider_ok.calls == 2
+    assert "".join(sub_store_ok.text) == "Subagent partial. Subagent finished."
+
+    # Case 2: Subagent drops twice -> only 1 auto-resume is allowed for subagents.
+    class AlwaysDropSubagentProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream(self, request):
+            self.calls += 1
+            yield NormalizedStreamItem(StreamKind.TEXT, 1, text="Subagent partial.")
+            raise ProviderTransportError("EOF", end_reason="stdout_eof", exit_code=1)
+
+    sub_store_fail = SubagentStore()
+    provider_fail = AlwaysDropSubagentProvider()
+    res_fail = AgenticTurnRuntime(
+        store=sub_store_fail,
+        provider=provider_fail,
+        sleep=lambda _s: None,
+    ).run("turn-sub-2", turn={"turn_id": "turn-sub-2", "assistant_message_id": "msg-sub-2", "is_subagent": True})
+    assert res_fail.state == "reconciliation_required"
+    assert provider_fail.calls == 2
+
+
+def test_paused_turn_with_pending_tool_effect_resumes_via_endpoint_and_completes(tmp_path, monkeypatch) -> None:
+    from datetime import UTC, datetime, timedelta
+    from agentos.execution.journal import (
+        ExecutionEffect,
+        ExecutionEffectKind,
+        ExecutionEffectRetryability,
+        ExecutionEffectState,
+        ExecutionJournalScope,
+    )
+    from agentos.persistence.postgres.execution_journal import PostgresExecutionJournal
+    from agentos.workers.chat import ChatWorker
+    from tests.integration.server_world import build_server_world
+
+    world = build_server_world(tmp_path, monkeypatch)
+    admin = world.admin()
+    store = world.services.conversation_application.store
+    created = store.create(
+        user_id=admin.user_id,
+        message="Execute long task",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="resume-test-1",
+    )
+    conv_id = str(created.conversation_id)
+    turn_id = str(created.turn_id)
+
+    turn = store.claim(turn_id)
+    assert turn is not None
+    worker = ChatWorker(store)
+    worker._project(turn, "STARTING", "worker_acquired")
+    worker._project(turn, "RUNNING", "provider_started")
+
+    # Simulate an in-flight/unknown TOOL effect and pause the turn for reconciliation.
+    worker._effect_started(
+        turn,
+        kind="tool",
+        invocation_ref="tool:call-write-1",
+        request_ref="tool:write_file",
+    )
+    worker._journal.mark_unresolved_unknown(
+        worker._journal_scope(turn),
+        now=datetime.now(UTC),
+    )
+
+    assert worker.has_unresolved_tool_effects(turn) is True
+    worker._project(turn, "PAUSED", "effect_reconciliation_required")
+    store.pause_for_reconciliation(
+        turn,
+        code="PROVIDER_STREAM_INTERRUPTED",
+        end_reason="idle_timeout",
+        message="O modelo ficou sem responder por 180 s e o processo foi encerrado. O trabalho feito até aqui está salvo.",
+    )
+
+    # recover_stale must NOT auto-resume while the TOOL effect is unresolved
+    assert worker.recover_stale(maximum_age=timedelta(minutes=30)) == ()
+
+    # Call POST /v1/conversations/{conversation_id}/turns/{turn_id}/resume
+    resumed_resp = admin.api.post(
+        f"/v1/conversations/{conv_id}/turns/{turn_id}/resume",
+        json={},
+        headers=admin.headers(),
+    )
+    assert resumed_resp.status_code == 202, resumed_resp.text
+    resumed_data = resumed_resp.json()
+    assert resumed_data["resumed"] is True
+    assert resumed_data["state"] == "queued"
+    assert "tool:call-write-1" in resumed_data["acknowledged_effects"]
+    assert worker.has_unresolved_tool_effects(turn) is False
+
+    from sqlalchemy import select
+    from agentos.persistence.postgres.schema import execution_effects
+    with store._engine.connect() as conn:
+        eff_rows = conn.execute(
+            select(execution_effects.c.invocation_ref, execution_effects.c.state, execution_effects.c.reconciliation_ref)
+            .where(execution_effects.c.execution_id == str(turn["execution_id"]))
+        ).mappings().all()
+    assert any(
+        r["invocation_ref"] == "tool:call-write-1"
+        and r["state"] == ExecutionEffectState.UNKNOWN_ACKED.value
+        and r["reconciliation_ref"] is not None
+        for r in eff_rows
+    )
+
+    # Now the worker can claim the resumed turn and complete it, seeing the unknown-tool verification note in history.
+    claimed_again = store.claim(turn_id)
+    assert claimed_again is not None
+    history = store.history_for_turn(claimed_again)
+    assert any(
+        "tool:call-write-1" in str(m.get("content"))
+        and "UNKNOWN_ACKED" in str(m.get("content"))
+        and "reconhecidas pelo usuário" in str(m.get("content"))
+        for m in history
+    )
+    worker._project(claimed_again, "STARTING", "worker_acquired")
+    worker._project(claimed_again, "RUNNING", "provider_started")
+    store.delta(claimed_again, "Tarefa retomada e concluída.")
+    worker._project(
+        claimed_again,
+        "COMPLETED",
+        "provider_completed",
+        result_ref=f"conversation-message:{claimed_again['assistant_message_id']}",
+    )
+    store.finish(claimed_again)
+    conv_view = store.get(conv_id, admin.user_id)
+    assert conv_view["state"] == "completed"
+
+    # A turn paused with PROVIDER_STREAM_INTERRUPTED and a clean tool ledger is auto-resumed by recover_stale.
+    created2 = store.create(
+        user_id=admin.user_id,
+        message="Follow-up with clean ledger",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="resume-test-2",
+    )
+    conv2_id = str(created2.conversation_id)
+    turn2_id = str(created2.turn_id)
+    turn2 = store.claim(turn2_id)
+    assert turn2 is not None
+    worker._project(turn2, "STARTING", "worker_acquired")
+    worker._project(turn2, "RUNNING", "provider_started")
+    worker._project(turn2, "PAUSED", "effect_reconciliation_required")
+    store.pause_for_reconciliation(
+        turn2,
+        code="PROVIDER_STREAM_INTERRUPTED",
+        end_reason="stdout_eof",
+        message="O processo do modelo terminou sem concluir a resposta.",
+    )
+    recovered_ids = worker.recover_stale(maximum_age=timedelta(minutes=30))
+    assert turn2_id in recovered_ids
+    assert store.get(conv2_id, admin.user_id)["state"] == "queued"
+
+

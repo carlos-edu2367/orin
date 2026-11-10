@@ -18,6 +18,28 @@ _API_ERROR_STATUS_RE = re.compile(r"\bAPI Error:\s*(\d{3})\b")
 class ProviderTransportError(ProviderKeyRejected):
     """Raised when `claude -p` fails auth, security, protocol, or execution."""
 
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+        exhausted: bool = False,
+        end_reason: str | None = None,
+        output_tail: str = "",
+        exit_code: int | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=status_code,
+            retry_after_seconds=retry_after_seconds,
+            exhausted=exhausted,
+        )
+        self.end_reason = end_reason
+        self.output_tail = output_tail
+        self.stderr_tail = output_tail
+        self.exit_code = exit_code
+
 
 class NativeLoopUnavailable(ProviderTransportError):
     """Raised before the first user-visible delta when native MCP loop cannot start."""
@@ -89,6 +111,7 @@ def classify_result_error(
             status_code=429,
             exhausted=False,
             retry_after_seconds=retry_after_seconds,
+            end_reason="error_result",
         )
 
     if status in (401, 403):
@@ -96,6 +119,7 @@ def classify_result_error(
             raw_text,
             status_code=401,
             exhausted=True,
+            end_reason="error_result",
         )
 
     if status == 404:
@@ -103,6 +127,7 @@ def classify_result_error(
             raw_text,
             status_code=404,
             exhausted=False,
+            end_reason="error_result",
         )
 
     if status == 529:
@@ -110,6 +135,7 @@ def classify_result_error(
             raw_text,
             status_code=529,
             exhausted=False,
+            end_reason="error_result",
         )
 
     if status == 400:
@@ -117,6 +143,7 @@ def classify_result_error(
             raw_text,
             status_code=400,
             exhausted=False,
+            end_reason="error_result",
         )
 
     effective_status = (
@@ -126,6 +153,7 @@ def classify_result_error(
         raw_text,
         status_code=effective_status,
         exhausted=False,
+        end_reason="error_result",
     )
 
 
@@ -214,12 +242,15 @@ def classify_result_error_info(
 
 def error_info_to_transport_error(info: CliErrorInfo) -> ProviderTransportError:
     if isinstance(info.exception, ProviderTransportError):
+        if info.exception.end_reason is None:
+            info.exception.end_reason = "error_result"
         return info.exception
     return ProviderTransportError(
         info.user_message,
         status_code=401 if info.kind == CliErrorKind.AUTH else info.status_code,
         retry_after_seconds=info.retry_after_seconds,
         exhausted=(info.kind == CliErrorKind.AUTH),
+        end_reason="error_result",
     )
 
 

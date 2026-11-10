@@ -76,7 +76,8 @@ export function CodeToolCallBlock({
   defaultDiffOpen = true,
   defaultExpanded,
 }: CodeToolCallBlockProps) {
-  const toolName = event.toolName ?? 'tool'
+  // A background job that outlived its turn reports its exit without a tool call behind it.
+  const toolName = event.toolName ?? (event.type === 'process.exited' ? 'Processo' : 'tool')
   const isShellTool = toolName === 'run_command' || toolName === 'bash' || toolName === 'powershell'
   const rawFilePath = event.filePath ?? event.path ?? event.diff?.path ?? ''
   const filePath = rawFilePath || (toolName === 'read_file' ? extractFilePathFromSummary(event.summary) : '')

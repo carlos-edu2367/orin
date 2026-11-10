@@ -814,6 +814,34 @@ def _is_zombie(pid: int) -> bool:
     return bool(fields) and fields[0] in {"Z", "X"}
 
 
+_BACKGROUND_POPENS_LOCK = threading.Lock()
+_BACKGROUND_POPENS: dict[int, Any] = {}
+
+
+def register_background_popen(pid: int, process: Any) -> None:
+    """Keep a bounded reference to a background ``Popen`` so later turns or the worker observer can read its exit code."""
+    if not isinstance(pid, int) or pid <= 0 or process is None or not hasattr(process, "poll"):
+        return
+    with _BACKGROUND_POPENS_LOCK:
+        _BACKGROUND_POPENS[pid] = process
+        while len(_BACKGROUND_POPENS) > MAX_TRACKED_PROCESSES * 4:
+            oldest = next(iter(_BACKGROUND_POPENS))
+            _BACKGROUND_POPENS.pop(oldest, None)
+
+
+def poll_background_popen(pid: int) -> tuple[bool, int | None] | None:
+    """Return ``(running, exit_code)`` when ``pid`` has a tracked ``Popen`` in this process, else ``None``."""
+    with _BACKGROUND_POPENS_LOCK:
+        process = _BACKGROUND_POPENS.get(pid)
+    if process is None or not hasattr(process, "poll"):
+        return None
+    try:
+        code = process.poll()
+    except Exception:  # noqa: BLE001
+        return None
+    return (code is None, int(code) if isinstance(code, int) and not isinstance(code, bool) else None)
+
+
 def _append_reminder(outcome: ToolOutcome, items: list[str], limit: int) -> None:
     """Append hook feedback as a system-reminder block, keeping the whole result under ``limit``."""
     clean = [item for item in items if isinstance(item, str) and item.strip()]

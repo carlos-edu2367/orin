@@ -169,6 +169,10 @@ def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: f
         if isinstance(worker_or_runner, ConcurrentTurnRunner):
             renew_leases(worker_or_runner)
         recover_once(worker.store, has_in_flight=has_in_flight)
+        try:
+            worker.sweep_exited_processes()
+        except Exception:
+            _LOGGER.exception("could not sweep exited background processes")
     return False, next_sweep
 
 

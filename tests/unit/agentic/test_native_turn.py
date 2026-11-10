@@ -259,6 +259,21 @@ class FakeNativeProvider:
         )
 
 
+def _with_message_cap(provider: FakeNativeProvider, cap_bytes: int = 190_791) -> FakeNativeProvider:
+    """A CLI that reads at most ``cap_bytes`` of one stdin user message, as agy does."""
+    from types import SimpleNamespace
+
+    from agentos.providers.cli_adapter import CliCapabilities
+
+    provider.adapter = SimpleNamespace(  # type: ignore[attr-defined]
+        name="claude",
+        capabilities=CliCapabilities(
+            native_tool_loop=True, tool_list_changed=True, persistent_stdin=True, max_user_message_bytes=cap_bytes,
+        ),
+    )
+    return provider
+
+
 def _make_toolset(workspace: ConversationWorkspace, **kwargs: Any) -> AgentToolset:
     kwargs.setdefault("code_mode_active", True)
     kwargs.setdefault("public_tool_names", True)
@@ -614,6 +629,88 @@ def test_waiting_subagents_continues_turn_when_background_agent_finishes(tmp_pat
         assert "Relatório: .orin/agent-outputs/antigravity.md" in sent_text
         assert "</subagent-finished>" in sent_text
     finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+
+
+def test_the_turn_waits_for_its_background_job_and_hands_back_how_it_ended(tmp_path: Path) -> None:
+    """Fase 4: an answer given while a job of this turn still runs does not end the turn on a promise."""
+    import sys
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    store = FakeStore()
+    conv_id = str(store.turn["conversation_id"])
+    workspace = ConversationWorkspace(tmp_path, conv_id)
+    toolset = _make_toolset(workspace)
+    job = f'"{sys.executable}" -c "import time,sys; time.sleep(0.8); print(\'RENDER_OK 10/10\', flush=True); sys.exit(3)"'
+
+    def _round_1(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        toolset.run_command(job, background=True, description="render tts")
+        sink.on_text("O render está rodando em segundo plano.")
+        return NativeTurnOutcome(
+            result=_make_result(text="O render está rodando em segundo plano."), init=init,
+            final_text="O render está rodando em segundo plano.", exit_code=0,
+        )
+
+    def _round_2(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        sink.on_text("O render falhou com exit 3; corrigi.")
+        return NativeTurnOutcome(
+            result=_make_result(text="O render falhou com exit 3; corrigi."), init=_make_init(req.model),
+            final_text="O render falhou com exit 3; corrigi.", exit_code=0,
+        )
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round_1, _round_2]))
+    runtime = AgenticTurnRuntime(
+        store=store, provider=fake_provider, toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    try:
+        out = runtime.run("t1", turn=store.turn)
+        assert out.state == "completed"
+        waiting = [p for s, p in store.states if s == "waiting_subagents"]
+        assert len(waiting) == 1 and waiting[0]["agents"][0].startswith("processo ")
+        sent_text = str(fake_provider.handles[0].sent_users)
+        assert "(render tts) failed (exit 3)" in sent_text and "RENDER_OK 10/10" in sent_text
+        assert toolset.awaited_background_processes() == []
+        assert toolset.take_finished_process_notices() == ""  # told once, not again
+    finally:
+        BACKGROUND_AGENTS.clear_for_tests()
+
+
+def test_a_turn_does_not_wait_for_a_server_it_started(tmp_path: Path) -> None:
+    import sys
+    from agentos.agentic.background_agents import BACKGROUND_AGENTS
+
+    BACKGROUND_AGENTS.clear_for_tests()
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, str(store.turn["conversation_id"]))
+    toolset = _make_toolset(workspace)
+    server = f'"{sys.executable}" -c "import time; print(\'Local: http://localhost:5173/\', flush=True); time.sleep(30)"'
+    started: dict[str, int] = {}
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        started["pid"] = int(toolset.run_command(server, background=True)["pid"])
+        time.sleep(0.6)  # the ready line reaches the log
+        sink.on_text("Servidor no ar.")
+        return NativeTurnOutcome(result=_make_result(text="Servidor no ar."), init=init, final_text="Servidor no ar.", exit_code=0)
+
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    runtime = AgenticTurnRuntime(
+        store=store, provider=fake_provider, toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    began = time.monotonic()
+    try:
+        assert runtime.run("t1", turn=store.turn).state == "completed"
+        assert time.monotonic() - began < 10
+        assert not [s for s, _ in store.states if s == "waiting_subagents"]
+    finally:
+        if started.get("pid"):
+            toolset.stop_process(started["pid"])
         BACKGROUND_AGENTS.clear_for_tests()
 
 
@@ -1606,9 +1703,9 @@ def test_native_turn_ages_prior_tool_results_and_caps_prior_history_preserving_c
             exit_code=0,
         )
 
-    prov = FakeNativeProvider(
+    prov = _with_message_cap(FakeNativeProvider(
         handle_factory=lambda req: ScriptedHandle(req, [_round])
-    )
+    ))
     prior_messages: list[dict[str, object]] = [
         {
             "role": "system",
@@ -2326,23 +2423,40 @@ def _long_prior_history() -> list[dict[str, object]]:
 
 
 def _compaction_runtime(
-    tmp_path: Path, **kw: Any
+    tmp_path: Path, *, message_cap: bool = True, limits: AgenticLimits | None = None, **kw: Any
 ) -> tuple[AgenticTurnRuntime, FakeStore, FakeNativeProvider, list[dict[str, Any]]]:
     store = FakeStore()
     history = _long_prior_history()
     store.history_for_turn = lambda turn: [dict(item) for item in history]  # type: ignore[method-assign]
     boundaries: list[dict[str, Any]] = []
     store.record_compact_boundary = lambda turn, **values: boundaries.append(dict(values))  # type: ignore[attr-defined]
-    provider = FakeNativeProvider()
+    provider = _with_message_cap(FakeNativeProvider()) if message_cap else FakeNativeProvider()
     runtime = AgenticTurnRuntime(
         store=store,
         provider=provider,
         toolset=_make_toolset(ConversationWorkspace(tmp_path, "c1")),
         context_reporting=True,
-        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+        limits=limits or AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
         **kw,
     )
     return runtime, store, provider, boundaries
+
+
+def test_a_cli_without_a_message_cap_gets_prior_history_whole_below_the_threshold(tmp_path: Path) -> None:
+    """Claude CLI with a 1M window: 180k chars of history (~45k tokens) is far from 400k, so nothing is cut."""
+    runtime, store, provider, boundaries = _compaction_runtime(
+        tmp_path,
+        message_cap=False,
+        limits=AgenticLimits(
+            max_iterations=10, max_actions=10, max_context_tokens=936_000, context_window_tokens=1_000_000,
+        ),
+    )
+
+    assert runtime.run("t1", turn=store.turn).state == "completed"
+    assert boundaries == [] and provider.stream_calls == 0
+    combined = "\n".join(str(block.get("text") or "") for block in provider.requests[0].user_content)
+    assert "Resposta 1: " in combined and "Resposta 30: " in combined
+    assert "blocos antigos" not in combined
 
 
 def test_native_turn_compacts_prior_history_over_the_cap_and_persists_the_boundary(tmp_path: Path) -> None:
@@ -2870,3 +2984,57 @@ def test_a_constant_adapter_message_id_does_not_leak_reads_across_rounds(tmp_pat
     r_edit = _edit(executor, "e1", "x = 1", "x = 2")
     assert r_edit.is_error is False, r_edit.text
     assert (workspace.root / "page.tsx").read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_cli_dying_while_a_tool_runs_waits_for_it_and_resumes_without_running_it_again(tmp_path: Path) -> None:
+    """agy killed mid-command: the command, which runs in Orin, finishes once and the next process sees its result."""
+    import threading
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace)
+    command = "python -c \"import time; time.sleep(1.5); open('marca.txt','a').write('x'); print('TOOL_DONE')\""
+    results: list[ToolCallResult] = []
+
+    def _dies_mid_tool(r: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        sink.on_init(_make_init(r.model))
+        sink.on_tool_use_started("tu_bash_1", "mcp__orin__Bash")
+        sink.on_tool_use_complete("tu_bash_1", "mcp__orin__Bash", {"command": command, "timeout": 60000})
+        threading.Thread(
+            target=lambda: results.append(
+                r.executor.call_tool(
+                    ToolCallRequest("Bash", {"command": command, "timeout": 60000}, {TOOL_USE_ID_META_KEY: "tu_bash_1"})
+                )
+            ),
+            daemon=True,
+        ).start()
+        time.sleep(0.4)
+        raise ProviderTransportError("CLI encerrou sem evento result (exit=1).", end_reason="stdout_eof", exit_code=1)
+
+    def _finishes(r: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(r.model)
+        sink.on_init(init)
+        sink.on_text("TOOL_DONE")
+        return NativeTurnOutcome(result=_make_result(text="TOOL_DONE"), init=init, final_text="TOOL_DONE", exit_code=0)
+
+    rounds = [_dies_mid_tool, _finishes]
+    fake_provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [rounds.pop(0)]))
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=fake_provider,
+        toolset=toolset,
+        sleep=lambda _s: None,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, max_provider_retries=2, context_window_tokens=1_000_000),
+    )
+
+    out = runtime.run("t1", turn=store.turn)
+
+    assert out.state == "completed"
+    assert fake_provider.starts == 2
+    assert (workspace.root / "marca.txt").read_text(encoding="utf-8") == "x"
+    assert len(results) == 1 and "TOOL_DONE" in results[0].text
+    assert any(state == "stream_resuming" for state, _ in store.states)
+    resumed_text = "".join(
+        str(b.get("text") or "") for b in fake_provider.requests[1].user_content if isinstance(b, Mapping)
+    )
+    assert "TOOL_DONE" in resumed_text

@@ -247,6 +247,9 @@ class _RuntimeStore:
             error_code=error_code, private_result=private_result,
         )
 
+    def has_unresolved_tool_effects(self, turn: Mapping[str, object]) -> bool:
+        return self._worker.has_unresolved_tool_effects(turn)
+
     def record_quality(self, turn: dict[str, object], **values: object) -> None:
         self._store.record_quality(turn, **values)
 
@@ -392,12 +395,16 @@ class _ConversationProviderPort:
         self.error_code: str | None = None
         self.queued_turn_count = 0
         self.verification: str | None = None
+        self.end_reason: str | None = None
+        self.message: str | None = None
 
     def generate(self, request):
         result = self._runtime.run(str(self._turn["turn_id"]))
         self.error_code = result.error_code
         self.queued_turn_count = int(getattr(result, "queued_turn_count", 0) or 0)
         self.verification = getattr(result, "verification", None)
+        self.end_reason = getattr(result, "end_reason", None)
+        self.message = getattr(result, "message", None)
         if result.state == "completed":
             return ProviderFinal(f"conversation-message:{self._turn['assistant_message_id']}")
         if result.state == "completed_with_caveats":
@@ -563,10 +570,13 @@ class ChatWorker:
                         verification=provider_port.verification,
                     )
                 elif isinstance(outcome, WaitingOutcome):
+                    is_reconcile = provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED
                     result = AgenticRunResult(
-                        "reconciliation_required" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else "waiting_user",
-                        error_code="EFFECT_RECONCILIATION_REQUIRED" if provider_port.reconciliation_required or outcome.state is ExecutionState.PAUSED else None,
+                        "reconciliation_required" if is_reconcile else "waiting_user",
+                        error_code=(provider_port.error_code or "EFFECT_RECONCILIATION_REQUIRED") if is_reconcile else None,
                         queued_turn_count=provider_port.queued_turn_count,
+                        end_reason=provider_port.end_reason,
+                        message=provider_port.message,
                     )
                 elif isinstance(outcome, CancelledOutcome):
                     result = AgenticRunResult("cancelled", queued_turn_count=provider_port.queued_turn_count)
@@ -619,7 +629,12 @@ class ChatWorker:
                     self.store.finish(turn, failed=True, code="TURN_CANCELLED")
             elif result_state == "reconciliation_required":
                 self._project(turn, "PAUSED", "effect_reconciliation_required")
-                self.store.pause_for_reconciliation(turn, code=error_code or "EFFECT_RECONCILIATION_REQUIRED")
+                self.store.pause_for_reconciliation(
+                    turn,
+                    code=error_code or "EFFECT_RECONCILIATION_REQUIRED",
+                    end_reason=getattr(result, "end_reason", None) or (str(turn.get("end_reason")) if turn.get("end_reason") else None),
+                    message=getattr(result, "message", None) or (str(turn.get("pause_message")) if turn.get("pause_message") else None),
+                )
             else:
                 self._project(turn, "FAILED", error_code or "agentic_runtime_failed")
                 if kernel_managed:
@@ -780,7 +795,13 @@ class ChatWorker:
         view = self._queries.get({"resource_id": turn["execution_id"], "user_id": turn["user_id"], "purpose": "execution.read"})
         if view["state"] == target:
             return
-        self._executions.transition({"execution_id": turn["execution_id"], "user_id": turn["user_id"], "target_state": target, "reason_code": reason, "result_ref": result_ref, "expected_state_version": view["state_version"], "idempotency_key": f"chat-worker:{turn['turn_id']}:{target}", "requested_at": datetime.now(UTC)})
+        attempt = max(1, int(turn.get("dispatch_attempts") or 1))
+        idem_key = (
+            f"chat-worker:{turn['turn_id']}:{target}"
+            if attempt == 1
+            else f"chat-worker:{turn['turn_id']}:{target}:a{attempt}:v{view['state_version']}"
+        )
+        self._executions.transition({"execution_id": turn["execution_id"], "user_id": turn["user_id"], "target_state": target, "reason_code": reason, "result_ref": result_ref, "expected_state_version": view["state_version"], "idempotency_key": idem_key, "requested_at": datetime.now(UTC)})
 
     def _journal_scope(self, turn: dict[str, object]) -> ExecutionJournalScope:
         return ExecutionJournalScope(
@@ -793,12 +814,18 @@ class ChatWorker:
         scope = self._journal_scope(turn)
         now = datetime.now(UTC)
         effect_id = f"eff_{uuid4().hex}"
+        attempt = max(1, int(turn.get("dispatch_attempts") or 1))
+        idem_key = (
+            f"{turn['execution_id']}:{invocation_ref}"
+            if attempt == 1
+            else f"{turn['execution_id']}:attempt:{attempt}:{invocation_ref}"
+        )
         effect = self._journal.prepare(ExecutionEffect(
             effect_id=effect_id, scope=scope, kind=ExecutionEffectKind(kind.upper()),
             invocation_ref=invocation_ref, request_ref=request_ref,
-            idempotency_key=f"{turn['execution_id']}:{invocation_ref}",
+            idempotency_key=idem_key,
             state=ExecutionEffectState.PREPARED, retryability=ExecutionEffectRetryability.NEVER,
-            attempt=1, prepared_at=now,
+            attempt=attempt, prepared_at=now,
         ))
         self._checkpoint(turn, scope, next_decision=kind, is_safe=False, pending_effect_id=effect.effect_id)
         # This write is deliberately immediately before handing control to the
@@ -806,6 +833,13 @@ class ChatWorker:
         # classifies it as UNKNOWN unless a reconciler supplies a receipt.
         self._journal.mark_in_flight(effect.effect_id, scope, now=now)
         return effect.effect_id
+
+    def has_unresolved_tool_effects(self, turn: Mapping[str, object]) -> bool:
+        scope = self._journal_scope(turn)
+        return any(
+            effect.kind is ExecutionEffectKind.TOOL
+            for effect in self._journal.unresolved(scope)
+        )
 
     def _effect_finished(self, turn: dict[str, object], *, effect_id: str, state: str, result_ref: str | None, error_code: str | None, private_result) -> None:
         scope = self._journal_scope(turn)
@@ -917,7 +951,28 @@ class ChatWorker:
             else:
                 self._transition(turn, "PAUSED", "checkpoint_resume_required")
                 self.store.pause_for_reconciliation(turn, code="CHECKPOINT_RESUME_REQUIRED")
+        recent_interrupted_fn = getattr(self.store, "recent_interrupted_paused_turns", None)
+        resume_turn_fn = getattr(self.store, "resume_turn", None)
+        if callable(recent_interrupted_fn) and callable(resume_turn_fn):
+            for paused_turn in recent_interrupted_fn(maximum_age=timedelta(minutes=30)):
+                if not self.has_unresolved_tool_effects(paused_turn):
+                    try:
+                        resume_turn_fn(
+                            str(paused_turn["conversation_id"]),
+                            str(paused_turn["turn_id"]),
+                            str(paused_turn["user_id"]),
+                            reason="worker_auto_resumed",
+                        )
+                        recovered.append(str(paused_turn["turn_id"]))
+                    except Exception:
+                        _LOGGER.exception("failed to auto-resume interrupted paused turn %s", paused_turn.get("turn_id"))
         return tuple(recovered)
+
+    def sweep_exited_processes(self) -> tuple[dict[str, object], ...]:
+        """Record ``process.exited`` activity events and fire ``wake_on_pid`` wakeups for idle conversations."""
+        from agentos.workers.process_watch import sweep_exited_processes
+
+        return sweep_exited_processes(self.store, workspace_root=self._workspace_root)
 
     def _catalog_row_for(self, turn: dict[str, object]) -> dict[str, object] | None:
         """The turn model's provider-catalog row, or None if it is unknown.
@@ -1079,6 +1134,10 @@ class ChatWorker:
         """
         proportional = -(-context_window * 10 // 100)  # ceil without importing math
         return min(CONTEXT_WINDOW_RESERVE_CEILING, max(CONTEXT_WINDOW_RESERVE_TOKENS, proportional))
+
+    def _context_limits_for(self, turn: dict[str, object]) -> tuple[int, int | None]:
+        """(max_context_tokens, context_window_tokens) for the turn's model, as the main turn derives them."""
+        return self._max_context_tokens_for(turn), self._context_window_for(turn)
 
     def _max_context_tokens_for(self, turn: dict[str, object]) -> int:
         """Derive the context-trim budget from the turn's actual model window.
@@ -1708,6 +1767,9 @@ class ChatWorker:
             child_model_ids=self._favorite_child_model_ids(turn),
             child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
             agent_model_authorizer=lambda model_id, provider: self._is_agent_model_allowed(turn, model_id, provider),
+            subagent_context_limits=lambda model_id, provider: self._context_limits_for(
+                {**turn, "model_id": model_id, "provider": provider or turn["provider"]}
+            ),
             child_provider_factory=lambda model_id, provider=None: self._child_provider_for_turn(turn, model_id, provider=provider),
             mcp_provider=mcp_provider,
             mcp_service=mcp_service,

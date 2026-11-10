@@ -445,6 +445,74 @@ def test_run_command_description_and_dev_server_auto_backgrounding(tmp_path: Pat
             _terminate_pid(pid)
 
 
+def test_run_command_auto_backgrounded_before_max_tool_call_seconds_cap(
+    tmp_path: Path,
+) -> None:
+    workspace = ConversationWorkspace(tmp_path, "conv-bash-cap-bg")
+    toolset = AgentToolset(
+        workspace,
+        code_mode_active=True,
+        permission_mode="full_autonomy",
+        max_tool_call_seconds=26,  # cap - 25s = 1s
+    )
+
+    slow_cmd = (
+        f'"{sys.executable}" -u -c '
+        '"import time; print(\'starting-long-suite\', flush=True); time.sleep(30)"'
+    )
+    started = time.monotonic()
+    capped = toolset.invoke(
+        "run_command",
+        {
+            "command": slow_cmd,
+            "description": "Run slow test suite under client tool cap",
+        },
+    )
+    elapsed = time.monotonic() - started
+    pid = capped.payload.get("pid")
+    try:
+        assert capped.status == "succeeded", capped.content
+        assert 0.8 <= elapsed < 6.0
+        assert capped.payload["ok"] is True
+        assert capped.payload["background"] is True
+        assert capped.payload["auto_backgrounded"] is True
+        assert capped.payload["backgrounded_by_tool_cap"] is True
+        assert capped.payload["backgrounded_by_readiness"] is False
+        assert isinstance(pid, int) and pid > 0
+        log_rel = capped.payload["log_path"]
+        assert str(log_rel).startswith(".orin/logs/")
+        expected_msg = (
+            f"Still running after 1s; moved to background (pid {pid}, log: {log_rel}). "
+            f"Wait for it with read_process_output(pid={pid}, block=true); do not start it again. "
+            "If you end your answer while it runs, the turn waits for it and tells you how it ended."
+        )
+        assert expected_msg in capped.content
+        assert capped.payload["message"] == expected_msg
+        assert capped.payload["shell_id"] in toolset._background_shells
+    finally:
+        if isinstance(pid, int) and pid > 0:
+            _terminate_pid(pid)
+
+    # Without a cap (max_tool_call_seconds=None), a command past 1s is NOT auto-backgrounded
+    toolset.set_max_tool_call_seconds(None)
+    uncapped_cmd = (
+        f'"{sys.executable}" -u -c '
+        '"import time; time.sleep(1.3); print(\'completed-foreground\', flush=True)"'
+    )
+    uncapped = toolset.invoke(
+        "run_command",
+        {
+            "command": uncapped_cmd,
+            "description": "Run foreground command without tool cap",
+        },
+    )
+    assert uncapped.status == "succeeded", uncapped.content
+    assert uncapped.payload["auto_backgrounded"] is False
+    assert uncapped.payload["background"] is False
+    assert uncapped.payload["exit_code"] == 0
+    assert "completed-foreground" in uncapped.content
+
+
 def test_exit_plan_mode_includes_plan_approval_and_plan_content(tmp_path: Path) -> None:
     workspace = ConversationWorkspace(tmp_path, "conv-exit-plan")
     toolset = AgentToolset(workspace, code_mode_active=True, permission_mode="accept_edits")

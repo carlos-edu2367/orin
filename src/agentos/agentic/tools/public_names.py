@@ -124,7 +124,7 @@ _RENAMES: dict[str, dict[str, str]] = {
     "read_process_output": {"task_id": "pid"},
     "stop_process": {"task_id": "pid", "shell_id": "pid"},
     "exit_worktree": {"discard_changes": "force"},
-    "schedule_wakeup": {"delaySeconds": "delay_seconds"},
+    "schedule_wakeup": {"delaySeconds": "delay_seconds", "wakeOnPid": "wake_on_pid"},
 }
 
 # public keys Orin cannot honour yet (W4 implements them); dropped on the way in

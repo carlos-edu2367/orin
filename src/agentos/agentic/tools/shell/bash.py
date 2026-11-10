@@ -41,6 +41,8 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
     logger,
+    poll_background_popen,
+    register_background_popen,
 )
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
@@ -77,6 +79,26 @@ def _release_job(job: Any) -> None:
 
 SESSION_CWD_PATH = ".orin/state/cwd.json"
 MAX_OUTPUT_FIELD_CHARS = 30_000
+TOOL_CAP_HEADROOM_SECONDS = 25
+# A bare `sleep N` this long is a wait for something, not work: it becomes a wait that ends early when a
+# background job or subagent finishes, instead of a blind timer.
+LONG_SLEEP_SECONDS = 60
+_PURE_SLEEP_RE = re.compile(
+    r"^\s*(?:sleep\s+(?P<posix>\d+)(?P<unit>[smh]?)"
+    r"|Start-Sleep\s+(?:-s(?:econds)?\s+)?(?P<ps>\d+)"
+    r"|timeout\s+/t\s+(?P<cmd>\d+)(?:\s+/nobreak)?(?:\s*>\s*nul)?)\s*;?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _pure_sleep_seconds(command: str) -> int | None:
+    match = _PURE_SLEEP_RE.match(command or "")
+    if match is None:
+        return None
+    if match.group("posix") is not None:
+        return int(match.group("posix")) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group("unit").lower()]
+    return int(match.group("ps") or match.group("cmd"))
+
 # Exit codes that are an answer, not a failure, for common read-only programs.
 _RETURN_CODE_MEANINGS = {
     ("grep", 1): "No matches found", ("rg", 1): "No matches found", ("findstr", 1): "No matches found",
@@ -121,6 +143,42 @@ _CD_PATTERNS: dict[str, re.Pattern[str]] = {
 
 class BashTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
+
+    def set_max_tool_call_seconds(
+        self,
+        seconds: Any,
+    ) -> None:
+        """Install the client's per-call MCP timeout cap so long foreground commands can auto-background first."""
+        if callable(seconds):
+            self._max_tool_call_seconds = seconds
+        elif (
+            isinstance(seconds, (int, float))
+            and not isinstance(seconds, bool)
+            and seconds > 0
+        ):
+            self._max_tool_call_seconds = float(seconds)
+        else:
+            self._max_tool_call_seconds = None
+
+    def _effective_max_tool_call_seconds(self) -> float | None:
+        """Return the client's MCP tool call timeout cap in seconds, or None when uncapped."""
+        for candidate in (
+            getattr(self, "_max_tool_call_seconds", None),
+            getattr(self, "max_tool_call_seconds", None),
+            getattr(getattr(self, "workspace", None), "max_tool_call_seconds", None),
+        ):
+            if callable(candidate):
+                try:
+                    candidate = candidate()
+                except Exception:
+                    candidate = None
+            if (
+                isinstance(candidate, (int, float))
+                and not isinstance(candidate, bool)
+                and candidate > 0
+            ):
+                return float(candidate)
+        return None
 
     def _resolve_cwd_after_command(
         self,
@@ -233,6 +291,9 @@ class BashTools:
         timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
         if not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
             raise AgentToolError(f"timeout_seconds must be between 1 and {MAX_COMMAND_TIMEOUT_SECONDS}.")
+        sleep_seconds = None if background else _pure_sleep_seconds(command)
+        if sleep_seconds is not None and sleep_seconds >= LONG_SLEEP_SECONDS:
+            return self._interruptible_sleep(command, sleep_seconds, timeout, clean_description, tool_name)
         working_directory = self._current_cwd if self._current_cwd.is_dir() else self.workspace.root
         if isinstance(cwd, str) and cwd.strip():
             working_directory = self.workspace.resolve(cwd)
@@ -318,6 +379,7 @@ class BashTools:
                     log_handle.close()
             if background:
                 shell_id = f"bash_{process.pid}"
+                register_background_popen(process.pid, process)
                 manifest = self._load_process_manifest()
                 manifest[str(process.pid)] = {
                     "command": command[:400],
@@ -326,6 +388,7 @@ class BashTools:
                     "started_at": datetime.now(UTC).isoformat(),
                     "created": process_created(process.pid),  # W7: the tasks panel stops only this very process
                     "notified_exit": False,
+                    **({"conversation_id": str(self.conversation_id)} if getattr(self, "conversation_id", None) else {}),
                 }
                 self._save_process_manifest(manifest)
                 self._background_shells[shell_id] = {
@@ -337,6 +400,7 @@ class BashTools:
                     "log_path": log_relative,
                     "status": "running",
                 }
+                self._turn_background_pids.add(process.pid)
                 artifacts = self.workspace.end_change_tracking(change_baseline)
                 self._queue_reindex(artifacts)
                 return {
@@ -411,6 +475,17 @@ class BashTools:
                 ready_match_at: float | None = None
                 detected_url: str | None = None
                 exited_at: float | None = None
+                cap_fn = getattr(self, "_effective_max_tool_call_seconds", None)
+                tool_cap_s = cap_fn() if callable(cap_fn) else None
+                cap_auto_bg_after: float | None = None
+                if tool_cap_s is not None:
+                    cap_auto_bg_after = (
+                        float(tool_cap_s) - float(TOOL_CAP_HEADROOM_SECONDS)
+                        if float(tool_cap_s) > float(TOOL_CAP_HEADROOM_SECONDS)
+                        else max(0.1, float(tool_cap_s))
+                    )
+                    if timeout_seconds is None and cap_auto_bg_after >= timeout:
+                        timeout = int(cap_auto_bg_after) + int(TOOL_CAP_HEADROOM_SECONDS)
 
                 while process.poll() is None or t_out.is_alive() or t_err.is_alive():
                     now = time.monotonic()
@@ -459,9 +534,15 @@ class BashTools:
                         url_m = _URL_EXTRACT_RE.search(combined_live)
                         detected_url = url_m.group(0) if url_m else None
 
+                    backgrounded_by_tool_cap = (
+                        process.poll() is None
+                        and cap_auto_bg_after is not None
+                        and elapsed >= cap_auto_bg_after
+                    )
                     should_auto_bg = process.poll() is None and (
                         (ready_match_at is not None and (now - ready_match_at) >= 0.35)
                         or (is_dev_server_cmd and elapsed >= 2.0)
+                        or backgrounded_by_tool_cap
                     )
                     if should_auto_bg:
                         _release_job(process_job)
@@ -489,6 +570,7 @@ class BashTools:
                             url_m = _URL_EXTRACT_RE.search(combined_live)
                             detected_url = url_m.group(0) if url_m else None
                         shell_id = f"bash_{process.pid}"
+                        register_background_popen(process.pid, process)
                         manifest = self._load_process_manifest()
                         manifest[str(process.pid)] = {
                             "command": command[:400],
@@ -499,6 +581,7 @@ class BashTools:
                             "notified_exit": False,
                             "auto_backgrounded": True,
                             "detected_url": detected_url,
+                            **({"conversation_id": str(self.conversation_id)} if getattr(self, "conversation_id", None) else {}),
                         }
                         self._save_process_manifest(manifest)
                         self._background_shells[shell_id] = {
@@ -510,12 +593,30 @@ class BashTools:
                             "log_path": auto_log_rel,
                             "status": "running",
                             "auto_backgrounded": True,
+                            "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
                             "detected_url": detected_url,
                         }
+                        self._turn_background_pids.add(process.pid)
                         artifacts = self.workspace.end_change_tracking(change_baseline)
                         self._queue_reindex(artifacts)
-                        msg = "Dev server detected and automatically moved to background."
-                        content_parts = [f"{msg} (pid={process.pid}, shell_id={shell_id}, log={auto_log_rel})"]
+                        if backgrounded_by_tool_cap:
+                            after_s = max(1, int(round(cap_auto_bg_after or elapsed)))
+                            msg = (
+                                f"Still running after {after_s}s; moved to background "
+                                f"(pid {process.pid}, log: {auto_log_rel}). "
+                                f"Wait for it with read_process_output(pid={process.pid}, block=true); do not start it again. "
+                                "If you end your answer while it runs, the turn waits for it and tells you how it ended."
+                            )
+                            content_parts = [msg]
+                            summary_text = (
+                                f"Auto-backgrounded after {after_s}s: {(clean_description or command)[:60]}"[:240]
+                            )
+                        else:
+                            msg = "Dev server detected and automatically moved to background."
+                            content_parts = [f"{msg} (pid={process.pid}, shell_id={shell_id}, log={auto_log_rel})"]
+                            summary_text = (
+                                f"Auto-backgrounded dev server: {(clean_description or command)[:60]}"[:240]
+                            )
                         if detected_url:
                             content_parts.append(f"Detected URL: {detected_url}")
                         if stdout_now:
@@ -531,6 +632,7 @@ class BashTools:
                             "background": True,
                             "auto_backgrounded": True,
                             "backgrounded_by_readiness": bool(ready_match_at is not None),
+                            "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
                             "shell_id": shell_id,
                             "pid": process.pid,
                             "process_id": process.pid,
@@ -552,6 +654,7 @@ class BashTools:
                             "background": True,
                             "auto_backgrounded": True,
                             "backgrounded_by_readiness": bool(ready_match_at is not None),
+                            "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
                             "shell_id": shell_id,
                             "pid": process.pid,
                             "process_id": process.pid,
@@ -563,7 +666,7 @@ class BashTools:
                             "stderr": stderr_now,
                             "output_tail": auto_tail,
                             "message": msg,
-                            "summary": f"Auto-backgrounded dev server: {(clean_description or command)[:60]}"[:240],
+                            "summary": summary_text,
                             "content": "\n".join(content_parts),
                             "payload": payload,
                             "tool_output": _bash_output(stdout_now, stderr_now, command=command, background_id=shell_id),
@@ -716,6 +819,77 @@ class BashTools:
             ),
         }
 
+    def _interruptible_sleep(
+        self, command: str, seconds: int, timeout: int, description: str, tool_name: str,
+    ) -> dict[str, Any]:
+        """`sleep N` as a wait that wakes when this turn's background job or a subagent finishes.
+
+        Bounded by the command timeout and the provider's per-call cap, like the command it replaces.
+        """
+        from agentos.agentic.background_agents import BACKGROUND_AGENTS
+
+        limit = min(seconds, timeout)
+        cap_fn = getattr(self, "_effective_max_tool_call_seconds", None)
+        cap = cap_fn() if callable(cap_fn) else None
+        if cap is not None and float(cap) > TOOL_CAP_HEADROOM_SECONDS:
+            limit = min(limit, int(float(cap) - TOOL_CAP_HEADROOM_SECONDS))
+        conv_id = str(getattr(self, "conversation_id", None) or "")
+        started = time.monotonic()
+        next_progress = started + 10.0
+        woke = ""
+        while True:
+            elapsed = time.monotonic() - started
+            if self._cancel_requested():
+                if self._call_abandoned():
+                    raise AgentToolError(
+                        "Stopped: the model's client gave up waiting for this command (tool timeout).",
+                        error_code="TOOL_CALL_ABANDONED",
+                    )
+                raise AgentToolError("Interrupted by user: the command was stopped.", error_code="INTERRUPTED_BY_USER")
+            if self.has_finished_background_process():
+                woke = self.take_finished_process_notices()
+                break
+            if conv_id and BACKGROUND_AGENTS.has_unnotified(conv_id, since_monotonic=started):
+                woke = "A background subagent finished; read its report with check_subagent."
+                break
+            if elapsed >= limit:
+                break
+            if time.monotonic() >= next_progress and callable(self._on_tool_progress):
+                next_progress = time.monotonic() + 10.0
+                try:
+                    self._on_tool_progress(tool_name, f"Aguardando ({int(elapsed)}s de {seconds}s)", {
+                        "tool_name": tool_name, "tool_kind": "terminal",
+                        "invocation_id": getattr(self, "_active_invocation_id", None) or "",
+                        "command": command[:240], "description": description, "elapsed_ms": int(elapsed * 1000),
+                    })
+                except Exception:  # noqa: BLE001 - progress is best effort
+                    pass
+            time.sleep(min(0.25, max(0.01, limit - elapsed)))
+        waited = int(round(time.monotonic() - started))
+        if woke:
+            body = f"Woke after {waited}s of {seconds}s because background work finished.\n{woke}"
+        elif waited + 1 < seconds:
+            body = (
+                f"Waited {waited}s of {seconds}s (the most one call may take). To wait for a background job use "
+                "read_process_output(pid=..., block=true); for a subagent, check_subagent(wait_seconds=...)."
+            )
+        else:
+            body = f"Waited {waited}s."
+        return {
+            "ok": True,
+            "description": description,
+            "background": False,
+            "exit_code": 0,
+            "summary": f"Aguardou {waited}s" + (" (trabalho em segundo plano terminou)" if woke else ""),
+            "content": f"exit=0\n{body}",
+            "payload": {
+                "ok": True, "command": command[:400], "description": description, "background": False,
+                "auto_backgrounded": False, "exit_code": 0, "label": (description or command)[:120],
+                "failed": False, "slept_seconds": waited, "woke_early": bool(woke),
+            },
+            "tool_output": _bash_output(body, "", command=command, exit_code=0),
+        }
+
     def _check_exited_background_processes(self) -> str:
         manifest = self._load_process_manifest()
         if not manifest:
@@ -733,16 +907,25 @@ class BashTools:
                 continue
             if row_pid in self._notified_exited_pids:
                 continue
-            if not _process_is_running(row_pid):
+            running, exit_code = self._background_status(row_pid)
+            if not running:
+                if exit_code is None:
+                    recorded_code = info.get("exit_code")
+                    if isinstance(recorded_code, int) and not isinstance(recorded_code, bool):
+                        exit_code = recorded_code
                 self._notified_exited_pids.add(row_pid)
                 updated = dict(info)
                 updated["notified_exit"] = True
+                updated["exit_event_recorded"] = True
+                if exit_code is not None and updated.get("exit_code") is None:
+                    updated["exit_code"] = exit_code
                 manifest[pid_text] = updated
                 dirty = True
                 cmd = str(info.get("command") or "").strip()
                 log_path = str(info.get("log_path") or "").strip()
+                how = "has exited" if exit_code is None else f"has exited with code {exit_code}"
                 notices.append(
-                    f"Background process {row_pid} ({cmd}) has exited. "
+                    f"Background process {row_pid} ({cmd}) {how}. "
                     f"Use read_process_output(pid={row_pid}) to inspect {log_path or 'its output'}."
                 )
         if dirty:
@@ -777,7 +960,14 @@ class BashTools:
         # Bounded so a long-running conversation cannot grow this file forever;
         # the oldest tracked processes (by insertion order) fall off first.
         trimmed = dict(list(manifest.items())[-MAX_TRACKED_PROCESSES:])
-        self.workspace.write_text(_PROCESS_MANIFEST_PATH, json.dumps(trimmed))
+        serialized = json.dumps(trimmed)
+        try:
+            target = self.workspace.prepare_write_target(_PROCESS_MANIFEST_PATH)
+            tmp_path = target.with_name(f"{target.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+            tmp_path.write_text(serialized, encoding="utf-8")
+            os.replace(tmp_path, target)
+        except Exception:
+            self.workspace.write_text(_PROCESS_MANIFEST_PATH, serialized)
 
 
 class BashInput(ToolInput):
@@ -808,7 +998,9 @@ SPECS: tuple[ToolSpec, ...] = (
         key="run_command",
         description="Run one shell command inside the conversation workspace and return its output. Set background=true only for a "
         "long-lived process (e.g. a dev server); it returns immediately and you read its output later with read_process_output. "
-        "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands.",
+        "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands. "
+        "To wait for a background command, call read_process_output(pid, block=true) instead of sleep; "
+        "for a background subagent, check_subagent(wait_seconds=...).",
         legacy_schema=_schema({
             "command": {**_TEXT, "description": "A single command line, executed non-interactively (stdin is closed)."},
             "description": {**_TEXT, "description": "Short 5-10 word description of what this command does."},

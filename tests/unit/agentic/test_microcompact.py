@@ -187,3 +187,28 @@ def test_the_summary_call_counts_toward_the_budget() -> None:
     assert runtime._run_compaction(messages, {"turn_id": "t"}, keep_units=2)
     assert meter.total == Decimal("0.25")
     assert runtime._spent_usd(Decimal("0")) >= Decimal("0.2")  # the next budget check sees the summary
+
+
+def test_the_approved_autocompact_rule_caps_large_windows_at_400k() -> None:
+    """min(90% of window, window - reply - 13k, 400k), never past max_context_tokens (approved 2026-11-10)."""
+    assert _runtime(max_context_tokens=180_000, context_window_tokens=200_000)._autocompact_threshold() == 167_000
+    assert _runtime(max_context_tokens=360_000, context_window_tokens=400_000)._autocompact_threshold() == 360_000
+    assert _runtime(max_context_tokens=936_000, context_window_tokens=1_000_000)._autocompact_threshold() == 400_000
+    # Never past the trim budget the worker derived from the window.
+    assert _runtime(max_context_tokens=300_000, context_window_tokens=1_000_000)._autocompact_threshold() == 300_000
+    # A small window with a large reply reserve keeps half of it.
+    assert _runtime(max_context_tokens=30_000, context_window_tokens=32_000, max_output_tokens=16_000)._autocompact_threshold() == 16_000
+
+
+def test_old_results_are_kept_whole_below_the_threshold() -> None:
+    """A 1M window used to clear old results at 65% of the trim budget; now nothing is cleared before 400k."""
+    store = Store()
+    runtime = AgenticTurnRuntime(
+        store=store, provider=Summarizer(),
+        limits=AgenticLimits(max_context_tokens=936_000, context_window_tokens=1_000_000),
+    )
+    messages = _conversation(40, size=4_000)
+    runtime._pinned_index = 0
+    runtime._maybe_compact(messages, {"turn_id": "t"}, [])
+    assert store.boundaries == []
+    assert all(m["content"] != MICROCOMPACT_MARKER for m in messages if m.get("role") == "tool")

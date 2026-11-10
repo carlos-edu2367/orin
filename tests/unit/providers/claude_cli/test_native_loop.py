@@ -43,6 +43,7 @@ class _RecordingSink(NativeTurnSink):
         self.usages: list[tuple[str, CliUsage]] = []
         self.compacted_count: int = 0
         self.rate_limits: list[RateLimitState] = []
+        self.waiting_models: list[tuple[int, bool]] = []
 
     def on_init(self, init: CliInit) -> None:
         self.inits.append(init)
@@ -74,6 +75,9 @@ class _RecordingSink(NativeTurnSink):
 
     def on_rate_limit(self, state: RateLimitState) -> None:
         self.rate_limits.append(state)
+
+    def on_waiting_model(self, seconds: int, *, extended: bool = False) -> None:
+        self.waiting_models.append((seconds, extended))
 
 
 class _EchoExecutor:
@@ -391,6 +395,41 @@ def test_mcp_tool_timeout_env_matches_remaining_deadline(tmp_path: Path) -> None
         handle.close()
 
 
+def test_tool_call_cap_follows_the_per_call_timeout_the_turn_grants(tmp_path: Path) -> None:
+    """agy honors timeoutSeconds, so its 180 s default must not auto-background at 155 s."""
+    from dataclasses import replace
+
+    from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
+
+    class _CappedAdapter(ClaudeCliAdapter):
+        capabilities = replace(ClaudeCliAdapter.capabilities, max_tool_call_seconds=180)
+
+    class _Toolset:
+        def __init__(self) -> None:
+            self.caps: list[Any] = []
+
+        def set_max_tool_call_seconds(self, seconds: Any) -> None:
+            self.caps.append(seconds)
+
+    executor = _EchoExecutor()
+    executor.toolset = _Toolset()  # type: ignore[attr-defined]
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "single_tool_call"},
+        adapter=_CappedAdapter(),
+    )
+    handle = provider.start_native_turn(
+        _make_request(tmp_path, executor=executor, deadline_offset=1200.0)
+    )
+    try:
+        handle.run_until_result(_RecordingSink())
+    finally:
+        handle.close()
+    caps = executor.toolset.caps  # type: ignore[attr-defined]
+    assert caps[0] == 180
+    assert 1100 <= caps[-1] <= 1200
+
+
 def test_sink_gets_tool_progress_and_empty_thinking(tmp_path: Path) -> None:
     provider = ClaudeCliProvider(
         binary=FAKE_CLAUDE_SCRIPT,
@@ -596,4 +635,228 @@ def test_start_native_turn_waiting_for_slot_invokes_on_waiting_slot(
         assert waiting_events == [(1, 1)]
     finally:
         handle.close()
+
+
+def test_end_reason_for_idle_timeout_stdout_eof_and_error_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import agentos.providers.claude_cli.native_loop as nl_mod
+
+    caplog.set_level(logging.INFO, logger="agentos.providers.claude_cli")
+
+    # 1. Silent past idle -> end_reason == "idle_timeout"
+    monkeypatch.setattr(nl_mod, "IDLE_TIMEOUT_SECONDS", 1)
+    idle_provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "silent_hang"},
+    )
+    idle_handle = idle_provider.start_native_turn(_make_request(tmp_path / "idle"))
+    try:
+        with pytest.raises(ProviderTransportError) as exc_idle:
+            idle_handle.run_until_result(_RecordingSink())
+        assert exc_idle.value.end_reason == "idle_timeout"
+        assert "NON_JSON_BEFORE_IDLE" in exc_idle.value.output_tail
+    finally:
+        idle_handle.close()
+
+    # 2. Stdout closed (EOF) without result -> end_reason == "stdout_eof"
+    monkeypatch.setattr(nl_mod, "IDLE_TIMEOUT_SECONDS", 10)
+    eof_provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "stdout_eof"},
+    )
+    eof_sink = _RecordingSink()
+    eof_handle = eof_provider.start_native_turn(_make_request(tmp_path / "eof"))
+    try:
+        with pytest.raises(ProviderTransportError) as exc_eof:
+            eof_handle.run_until_result(eof_sink)
+        assert exc_eof.value.end_reason == "stdout_eof"
+        assert exc_eof.value.exit_code == 17
+        assert "NON_JSON_STDOUT_LINE" in exc_eof.value.output_tail
+        assert "STDERR_DIAG_LINE" in exc_eof.value.output_tail
+        assert eof_sink.texts == ["partial before eof"]
+    finally:
+        eof_handle.close()
+
+    # 3. Error result -> end_reason == "error_result"
+    err_provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "error_result"},
+    )
+    err_handle = err_provider.start_native_turn(_make_request(tmp_path / "err"))
+    try:
+        with pytest.raises(ProviderTransportError) as exc_err:
+            err_handle.run_until_result(_RecordingSink())
+        assert exc_err.value.end_reason == "error_result"
+        assert "NON_JSON_ERROR_CONTEXT" in exc_err.value.output_tail
+    finally:
+        err_handle.close()
+
+    run_logs = [
+        r.message
+        for r in caplog.records
+        if "claude_cli run mode=native" in r.message
+    ]
+    assert any("end_reason=idle_timeout" in msg for msg in run_logs)
+    assert any("end_reason=stdout_eof" in msg for msg in run_logs)
+    assert any("end_reason=error_result" in msg for msg in run_logs)
+
+
+def test_antigravity_idle_timeout_not_killed_at_180_extends_once_then_kills(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from agentos.providers.antigravity_cli.adapter import AntigravityCliAdapter
+    from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
+    from agentos.providers.codex_cli.adapter import CodexCliAdapter
+
+    assert ClaudeCliAdapter.capabilities.idle_timeout_seconds == 180
+    assert ClaudeCliAdapter.capabilities.max_tool_call_seconds is None
+    assert AntigravityCliAdapter.capabilities.idle_timeout_seconds == 600
+    assert AntigravityCliAdapter.capabilities.max_tool_call_seconds == 180
+    assert CodexCliAdapter.capabilities.idle_timeout_seconds == 300
+    assert CodexCliAdapter.capabilities.max_tool_call_seconds is None
+
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "silent_hang"},
+    )
+    sink = _RecordingSink()
+    handle = provider.start_native_turn(
+        _make_request(tmp_path, deadline_offset=3600.0)
+    )
+    # Give the handle an adapter with antigravity capabilities (idle_timeout_seconds=600)
+    handle._adapter = SimpleNamespace(  # type: ignore[assignment]
+        name="antigravity",
+        capabilities= replace(
+            AntigravityCliAdapter.capabilities,
+            forbidden_item_kinds=frozenset(),
+        ),
+    )
+    assert handle._effective_idle_timeout_seconds() == 600.0
+
+    t0 = 1000.0
+    scripted_offsets = [180.0, 599.0, 600.0, 899.0, 900.0]
+    step_idx = [0]
+    alive_at_180: list[bool] = []
+    waiting_at_180: list[list[tuple[int, bool]]] = []
+
+    def _fake_clock() -> float:
+        if not handle._non_json_stdout_lines:
+            return t0
+        idx = min(step_idx[0], len(scripted_offsets) - 1)
+        val = t0 + scripted_offsets[idx]
+        if step_idx[0] == 1:
+            # Record state right after the 180s check completed without killing or extending
+            alive_at_180.append(handle.is_process_alive())
+            waiting_at_180.append(list(sink.waiting_models))
+        step_idx[0] += 1
+        return val
+
+    handle._clock = _fake_clock
+    handle._deadline_monotonic = t0 + 3600.0
+
+    try:
+        with pytest.raises(ProviderTransportError) as exc_info:
+            handle.run_until_result(sink)
+        assert alive_at_180 == [True]
+        assert waiting_at_180 == [[]]
+        assert sink.waiting_models == [(600, True)]
+        assert exc_info.value.end_reason == "idle_timeout"
+        assert "900s" in str(exc_info.value)
+    finally:
+        handle.close()
+
+
+def test_dead_process_is_not_extended_on_idle_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "silent_hang"},
+    )
+    sink = _RecordingSink()
+    handle = provider.start_native_turn(
+        _make_request(tmp_path, deadline_offset=3600.0)
+    )
+    t0 = 2000.0
+    scripted_offsets = [180.0, 270.0]
+    step_idx = [0]
+
+    def _fake_clock() -> float:
+        if not handle._non_json_stdout_lines:
+            return t0
+        # Simulate process having already died when idle deadline hits
+        monkeypatch.setattr(handle._proc, "poll", lambda: 1)
+        idx = min(step_idx[0], len(scripted_offsets) - 1)
+        val = t0 + scripted_offsets[idx]
+        step_idx[0] += 1
+        return val
+
+    handle._clock = _fake_clock
+    handle._deadline_monotonic = t0 + 3600.0
+
+    try:
+        with pytest.raises(ProviderTransportError) as exc_info:
+            handle.run_until_result(sink)
+        assert sink.waiting_models == []
+        assert exc_info.value.end_reason == "idle_timeout"
+        assert "180s" in str(exc_info.value)
+    finally:
+        handle.close()
+
+
+def test_adapter_without_idle_timeout_seconds_keeps_default_180(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from agentos.providers.claude_cli.adapter import ClaudeCliAdapter
+
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        env={"FAKE_CLAUDE_MODE": "silent_hang"},
+    )
+    sink = _RecordingSink()
+    handle = provider.start_native_turn(
+        _make_request(tmp_path, deadline_offset=3600.0)
+    )
+    caps_no_idle = replace(
+        ClaudeCliAdapter.capabilities,
+        idle_timeout_seconds=None,
+    )
+    handle._adapter = SimpleNamespace(  # type: ignore[assignment]
+        name="custom",
+        capabilities=caps_no_idle,
+    )
+    assert handle._effective_idle_timeout_seconds() == 180.0
+
+    t0 = 3000.0
+    scripted_offsets = [179.0, 180.0, 269.0, 270.0]
+    step_idx = [0]
+
+    def _fake_clock() -> float:
+        if not handle._non_json_stdout_lines:
+            return t0
+        idx = min(step_idx[0], len(scripted_offsets) - 1)
+        val = t0 + scripted_offsets[idx]
+        step_idx[0] += 1
+        return val
+
+    handle._clock = _fake_clock
+    handle._deadline_monotonic = t0 + 3600.0
+
+    try:
+        with pytest.raises(ProviderTransportError) as exc_info:
+            handle.run_until_result(sink)
+        assert sink.waiting_models == [(180, True)]
+        assert exc_info.value.end_reason == "idle_timeout"
+        assert "270s" in str(exc_info.value)
+    finally:
+        handle.close()
+
+
 

@@ -52,9 +52,16 @@ from .runtime import (
     CLOSING_INSTRUCTION,
     INTERRUPTED_TOOL_RESULT,
     MAX_STOP_CONTINUATIONS,
+    MAX_STREAM_RESUMES,
+    STREAM_RESUME_BACKOFF_SECONDS,
+    AUTOCOMPACT_MARGIN_TOKENS,
+    AUTOCOMPACT_OUTPUT_RESERVE_TOKENS,
+    STREAM_RESUME_REMINDER,
     VERIFY_REQUIRED_MESSAGE,
     AgenticRunResult,
     _SpeakState,
+    format_stream_interrupted_message,
+    infer_stream_end_reason,
 )
 from .speak_stream import SpeakStreamParser
 
@@ -72,6 +79,8 @@ CLI_PARALLEL_MCP: bool = True
 CLI_PARALLEL_NEEDS_READONLY_HINT: bool = True
 SESSION_BRANCH: str = "B"
 NATIVE_CWD: Path = native_workdir("claude")
+# Prior history a CLI with a stdin message cap (agy: 190,791 bytes) takes whole, with room for
+# multi-byte text and the current request. A CLI without a cap is bounded by its window instead.
 MAX_NATIVE_PRIOR_HISTORY_CHARS: int = 120_000
 
 _REFUSAL_REASONS: dict[str, str] = {
@@ -438,6 +447,7 @@ class RuntimeToolExecutor(ToolExecutor):
         allow_deferral: bool = True,
         same_message_read_window: float = SAME_MESSAGE_READ_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        max_tool_call_seconds: int | float | None = None,
     ) -> None:
         self.runtime = runtime
         self.turn = turn
@@ -499,6 +509,9 @@ class RuntimeToolExecutor(ToolExecutor):
         bind_abandon = getattr(runtime.toolset, "set_call_abandoned_check", None)
         if callable(bind_abandon):
             bind_abandon(self.collector.running_call_abandoned)
+        bind_tool_cap = getattr(runtime.toolset, "set_max_tool_call_seconds", None)
+        if callable(bind_tool_cap):
+            bind_tool_cap(max_tool_call_seconds)
 
     def close(self) -> None:
         self._closed.set()
@@ -1329,6 +1342,20 @@ class _RunnerSink:
                 iteration=self._runner.iteration,
             )
 
+    def on_waiting_model(
+        self, seconds: int, *, extended: bool = False
+    ) -> None:
+        sec = int(seconds)
+        if sec > self._last_waiting_model_bucket:
+            self._last_waiting_model_bucket = sec
+        self._runner.runtime._life(
+            self._runner.turn,
+            "waiting_model",
+            seconds=sec,
+            extended=bool(extended),
+            iteration=self._runner.iteration,
+        )
+
     def _note_cli_event(self) -> None:
         pass
         self._reset_model_heartbeat()
@@ -1836,7 +1863,7 @@ class NativeTurnRunner:
         )
         prior_char_budget = max(
             16_000,
-            MAX_NATIVE_PRIOR_HISTORY_CHARS - max(0, reserved_tail_chars - 20_000),
+            self._prior_history_char_budget(tool_schemas) - max(0, reserved_tail_chars - 20_000),
         )
 
         blocks: list[dict[str, Any]] = []
@@ -1959,24 +1986,62 @@ class NativeTurnRunner:
         blocks.extend(cur_images)
         return blocks
 
-    def _compact_prior_history(self, tool_schemas: list[dict[str, object]]) -> bool:
-        """Summarize earlier history before it is handed to the CLI, as the classic loop does.
+    def _prior_history_char_cap(self) -> int | None:
+        """Chars of prior history the CLI reads whole in one stdin message; None when only the window bounds it."""
+        caps = getattr(getattr(self.provider, "adapter", None), "capabilities", None)
+        cap_bytes = getattr(caps, "max_user_message_bytes", None)
+        if not isinstance(cap_bytes, int) or isinstance(cap_bytes, bool) or cap_bytes <= 0:
+            return None
+        return min(MAX_NATIVE_PRIOR_HISTORY_CHARS, int(cap_bytes * 0.63))
 
-        The CLI's own autocompact only lives inside its process: nothing it folds is persisted, so the next
-        turn rebuilt the whole history again and the prior-history cap silently dropped the oldest part with
-        no summary. Compacting here writes the boundary, so later turns start from the summary.
+    def _prior_history_char_budget(self, tool_schemas: list[dict[str, object]]) -> int:
+        """The first message's room for prior history: the CLI's message cap, else what the window leaves.
+
+        Above the autocompact threshold this is only a safety net: history is summarized before it gets here.
+        """
+        cap = self._prior_history_char_cap()
+        if cap is not None:
+            return cap
+        runtime = self.runtime
+        limits = runtime.limits
+        window = limits.context_window_tokens or limits.max_context_tokens
+        reserve = (limits.max_output_tokens or AUTOCOMPACT_OUTPUT_RESERVE_TOKENS) + AUTOCOMPACT_MARGIN_TOKENS
+        room = (
+            min(limits.max_context_tokens, window - reserve)
+            - runtime._prompt_overhead_tokens()
+            - runtime._estimated_tokens({"tools": tool_schemas})
+        )
+        return max(16_000, room * 4)
+
+    def _compact_prior_history(self, tool_schemas: list[dict[str, object]]) -> bool:
+        """Fit earlier history before it is handed to the CLI: shrink old tool results, then summarize.
+
+        Only near the autocompact threshold (or, for a CLI with a stdin message cap such as agy, near that
+        cap): below it the model keeps every result it read. The CLI's own autocompact only lives inside its
+        process, so compacting here writes the boundary and later turns start from the summary.
         """
         runtime = self.runtime
-        threshold = runtime._autocompact_threshold()
-        if threshold is None or runtime._compaction_count >= 8:
+        if runtime._compaction_count >= 8:
             return False
+        threshold = runtime._autocompact_threshold()
+        trigger = threshold if threshold is not None else runtime._context_trigger_tokens()
+        char_cap = self._prior_history_char_cap()
         pinned = runtime._pinned_index if isinstance(runtime._pinned_index, int) else len(self.messages)
-        prior_chars = sum(runtime._estimated_tokens(item) * 4 for item in self.messages[:pinned])
-        estimate = (
-            runtime._estimated_tokens({"messages": self.messages, "tools": tool_schemas})
-            + runtime._prompt_overhead_tokens()
-        )
-        if prior_chars <= MAX_NATIVE_PRIOR_HISTORY_CHARS and estimate < threshold:
+
+        def _over() -> bool:
+            prior_chars = sum(runtime._estimated_tokens(item) * 4 for item in self.messages[:pinned])
+            estimate = (
+                runtime._estimated_tokens({"messages": self.messages, "tools": tool_schemas})
+                + runtime._prompt_overhead_tokens()
+            )
+            return estimate >= trigger or (char_cap is not None and prior_chars > char_cap)
+
+        if not _over():
+            return False
+        # First step, no model call: earlier turns' tool results shrink to AGED_TOOL_RESULT_CHARS.
+        runtime._age_tool_results(self.messages, keep_recent=0)
+        runtime._release_read_stubs(self.messages)
+        if threshold is None or not _over():
             return False
         try:
             return runtime._compact_keeping_recent(self.messages, self.turn)
@@ -2015,6 +2080,8 @@ class NativeTurnRunner:
                 else True
             )
         )
+        # The agy keeps its conversation after a kill, but pins the turn's MCP URL and token inside it, so a new
+        # process (new tool-server port) loses Orin's tools; it resumes from history instead of --conversation.
         supports_session_resume = bool(
             getattr(adapter_caps, "supports_session_resume", not persistent_stdin)
             if adapter_caps is not None
@@ -2056,10 +2123,8 @@ class NativeTurnRunner:
         else:
             executor_schemas = None
 
-        # Age prior turns' completed tool results to AGED_TOOL_RESULT_CHARS (1,600 chars)
-        # before building the initial window so CLI providers are not flooded with raw
-        # 100KB tool outputs from earlier turns.
-        self.runtime._age_tool_results(self.messages, keep_recent=0)
+        # Near the threshold (or agy's message cap), prior turns' tool results shrink and, if that is not
+        # enough, the history is summarized; below it they reach the CLI whole.
         self._compact_prior_history(tool_schemas)
         window = self.runtime._request_messages(self.messages)
         if self.runtime._names is not None:
@@ -2090,6 +2155,11 @@ class NativeTurnRunner:
             messages=self.messages,
             deadline=self.deadline,
             allow_deferral=allow_deferral,
+            max_tool_call_seconds=(
+                getattr(adapter_caps, "max_tool_call_seconds", None)
+                if adapter_caps is not None
+                else None
+            ),
         )
         self._executor = executor
         sink = _RunnerSink(self, executor)
@@ -2439,11 +2509,15 @@ class NativeTurnRunner:
                         next_process = True
                         break
 
-                    from .background_agents import (
-                        BACKGROUND_AGENTS,
-                        format_subagent_notifications,
+                    from .background_wait import (
+                        has_pending_background_work,
+                        take_background_notifications,
+                        wait_for_background_work,
+                        waiting_labels,
                     )
                     from .runtime import MAX_BACKGROUND_CONTINUATIONS
+
+                    bg_toolset = getattr(self.runtime, "toolset", None)
 
                     conv_id = str(self.turn.get("conversation_id") or "")
                     is_subagent_turn = bool(self.turn.get("is_subagent")) or (
@@ -2456,26 +2530,22 @@ class NativeTurnRunner:
                         and not turns_used
                         and not is_subagent_turn
                         and conv_id
-                        and (
-                            BACKGROUND_AGENTS.running(conv_id)
-                            or BACKGROUND_AGENTS.has_unnotified(conv_id, since_monotonic=since_mono)
-                        )
+                        and has_pending_background_work(conv_id, bg_toolset, since_monotonic=since_mono)
                         and self.runtime._bg_continuations < MAX_BACKGROUND_CONTINUATIONS
                     ):
                         self.runtime._bg_continuations += 1
                         self.runtime._life(
                             self.turn,
                             "waiting_subagents",
-                            agents=[
-                                e.name for e in BACKGROUND_AGENTS.running(conv_id)
-                            ],
+                            agents=waiting_labels(conv_id, bg_toolset),
                         )
                         rem_timeout = max(
                             0.1,
                             self._remaining_deadline_monotonic() - time.monotonic(),
                         )
-                        BACKGROUND_AGENTS.wait_any(
+                        wait_for_background_work(
                             conv_id,
+                            bg_toolset,
                             timeout=rem_timeout,
                             cancelled=lambda: self.runtime.cancelled(self.turn),
                             extra_wake=lambda: self.runtime._has_queued_inputs(
@@ -2492,11 +2562,9 @@ class NativeTurnRunner:
                             return self.runtime._cancel(
                                 self.turn, process_count, executor.action_count
                             )
-                        unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id, since_monotonic=since_mono)
                         notif_parts: list[str] = []
-                        notif_body = format_subagent_notifications(
-                            unnotified,
-                            still_running=BACKGROUND_AGENTS.running(conv_id),
+                        notif_body = take_background_notifications(
+                            conv_id, bg_toolset, since_monotonic=since_mono
                         )
                         if notif_body:
                             notif_parts.append(notif_body)
@@ -2597,28 +2665,23 @@ class NativeTurnRunner:
                         recorder(exc)
                     except Exception:
                         pass
-                if sink.had_visible_output or executor.action_count > 0:
-                    self.runtime._effect_finished(
-                        self.turn,
-                        provider_effect_id,
-                        state="UNKNOWN",
-                        error_code="PROVIDER_STREAM_INTERRUPTED",
+                self._drain_in_flight_tools(executor)
+                if self._stream_did_work(sink, executor):
+                    resumed, pause_result = self._handle_stream_interrupted(
+                        exc,
+                        provider_effect_id=provider_effect_id,
+                        process_count=process_count,
+                        executor=executor,
+                        sink=sink,
                     )
-                    self.runtime._emit(
-                        HookEvent.STOP_FAILURE,
-                        error_code="PROVIDER_STREAM_INTERRUPTED",
-                    )
-                    self.runtime._settle_quality(
-                        self.turn,
-                        "reconciliation_required",
-                        "PROVIDER_STREAM_INTERRUPTED",
-                    )
-                    return AgenticRunResult(
-                        "reconciliation_required",
-                        process_count,
-                        executor.action_count,
-                        "PROVIDER_STREAM_INTERRUPTED",
-                    )
+                    if resumed:
+                        resume_session_id = None
+                        user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        continue
+                    return pause_result
                 self.runtime._effect_finished(
                     self.turn,
                     provider_effect_id,
@@ -2639,28 +2702,23 @@ class NativeTurnRunner:
                         error_code=stop_code,
                     )
                     return self.runtime._fail(self.turn, stop_code, process_count, executor.action_count)
-                if sink.had_visible_output or executor.action_count > 0:
-                    self.runtime._effect_finished(
-                        self.turn,
-                        provider_effect_id,
-                        state="UNKNOWN",
-                        error_code="PROVIDER_STREAM_INTERRUPTED",
+                self._drain_in_flight_tools(executor)
+                if self._stream_did_work(sink, executor):
+                    resumed, pause_result = self._handle_stream_interrupted(
+                        exc,
+                        provider_effect_id=provider_effect_id,
+                        process_count=process_count,
+                        executor=executor,
+                        sink=sink,
                     )
-                    self.runtime._emit(
-                        HookEvent.STOP_FAILURE,
-                        error_code="PROVIDER_STREAM_INTERRUPTED",
-                    )
-                    self.runtime._settle_quality(
-                        self.turn,
-                        "reconciliation_required",
-                        "PROVIDER_STREAM_INTERRUPTED",
-                    )
-                    return AgenticRunResult(
-                        "reconciliation_required",
-                        process_count,
-                        executor.action_count,
-                        "PROVIDER_STREAM_INTERRUPTED",
-                    )
+                    if resumed:
+                        resume_session_id = None
+                        user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        continue
+                    return pause_result
 
                 self.runtime._effect_finished(
                     self.turn,
@@ -2717,6 +2775,122 @@ class NativeTurnRunner:
                         handle.close()
                     except Exception:
                         pass
+
+    def _drain_in_flight_tools(self, executor: RuntimeToolExecutor) -> None:
+        """Let tool calls still running in Orin finish before deciding how a dead CLI process goes on.
+
+        The tools run here, not in the CLI, so a call outlives the process that asked for it. Deciding
+        while it runs saw no action, retried the provider, and the new process ran the same command again.
+        Once drained, its result is in the history and its effect is settled.
+        """
+        deadline_mono = self._remaining_deadline_monotonic()
+        while getattr(executor, "_in_flight", 0) > 0 and time.monotonic() < deadline_mono:
+            if self.runtime.cancelled(self.turn):
+                return
+            time.sleep(0.2)
+
+    def _stream_did_work(self, sink: _RunnerSink, executor: RuntimeToolExecutor) -> bool:
+        """Whether the dead process left anything a blind retry could repeat or lose."""
+        return bool(
+            sink.had_visible_output
+            or executor.action_count > 0
+            or getattr(executor, "_in_flight", 0) > 0
+            or self.runtime._has_unresolved_tool_effects(self.turn)
+        )
+
+    def _handle_stream_interrupted(
+        self,
+        exc: BaseException,
+        *,
+        provider_effect_id: str | None,
+        process_count: int,
+        executor: RuntimeToolExecutor,
+        sink: _RunnerSink,
+    ) -> tuple[bool, AgenticRunResult | None]:
+        end_reason, exit_code = infer_stream_end_reason(exc)
+        human_message = format_stream_interrupted_message(
+            end_reason, exit_code=exit_code
+        )
+        self.turn["end_reason"] = end_reason
+        self.turn["pause_message"] = human_message
+        is_subagent = bool(self.turn.get("is_subagent")) or (
+            hasattr(self.runtime.store, "text")
+            and hasattr(self.runtime.store, "agent_id")
+        )
+        max_resumes = 1 if is_subagent else MAX_STREAM_RESUMES
+        can_auto_resume = (
+            not self.runtime._has_unresolved_tool_effects(self.turn)
+            and self.runtime._stream_resumes_used < max_resumes
+            and self.runtime.clock() < self.deadline
+            and not self.runtime.cancelled(self.turn)
+        )
+        if can_auto_resume:
+            self.runtime._stream_resumes_used += 1
+            attempt = self.runtime._stream_resumes_used
+            self.runtime._effect_finished(
+                self.turn,
+                provider_effect_id,
+                state="NOT_APPLIED",
+                error_code="PROVIDER_STREAM_INTERRUPTED",
+            )
+            self.runtime._emit_stream_resuming(
+                self.turn,
+                attempt=attempt,
+                max_attempts=max_resumes,
+                end_reason=end_reason,
+            )
+            delay = STREAM_RESUME_BACKOFF_SECONDS[
+                min(attempt - 1, len(STREAM_RESUME_BACKOFF_SECONDS) - 1)
+            ]
+            if not self.runtime._wait(self.turn, delay):
+                return False, self.runtime._cancel(
+                    self.turn, process_count, executor.action_count
+                )
+            assistant_text = "".join(sink.text_parts).strip()
+            if assistant_text:
+                self.messages.append(
+                    {"role": "assistant", "content": assistant_text}
+                )
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": system_reminder(STREAM_RESUME_REMINDER),
+                }
+            )
+            return True, None
+
+        self.runtime._effect_finished(
+            self.turn,
+            provider_effect_id,
+            state="UNKNOWN",
+            error_code="PROVIDER_STREAM_INTERRUPTED",
+        )
+        self.runtime._emit(
+            HookEvent.STOP_FAILURE,
+            error_code="PROVIDER_STREAM_INTERRUPTED",
+            end_reason=end_reason,
+            message=human_message,
+        )
+        self.runtime._settle_quality(
+            self.turn,
+            "reconciliation_required",
+            "PROVIDER_STREAM_INTERRUPTED",
+        )
+        self.runtime._life(
+            self.turn,
+            "reconciliation_required",
+            error_code="PROVIDER_STREAM_INTERRUPTED",
+            end_reason=end_reason,
+            message=human_message,
+        )
+        return False, AgenticRunResult(
+            "reconciliation_required",
+            process_count,
+            executor.action_count,
+            "PROVIDER_STREAM_INTERRUPTED",
+            end_reason=end_reason,
+            message=human_message,
+        )
 
 
 __all__ = [

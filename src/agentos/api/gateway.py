@@ -1512,6 +1512,28 @@ def create_app(services: ApiServices) -> FastAPI:
             result = app_port.cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
         return JSONResponse(_jsonable(result), status_code=202)
 
+    @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/resume", status_code=202)
+    async def resume_conversation_turn(
+        conversation_id: str,
+        turn_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.authorize(
+            principal,
+            action="conversation.send",
+            resource_id=conversation_id,
+            purpose="conversation.resume",
+        )
+        app_port = require_port(services.conversation_application)
+        result = await run_in_threadpool(
+            app_port.resume_turn,  # type: ignore[union-attr]
+            conversation_id,
+            turn_id,
+            principal.user_id,
+        )
+        return JSONResponse(_jsonable(result), status_code=202)
+
     @app.post("/v1/conversations/{conversation_id}/agents/{agent_id}/stop", status_code=202)
     async def stop_conversation_agent(conversation_id: str, agent_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)

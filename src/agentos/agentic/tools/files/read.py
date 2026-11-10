@@ -447,6 +447,18 @@ class ReadTools:
                         f"[File unchanged since last read ({norm}, lines {start_line}-{end_line}, "
                         f"sha256={current_sha[:12]}). Refer to previous read_file output in context.]"
                     )
+                    reread_key = (norm, norm_offset, norm_limit, current_sha)
+                    with self._read_file_lock:
+                        counts = self.__dict__.setdefault("_unchanged_reread_counts", {})
+                        counts[reread_key] = counts.get(reread_key, 0) + 1
+                        rereads = counts[reread_key]
+                    if rereads >= 2:
+                        # A model that lost track of what it read loops on the same range; say so plainly.
+                        stub += (
+                            f"\nYou have now asked for this same unchanged range {rereads + 1} times. Its content is "
+                            "above in this conversation: do not read it again, continue with the task. Use "
+                            "force_reload=true only if that earlier output is no longer visible to you."
+                        )
                     if self.name_translator is not None:
                         stub = public_text(stub)
                     payload = {

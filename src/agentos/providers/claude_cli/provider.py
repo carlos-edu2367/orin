@@ -288,6 +288,7 @@ def log_cli_run(
     mode: Literal["text", "native"],
     usage: Any = None,
     loggable_command: Callable[[Sequence[str]], Sequence[str]] | None = None,
+    end_reason: str | None = None,
 ) -> None:
     """Log one structured diagnostic line per CLI execution with redacted paths and secrets."""
     pre_redacted: Sequence[str] = argv
@@ -310,16 +311,21 @@ def log_cli_run(
 
     lines = (stderr_tail or "").splitlines()[-20:]
     tail = "\n".join(lines)
-    if len(tail) > 2000:
-        tail = tail[-2000:]
+    if len(tail) > 4096:
+        tail = tail[-4096:]
+
+    resolved_reason = end_reason or (
+        "error_result" if (result is not None and result.is_error) else "ok"
+    )
 
     _LOGGER.info(
-        "claude_cli run mode=%s argv=%s requested=%s actual=%s exit=%s duration=%.1fs in=%d out=%d cache_read=%d cache_creation=%d stderr_tail=%r",
+        "claude_cli run mode=%s argv=%s requested=%s actual=%s exit=%s end_reason=%s duration=%.1fs in=%d out=%d cache_read=%d cache_creation=%d stderr_tail=%r",
         mode,
         redacted_argv,
         requested_model or "default",
         actual_model,
         exit_code,
+        resolved_reason,
         duration_s,
         in_tok,
         out_tok,

@@ -26,6 +26,7 @@ class ExecutionEffectState(StrEnum):
     APPLIED = "APPLIED"
     NOT_APPLIED = "NOT_APPLIED"
     UNKNOWN = "UNKNOWN"
+    UNKNOWN_ACKED = "UNKNOWN_ACKED"
 
 
 class ExecutionEffectRetryability(StrEnum):

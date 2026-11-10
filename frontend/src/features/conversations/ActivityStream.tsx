@@ -185,5 +185,5 @@ export function renderActivityGroup(
   if (group.kind === 'agent' && (first.type === 'agent.message_sent' || first.type === 'agent.message_received')) {
     return <>{group.events.map((event) => <AgentExchange key={event.eventId} event={event} />)}</>
   }
-  return <ActivityCard group={group} conversationId={conversationId} onPreview={onPreview} />
+  return <ActivityCard group={group} conversationId={conversationId} onPreview={onPreview} client={codeSessionContext?.client} />
 }

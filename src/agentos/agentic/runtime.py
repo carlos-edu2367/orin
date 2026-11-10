@@ -64,6 +64,10 @@ MICROCOMPACT_MIN_CHARS = 200
 # Autocompact fires at the window minus room for one full reply and a fixed margin.
 AUTOCOMPACT_OUTPUT_RESERVE_TOKENS = 20_000
 AUTOCOMPACT_MARGIN_TOKENS = 13_000
+# ... and never past 90% of the window nor 400k tokens, so a 1M window compacts at 400k
+# (approved 2026-11-10: threshold = min(90% of window, window - reserve - 13k, 400k)).
+AUTOCOMPACT_WINDOW_FRACTION = 0.90
+AUTOCOMPACT_MAX_TOKENS = 400_000
 
 # Providers whose prompt cache this runtime can actually address. For these the
 # message list is append-only, because prompt caching keys on an exact prefix:
@@ -129,6 +133,13 @@ MAX_BACKGROUND_CONTINUATIONS = 12
 # at most this many times per turn.
 MAX_OUTPUT_RECOVERIES = 3
 MAX_ESCALATED_OUTPUT_TOKENS = 32_000
+MAX_STREAM_RESUMES = 2
+STREAM_RESUME_BACKOFF_SECONDS: tuple[float, ...] = (2.0, 5.0)
+STREAM_RESUME_REMINDER = (
+    "The previous model connection was interrupted before completion. "
+    "Your partial output and all completed tool results above are already saved. "
+    "Continue from where you stopped without repeating tool actions that were already applied."
+)
 CONTINUE_AFTER_OUTPUT_LIMIT = (
     "Your previous reply was cut off by the output length limit. Continue exactly where it stopped: "
     "do not repeat what you already wrote, do not apologize and do not summarize."
@@ -236,6 +247,87 @@ class AgenticRunResult:
     # How many queued messages from the person reached the model during this turn.
     queued_turn_count: int = 0
     verification: str | None = None
+    end_reason: str | None = None
+    message: str | None = None
+
+
+_EXIT_CODE_RE = re.compile(r"\bcode=(-?\d+)\b")
+
+
+def infer_stream_end_reason(exc: BaseException) -> tuple[str, int | None]:
+    """Return (end_reason, exit_code) for an interrupted provider stream."""
+    raw_reason = getattr(exc, "end_reason", None)
+    exit_code = getattr(exc, "exit_code", None)
+    text = str(exc or "")
+    if exit_code is None:
+        match = _EXIT_CODE_RE.search(text)
+        if match:
+            try:
+                exit_code = int(match.group(1))
+            except ValueError:
+                exit_code = None
+    if isinstance(raw_reason, str) and raw_reason in {
+        "idle_timeout",
+        "stdout_eof",
+        "error_result",
+        "stream_error",
+        "deadline",
+        "cancelled",
+    }:
+        return raw_reason, exit_code
+    lower = text.lower()
+    if (
+        (isinstance(exc, ProviderError) and exc.category is ProviderErrorCategory.TIMEOUT)
+        or "sem saída por" in lower
+        or "stalled without tokens" in lower
+        or "idle timeout" in lower
+    ):
+        return "idle_timeout", exit_code
+    if "turn_deadline_exceeded" in lower or "exceeded deadline" in lower:
+        return "deadline", exit_code
+    if "exited without result packet" in lower or "exited before initialization" in lower:
+        return "stdout_eof", exit_code
+    return "stream_error", exit_code
+
+
+def format_stream_interrupted_message(
+    end_reason: str | None,
+    *,
+    exit_code: int | None = None,
+    idle_seconds: int = 180,
+) -> str:
+    """Human-readable pt-BR message explaining why the model stream stopped."""
+    if end_reason == "idle_timeout":
+        return (
+            f"O modelo ficou sem responder por {idle_seconds} s e o processo foi encerrado. "
+            "O trabalho feito até aqui está salvo."
+        )
+    if end_reason == "stdout_eof":
+        if exit_code is not None:
+            return (
+                f"O processo do modelo terminou sem concluir a resposta (código {exit_code}). "
+                "O trabalho feito até aqui está salvo."
+            )
+        return (
+            "O processo do modelo terminou sem concluir a resposta. "
+            "O trabalho feito até aqui está salvo."
+        )
+    if end_reason == "error_result":
+        return (
+            "O modelo encerrou a execução com erro antes de concluir a resposta. "
+            "O trabalho feito até aqui está salvo."
+        )
+    if end_reason == "deadline":
+        return (
+            "O tempo limite do turno foi atingido antes da conclusão da resposta. "
+            "O trabalho feito até aqui está salvo."
+        )
+    if end_reason == "cancelled":
+        return "A execução foi cancelada antes de concluir a resposta."
+    return (
+        "A conexão com o modelo foi interrompida antes de concluir a resposta. "
+        "O trabalho feito até aqui está salvo."
+    )
 
 
 def _exists_in_workspace(toolset: object, path: str) -> bool:
@@ -349,6 +441,11 @@ class AgenticTurnRuntime:
         self._silent_tool_rounds = 0
         self._last_status_nudge_at: datetime | None = None
         self._max_tokens_recoveries = 0
+        self._stream_resumes_used = 0
+        self._tool_effects_lock = threading.Lock()
+        self._in_flight_tool_effects: dict[str, str] = {}
+        self._unknown_tool_effects: dict[str, str] = {}
+        self._local_effect_seq = 0
         self._reminder_requests = 0
         # Raised for the rest of the turn after a tool call was cut by the output limit.
         self._output_cap: int | None = None
@@ -1189,18 +1286,94 @@ class AgenticTurnRuntime:
                     )
                 )
                 effective_yielded = provider_yielded and not is_keepalive_stall
-                # Once a stream yielded anything the request may have reached
-                # the provider and charged or produced a result.  A restart
-                # must reconcile it rather than issuing a duplicate request.
+                if effective_yielded:
+                    end_reason, exit_code = infer_stream_end_reason(exc)
+                    human_message = format_stream_interrupted_message(
+                        end_reason, exit_code=exit_code
+                    )
+                    turn["end_reason"] = end_reason
+                    turn["pause_message"] = human_message
+                    is_sub = bool(turn.get("is_subagent")) or (
+                        hasattr(self.store, "text") and hasattr(self.store, "agent_id")
+                    )
+                    max_resumes = 1 if is_sub else MAX_STREAM_RESUMES
+                    can_auto_resume = (
+                        not self._has_unresolved_tool_effects(turn)
+                        and self._stream_resumes_used < max_resumes
+                        and self.clock() < deadline
+                        and not self.cancelled(turn)
+                        and not final_iteration
+                    )
+                    if can_auto_resume:
+                        self._stream_resumes_used += 1
+                        attempt = self._stream_resumes_used
+                        self._effect_finished(
+                            turn,
+                            provider_effect_id,
+                            state="NOT_APPLIED",
+                            error_code="PROVIDER_STREAM_INTERRUPTED",
+                        )
+                        self._emit_stream_resuming(
+                            turn,
+                            attempt=attempt,
+                            max_attempts=max_resumes,
+                            end_reason=end_reason,
+                        )
+                        delay = STREAM_RESUME_BACKOFF_SECONDS[
+                            min(attempt - 1, len(STREAM_RESUME_BACKOFF_SECONDS) - 1)
+                        ]
+                        if not self._wait(turn, delay):
+                            return self._cancel(turn, iteration, action_count)
+                        partial_text = "".join(text_parts).strip()
+                        if partial_text:
+                            messages.append({"role": "assistant", "content": partial_text})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": system_reminder(STREAM_RESUME_REMINDER),
+                            }
+                        )
+                        continuing_text = True
+                        self._life(turn, "running")
+                        continue
+                    self._effect_finished(
+                        turn,
+                        provider_effect_id,
+                        state="UNKNOWN",
+                        error_code="PROVIDER_STREAM_INTERRUPTED",
+                    )
+                    self._emit(
+                        HookEvent.STOP_FAILURE,
+                        error_code="PROVIDER_STREAM_INTERRUPTED",
+                        end_reason=end_reason,
+                        message=human_message,
+                    )
+                    self._settle_quality(
+                        turn,
+                        "reconciliation_required",
+                        "PROVIDER_STREAM_INTERRUPTED",
+                    )
+                    self._life(
+                        turn,
+                        "reconciliation_required",
+                        error_code="PROVIDER_STREAM_INTERRUPTED",
+                        end_reason=end_reason,
+                        message=human_message,
+                    )
+                    return AgenticRunResult(
+                        "reconciliation_required",
+                        iteration,
+                        action_count,
+                        "PROVIDER_STREAM_INTERRUPTED",
+                        end_reason=end_reason,
+                        message=human_message,
+                    )
                 self._effect_finished(
-                    turn, provider_effect_id,
-                    state="UNKNOWN" if effective_yielded else "NOT_APPLIED",
+                    turn,
+                    provider_effect_id,
+                    state="NOT_APPLIED",
                     error_code="PROVIDER_STREAM_INTERRUPTED",
                 )
-                if effective_yielded:
-                    self._emit(HookEvent.STOP_FAILURE, error_code="PROVIDER_STREAM_INTERRUPTED")
-                    self._settle_quality(turn, "reconciliation_required", "PROVIDER_STREAM_INTERRUPTED")
-                    return AgenticRunResult("reconciliation_required", iteration, action_count, "PROVIDER_STREAM_INTERRUPTED")
                 recovery = self._recover_provider_failure(turn, exc, retries_used=provider_retries, deadline=deadline, code="PROVIDER_STREAM_FAILED")
                 if recovery == "retry":
                     provider_retries += 1
@@ -1362,8 +1535,9 @@ class AgenticTurnRuntime:
                 # is exactly what a prompt cache cannot survive. Where the
                 # provider has a cache, this is deferred to compaction, whose
                 # rewrite is unavoidable anyway; where it has none, shrinking
-                # every iteration is still the cheapest thing to do.
-                if not self._prefix_caching(turn):
+                # every iteration is still the cheapest thing to do -- once the window is
+                # near full: below that, shrinking only made the model re-read what it had.
+                if not self._prefix_caching(turn) and self._over_context_trigger(messages, tool_schemas):
                     self._age_tool_results(messages, keep_recent=max(RECENT_UNAGED_TOOL_RESULTS, len(results)))
                     self._release_read_stubs(messages)
                 # ``ask_user`` deliberately ends this provider run.  A worker
@@ -1441,7 +1615,12 @@ class AgenticTurnRuntime:
                     messages.append({"role": "user", "content": f"[Hook Stop] {stop_decision.reason or 'continue working'}"})
                     self._life(turn, "running")
                     continue
-                from .background_agents import BACKGROUND_AGENTS, format_subagent_notifications
+                from .background_wait import (
+                    has_pending_background_work,
+                    take_background_notifications,
+                    wait_for_background_work,
+                    waiting_labels,
+                )
 
                 conv_id = str(turn.get("conversation_id") or "")
                 since_mono = getattr(self, "_started_mono", None)
@@ -1450,29 +1629,26 @@ class AgenticTurnRuntime:
                     and not bool(turn.get("is_subagent"))
                     and not final_iteration
                     and conv_id
-                    and (BACKGROUND_AGENTS.running(conv_id) or BACKGROUND_AGENTS.has_unnotified(conv_id, since_monotonic=since_mono))
+                    and has_pending_background_work(conv_id, self.toolset, since_monotonic=since_mono)
                     and self._bg_continuations < MAX_BACKGROUND_CONTINUATIONS
                 ):
                     self._bg_continuations += 1
                     self._life(
                         turn,
                         "waiting_subagents",
-                        agents=[e.name for e in BACKGROUND_AGENTS.running(conv_id)],
+                        agents=waiting_labels(conv_id, self.toolset),
                     )
                     rem_sec = max(0.1, (deadline - self.clock()).total_seconds())
-                    BACKGROUND_AGENTS.wait_any(
+                    wait_for_background_work(
                         conv_id,
+                        self.toolset,
                         timeout=rem_sec,
                         cancelled=lambda: self.cancelled(turn),
                         extra_wake=lambda: self._has_queued_inputs(turn),
                     )
                     if self.cancelled(turn):
                         return self._cancel(turn, iteration, action_count)
-                    unnotified = BACKGROUND_AGENTS.take_unnotified(conv_id, since_monotonic=since_mono)
-                    notif_text = format_subagent_notifications(
-                        unnotified,
-                        still_running=BACKGROUND_AGENTS.running(conv_id),
-                    )
+                    notif_text = take_background_notifications(conv_id, self.toolset, since_monotonic=since_mono)
                     if notif_text or self._has_queued_inputs(turn):
                         self._effect_finished(
                             turn, provider_effect_id, state="APPLIED",
@@ -1755,8 +1931,11 @@ class AgenticTurnRuntime:
         # with every call, so leaving them out let the meter read ~100% while autocompact never fired.
         overhead = self._prompt_overhead_tokens()
         estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas}) + overhead
-        limit = self.limits.max_context_tokens
-        if estimate >= int(limit * MICROCOMPACT_THRESHOLD):
+        threshold = self._autocompact_threshold()
+        # Clearing old results is the first step at the threshold, not a cost paid long before it: below it
+        # the model keeps everything it read. With autoCompact off it still guards the window.
+        trigger = threshold if threshold is not None else self._context_trigger_tokens()
+        if estimate >= trigger:
             before = estimate
             if self._microcompact(messages, keep_recent=MICROCOMPACT_KEEP_RECENT):
                 self._release_read_stubs(messages)
@@ -1764,7 +1943,6 @@ class AgenticTurnRuntime:
                 self._persist_compact_boundary(turn, kind="microcompact", trigger="auto", pre_tokens=before, post_tokens=estimate)
                 if self.context_reporting:
                     self._life(turn, "context_microcompacted", pre_tokens=before, post_tokens=estimate)
-        threshold = self._autocompact_threshold()
         if threshold is None or estimate < threshold:
             return
         self._compact_keeping_recent(messages, turn)
@@ -1803,11 +1981,25 @@ class AgenticTurnRuntime:
         if isinstance(setting, int) and not isinstance(setting, bool) and setting > 0:
             # Floored at a quarter of the context: a tiny threshold would summarize on nearly every request.
             return max(limit // 4, min(int(setting), limit))
+        return self._context_trigger_tokens()
+
+    def _context_trigger_tokens(self) -> int:
+        """Where the window is considered full: ``min(90% of window, window - reply - 13k, 400k)``.
+
+        Floored at half the window so a small window with a large reply reserve still works; never past 400k nor
+        ``max_context_tokens``. Without a known window, 82% of ``max_context_tokens``, under the same 400k cap.
+        """
+        limit = self.limits.max_context_tokens
         window = self.limits.context_window_tokens
-        if window:
-            reserve = (self.limits.max_output_tokens or AUTOCOMPACT_OUTPUT_RESERVE_TOKENS) + AUTOCOMPACT_MARGIN_TOKENS
-            return max(1_000, min(limit, window - reserve))
-        return int(limit * CONTEXT_COMPACTION_THRESHOLD)
+        if not window:
+            return min(int(limit * CONTEXT_COMPACTION_THRESHOLD), AUTOCOMPACT_MAX_TOKENS)
+        reserve = (self.limits.max_output_tokens or AUTOCOMPACT_OUTPUT_RESERVE_TOKENS) + AUTOCOMPACT_MARGIN_TOKENS
+        threshold = max(min(int(window * AUTOCOMPACT_WINDOW_FRACTION), window - reserve), window // 2)
+        return max(1_000, min(limit, threshold, AUTOCOMPACT_MAX_TOKENS))
+
+    def _over_context_trigger(self, messages: list[dict[str, object]], tool_schemas: list[dict[str, object]]) -> bool:
+        estimate = self._estimated_tokens({"messages": messages, "tools": tool_schemas}) + self._prompt_overhead_tokens()
+        return estimate >= self._context_trigger_tokens()
 
     def _run_compaction(
         self,
@@ -2995,11 +3187,73 @@ class AgenticTurnRuntime:
         if hasattr(self.store, "lifecycle"):
             self.store.lifecycle(turn, state, **payload)
 
+    def _emit_stream_resuming(
+        self,
+        turn: dict[str, object],
+        *,
+        attempt: int,
+        max_attempts: int,
+        end_reason: str | None,
+    ) -> None:
+        resume_summary = f"Conexão com o modelo caiu; retomando ({attempt}/{max_attempts})"
+        payload: dict[str, object] = {
+            "state": "stream_resuming",
+            "stream_resuming": True,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "end_reason": end_reason,
+        }
+        self._life(
+            turn,
+            "stream_resuming",
+            attempt=attempt,
+            max_attempts=max_attempts,
+            end_reason=end_reason,
+            summary=resume_summary,
+        )
+        session = getattr(self.store, "_session", None)
+        is_subagent = bool(turn.get("is_subagent")) or (
+            hasattr(self.store, "text") and hasattr(self.store, "agent_id")
+        )
+        if session is not None and hasattr(session, "_record"):
+            try:
+                actor = getattr(self.store, "agent_id", None) or getattr(session, "main_agent_id", "main")
+                event_type = (
+                    AgentActivityEventType.TOOL_PROGRESSED
+                    if is_subagent
+                    else AgentActivityEventType.TURN_STARTED
+                )
+                parent_of = getattr(session, "_parent_of", None)
+                parent_id = parent_of(actor) if is_subagent and callable(parent_of) else None
+                session._record(
+                    event_type,
+                    resume_summary,
+                    payload,
+                    agent_id=actor,
+                    parent_agent_id=parent_id,
+                )
+                return
+            except Exception:  # noqa: BLE001
+                pass
+        recorder = getattr(self.store, "record", None)
+        if callable(recorder):
+            try:
+                recorder(turn, AgentActivityEventType.TURN_STARTED, resume_summary, payload)
+            except Exception:  # noqa: BLE001
+                pass
+
     def _effect_started(self, turn: dict[str, object], *, kind: str, invocation_ref: str, request_ref: str) -> str | None:
         recorder = getattr(self.store, "effect_started", None)
+        effect_id: str | None = None
         if callable(recorder):
-            return recorder(turn, kind=kind, invocation_ref=invocation_ref, request_ref=request_ref)
-        return None
+            effect_id = recorder(turn, kind=kind, invocation_ref=invocation_ref, request_ref=request_ref)
+        if str(kind).upper() == "TOOL":
+            with self._tool_effects_lock:
+                if effect_id is None:
+                    self._local_effect_seq += 1
+                    effect_id = f"_local_effect:{self._local_effect_seq}"
+                self._in_flight_tool_effects[str(effect_id)] = invocation_ref
+        return effect_id
 
     def _effect_finished(
         self,
@@ -3011,12 +3265,34 @@ class AgenticTurnRuntime:
         error_code: str | None = None,
         private_result: Mapping[str, object] | None = None,
     ) -> None:
+        if effect_id is not None:
+            with self._tool_effects_lock:
+                inv_ref = self._in_flight_tool_effects.pop(str(effect_id), None)
+                if str(state).upper() == "UNKNOWN":
+                    self._unknown_tool_effects[str(effect_id)] = inv_ref or str(effect_id)
+                else:
+                    self._unknown_tool_effects.pop(str(effect_id), None)
         recorder = getattr(self.store, "effect_finished", None)
-        if callable(recorder) and effect_id is not None:
+        if callable(recorder) and effect_id is not None and not str(effect_id).startswith("_local_effect:"):
             recorder(
                 turn, effect_id=effect_id, state=state, result_ref=result_ref,
                 error_code=error_code, private_result=private_result,
             )
+
+    def _has_unresolved_tool_effects(self, turn: Mapping[str, object]) -> bool:
+        with self._tool_effects_lock:
+            if self._in_flight_tool_effects or self._unknown_tool_effects:
+                return True
+        checker = getattr(self.store, "has_unresolved_tool_effects", None)
+        if callable(checker):
+            try:
+                if bool(checker(turn)):
+                    return True
+            except Exception:
+                return True
+        if self.reconciliation_required(turn):
+            return True
+        return False
 
     def _emit(self, name: HookEvent, **payload: object):
         bus = getattr(self, "lifecycle", None)

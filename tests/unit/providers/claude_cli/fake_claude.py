@@ -187,7 +187,44 @@ def main() -> int:
     )
 
     if mode == "silent_hang":
+        sys.stdout.write("NON_JSON_BEFORE_IDLE\n")
+        sys.stdout.flush()
         time.sleep(30.0)
+        return 0
+
+    if mode == "stdout_eof":
+        sys.stdout.write("NON_JSON_STDOUT_LINE\n")
+        sys.stdout.flush()
+        sys.stderr.write("STDERR_DIAG_LINE\n")
+        sys.stderr.flush()
+        _emit(
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "partial before eof"},
+                },
+            }
+        )
+        return 17
+
+    if mode == "error_result":
+        sys.stdout.write("NON_JSON_ERROR_CONTEXT\n")
+        sys.stdout.flush()
+        _emit(
+            {
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": True,
+                "result": "Execution failed in fake CLI",
+                "stop_reason": "error",
+                "num_turns": 1,
+                "duration_ms": 12,
+                "session_id": "sess-fake",
+                "usage": {"input_tokens": 8, "output_tokens": 2},
+            }
+        )
         return 0
 
     if mode == "hold_until_eof":

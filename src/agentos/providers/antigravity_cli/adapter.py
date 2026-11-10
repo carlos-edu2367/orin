@@ -52,6 +52,14 @@ class AntigravityCliAdapter:
         persistent_stdin=True,
         reports_tool_inventory=True,
         forbidden_item_kinds=FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS,
+        # Calibrated from orin.db telemetry on gemini-4-argon-high (48 runs, 2603 iterations):
+        # per-iteration silence p50=1.9s, p90=24.7s, p99=92.4s, max=194.7s (per-run max p50=63.1s,
+        # p90=169.5s, p99=188.3s, max=194.7s; 4 runs died at the old 180s cap). 600s (~3x max,
+        # plus one +50% waiting_model extension if alive) covers deep thinking on large contexts.
+        idle_timeout_seconds=600,
+        max_tool_call_seconds=180,
+        # agy 1.5.x cuts a longer USER_INPUT at the end (re-checked on 1.5.4: 300 KB lost the question).
+        max_user_message_bytes=190_791,
     )
 
     def resolve_binary(

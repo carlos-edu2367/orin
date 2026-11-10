@@ -121,14 +121,24 @@ class PostgresExecutionJournal:
                 return _effect(row)
 
     def resolve(self, effect_id: str, scope: ExecutionJournalScope, *, state: ExecutionEffectState, now: datetime, result_ref: str | None = None, error_code: str | None = None, private_result: Mapping[str, object] | None = None) -> ExecutionEffect:
-        if state not in {ExecutionEffectState.APPLIED, ExecutionEffectState.NOT_APPLIED, ExecutionEffectState.UNKNOWN}:
+        if state not in {
+            ExecutionEffectState.APPLIED,
+            ExecutionEffectState.NOT_APPLIED,
+            ExecutionEffectState.UNKNOWN,
+            ExecutionEffectState.UNKNOWN_ACKED,
+        }:
             raise ValueError("effect resolution must be terminal")
         with self._lock:
             with self._engine.begin() as connection:
                 row = connection.execute(select(execution_effects).where(
                     *_scope_where(execution_effects, scope), execution_effects.c.effect_id == effect_id,
                 )).mappings().one()
-                if row["state"] not in {ExecutionEffectState.APPLIED.value, ExecutionEffectState.NOT_APPLIED.value, ExecutionEffectState.UNKNOWN.value}:
+                if row["state"] not in {
+                    ExecutionEffectState.APPLIED.value,
+                    ExecutionEffectState.NOT_APPLIED.value,
+                    ExecutionEffectState.UNKNOWN.value,
+                    ExecutionEffectState.UNKNOWN_ACKED.value,
+                }:
                     connection.execute(update(execution_effects).where(
                         execution_effects.c.effect_id == effect_id, execution_effects.c.version == row["version"],
                     ).values(state=state.value, result_ref=result_ref, error_code=error_code, result=dict(private_result or {}) or None,
@@ -197,7 +207,9 @@ class PostgresExecutionJournal:
         active = (ExecutionEffectState.PREPARED.value, ExecutionEffectState.IN_FLIGHT.value, ExecutionEffectState.UNKNOWN.value)
         with self._engine.connect() as connection:
             rows = connection.execute(select(execution_effects).where(
-                *_scope_where(execution_effects, scope), execution_effects.c.state.in_(active),
+                *_scope_where(execution_effects, scope),
+                execution_effects.c.state.in_(active),
+                execution_effects.c.reconciliation_ref.is_(None),
             ).order_by(execution_effects.c.prepared_at, execution_effects.c.effect_id)).mappings().all()
         return tuple(_effect(row) for row in rows)
 
@@ -213,6 +225,52 @@ class PostgresExecutionJournal:
             else:
                 resolved.append(self.resolve(effect.effect_id, scope, state=ExecutionEffectState.UNKNOWN, now=now, error_code="RECOVERY_RECONCILIATION_REQUIRED"))
         return tuple(resolved)
+
+    def acknowledge_unresolved(
+        self,
+        scope: ExecutionJournalScope,
+        *,
+        reconciliation_ref: str,
+        now: datetime,
+    ) -> tuple[ExecutionEffect, ...]:
+        """Acknowledge unresolved/unknown effects so a paused execution can resume without deleting ledger rows."""
+        self.mark_unresolved_unknown(scope, now=now)
+        with self._lock:
+            with self._engine.begin() as connection:
+                rows = connection.execute(
+                    select(execution_effects)
+                    .where(
+                        *_scope_where(execution_effects, scope),
+                        execution_effects.c.state == ExecutionEffectState.UNKNOWN.value,
+                        execution_effects.c.reconciliation_ref.is_(None),
+                    )
+                    .order_by(execution_effects.c.prepared_at, execution_effects.c.effect_id)
+                ).mappings().all()
+                if not rows:
+                    return ()
+                effect_ids = [str(row["effect_id"]) for row in rows]
+                connection.execute(
+                    update(execution_effects)
+                    .where(
+                        *_scope_where(execution_effects, scope),
+                        execution_effects.c.effect_id.in_(effect_ids),
+                    )
+                    .values(
+                        state=ExecutionEffectState.UNKNOWN_ACKED.value,
+                        reconciliation_ref=reconciliation_ref,
+                        resolved_at=now,
+                        version=execution_effects.c.version + 1,
+                    )
+                )
+                updated_rows = connection.execute(
+                    select(execution_effects)
+                    .where(
+                        *_scope_where(execution_effects, scope),
+                        execution_effects.c.effect_id.in_(effect_ids),
+                    )
+                    .order_by(execution_effects.c.prepared_at, execution_effects.c.effect_id)
+                ).mappings().all()
+        return tuple(_effect(row) for row in updated_rows)
 
 
 __all__ = ["PostgresExecutionJournal"]

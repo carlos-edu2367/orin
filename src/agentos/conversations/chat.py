@@ -31,6 +31,11 @@ from agentos.persistence.postgres.agentic_activity import (
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
 from agentos.agentic.compaction import compaction_message
+from agentos.conversations.resume import (
+    append_resumed_turn_history,
+    recent_interrupted_paused_turns as _recent_interrupted_paused_turns,
+    resume_paused_turn as _resume_paused_turn,
+)
 from agentos.persistence.postgres.schema import (code_mode_runs, conversation_activity_events, conversation_agent_usage, conversation_agents, conversation_compact_boundaries, conversation_dispatches, conversation_events, conversation_hook_context, conversation_input_queue, conversation_message_attachments, conversation_message_commands, conversation_messages, conversation_prompt_snapshots, conversation_sessions, conversation_tool_records, conversation_turn_steps, conversation_turns, conversations, metadata, projects, provider_model_catalog, runtime_heartbeats, turn_quality_metrics, workspace_roots)
 from agentos.code_mode.models import CodeAutonomy, CodeStage, detect_code_request, known_permission_mode
 from agentos.provider_catalog.pricing import estimate_cost_usd
@@ -2091,12 +2096,14 @@ class PostgresChatStore:
                 turn = c.execute(
                     select(
                         conversation_turns,
+                        conversation_dispatches.c.attempts.label("dispatch_attempts"),
                         conversations.c.project_id,
                         conversations.c.mode.label("conversation_mode"),
                         conversations.c.permission_mode.label("permission_mode"),
                         projects.c.workspace_id.label("project_workspace_id"),
                         workspace_roots.c.root_path.label("workspace_root_path"),
                     )
+                    .join(conversation_dispatches, conversation_dispatches.c.turn_id == conversation_turns.c.turn_id)
                     .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
                     .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
                     .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
@@ -2596,6 +2603,7 @@ class PostgresChatStore:
             # ``_sequence`` lets the runtime know which messages a compaction folded;
             # keys starting with ``_`` never reach the provider.
             history.append({"role": str(row["role"]), "content": content, "_sequence": int(row["sequence"])})
+        append_resumed_turn_history(self, turn, history, rehydration_budget_tokens=rehydration_budget_tokens)
         if compacted:
             history.insert(0, compaction_message(str(boundary["summary"])))
         return history
@@ -2867,13 +2875,27 @@ class PostgresChatStore:
             {"state": state, "retryable": retryable, "error_code": code},
         )
 
-    def pause_for_reconciliation(self, turn: Mapping[str, object], *, code: str) -> None:
+    def pause_for_reconciliation(
+        self,
+        turn: Mapping[str, object],
+        *,
+        code: str,
+        end_reason: str | None = None,
+        message: str | None = None,
+    ) -> None:
         """Expose an unknown external effect without converting it to a retry.
 
         The canonical Execution remains PAUSED. This is only its chat read
         model, so the next worker cannot claim and accidentally repeat it.
         """
         now = datetime.now(UTC)
+        resolved_end_reason = str(end_reason or turn.get("end_reason") or "").strip() or None
+        resolved_message = str(message or turn.get("pause_message") or "").strip() or None
+        event_payload: dict[str, object] = {"state": "paused", "code": code, "resumable": True}
+        if resolved_end_reason:
+            event_payload["end_reason"] = resolved_end_reason
+        if resolved_message:
+            event_payload["message"] = resolved_message
         with self._engine.begin() as c:
             c.execute(update(conversation_dispatches).where(
                 conversation_dispatches.c.turn_id == turn["turn_id"],
@@ -2889,12 +2911,15 @@ class PostgresChatStore:
             ).values(state="paused", updated_at=now))
             c.execute(insert(conversation_events).values(
                 conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="turn.reconciliation_required",
-                message_id=turn["assistant_message_id"], payload={"state": "paused", "code": code}, created_at=now,
+                message_id=turn["assistant_message_id"], payload=event_payload, created_at=now,
             ))
-        self._activity(
-            dict(turn), AgentActivityEventType.TURN_FAILED, "Aguardando reconciliação de efeito externo",
-            {"state": "paused", "retryable": False, "error_code": code},
-        )
+        summary = resolved_message or "Aguardando reconciliação de efeito externo"
+        activity_payload: dict[str, object] = {"state": "paused", "retryable": False, "resumable": True, "error_code": code}
+        if resolved_end_reason:
+            activity_payload["end_reason"] = resolved_end_reason
+        if resolved_message:
+            activity_payload["message"] = resolved_message
+        self._activity(dict(turn), AgentActivityEventType.TURN_FAILED, summary, activity_payload)
 
     def overview(self, conversation_id: str, user_id: str) -> dict[str, object]:
         """Aggregate one conversation into the shape the overview scene draws."""
@@ -3178,6 +3203,12 @@ class PostgresChatStore:
             ))
         return True
 
+    def recent_interrupted_paused_turns(self, *, maximum_age: timedelta = timedelta(minutes=30)) -> tuple[dict[str, object], ...]:
+        return _recent_interrupted_paused_turns(self, maximum_age=maximum_age)
+
+    def resume_turn(self, conversation_id: str, turn_id: str, user_id: str, *, reason: str = "user_resumed") -> dict[str, object]:
+        return _resume_paused_turn(self, conversation_id, turn_id, user_id, reason=reason)
+
     def heartbeat(self, component: str) -> None:
         now = datetime.now(UTC)
         with self._engine.begin() as c:
@@ -3317,6 +3348,9 @@ class ChatApplication:
     def keep_subagents_requested(self, turn_id: str) -> bool:
         checker = getattr(self.store, "keep_subagents_requested", None)
         return bool(checker(turn_id)) if callable(checker) else False
+
+    def resume_turn(self, conversation_id: str, turn_id: str, user_id: str, *, reason: str = "user_resumed") -> dict[str, object]:
+        return self.store.resume_turn(conversation_id, turn_id, user_id, reason=reason)
 
     def request_agent_stop(self, conversation_id: str, user_id: str, agent_id: str) -> dict[str, object]:
         return self.store.request_agent_stop(conversation_id, user_id, agent_id)

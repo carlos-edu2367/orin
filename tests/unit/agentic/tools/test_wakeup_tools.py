@@ -93,3 +93,19 @@ def test_it_is_allowed_without_a_prompt() -> None:
     assert "schedule_wakeup" in READ_ONLY_TOOLS and "schedule_wakeup" in CODE_MODE_CORE_TOOLS
     assert PUBLIC_NAMES["schedule_wakeup"] == "ScheduleWakeup"
     assert arguments_in("schedule_wakeup", {"delaySeconds": 60})["delay_seconds"] == 60
+    assert arguments_in("schedule_wakeup", {"delaySeconds": 60, "wakeOnPid": 3144})["wake_on_pid"] == 3144
+
+
+def test_wake_on_pid_is_stored_and_validated(tmp_path: Path) -> None:
+    scheduler, conversation_id, toolset = _setup(tmp_path)
+    outcome = _wake(toolset, delaySeconds=120, wake_on_pid=3144)
+    assert outcome.status == "succeeded", outcome.content
+    assert outcome.data["tool_output"]["wakeOnPid"] == 3144
+    rows = scheduler.list_for_conversation("user-1", conversation_id, sources=("wakeup",))
+    assert len(rows) == 1 and rows[0]["wake_on_pid"] == 3144
+
+    # Invalid wake_on_pid is rejected cleanly.
+    assert _wake(toolset, delaySeconds=120, wake_on_pid=0).status == "failed"
+    assert _wake(toolset, delaySeconds=120, wake_on_pid=-5).status == "failed"
+    assert _wake(toolset, delaySeconds=120, wake_on_pid="not-a-pid").status == "failed"
+

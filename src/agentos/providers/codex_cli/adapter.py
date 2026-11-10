@@ -45,6 +45,8 @@ class CodexCliAdapter:
         persistent_stdin=False,
         reports_tool_inventory=False,
         forbidden_item_kinds=FORBIDDEN_CODEX_ITEM_KINDS,
+        idle_timeout_seconds=300,
+        max_tool_call_seconds=None,
     )
 
     def resolve_binary(

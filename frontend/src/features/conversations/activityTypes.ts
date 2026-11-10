@@ -159,6 +159,7 @@ export type AgentActivityEventType =
   | 'code_mode.command_batch'
   | 'code_mode.decision_required'
   | 'notification.pushed'
+  | 'process.exited'
   | (string & {})
 
 export type ConversationActivityEvent = {
@@ -246,6 +247,7 @@ export type ConversationActivityEvent = {
   /** Preview server state from PreviewStart / PreviewOpen; drives the Bancada Preview tab. */
   previewServer?: ActivityPreviewServer
   shellId?: string
+  pid?: number
   exitCode?: number | null
   /** Interactive tool permission request emitted in Code Mode. */
   toolPermission?: ToolPermissionRequest
@@ -428,6 +430,9 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   // pass through.
   if (type === 'artifact.created') return 'completed'
   if (type === 'memory.learned' || type === 'todo.updated' || type === 'TODO_UPDATED') return 'completed'
+  if (type === 'process.exited') {
+    return status === 'failed' || Boolean(errorCode) ? 'failed' : 'completed'
+  }
   if (type === 'turn.started' || type === 'TURN_STARTED') {
     return status === 'queued' ? 'queued' : 'working'
   }
