@@ -60,6 +60,7 @@ from agentos.accounts.store import UserStore
 from agentos.configuration.capabilities import InstanceCapabilities
 from agentos.configuration.mode import current_mode
 from agentos.conversations.chat import PostgresChatStore
+from agentos.conversations.resume import WORKER_AUTO_RESUME_REASON
 from agentos.agentic.workspace import resolve_workspace
 from pathlib import Path
 from agentos.installation import orin_paths
@@ -961,7 +962,7 @@ class ChatWorker:
                             str(paused_turn["conversation_id"]),
                             str(paused_turn["turn_id"]),
                             str(paused_turn["user_id"]),
-                            reason="worker_auto_resumed",
+                            reason=WORKER_AUTO_RESUME_REASON,
                         )
                         recovered.append(str(paused_turn["turn_id"]))
                     except Exception:

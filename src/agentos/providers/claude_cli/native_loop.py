@@ -172,6 +172,11 @@ def find_forbidden_item_kinds(
             except Exception:
                 payload = None
     candidates: list[object] = []
+    # Orin's own MCP tools named in the raw event, without their prefix. The agy translator hands
+    # `tool_name` over stripped (`mcp_orin_run_command` -> `run_command`), and chat mode names Orin's
+    # tools `run_command`/`read_file`/`view_file`, the same words as agy built-ins. Checking that bare
+    # name against the built-in list killed the process after every Orin tool call in chat mode.
+    orin_tool_names: set[str] = set()
 
     def _collect(obj: Any, depth: int = 0) -> None:
         if depth > 6 or not isinstance(obj, Mapping):
@@ -202,6 +207,10 @@ def find_forbidden_item_kinds(
                     )
                     or ""
                 ).strip()
+                for prefix in ("mcp_orin_", "orin/", "mcp__orin__"):
+                    if tname.startswith(prefix) and len(tname) > len(prefix):
+                        orin_tool_names.add(tname[len(prefix):].strip())
+                        break
                 if not _is_allowed_antigravity_media_step(
                     tname, tool_info, allowed_media_root
                 ):
@@ -245,7 +254,7 @@ def find_forbidden_item_kinds(
 
     if isinstance(payload, Mapping):
         _collect(payload, 0)
-    if tool_name:
+    if tool_name and tool_name not in orin_tool_names:
         candidates.append(tool_name)
     matches: list[str] = []
     for cand in candidates:

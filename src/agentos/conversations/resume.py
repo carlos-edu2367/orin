@@ -1,6 +1,7 @@
 """Turn resume and current-turn history replay helpers for PostgresChatStore."""
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
@@ -28,6 +29,12 @@ from agentos.persistence.postgres.schema import (
 )
 
 MAX_QUEUED_REPLAY_CHARS = 16_000
+# How many times the worker may re-queue one turn paused by PROVIDER_STREAM_INTERRUPTED on its own.
+# Each resume refreshes the dispatch's updated_at, so without a cap a turn that fails the same way on
+# every run (e.g. the CLI aborting after each tool call) was resumed forever, spending the user's quota.
+# Past the cap the turn stays paused and the user resumes it by hand.
+MAX_WORKER_AUTO_RESUMES = 2
+WORKER_AUTO_RESUME_REASON = "worker_auto_resumed"
 
 
 def append_resumed_turn_history(
@@ -141,7 +148,36 @@ def recent_interrupted_paused_turns(
             .mappings()
             .all()
         )
-    return tuple(dict(row) for row in rows)
+        if not rows:
+            return ()
+        turn_ids = [str(row["turn_id"]) for row in rows]
+        resume_steps = c.execute(
+            select(
+                conversation_turn_steps.c.turn_id,
+                conversation_turn_steps.c.payload,
+            ).where(
+                conversation_turn_steps.c.turn_id.in_(turn_ids),
+                conversation_turn_steps.c.kind == turn_transcript.STEP_QUEUED_INPUT,
+            )
+        ).all()
+    auto_resumes: dict[str, int] = {}
+    for step_turn_id, payload in resume_steps:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except ValueError:
+                payload = None
+        if (
+            isinstance(payload, Mapping)
+            and payload.get("resume_reason") == WORKER_AUTO_RESUME_REASON
+        ):
+            key = str(step_turn_id)
+            auto_resumes[key] = auto_resumes.get(key, 0) + 1
+    return tuple(
+        dict(row)
+        for row in rows
+        if auto_resumes.get(str(row["turn_id"]), 0) < MAX_WORKER_AUTO_RESUMES
+    )
 
 
 def resume_paused_turn(
