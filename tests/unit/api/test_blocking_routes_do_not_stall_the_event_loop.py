@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import time
 
 from httpx import ASGITransport, AsyncClient
@@ -92,14 +93,23 @@ async def _fast_request_completes_while_slow_one_is_in_flight(app, slow_call, fa
     # fast request actually complete? If the loop is blocked, that time is pinned to
     # (at least) SLOW_SECONDS, no matter when the fast call was fired.
     transport = ASGITransport(app=app)
-    scenario_started = time.monotonic()
-    async with AsyncClient(transport=transport, base_url=base_url) as client:
-        slow = asyncio.ensure_future(slow_call(client))
-        await asyncio.sleep(SLOW_SECONDS / 4)  # give the slow request a head start
-        await fast_call(client)
-        fast_completed_at = time.monotonic() - scenario_started
-        await slow
-        return fast_completed_at
+    # A full garbage collection of the heap the whole suite built (~0.4 s on a CI runner) landing inside the
+    # measured window is not the event loop being blocked by the route; keep it out of the measurement.
+    gc.collect()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        scenario_started = time.monotonic()
+        async with AsyncClient(transport=transport, base_url=base_url) as client:
+            slow = asyncio.ensure_future(slow_call(client))
+            await asyncio.sleep(SLOW_SECONDS / 4)  # give the slow request a head start
+            await fast_call(client)
+            fast_completed_at = time.monotonic() - scenario_started
+            await slow
+            return fast_completed_at
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 
 def test_mcp_approve_does_not_block_a_concurrent_simple_request():
