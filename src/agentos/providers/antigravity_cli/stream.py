@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any, Mapping
 
+from agentos.providers.antigravity_cli.media_gate import is_allowed_media_path
 from agentos.providers.cli_adapter import (
     CliEvent,
     CliEventKind,
@@ -60,6 +62,7 @@ FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS: frozenset[str] = frozenset(
         "notebook_execution",
         "open_browser_url",
         "read_browser_page",
+        "read_file",
         "read_resource",
         "read_url_content",
         "replace_file_content",
@@ -93,11 +96,15 @@ FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS: frozenset[str] = frozenset(
 #   wait, wait_5_seconds, finish: wait or end agy's task; no effect.
 #   ask_question, ask_permission, ask_custom_permission: ask through agy's UI, which a headless run has
 #       none of; a grant "NEVER grants file, command, network, or tool access" (agy's own description).
+#   generate_image: the process is killed when the call is announced, so nothing is generated; the resumed
+#       turn is directed to Orin's generate_image tool instead.
+#   read_file: only reaches here when it is NOT an allowed media read (a Gemini turn's audio/video/image
+#       file inside the workspace passes untouched); read only, and the media gate hook denies it anyway.
 # Everything else stays a security abort, as before: shell and command input (run_command,
 # send_command_input), file writes (write_to_file, replace_file_content, multi_replace_file_content,
 # sed_file, delete_knowledge), the browser (browser_*, open_browser_url, read_browser_page,
 # capture_browser_*, click_browser_pixel, execute_browser_javascript, list_browser_pages), the network
-# (read_url_content, search_web, search_marketplace, generate_image), agy's own subagents (invoke_subagent,
+# (read_url_content, search_web, search_marketplace), agy's own subagents (invoke_subagent,
 # define_subagent, manage_subagents, browser_subagent), notebooks (notebook_edit, notebook_execution),
 # other MCP calls (call_mcp_tool), workflows and messages (run_workflow, schedule, send_message,
 # manage_inbox) and any tool not named in the list (forbidden_builtin_tool).
@@ -119,6 +126,8 @@ RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS: frozenset[str] = frozenset(
         "ask_question",
         "ask_permission",
         "ask_custom_permission",
+        "generate_image",
+        "read_file",
     }
 )
 
@@ -137,6 +146,8 @@ ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES: tuple[tuple[str, tuple[str, ...]], ...] =
     ("ask_question", ("ask_user",)),
     ("ask_permission", ("ask_user",)),
     ("ask_custom_permission", ("ask_user",)),
+    ("generate_image", ("generate_image",)),
+    ("read_file", ("read_file", "view_file")),
 )
 
 _ORIN_TOOL_PREFIXES: tuple[str, ...] = (
@@ -187,8 +198,16 @@ def _build_cli_usage(
 class AntigravityStreamTranslator:
     """Line-by-line NDJSON stream translator for `agy --output-format stream-json`."""
 
-    def __init__(self, *, model: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        model: str = "",
+        allowed_media_root: Path | str | None = None,
+    ) -> None:
         self._model: str = model.strip() if isinstance(model, str) else ""
+        self.allowed_media_root: Path | None = (
+            Path(allowed_media_root) if allowed_media_root is not None else None
+        )
         self.init: CliInit | None = None
         self.result: CliResult | None = None
         self.rate_limit: RateLimitState | None = None
@@ -314,6 +333,29 @@ class AntigravityStreamTranslator:
 
         return CliUsage()
 
+    def _is_allowed_native_media_read(
+        self,
+        raw_tool_name: str,
+        tool_info: Mapping[str, Any],
+    ) -> bool:
+        if raw_tool_name != "read_file" or self.allowed_media_root is None:
+            return False
+        raw_params = tool_info.get("parameters")
+        if not isinstance(raw_params, Mapping):
+            raw_params = tool_info.get("args")
+        if not isinstance(raw_params, Mapping):
+            return False
+        raw_path = (
+            raw_params.get("Path")
+            if "Path" in raw_params
+            else raw_params.get("AbsolutePath")
+        )
+        allowed, _ = is_allowed_media_path(
+            raw_path,
+            allowed_root=self.allowed_media_root,
+        )
+        return allowed
+
     def feed_line(self, line: str) -> list[CliEvent]:
         if not isinstance(line, str):
             return []
@@ -327,7 +369,9 @@ class AntigravityStreamTranslator:
         if not isinstance(packet, Mapping):
             return []
 
-        event_type = str(packet.get("event") or "").strip()
+        event_type = str(
+            packet.get("event") or packet.get("type") or ""
+        ).strip()
 
         if event_type == "init":
             conv_id = str(packet.get("conversation_id") or "").strip()
@@ -384,7 +428,11 @@ class AntigravityStreamTranslator:
                 str(su.get("conversation_id") or "").strip()
                 or self._session_id(packet)
             )
-            raw_idx = su.get("step_index")
+            raw_idx = (
+                su.get("step_index")
+                if su.get("step_index") is not None
+                else su.get("step_idx")
+            )
             if isinstance(raw_idx, int) and not isinstance(raw_idx, bool):
                 step_idx = raw_idx
             else:
@@ -502,6 +550,10 @@ class AntigravityStreamTranslator:
                 tool_use_id = f"{conv_id}:{step_idx}"
                 canonical_name = _strip_orin_prefix(raw_tool_name)
                 if canonical_name is None:
+                    if self._is_allowed_native_media_read(
+                        raw_tool_name, tool_info
+                    ):
+                        return []
                     bad_name = (
                         raw_tool_name
                         if raw_tool_name in FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS
@@ -677,6 +729,8 @@ class AntigravityStreamTranslator:
 
 
 __all__ = [
+    "ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES",
     "AntigravityStreamTranslator",
     "FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS",
+    "RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS",
 ]

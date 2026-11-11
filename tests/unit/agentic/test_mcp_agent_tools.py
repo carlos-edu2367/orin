@@ -108,3 +108,25 @@ def test_test_mcp_server_uses_oauth_connector_when_provider_has_oauth(tmp_path, 
     toolset.test_mcp_server(slug="auryly")
     assert seen_token_sources == ["oauth-token-source"]
 
+
+def test_configure_mcp_accepts_convenience_headers_list_and_rejects_header_values(tmp_path):
+    service = FakeMcpService()
+    toolset = _toolset(tmp_path, service)
+    outcome = toolset.configure_mcp(
+        display_name="ClickUp",
+        transport="http",
+        url="https://mcp.team.contraestatisticallc.com/mcp",
+        headers=["Authorization", "X-Custom"],
+    )
+    assert outcome.status == "succeeded"
+    assert service.proposals[0]["secret_names"] == ["header:Authorization", "header:X-Custom"]
+
+    with pytest.raises(AgentToolError):
+        toolset.configure_mcp(
+            display_name="ClickUp",
+            transport="http",
+            url="https://mcp.team.contraestatisticallc.com/mcp",
+            headers=["Authorization: Bearer leaked"],
+        )
+
+

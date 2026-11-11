@@ -92,13 +92,25 @@ MAX_BUILTIN_TOOL_DETOURS: int = 2
 def builtin_tool_reminder(tool_name: str, alternatives: Sequence[str], *, prefix: str = "mcp_orin_") -> str:
     """What the resumed model reads after it called one of the CLI's own tools."""
     tool = str(tool_name or "that tool")
+    named = [f"`{prefix}{name}`" for name in alternatives if name]
+    if tool == "read_file":
+        # agy's native read_file stays on in Gemini turns, but only for audio/video/image files of the workspace:
+        # the model must keep it for media, not be told it does not exist.
+        lines = [
+            "That native `read_file` call was refused and stopped the CLI; the turn continues from where it was "
+            "and that call did not run.",
+            "Your native `read_file` only opens audio, video and image files inside the workspace, given by their "
+            "ABSOLUTE path (when this session allows it at all). Use it only for those.",
+        ]
+        if named:
+            lines.append(f"For text, code and any other file use {', '.join(named)}.")
+        return "\n".join(lines)
     lines = [
         f"The tool `{tool}` does not exist here: it is one of the CLI's own tools, which Orin turns off, so "
         "calling it stopped the CLI. The turn continues from where it was; that call did not run.",
         f"Use only the tools of the `orin` MCP server (their names start with `{prefix}`) and do not call "
         f"`{tool}` or any other tool outside that list again.",
     ]
-    named = [f"`{prefix}{name}`" for name in alternatives if name]
     if named:
         lines.append(f"For what `{tool}` does, use {', '.join(named)}.")
     else:

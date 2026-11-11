@@ -99,7 +99,10 @@ class ProviderModelCatalogService:
         fallback. A failing reference is not a failed refresh: the models
         stay usable, just without the better window.
         """
-        if all(record.context_window is not None for record in records):
+        if all(
+            record.context_window is not None or "text" not in record.output_modalities
+            for record in records
+        ):
             return records
         lookup: ContextWindowLookup = context_window_from_id
         if self._context_reference is not None:
@@ -109,7 +112,10 @@ class ProviderModelCatalogService:
                 lookup = context_window_from_id
         filled: list[ProviderModelRecord] = []
         for record in records:
-            window = record.context_window if record.context_window is not None else lookup(record.model_id)
+            if record.context_window is not None or "text" not in record.output_modalities:
+                filled.append(record)
+                continue
+            window = lookup(record.model_id)
             filled.append(record if window == record.context_window else replace(record, context_window=window))
         return filled
 
@@ -146,9 +152,17 @@ class ProviderModelCatalogService:
             if adapter is None:
                 raise ProviderCatalogUnavailable("provider catalog is not supported")
             refresh_models_fn = getattr(adapter, "refresh_models", None)
-            raw_adapter_models = (
+            raw_adapter_models = list(
                 refresh_models_fn() if callable(refresh_models_fn) else adapter.models()
             )
+            virtual_fn = getattr(adapter, "virtual_media_models", None)
+            extra_models = list(virtual_fn()) if callable(virtual_fn) else []
+            for virtual_image_model in extra_models:
+                if not any(
+                    str(getattr(m, "id", None) or getattr(m, "model_id", "")).strip() == virtual_image_model.id
+                    for m in raw_adapter_models
+                ):
+                    raw_adapter_models.append(virtual_image_model)
             records: list[ProviderModelRecord] = []
             for item in raw_adapter_models:
                 model_id = str(getattr(item, "id", None) or getattr(item, "model_id", "")).strip()
@@ -156,12 +170,15 @@ class ProviderModelCatalogService:
                     continue
                 display_name = str(getattr(item, "display_name", "") or model_id).strip()
                 context_window = getattr(item, "context_window", None)
+                out_mods = getattr(item, "output_modalities", None) or infer_output_modalities(model_id)
                 caps = getattr(item, "capabilities", None)
                 if not caps:
-                    efforts = getattr(item, "supported_efforts", ())
-                    caps = ("tools", "reasoning") if efforts else ("tools",)
+                    if "text" not in out_mods:
+                        caps = ()
+                    else:
+                        efforts = getattr(item, "supported_efforts", ())
+                        caps = ("tools", "reasoning") if efforts else ("tools",)
                 in_mods = getattr(item, "input_modalities", None) or ("text",)
-                out_mods = getattr(item, "output_modalities", None) or infer_output_modalities(model_id)
                 records.append(
                     ProviderModelRecord(
                         provider=normalized_provider,
@@ -421,7 +438,7 @@ def _antigravity_modalities_are_stale(items: Sequence[ProviderModelRecord]) -> b
     return any(
         set(antigravity_input_modalities(item.model_id)) - set(item.input_modalities)
         for item in items
-        if not item.is_custom
+        if not item.is_custom and "text" in item.output_modalities
     )
 
 

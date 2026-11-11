@@ -364,8 +364,8 @@ export function McpSection({ client }: { client?: ApiClient }) {
         <McpServerForm
           client={apiClient}
           onClose={() => setFormOpen(false)}
-          onCreated={() => {
-            setFormOpen(false)
+          onCreated={(options) => {
+            if (!options?.keepOpen) setFormOpen(false)
             void refresh()
           }}
         />

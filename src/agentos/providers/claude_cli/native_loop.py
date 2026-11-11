@@ -108,11 +108,41 @@ def find_forbidden_item_kind(
     raw: Mapping[str, Any] | None = None,
     raw_line: str | None = None,
     tool_name: str | None = None,
+    allowed_media_root: Path | str | None = None,
 ) -> str | None:
     matches = find_forbidden_item_kinds(
-        forbidden, raw=raw, raw_line=raw_line, tool_name=tool_name
+        forbidden,
+        raw=raw,
+        raw_line=raw_line,
+        tool_name=tool_name,
+        allowed_media_root=allowed_media_root,
     )
     return matches[0] if matches else None
+
+
+def _is_allowed_antigravity_media_step(
+    tool_name: str,
+    tool_info: Any,
+    allowed_media_root: Path | str | None,
+) -> bool:
+    if tool_name != "read_file" or allowed_media_root is None:
+        return False
+    if not isinstance(tool_info, Mapping):
+        return False
+    raw_params = tool_info.get("parameters")
+    if not isinstance(raw_params, Mapping):
+        raw_params = tool_info.get("args")
+    if not isinstance(raw_params, Mapping):
+        return False
+    raw_path = (
+        raw_params.get("Path")
+        if "Path" in raw_params
+        else raw_params.get("AbsolutePath")
+    )
+    from agentos.providers.antigravity_cli.media_gate import is_allowed_media_path
+
+    allowed, _ = is_allowed_media_path(raw_path, allowed_root=allowed_media_root)
+    return allowed
 
 
 def find_forbidden_item_kinds(
@@ -121,6 +151,7 @@ def find_forbidden_item_kinds(
     raw: Mapping[str, Any] | None = None,
     raw_line: str | None = None,
     tool_name: str | None = None,
+    allowed_media_root: Path | str | None = None,
 ) -> list[str]:
     """Every forbidden kind/tool in the event, first match first (empty when there is none)."""
     if not forbidden:
@@ -171,20 +202,23 @@ def find_forbidden_item_kinds(
                     )
                     or ""
                 ).strip()
-                candidates.append(tname)
-                if (
-                    "forbidden_builtin_tool" in forbidden_set
-                    and step_type_raw.lower()
-                    not in ("user_input", "agent_response")
+                if not _is_allowed_antigravity_media_step(
+                    tname, tool_info, allowed_media_root
                 ):
-                    if not tname.startswith(
-                        ("mcp_orin_", "orin/", "mcp__orin__")
-                    ) or tname in {"mcp_orin_", "orin/", "mcp__orin__"}:
-                        candidates.append(
-                            tname
-                            if tname in forbidden_set
-                            else "forbidden_builtin_tool"
-                        )
+                    candidates.append(tname)
+                    if (
+                        "forbidden_builtin_tool" in forbidden_set
+                        and step_type_raw.lower()
+                        not in ("user_input", "agent_response")
+                    ):
+                        if not tname.startswith(
+                            ("mcp_orin_", "orin/", "mcp__orin__")
+                        ) or tname in {"mcp_orin_", "orin/", "mcp__orin__"}:
+                            candidates.append(
+                                tname
+                                if tname in forbidden_set
+                                else "forbidden_builtin_tool"
+                            )
         init_obj = obj.get("init")
         if (
             isinstance(init_obj, Mapping)
@@ -239,6 +273,7 @@ class NativeTurnRequest:
     server_name: str = "orin"
     conversation_id: str = ""
     on_waiting_slot: Callable[..., None] | None = None
+    workspace_root: Path | None = None
 
 
 class NativeTurnSink(Protocol):
@@ -333,8 +368,10 @@ class NativeTurnHandle:
         conversation_id: str = "",
         on_waiting_slot: Callable[..., None] | None = None,
         process_cwd: Path | None = None,
+        allowed_media_root: Path | None = None,
     ) -> None:
         self._process_cwd = process_cwd
+        self._allowed_media_root = allowed_media_root
         self._adapter: CliAgentAdapter = (
             adapter if adapter is not None else ClaudeCliAdapter()
         )
@@ -360,6 +397,10 @@ class NativeTurnHandle:
         self._t0 = t0
 
         self._parser: CliStreamTranslator = self._adapter.stream_translator()
+        if self._allowed_media_root is not None and hasattr(
+            self._parser, "allowed_media_root"
+        ):
+            self._parser.allowed_media_root = self._allowed_media_root
         self._tool_bytes: dict[str, int] = {}
         self._tool_names: dict[str, str] = {}
         self._had_visible_output = False
@@ -475,7 +516,15 @@ class NativeTurnHandle:
             self._bg_server.handle.allow_calls()
             encode_fn = getattr(self._adapter, "encode_user_turn", None)
             if callable(encode_fn):
-                line = encode_fn(content).decode("utf-8")
+                if self._allowed_media_root is not None:
+                    try:
+                        line = encode_fn(
+                            content, workspace_root=self._allowed_media_root
+                        ).decode("utf-8")
+                    except TypeError:
+                        line = encode_fn(content).decode("utf-8")
+                else:
+                    line = encode_fn(content).decode("utf-8")
             else:
                 line = user_event_line(content)
             stdin.write(line)
@@ -512,6 +561,7 @@ class NativeTurnHandle:
             self._adapter.capabilities.forbidden_item_kinds,
             raw=ev.raw if isinstance(ev.raw, Mapping) else None,
             tool_name=ev.tool_name,
+            allowed_media_root=self._allowed_media_root,
         )
         if bad_kinds:
             self._stop_for_forbidden(bad_kinds)
@@ -890,6 +940,7 @@ class NativeTurnHandle:
             bad_line_kinds = find_forbidden_item_kinds(
                 self._adapter.capabilities.forbidden_item_kinds,
                 raw_line=line,
+                allowed_media_root=self._allowed_media_root,
             )
             if bad_line_kinds:
                 self._stop_for_forbidden(bad_line_kinds)
@@ -1163,6 +1214,42 @@ def start_native_turn_for_provider(
     ]
     for bind_cap in cap_targets:
         bind_cap(cap_tool_s)
+    workspace_root: Path | None = (
+        Path(request.workspace_root)
+        if request.workspace_root is not None
+        else None
+    )
+    if workspace_root is None:
+        for target_ts in (
+            getattr(request.executor, "toolset", None),
+            getattr(getattr(request.executor, "runtime", None), "toolset", None),
+            request.executor,
+        ):
+            if target_ts is None:
+                continue
+            ws_obj = getattr(target_ts, "workspace", None)
+            ws_root_cand = (
+                getattr(ws_obj, "root", None)
+                if ws_obj is not None
+                else getattr(target_ts, "workspace_root", None)
+            )
+            if isinstance(ws_root_cand, (Path, str)) and str(ws_root_cand).strip():
+                workspace_root = Path(ws_root_cand)
+                break
+
+    effective_model = request.model or provider.model
+    allowed_media_root: Path | None = None
+    if getattr(adapter, "name", "") == "antigravity" and workspace_root is not None:
+        from agentos.providers.antigravity_cli.command import (
+            is_antigravity_gemini_model,
+        )
+
+        if is_antigravity_gemini_model(effective_model):
+            try:
+                allowed_media_root = workspace_root.resolve()
+            except OSError:
+                allowed_media_root = workspace_root.absolute()
+
     bg_server: BackgroundTurnToolServer | None = None
     temp_files: list[Path] = []
     proc: Any | None = None
@@ -1186,10 +1273,24 @@ def start_native_turn_for_provider(
         wire_fn = getattr(adapter, "wire_tool_server", None)
         if callable(wire_fn):
             wiring_dir = run_cwd if uses_cwd_wiring else Path(tempfile.gettempdir())
-            wiring = wire_fn(
-                bg_server.handle,
-                wiring_dir,
-            )
+            if workspace_root is not None:
+                try:
+                    wiring = wire_fn(
+                        bg_server.handle,
+                        wiring_dir,
+                        model=effective_model,
+                        workspace_root=workspace_root,
+                    )
+                except TypeError:
+                    wiring = wire_fn(
+                        bg_server.handle,
+                        wiring_dir,
+                    )
+            else:
+                wiring = wire_fn(
+                    bg_server.handle,
+                    wiring_dir,
+                )
         else:
             mcp_cfg = adapter.write_tool_server_config(
                 bg_server.handle,
@@ -1250,7 +1351,7 @@ def start_native_turn_for_provider(
             CliTurnRequest(
                 binary=resolved_binary,
                 system_prompt_file=prompt_path,
-                model=request.model or provider.model,
+                model=effective_model,
                 effort=request.effort,
                 fallback_model=request.fallback_model,
                 max_turns=max(1, int(request.max_turns)),
@@ -1258,6 +1359,7 @@ def start_native_turn_for_provider(
                 tool_server_name=request.server_name,
                 tool_server_wiring=wiring,
                 tool_timeout_ms=mcp_tool_timeout_ms,
+                workspace_root=workspace_root,
                 capabilities=adapter.capabilities,
                 autocompact=request.autocompact,
                 session_id=session_kwargs.get("session_id"),
@@ -1282,7 +1384,17 @@ def start_native_turn_for_provider(
         )
         encode_fn = getattr(adapter, "encode_user_turn", None)
         if callable(encode_fn):
-            initial_payload = encode_fn(request.user_content).decode("utf-8")
+            if allowed_media_root is not None:
+                try:
+                    initial_payload = encode_fn(
+                        request.user_content, workspace_root=allowed_media_root
+                    ).decode("utf-8")
+                except TypeError:
+                    initial_payload = encode_fn(request.user_content).decode(
+                        "utf-8"
+                    )
+            else:
+                initial_payload = encode_fn(request.user_content).decode("utf-8")
         else:
             initial_payload = user_event_line(request.user_content)
 
@@ -1365,6 +1477,7 @@ def start_native_turn_for_provider(
             conversation_id=request.conversation_id,
             on_waiting_slot=request.on_waiting_slot,
             process_cwd=process_cwd,
+            allowed_media_root=allowed_media_root,
         )
         wrapped_executor.handle = handle
         return handle

@@ -200,6 +200,7 @@ class CliModelInfo:
     context_window: int
     supported_efforts: tuple[str, ...] = ()
     input_modalities: tuple[str, ...] | None = None
+    output_modalities: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +254,7 @@ class CliTurnRequest:
     # How long one call to Orin's tool server may take (the turn's remaining deadline). An adapter passes it on its
     # command line or through ``environment(tool_timeout_ms=...)``, whichever its CLI reads.
     tool_timeout_ms: int | None = None
+    workspace_root: Path | None = None
     capabilities: CliCapabilities = field(default_factory=CliCapabilities)
     prompt_via_stdin_once: bool = field(init=False)
 

@@ -15,6 +15,7 @@ from agentos.providers.cli_adapter import (
     ToolServerWiring,
 )
 from agentos.providers.codex_cli.catalog import (
+    CODEX_IMAGE_MODEL,
     context_window_for,
     discover_codex_models,
 )
@@ -120,6 +121,9 @@ class CodexCliAdapter:
 
     def models(self) -> Sequence[CliModelInfo]:
         return discover_codex_models()
+
+    def virtual_media_models(self) -> Sequence[CliModelInfo]:
+        return (CODEX_IMAGE_MODEL,)
 
     def context_window(self, model_id: str | None) -> int:
         return context_window_for(model_id, self.models())

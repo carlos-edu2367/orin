@@ -7,6 +7,7 @@ from typing import Any, Mapping, Sequence
 from agentos.providers.antigravity_cli import catalog as _catalog_mod
 from agentos.providers.antigravity_cli import command as _command_mod
 from agentos.providers.antigravity_cli.catalog import (
+    ANTIGRAVITY_IMAGE_MODEL,
     FALLBACK_ANTIGRAVITY_MODELS,
     _infer_supported_efforts,
     context_window_for,
@@ -131,11 +132,20 @@ class AntigravityCliAdapter:
         return is_antigravity_version_supported(version)
 
     def wire_tool_server(
-        self, handle: Any, directory: Path
+        self,
+        handle: Any,
+        directory: Path,
+        *,
+        model: str | None = None,
+        workspace_root: Path | str | None = None,
     ) -> ToolServerWiring:
         server_name = getattr(handle, "server_name", "orin") or "orin"
         return wire_antigravity_tool_server(
-            handle, directory, server_name=server_name
+            handle,
+            directory,
+            server_name=server_name,
+            model=model,
+            workspace_root=workspace_root,
         )
 
     def wire_no_tools(
@@ -167,8 +177,15 @@ class AntigravityCliAdapter:
             supported_efforts=supported_efforts,
         )
 
-    def encode_user_turn(self, content: list[dict[str, Any]]) -> bytes:
-        return encode_antigravity_user_turn(content)
+    def encode_user_turn(
+        self,
+        content: list[dict[str, Any]],
+        *,
+        workspace_root: Path | str | None = None,
+    ) -> bytes:
+        return encode_antigravity_user_turn(
+            content, workspace_root=workspace_root
+        )
 
     def loggable_command(self, argv: Sequence[str]) -> list[str]:
         return redact_antigravity_argv(argv)
@@ -182,8 +199,15 @@ class AntigravityCliAdapter:
     ) -> dict[str, str]:
         return build_isolated_antigravity_env(base)
 
-    def stream_translator(self) -> CliStreamTranslator:
-        return AntigravityStreamTranslator()
+    def stream_translator(
+        self,
+        *,
+        model: str = "",
+        allowed_media_root: Path | str | None = None,
+    ) -> CliStreamTranslator:
+        return AntigravityStreamTranslator(
+            model=model, allowed_media_root=allowed_media_root
+        )
 
     def classify_error(
         self,
@@ -228,6 +252,9 @@ class AntigravityCliAdapter:
             return set_cached_antigravity_models(binary, discovered)
 
         return FALLBACK_ANTIGRAVITY_MODELS
+
+    def virtual_media_models(self) -> Sequence[CliModelInfo]:
+        return (ANTIGRAVITY_IMAGE_MODEL,)
 
     def context_window(self, model_id: str | None) -> int:
         return context_window_for(model_id, self.models())

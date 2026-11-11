@@ -94,7 +94,14 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
     # W5: a server from a configuration file was written by the person (or approved from the repository), not
     # proposed by the model: it may use any launcher, start in its folder, and reach a local or plain-http address.
     from_file = config.origin != "orin"
-    file_headers = {name[len("header:"):]: value for name, value in secrets.items() if name.startswith("header:")}
+    custom_headers: dict[str, str] = {}
+    for name, value in secrets.items():
+        if name.startswith("header:"):
+            header_name = name[len("header:"):]
+            if header_name:
+                for existing in [k for k in custom_headers if k.lower() == header_name.lower()]:
+                    del custom_headers[existing]
+                custom_headers[header_name] = value
     if config.transport is McpTransport.SDK:
         return McpClient(SdkRelayTransport(server_name=config.display_name, relay_key=str(secrets.get("relay") or "")))
     if config.transport is McpTransport.STDIO:
@@ -102,13 +109,18 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
         transport = StdioTransport(command=str(config.command), args=config.args, env=dict(secrets), cwd=config.cwd,
                                    timeout=stdio_timeout, allow_any_command=from_file)
     elif config.transport is McpTransport.SSE:
-        transport = SseTransport(url=str(config.url), headers=file_headers if from_file else {}, allow_local=from_file)
+        transport = SseTransport(url=str(config.url), headers=custom_headers if from_file else {}, allow_local=from_file)
     elif config.transport is McpTransport.WEBSOCKET:
-        transport = WebSocketTransport(url=str(config.url), headers=file_headers if from_file else {}, allow_local=from_file)
+        transport = WebSocketTransport(url=str(config.url), headers=custom_headers if from_file else {}, allow_local=from_file)
     else:
-        headers = {"authorization": f"Bearer {secrets['token']}"} if "token" in secrets and token_source is None else {}
-        if from_file:
-            headers.update(file_headers)
+        headers: dict[str, str] = {}
+        has_explicit_auth = any(k.lower() == "authorization" for k in custom_headers)
+        if "token" in secrets and token_source is None and not has_explicit_auth:
+            token_val = str(secrets["token"]).strip()
+            headers["authorization"] = (
+                f"Bearer {token_val[7:].strip()}" if token_val.lower().startswith("bearer ") else f"Bearer {token_val}"
+            )
+        headers.update(custom_headers)
         transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source, allow_local=from_file)
     return McpClient(transport)
 
@@ -411,10 +423,12 @@ class McpToolProvider:
                             self._evict_session(key)
                         raise
             except McpReauthRequired as error:
-                message = str(error)
+                from .file_servers import redact_secret_values
+                message = redact_secret_values(str(error), secrets.values(), url=config.url)
                 return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS], payload, "MCP_REAUTH_REQUIRED")
             except (McpProtocolError, RuntimeError) as error:
-                message = f"{config.display_name}: {error}"
+                from .file_servers import redact_secret_values
+                message = redact_secret_values(f"{config.display_name}: {error}", secrets.values(), url=config.url)
                 return ToolOutcome("failed", message[:240], message[:MAX_MCP_RESULT_CHARS], payload, "MCP_UNAVAILABLE")
             text, images = _render(result.content)
             if result.is_error:

@@ -10,6 +10,15 @@ import sys
 import tempfile
 from typing import Any, Mapping, Sequence
 
+from agentos.providers.antigravity_cli.media_gate import (
+    ALLOWED_AUDIO_EXTENSIONS,
+    ALLOWED_MEDIA_EXTENSIONS,
+    ALLOWED_VIDEO_EXTENSIONS,
+    DEFAULT_MAX_MEDIA_BYTES,
+    MEDIA_GATE_CONFIG_FILENAME,
+    build_media_gate_hook_command,
+    is_allowed_media_path,
+)
 from agentos.providers.cli_adapter import CliTurnRequest, ToolServerWiring
 
 MIN_ANTIGRAVITY_VERSION: tuple[int, int, int] = (1, 1, 1)
@@ -356,6 +365,30 @@ def _coerce_timeout_seconds(tool_timeout_ms: int | None) -> int | None:
     return None
 
 
+def is_antigravity_gemini_model(model: str | None) -> bool:
+    """Return True when ``model`` resolves to a Gemini chat model on Antigravity."""
+    try:
+        cleaned = clean_antigravity_model_id(model)
+    except ValueError:
+        return False
+    if not cleaned or cleaned == "antigravity-image":
+        return False
+    return cleaned.lower().startswith("gemini-")
+
+
+def antigravity_media_prompt_note(workspace_root: Path | str) -> str:
+    """Return the system-prompt instruction for native audio/video viewing on Gemini agy turns."""
+    root_posix = Path(workspace_root).resolve().as_posix()
+    return (
+        f"To hear an audio file or watch a video file in the conversation workspace "
+        f"(workspace root: `{root_posix}`), call your native `read_file` tool with "
+        f"the file's ABSOLUTE path (for example, `{root_posix}/...`). "
+        f"Your native `read_file` tool ONLY accepts audio, video, and image files "
+        f"inside `{root_posix}`; for all text, code, PDF, and document files, "
+        f"keep using Orin's MCP tools."
+    )
+
+
 def _render_orin_agent_md(
     *,
     server_name: str,
@@ -363,6 +396,8 @@ def _render_orin_agent_md(
     token: str,
     system_prompt: str,
     timeout_seconds: int | None = None,
+    allow_native_media_read: bool = False,
+    workspace_root: Path | None = None,
 ) -> str:
     srv, clean_url, clean_token = _validate_mcp_server_params(
         server_name=server_name,
@@ -370,6 +405,7 @@ def _render_orin_agent_md(
         token=token,
     )
     auth_val = f"Bearer {clean_token}"
+    tools_line = "tools: [read_file]\n" if allow_native_media_read else ""
     timeout_line = (
         f"    timeoutSeconds: {int(timeout_seconds)}\n"
         if isinstance(timeout_seconds, int)
@@ -377,6 +413,15 @@ def _render_orin_agent_md(
         and timeout_seconds > 0
         else ""
     )
+    instructions_body = system_prompt.strip()
+    if allow_native_media_read and workspace_root is not None:
+        media_note = antigravity_media_prompt_note(workspace_root)
+        if media_note not in instructions_body:
+            instructions_body = (
+                f"{instructions_body}\n\n{media_note}"
+                if instructions_body
+                else media_note
+            )
     return (
         "---\n"
         "name: orin\n"
@@ -384,6 +429,7 @@ def _render_orin_agent_md(
         "mainAgent: true\n"
         "excludeDefaultComponents: true\n"
         "inheritMcp: false\n"
+        f"{tools_line}"
         "mcpServers:\n"
         f"  - name: {srv}\n"
         f"    url: {json.dumps(clean_url, ensure_ascii=True)}\n"
@@ -392,7 +438,7 @@ def _render_orin_agent_md(
         f"{timeout_line}"
         "---\n\n"
         "# Instructions\n\n"
-        f"{system_prompt.strip()}\n"
+        f"{instructions_body}\n"
     )
 
 
@@ -401,6 +447,7 @@ def _update_agent_md_instructions(
     system_prompt: str,
     *,
     timeout_seconds: int | None = None,
+    workspace_root: Path | None = None,
 ) -> None:
     if agent_md_path.is_symlink():
         raise ValueError(f"Refusing to write to symlink: {agent_md_path}")
@@ -414,8 +461,29 @@ def _update_agent_md_instructions(
 
     existing = agent_md_path.read_text(encoding="utf-8")
     marker = "# Instructions"
+    prefix = existing.split(marker, 1)[0] if marker in existing else ""
+    instructions_body = system_prompt.strip()
+    if "tools: [read_file]" in prefix:
+        eff_ws_root = workspace_root
+        if eff_ws_root is None:
+            gate_cfg_path = agent_md_path.parent.parent / MEDIA_GATE_CONFIG_FILENAME
+            if gate_cfg_path.is_file() and not gate_cfg_path.is_symlink():
+                try:
+                    gate_cfg = json.loads(gate_cfg_path.read_text(encoding="utf-8"))
+                    if isinstance(gate_cfg, Mapping) and gate_cfg.get("allowed_root"):
+                        eff_ws_root = Path(str(gate_cfg["allowed_root"]))
+                except Exception:
+                    eff_ws_root = None
+        if eff_ws_root is not None:
+            media_note = antigravity_media_prompt_note(eff_ws_root)
+            if media_note not in instructions_body:
+                instructions_body = (
+                    f"{instructions_body}\n\n{media_note}"
+                    if instructions_body
+                    else media_note
+                )
+
     if marker in existing:
-        prefix = existing.split(marker, 1)[0]
         if (
             isinstance(timeout_seconds, int)
             and not isinstance(timeout_seconds, bool)
@@ -425,9 +493,9 @@ def _update_agent_md_instructions(
         ):
             head, tail = prefix.rsplit("\n---\n", 1)
             prefix = f"{head}\n    timeoutSeconds: {int(timeout_seconds)}\n---\n{tail}"
-        updated = f"{prefix}{marker}\n\n{system_prompt.strip()}\n"
+        updated = f"{prefix}{marker}\n\n{instructions_body}\n"
     else:
-        updated = f"{existing.rstrip()}\n\n{marker}\n\n{system_prompt.strip()}\n"
+        updated = f"{existing.rstrip()}\n\n{marker}\n\n{instructions_body}\n"
     _write_owner_only_file(agent_md_path, updated)
 
 
@@ -464,6 +532,8 @@ def wire_antigravity_tool_server(
     server_name: str = "orin",
     system_prompt_file: Path | None = None,
     tool_timeout_ms: int | None = None,
+    model: str | None = None,
+    workspace_root: Path | str | None = None,
 ) -> ToolServerWiring:
     """Create isolated `.agents/agents/orin.md`, `.agents/mcp_config.json`, and `.agents/orin_settings.json`."""
     srv, clean_url, clean_token = _validate_mcp_server_params(
@@ -493,6 +563,25 @@ def wire_antigravity_tool_server(
         raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
     git_dir.mkdir(exist_ok=True)
 
+    enable_media_gate = False
+    resolved_ws_root: Path | None = None
+    if model is not None or workspace_root is not None:
+        eff_model = model if model is not None else DEFAULT_ANTIGRAVITY_MODEL
+        if is_antigravity_gemini_model(eff_model):
+            raw_ws = workspace_root if workspace_root is not None else workdir
+            _validate_path_arg(raw_ws, "workspace_root")
+            ws_path = Path(raw_ws)
+            if _is_symlink_or_junction(ws_path):
+                raise ValueError(
+                    f"Refusing symlinked workspace_root: {ws_path}"
+                )
+            ws_path.mkdir(parents=True, exist_ok=True)
+            try:
+                resolved_ws_root = ws_path.resolve()
+            except OSError:
+                resolved_ws_root = ws_path.absolute()
+            enable_media_gate = True
+
     sys_prompt = "You are a helpful assistant."
     if system_prompt_file is not None:
         sys_file_path = Path(system_prompt_file)
@@ -519,11 +608,23 @@ def wire_antigravity_tool_server(
     agent_md_path = agents_subdir / "orin.md"
     mcp_config_path = agents_dir / "mcp_config.json"
     settings_file = agents_dir / "orin_settings.json"
-    wiring_files = (agent_md_path, mcp_config_path, settings_file)
+    hooks_file = agents_dir / "hooks.json"
+    gate_config_file = agents_dir / MEDIA_GATE_CONFIG_FILENAME
+    wiring_files: tuple[Path, ...] = (
+        (
+            agent_md_path,
+            mcp_config_path,
+            settings_file,
+            hooks_file,
+            gate_config_file,
+        )
+        if enable_media_gate
+        else (agent_md_path, mcp_config_path, settings_file)
+    )
 
     try:
         for fpath in wiring_files:
-            if fpath.is_symlink():
+            if fpath.is_symlink() or _is_symlink_or_junction(fpath):
                 raise ValueError(f"Refusing to write to symlink: {fpath}")
 
         agent_md_content = _render_orin_agent_md(
@@ -532,6 +633,8 @@ def wire_antigravity_tool_server(
             token=clean_token,
             system_prompt=sys_prompt,
             timeout_seconds=timeout_seconds,
+            allow_native_media_read=enable_media_gate,
+            workspace_root=resolved_ws_root,
         )
         _write_owner_only_file(agent_md_path, agent_md_content)
 
@@ -552,27 +655,75 @@ def wire_antigravity_tool_server(
         except OSError:
             resolved_workdir = str(workdir.absolute())
 
+        if enable_media_gate and resolved_ws_root is not None:
+            allow_rules = [
+                f"mcp({srv}/*)",
+                f"read_file({resolved_ws_root.as_posix()})",
+            ]
+            deny_rules = [
+                "command(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "unsandboxed(*)",
+            ]
+        else:
+            allow_rules = [f"mcp({srv}/*)"]
+            deny_rules = [
+                "command(*)",
+                "read_file(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "unsandboxed(*)",
+            ]
+
         settings_payload = {
             "trustedWorkspaces": [resolved_workdir],
             "allowNonWorkspaceAccess": False,
             "enableTerminalSandbox": True,
             "disableSlashCommands": True,
             "permissions": {
-                "allow": [f"mcp({srv}/*)"],
-                "deny": [
-                    "command(*)",
-                    "read_file(*)",
-                    "write_file(*)",
-                    "read_url(*)",
-                    "execute_url(*)",
-                    "unsandboxed(*)",
-                ],
+                "allow": allow_rules,
+                "deny": deny_rules,
             },
         }
         _write_owner_only_file(
             settings_file,
             json.dumps(settings_payload, ensure_ascii=True, indent=2) + "\n",
         )
+
+        if enable_media_gate and resolved_ws_root is not None:
+            hooks_payload = {
+                "orin-media-gate": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "read_file",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": build_media_gate_hook_command(),
+                                    "timeout": 10,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+            _write_owner_only_file(
+                hooks_file,
+                json.dumps(hooks_payload, ensure_ascii=True, indent=2) + "\n",
+            )
+            gate_config_payload = {
+                "allowed_root": str(resolved_ws_root),
+                "allowed_extensions": sorted(ALLOWED_MEDIA_EXTENSIONS),
+                "max_bytes": DEFAULT_MAX_MEDIA_BYTES,
+            }
+            _write_owner_only_file(
+                gate_config_file,
+                json.dumps(gate_config_payload, ensure_ascii=True, indent=2)
+                + "\n",
+            )
     except Exception:
         for fpath in wiring_files:
             try:
@@ -692,8 +843,11 @@ def build_antigravity_command(
     """Build the isolated `agy` command line for headless `stream-json` execution."""
     binary_str = _validate_path_arg(request.binary, "binary")
     _validate_path_arg(request.system_prompt_file, "system_prompt_file")
+    cleaned_model = clean_antigravity_model_id(request.model)
     model = (
-        clean_antigravity_model_id(request.model) or DEFAULT_ANTIGRAVITY_MODEL
+        DEFAULT_ANTIGRAVITY_MODEL
+        if not cleaned_model or cleaned_model == "antigravity-image"
+        else cleaned_model
     )
 
     if request.session_id is not None:
@@ -844,6 +998,7 @@ def build_antigravity_command(
                         Path(fpath),
                         prompt_text,
                         timeout_seconds=req_timeout_seconds,
+                        workspace_root=request.workspace_root,
                     )
                     break
     if req_timeout_seconds is not None and eff_wiring is not None:
@@ -869,9 +1024,92 @@ _MEDIA_KEYS: tuple[str, ...] = (
     "video",
 )
 
+_AUDIO_VIDEO_EXTENSIONS: frozenset[str] = (
+    ALLOWED_AUDIO_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
+)
+
+
+def format_antigravity_workspace_media_note(abs_path: Path | str) -> str:
+    """Return a pt-BR note directing the model to use native `read_file` for a workspace audio/video file."""
+    resolved_posix = Path(abs_path).resolve().as_posix()
+    return (
+        f"[Arquivo de áudio/vídeo no workspace: {resolved_posix} — "
+        f"o Antigravity CLI não recebe áudio/vídeo embutido na mensagem. "
+        f'Para ouvir o áudio ou assistir ao vídeo, chame sua ferramenta nativa read_file com o caminho absoluto "{resolved_posix}".]'
+    )
+
+
+def _extract_workspace_audio_video_path(
+    block: Mapping[str, Any],
+    workspace_root: Path | str | None,
+) -> Path | None:
+    raw_candidates: list[str] = []
+    for key in ("path", "file_path", "workspace_path", "uri", "url"):
+        val = block.get(key)
+        if isinstance(val, str) and val.strip():
+            raw_candidates.append(val.strip())
+
+    for nested_key in ("source", "audio", "video", "document"):
+        nested = block.get(nested_key)
+        if isinstance(nested, str) and nested.strip():
+            raw_candidates.append(nested.strip())
+        elif isinstance(nested, Mapping):
+            for key in ("path", "file_path", "workspace_path", "uri", "url"):
+                val = nested.get(key)
+                if isinstance(val, str) and val.strip():
+                    raw_candidates.append(val.strip())
+
+    if not raw_candidates:
+        return None
+
+    ws_root_path: Path | None = None
+    if workspace_root is not None:
+        try:
+            ws_root_path = Path(workspace_root).resolve()
+        except OSError:
+            ws_root_path = None
+
+    for raw in raw_candidates:
+        cleaned = raw
+        if cleaned.startswith("workspace://"):
+            cleaned = cleaned[len("workspace://") :].lstrip("/")
+        elif cleaned.startswith(("http://", "https://", "data:")):
+            continue
+        elif cleaned.startswith("file://"):
+            cleaned = cleaned[len("file://") :]
+            if os.name == "nt" and cleaned.startswith("/") and len(cleaned) >= 3 and cleaned[2] == ":":
+                cleaned = cleaned[1:]
+
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+            continue
+        try:
+            cand = Path(cleaned)
+        except Exception:
+            continue
+
+        if not cand.is_absolute():
+            if ws_root_path is None:
+                continue
+            cand = ws_root_path / cand
+
+        eff_root = ws_root_path if ws_root_path is not None else cand.parent
+        ok, _ = is_allowed_media_path(
+            str(cand),
+            allowed_root=eff_root,
+            allowed_extensions=_AUDIO_VIDEO_EXTENSIONS,
+        )
+        if ok:
+            try:
+                return cand.resolve(strict=True)
+            except OSError:
+                continue
+    return None
+
 
 def encode_antigravity_user_turn(
     content: list[dict[str, Any]] | str,
+    *,
+    workspace_root: Path | str | None = None,
 ) -> bytes:
     """Encode a user turn for `agy --input-format stream-json`: text only.
 
@@ -879,8 +1117,8 @@ def encode_antigravity_user_turn(
     image only as an MCP tool result (view_file). A media block here is history replayed
     after a restart (the image a view_file call returned, kept as a user message) or the
     text-protocol fallback: it becomes a short text note, never bytes and never an error.
-    Raising here made every restart of a turn that had viewed an image fail and opened
-    the native-loop circuit breaker for every agy conversation.
+    When an audio/video block points to a file on disk in the workspace, the note includes
+    its absolute path and instructs the model to call its native `read_file` tool.
     """
     text_blocks: list[dict[str, str]] = []
     if isinstance(content, str):
@@ -900,7 +1138,25 @@ def encode_antigravity_user_turn(
                 or btype not in ("text", "input_text")
                 or any(media_key in block for media_key in _MEDIA_KEYS)
             ):
-                omitted_pending = True
+                media_path = _extract_workspace_audio_video_path(
+                    block, workspace_root
+                )
+                if media_path is not None:
+                    if omitted_pending:
+                        text_blocks.append(
+                            {"type": "text", "text": ANTIGRAVITY_OMITTED_MEDIA_NOTE}
+                        )
+                        omitted_pending = False
+                    text_blocks.append(
+                        {
+                            "type": "text",
+                            "text": format_antigravity_workspace_media_note(
+                                media_path
+                            ),
+                        }
+                    )
+                else:
+                    omitted_pending = True
                 continue
             if omitted_pending:
                 text_blocks.append({"type": "text", "text": ANTIGRAVITY_OMITTED_MEDIA_NOTE})
@@ -990,15 +1246,19 @@ def redact_antigravity_argv(argv: Sequence[str]) -> list[str]:
 
 
 __all__ = [
+    "ANTIGRAVITY_OMITTED_MEDIA_NOTE",
     "DEFAULT_ANTIGRAVITY_MODEL",
     "MAX_ANTIGRAVITY_MAJOR",
     "MIN_ANTIGRAVITY_VERSION",
     "VALID_EFFORT_LEVELS",
+    "antigravity_media_prompt_note",
     "antigravity_version",
     "build_antigravity_command",
     "build_isolated_antigravity_env",
     "clean_antigravity_model_id",
     "encode_antigravity_user_turn",
+    "format_antigravity_workspace_media_note",
+    "is_antigravity_gemini_model",
     "is_antigravity_version_supported",
     "redact_antigravity_argv",
     "resolve_antigravity_binary",

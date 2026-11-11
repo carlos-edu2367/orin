@@ -99,17 +99,27 @@ export function McpApprovalCard({ server, active, onApprove, onDecline, oauth }:
           <fieldset disabled={submitting !== null}>
             {server.secret_names.length === 0 ? (
               <p className="approval-card__hint">Este servidor não precisa de credencial.</p>
-            ) : server.secret_names.map((name) => (
-              <label key={name} className="approval-card__field">
-                <span>{name}</span>
-                <input
-                  type="password"
-                  autoComplete="off"
-                  value={values[name] ?? ''}
-                  onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))}
-                />
-              </label>
-            ))}
+            ) : server.secret_names.map((name) => {
+              const isHeader = name.toLowerCase().startsWith('header:')
+              const headerName = isHeader ? name.slice('header:'.length) : ''
+              const label = isHeader ? `Cabeçalho ${headerName}` : name
+              const isAuthorizationHeader = isHeader && headerName.toLowerCase() === 'authorization'
+              return (
+                <label key={name} className="approval-card__field">
+                  <span>{label}</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    aria-label={label}
+                    value={values[name] ?? ''}
+                    onChange={(event) => setValues((current) => ({ ...current, [name]: event.target.value }))}
+                  />
+                  {isAuthorizationHeader && (
+                    <small className="approval-card__hint">Cole o valor completo, ex.: Bearer sua-chave</small>
+                  )}
+                </label>
+              )
+            })}
           </fieldset>
           <footer className="approval-card__actions">
             <button type="button" className="approval-card__decline" onClick={() => void decline()} disabled={submitting !== null}>

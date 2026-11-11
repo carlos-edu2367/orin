@@ -35,28 +35,52 @@ class McpTools(McpResourceTools):
 
     def configure_mcp(self, display_name: str, catalog_id: str | None = None, transport: str | None = None,
                       command: str | None = None, args: list[str] | None = None, url: str | None = None,
-                      secret_names: list[str] | None = None, **rejected: Any) -> ToolOutcome:
+                      secret_names: list[str] | None = None, headers: list[str] | None = None,
+                      **rejected: Any) -> ToolOutcome:
         from agentos.mcp.catalog import find_catalog_entry
 
         if rejected:
             raise AgentToolError(
-                "configure_mcp does not accept credential values. Pass secret_names only; the user types the values in the approval card."
+                "configure_mcp does not accept credential values. Pass secret_names or header names only; the user types the values in the approval card."
             )
+        header_secret_names: list[str] = []
+        if headers is not None:
+            if isinstance(headers, (str, bytes, Mapping)) or not isinstance(headers, (list, tuple, set)):
+                raise AgentToolError(
+                    "configure_mcp expects 'headers' to be a list of HTTP header names (e.g. ['Authorization']), never header values."
+                )
+            for item in headers:
+                clean_header = str(item or "").strip()
+                if clean_header.lower().startswith("header:"):
+                    clean_header = clean_header[len("header:"):].strip()
+                if not clean_header or ":" in clean_header or any(ch.isspace() for ch in clean_header):
+                    raise AgentToolError(
+                        "configure_mcp does not accept credential values in 'headers'. Pass header names only (e.g. ['Authorization']); the user types the values in the approval card."
+                    )
+                header_secret_names.append(f"header:{clean_header}")
         command_values: dict[str, object] = {"user_id": self._mcp_user_id, "display_name": str(display_name)}
         if catalog_id:
             entry = find_catalog_entry(str(catalog_id))
             if entry is None:
                 raise AgentToolError(f"'{catalog_id}' is not in the MCP catalog. Call list_mcp_catalog first, or pass transport plus command/url explicitly.")
+            merged_secrets = [item.name for item in entry.secrets]
+            for h in header_secret_names:
+                if h not in merged_secrets:
+                    merged_secrets.append(h)
             command_values.update({
                 "catalog_id": entry.catalog_id, "transport": entry.transport.value,
                 "command": entry.command, "args": list(entry.args), "url": entry.url,
-                "secret_names": [item.name for item in entry.secrets],
+                "secret_names": merged_secrets,
             })
         else:
             if transport not in {"stdio", "http"}:
                 raise AgentToolError("transport must be 'stdio' or 'http' when no catalog_id is given.")
+            merged_secrets = [str(item) for item in (secret_names or [])]
+            for h in header_secret_names:
+                if h not in merged_secrets:
+                    merged_secrets.append(h)
             command_values.update({"transport": transport, "command": command, "args": list(args or []),
-                                   "url": url, "secret_names": [str(item) for item in (secret_names or [])]})
+                                   "url": url, "secret_names": merged_secrets})
         try:
             server = self._mcp_service.propose(command_values)
         except Exception as error:
@@ -471,7 +495,13 @@ SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         key="configure_mcp",
-        description="Propose an MCP server connection. This never activates the server and never accepts a credential value: it creates a pending configuration and shows the user an approval card where they type any secret themselves. Explain to the user what the server does and which credential they will need before calling this.",
+        description=(
+            "Propose an MCP server connection. This never activates the server and never accepts a credential value: "
+            "it creates a pending configuration and shows the user an approval card where they type any secret themselves. "
+            "For remote HTTP servers authenticated by static HTTP headers (e.g. Authorization: Bearer <KEY>), pass the header "
+            "names in 'headers' (e.g. ['Authorization']) or use 'header:<Name>' in 'secret_names' (e.g. ['header:Authorization']). "
+            "Explain to the user what the server does and which credential they will need before calling this."
+        ),
         legacy_schema=_schema({
             "display_name": {**_TEXT, "description": "How the connection appears in Settings, e.g. 'GitHub'."},
             "catalog_id": {**_TEXT, "description": "Id from list_mcp_catalog. Fills transport, command and required secrets."},
@@ -479,7 +509,22 @@ SPECS: tuple[ToolSpec, ...] = (
             "command": {**_TEXT, "description": "stdio launcher, e.g. 'npx'. Only for a server outside the catalog."},
             "args": {"type": "array", "items": _TEXT},
             "url": {**_TEXT, "description": "https endpoint. Only for a server outside the catalog."},
-            "secret_names": {"type": "array", "items": _TEXT, "description": "Names of the credentials the server needs. Names only — never values."},
+            "secret_names": {
+                "type": "array",
+                "items": _TEXT,
+                "description": (
+                    "Names of the credentials the server needs (names only — never values). "
+                    "Static HTTP header servers use 'header:<Header-Name>', e.g. 'header:Authorization'."
+                ),
+            },
+            "headers": {
+                "type": "array",
+                "items": _TEXT,
+                "description": (
+                    "Convenience list of HTTP header names for remote HTTP servers (e.g. ['Authorization', 'X-Api-Key']). "
+                    "Names only — never values; the user types the values in the approval card."
+                ),
+            },
         }, ("display_name",)),
         handler="configure_mcp",
         kind="mcp",

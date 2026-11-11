@@ -754,10 +754,11 @@ export function ChatPage() {
     listProviderModels(client, effectiveChatProvider, controller.signal)
       .then((items) => {
         if (controller.signal.aborted) return
-        setChatModels(items)
-        setChatModelId((current) => items.some((item) => item.model_id === current)
+        const textItems = items.filter((item) => item.output_modalities.length === 0 || item.output_modalities.includes('text'))
+        setChatModels(textItems)
+        setChatModelId((current) => textItems.some((item) => item.model_id === current)
           ? current
-          : items.find((item) => item.is_favorite)?.model_id ?? items[0]?.model_id ?? '')
+          : textItems.find((item) => item.is_favorite)?.model_id ?? textItems[0]?.model_id ?? '')
       })
       .catch(() => {
         if (!controller.signal.aborted) {

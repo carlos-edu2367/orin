@@ -117,6 +117,10 @@ class McpClient:
             server_name=str(server_info.get("name") or "")[:120],
             capabilities=dict(result.get("capabilities") or {}),
         )
+        try:
+            self._transport.protocol_version = self._negotiation.protocol_version  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
         self._transport.send(notification("notifications/initialized"))
         return self._negotiation
 

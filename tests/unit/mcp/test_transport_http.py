@@ -168,3 +168,74 @@ def test_a_second_401_invalidates_the_sign_in(monkeypatch):
     with pytest.raises(McpReauthRequired):
         _transport(lambda r: httpx.Response(401), token_source=source).send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
     assert len(source.invalidated) == 1
+
+
+def test_transport_sends_mcp_protocol_version_after_initialize(monkeypatch):
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    seen_versions: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_versions.append(request.headers.get("mcp-protocol-version"))
+        body = request.read().decode("utf-8")
+        if '"initialize"' in body:
+            return httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "clickup"}, "capabilities": {}},
+                },
+                headers={"Mcp-Session-Id": "sess-1"},
+            )
+        if '"notifications/initialized"' in body:
+            return httpx.Response(202)
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 2, "result": {"tools": []}})
+
+    transport = _transport(handler, headers={"Authorization": "Bearer key-1"})
+    init_resp = transport.send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}})
+    assert init_resp["result"]["protocolVersion"] == "2025-06-18"
+    assert transport.send({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    tools_resp = transport.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert tools_resp["result"] == {"tools": []}
+    assert seen_versions == [None, "2025-06-18", "2025-06-18"]
+
+
+def test_same_host_redirect_is_followed_with_headers(monkeypatch):
+    checked_urls: list[str] = []
+
+    def fake_public_url(url: str, resolve_dns: bool = False) -> str:
+        checked_urls.append(url)
+        return url
+
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", fake_public_url)
+    seen_requests: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append((str(request.url), request.headers.get("authorization")))
+        if str(request.url) == "https://mcp.example.com/mcp":
+            return httpx.Response(307, headers={"Location": "/mcp/"})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+
+    transport = _transport(handler, headers={"Authorization": "Bearer secret-key"})
+    response = transport.send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert response["result"] == {"ok": True}
+    assert seen_requests == [
+        ("https://mcp.example.com/mcp", "Bearer secret-key"),
+        ("https://mcp.example.com/mcp/", "Bearer secret-key"),
+    ]
+    assert "https://mcp.example.com/mcp/" in checked_urls
+
+
+def test_cross_host_redirect_is_refused(monkeypatch):
+    from agentos.mcp.transport_http import HttpTransportError
+
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(307, headers={"Location": "https://evil.example.org/mcp"})
+
+    transport = _transport(handler, headers={"Authorization": "Bearer secret-key"})
+    with pytest.raises((HttpTransportRefused, HttpTransportError)) as exc_info:
+        transport.send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    assert "evil.example.org" in str(exc_info.value)
+

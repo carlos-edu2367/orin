@@ -13,6 +13,7 @@ _IMAGE_MODEL_RE = re.compile(
     r"gpt-image[\w.-]*|dall-e[\w.-]*|flux[\w.-]*|sdxl[\w.-]*|stable-diffusion[\w.-]*|"
     r"imagen[\w.-]*|recraft[\w.-]*|ideogram[\w.-]*|midjourney[\w.-]*|playground-v[\w.-]*|"
     r"qwen-image[\w.-]*|seedream[\w.-]*|nano-banana[\w.-]*|"
+    r"codex-image[\w.-]*|antigravity-image[\w.-]*|"
     r"[\w.-]*-image-preview[\w.-]*|[\w.-]*-image-generation[\w.-]*"
     r")$"
 )

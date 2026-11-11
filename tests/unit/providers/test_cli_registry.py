@@ -679,7 +679,12 @@ def test_passo1_final_review_fixes(
     # agy's stream-json input is text-only, but an image in an MCP tool result
     # reaches the model, so Gemini and Claude are catalogued as seeing images.
     agy_by_id = {m.model_id: m.input_modalities for m in agy_models}
-    assert agy_by_id["gemini-4-argon-high"] == ("text", "image")
+    assert agy_by_id["gemini-4-argon-high"] == (
+        "text",
+        "image",
+        "audio",
+        "video",
+    )
     assert agy_by_id["claude-sonnet-5-5-high"] == ("text", "image")
     assert agy_by_id["gpt-oss-120b-medium"] == ("text",)
 

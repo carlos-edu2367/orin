@@ -108,21 +108,47 @@ def file_bundle(server: FileServer, *, user_id: str) -> ServerBundle:
     return config, (), secrets
 
 
-def _redacted(text: str, server: FileServer) -> str:
-    """The text without the server's environment and header values (3+ characters), nor its URL's path, query
-    and credentials: a token is often kept in any of them."""
-    secrets = [value for _, value in (*server.env, *server.headers) if len(value) >= 3]
-    if server.url:
+def redact_secret_values(
+    text: str,
+    values: Iterable[str],
+    *,
+    url: str | None = None,
+    redact_url_path: bool = False,
+) -> str:
+    """Remove secret/header/token values (3+ characters) and sensitive URL parts from ``text``."""
+    secrets: list[str] = []
+    for raw in values:
+        val = str(raw or "")
+        if len(val) >= 3:
+            secrets.append(val)
+        stripped = val.strip()
+        if stripped.lower().startswith("bearer "):
+            bare = stripped[7:].strip()
+            if len(bare) >= 3:
+                secrets.append(bare)
+    if url:
         try:
-            parts = urlsplit(server.url)
+            parts = urlsplit(url)
         except ValueError:  # a malformed URL has no readable parts, so the whole of it is masked
-            secrets.append(server.url)
+            secrets.append(url)
         else:
-            secrets.extend(segment for segment in parts.path.split("/") if len(segment) >= 4)
+            if redact_url_path:
+                secrets.extend(segment for segment in parts.path.split("/") if len(segment) >= 4)
             secrets.extend(item for item in (parts.query, parts.username, parts.password) if item and len(item) >= 3)
     for value in sorted(set(secrets), key=len, reverse=True):
         text = text.replace(value, "***")
     return text
+
+
+def _redacted(text: str, server: FileServer) -> str:
+    """The text without the server's environment and header values (3+ characters), nor its URL's path, query
+    and credentials: a token is often kept in any of them."""
+    return redact_secret_values(
+        text,
+        (value for _, value in (*server.env, *server.headers)),
+        url=server.url,
+        redact_url_path=True,
+    )
 
 
 def _cached(key: str, now: float) -> tuple[tuple[McpToolDescriptor, ...], str] | None:
@@ -246,5 +272,5 @@ def format_failure_notes(failures: Iterable[tuple[str, str]]) -> list[str]:
 
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS", "DISCOVERY_TTL_SECONDS", "FAILURE_TTL_SECONDS", "clear_discovery_cache",
-    "connect_file_servers", "discovery_timeout", "file_bundle", "format_failure_notes",
+    "connect_file_servers", "discovery_timeout", "file_bundle", "format_failure_notes", "redact_secret_values",
 ]

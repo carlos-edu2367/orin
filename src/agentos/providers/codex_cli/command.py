@@ -108,6 +108,84 @@ def _extract_windows_apps_version(folder_name: str) -> tuple[int, ...]:
         return ()
 
 
+_FSCTL_GET_REPARSE_POINT = 0x000900A8
+_IO_REPARSE_TAG_APPEXECLINK = 0x8000001B
+
+
+def _read_app_exec_link_target(alias: Path) -> str | None:
+    """Target path of a Windows app execution alias (an AppExecLink reparse point), or None.
+
+    ``os.readlink`` does not read this reparse type, and ``C:\\Program Files\\WindowsApps`` cannot be
+    listed by a normal user, so an alias is the only way to learn where a Store package is installed
+    without spawning PowerShell.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.restype = wintypes.HANDLE
+        create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        device_io_control = kernel32.DeviceIoControl
+        device_io_control.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                                      wintypes.LPVOID]
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        # No access rights needed to read reparse data; OPEN_EXISTING, OPEN_REPARSE_POINT | BACKUP_SEMANTICS.
+        handle = create_file(str(alias), 0, 0x7, None, 3, 0x00200000 | 0x02000000, None)
+        if not handle or handle == wintypes.HANDLE(-1).value:
+            return None
+        try:
+            buffer = ctypes.create_string_buffer(16 * 1024)
+            returned = wintypes.DWORD()
+            if not device_io_control(handle, _FSCTL_GET_REPARSE_POINT, None, 0, buffer, len(buffer),
+                                     ctypes.byref(returned), None):
+                return None
+            raw = buffer.raw[: returned.value]
+        finally:
+            close_handle(handle)
+    except (OSError, AttributeError, ValueError):
+        return None
+    if len(raw) < 12 or int.from_bytes(raw[0:4], "little") != _IO_REPARSE_TAG_APPEXECLINK:
+        return None
+    # Version (4 bytes) then NUL-separated UTF-16 strings: package family, app user model id, target path, ...
+    for part in raw[12:].decode("utf-16-le", errors="replace").split("\0"):
+        candidate = part.strip()
+        if candidate.lower().endswith(".exe") and Path(candidate).is_absolute():
+            return candidate
+    return None
+
+
+def _codex_package_dirs_from_aliases(alias_root: Path) -> list[Path]:
+    """Install folders of the Codex Store package, learned from its app execution aliases."""
+    aliases: list[Path] = []
+    try:
+        if not alias_root.is_dir():
+            return []
+        for family_dir in alias_root.glob("OpenAI.Codex_*"):
+            if family_dir.is_dir():
+                aliases.extend(family_dir.glob("*.exe"))
+        aliases.extend(alias_root.glob("*codex*.exe"))
+    except OSError:
+        return []
+    package_dirs: list[Path] = []
+    for alias in aliases:
+        target = _read_app_exec_link_target(alias)
+        if not target:
+            continue
+        for parent in Path(target).parents:
+            if _WINDOWS_APPS_PKG_RE.match(parent.name) and parent.parent.name.lower() == "windowsapps":
+                if parent not in package_dirs:
+                    package_dirs.append(parent)
+                break
+    return package_dirs
+
+
 def resolve_codex_binary(
     env: Mapping[str, str] | None = None,
     *,
@@ -170,28 +248,42 @@ def resolve_codex_binary(
                 if default_win_apps not in candidate_roots:
                     candidate_roots.append(default_win_apps)
 
+    alias_package_dirs: list[Path] = []
+    if windows_apps_dirs is None and os.name == "nt":
+        local_appdata = source_env.get("LOCALAPPDATA", "").strip()
+        if local_appdata:
+            # The package folder itself usually cannot be listed (WindowsApps ACL), and newer Codex app
+            # packages ship no `codex.exe` alias; any of the package's aliases still names its folder.
+            alias_package_dirs = _codex_package_dirs_from_aliases(
+                Path(local_appdata) / "Microsoft" / "WindowsApps"
+            )
+
     matches: list[tuple[tuple[int, ...], float, str]] = []
+    package_groups: list[list[Path]] = []
     for root in candidate_roots:
         try:
             if not root.is_dir():
                 continue
-            pkg_dirs = list(root.glob("OpenAI.Codex_*"))
+            package_groups.append(list(root.glob("OpenAI.Codex_*")))
         except OSError:
             continue
+    package_groups.append(alias_package_dirs)
 
-        for pkg_dir in pkg_dirs:
-            try:
-                candidate_exe = pkg_dir / "app" / "resources" / "codex.exe"
-                if not candidate_exe.is_file():
-                    continue
-                ver_tuple = _extract_windows_apps_version(pkg_dir.name)
-                try:
-                    mtime = float(candidate_exe.stat().st_mtime)
-                except OSError:
-                    mtime = 0.0
-                matches.append((ver_tuple, mtime, str(candidate_exe)))
-            except OSError:
+    seen_exes: set[str] = set()
+    for pkg_dir in (pkg_dir for group in package_groups for pkg_dir in group):
+        try:
+            candidate_exe = pkg_dir / "app" / "resources" / "codex.exe"
+            if str(candidate_exe) in seen_exes or not candidate_exe.is_file():
                 continue
+            seen_exes.add(str(candidate_exe))
+            ver_tuple = _extract_windows_apps_version(pkg_dir.name)
+            try:
+                mtime = float(candidate_exe.stat().st_mtime)
+            except OSError:
+                mtime = 0.0
+            matches.append((ver_tuple, mtime, str(candidate_exe)))
+        except OSError:
+            continue
 
     if not matches:
         return None
@@ -348,7 +440,12 @@ def build_codex_command(
     prompt_file_str = _validate_path_arg(
         request.system_prompt_file, "system_prompt_file"
     )
-    model = clean_codex_model_id(request.model) or DEFAULT_CODEX_MODEL
+    cleaned_model = clean_codex_model_id(request.model)
+    model = (
+        DEFAULT_CODEX_MODEL
+        if not cleaned_model or cleaned_model == "codex-image"
+        else cleaned_model
+    )
 
     cmd: list[str] = [binary_str, "exec"]
 
@@ -388,6 +485,7 @@ def build_codex_command(
         "features.shell_tool=false",
         'web_search="disabled"',
         "features.view_image=false",
+        "features.image_generation=false",
         # Codex's own subagents would bypass Orin's tree, budget and permissions: delegation goes through Agent.
         "features.multi_agent=false",
         'sandbox_mode="read-only"',
@@ -409,6 +507,7 @@ def build_codex_command(
         "features.shell_tool",
         "web_search",
         "features.view_image",
+        "features.image_generation",
         "features.multi_agent",
         "sandbox_mode",
         "approval_policy",

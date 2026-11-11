@@ -663,5 +663,35 @@ def test_contextvar_propagates_to_runtime_worker_threads_and_waiting_model_is_ta
     assert kw.get("agent_id") == "agent:sub-1"
 
 
+def test_build_client_sends_header_secrets_for_db_origin_http_server(monkeypatch):
+    from agentos.mcp.toolset import build_client
+
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    cfg = _config()
+    assert cfg.origin == "orin"
+    client = build_client(cfg, {"header:Authorization": "Bearer pk_123", "header:X-Workspace": "ws-1"})
+    assert client._transport._headers == {
+        "Authorization": "Bearer pk_123",
+        "X-Workspace": "ws-1",
+    }
+
+
+def test_build_client_normalizes_token_with_bearer_prefix_and_header_authorization_wins(monkeypatch):
+    from agentos.mcp.toolset import build_client
+
+    monkeypatch.setattr("agentos.mcp.transport_http._public_url", lambda url, resolve_dns=False: url)
+    cfg = _config()
+
+    client_prefixed = build_client(cfg, {"token": "Bearer secret_abc"})
+    assert client_prefixed._transport._headers == {"authorization": "Bearer secret_abc"}
+
+    client_lower_prefixed = build_client(cfg, {"token": "bearer   secret_abc"})
+    assert client_lower_prefixed._transport._headers == {"authorization": "Bearer secret_abc"}
+
+    client_both = build_client(cfg, {"token": "from_token", "header:Authorization": "Bearer from_header"})
+    assert client_both._transport._headers == {"Authorization": "Bearer from_header"}
+    assert "authorization" not in client_both._transport._headers
+
+
 
 

@@ -10,8 +10,9 @@ provider credentials.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
 
 from sqlalchemy import delete, insert, select, update
@@ -24,13 +25,34 @@ from agentos.persistence.postgres.schema import (
 )
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 
+from .file_servers import redact_secret_values
 from .models import McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, slugify, tools_digest as _tools_digest
 from .transport_http import HttpUnauthorized
 
 MAX_STATE_REASON_CHARS = 512
 _ALLOWED_PROPOSAL_FIELDS = frozenset({
     "user_id", "slug", "display_name", "transport", "command", "args", "url",
-    "secret_names", "catalog_id", "tool_allowlist",
+    "secret_names", "headers", "catalog_id", "tool_allowlist",
+})
+
+# RFC 7230 §3.2.6 token characters for HTTP header field-names.
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$")
+_FORBIDDEN_MCP_HEADERS = frozenset({
+    "accept",
+    "connection",
+    "content-length",
+    "content-type",
+    "cookie",
+    "host",
+    "keep-alive",
+    "mcp-protocol-version",
+    "mcp-session-id",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
 })
 
 Connector = Callable[[McpServerConfig, Mapping[str, str]], tuple[str, tuple[McpToolDescriptor, ...]]]
@@ -38,6 +60,63 @@ Connector = Callable[[McpServerConfig, Mapping[str, str]], tuple[str, tuple[McpT
 
 class McpServiceError(ValueError):
     """Raised for any request the MCP server library will not act on."""
+
+
+def validate_mcp_header_name(header_name: str) -> str:
+    if not header_name or not _HEADER_NAME_RE.fullmatch(header_name):
+        raise McpServiceError(f"invalid HTTP header name '{header_name[:64]}'")
+    if header_name.lower() in _FORBIDDEN_MCP_HEADERS:
+        raise McpServiceError(f"HTTP header '{header_name}' is reserved by the transport and cannot be set")
+    return header_name
+
+
+def validate_mcp_secret_names(secret_names: Iterable[str]) -> tuple[str, ...]:
+    validated: list[str] = []
+    seen: set[str] = set()
+    for raw in secret_names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        if name.lower().startswith("header:"):
+            header_name = validate_mcp_header_name(name[len("header:"):])
+            name = f"header:{header_name}"
+        if name not in seen:
+            seen.add(name)
+            validated.append(name)
+    return tuple(validated)
+
+
+def validate_mcp_secrets(secrets: Mapping[str, str], *, expected_names: Iterable[str] = ()) -> dict[str, str]:
+    for expected in expected_names:
+        if str(expected).lower().startswith("header:"):
+            validate_mcp_header_name(str(expected)[len("header:"):])
+    cleaned: dict[str, str] = {}
+    for raw_name, raw_value in secrets.items():
+        name = str(raw_name or "").strip()
+        value = str(raw_value or "")
+        if not name:
+            raise McpServiceError("credential name cannot be empty")
+        if name.lower().startswith("header:"):
+            header_name = validate_mcp_header_name(name[len("header:"):])
+            name = f"header:{header_name}"
+        if "\r" in value or "\n" in value or "\x00" in value:
+            raise McpServiceError(f"credential '{name}' cannot contain CR, LF or NUL characters")
+        cleaned[name] = value
+    return cleaned
+
+
+def _sent_header_names(secrets: Mapping[str, str], expected_names: Iterable[str] = ()) -> list[str]:
+    names: list[str] = []
+    for key in (*secrets.keys(), *expected_names):
+        if key.startswith("header:"):
+            header_name = key[len("header:"):]
+            if header_name and not any(existing.lower() == header_name.lower() for existing in names):
+                names.append(header_name)
+    if ("token" in secrets or "token" in expected_names) and not any(
+        existing.lower() == "authorization" for existing in names
+    ):
+        names.append("Authorization")
+    return names
 
 
 class McpServerNotFound(McpServiceError):
@@ -190,6 +269,26 @@ class McpServerService:
         except ValueError as error:
             raise McpServiceError(str(error)) from error
 
+        raw_secret_names = [str(item) for item in (command.get("secret_names") or ())]
+        raw_headers = command.get("headers")
+        if raw_headers is not None:
+            if isinstance(raw_headers, (str, bytes, Mapping)) or not isinstance(raw_headers, Iterable):
+                raise McpServiceError(
+                    "propose accepts header names only (e.g. headers=['Authorization']); "
+                    "credential values are supplied at approve time."
+                )
+            for item in raw_headers:
+                clean_header = str(item or "").strip()
+                if clean_header.lower().startswith("header:"):
+                    clean_header = clean_header[len("header:"):].strip()
+                if ":" in clean_header or any(ch.isspace() for ch in clean_header):
+                    raise McpServiceError(
+                        "propose does not accept header values; pass header names only (e.g. 'Authorization')."
+                    )
+                validate_mcp_header_name(clean_header)
+                raw_secret_names.append(f"header:{clean_header}")
+        secret_names = validate_mcp_secret_names(raw_secret_names)
+
         with self.engine.begin() as connection:
             existing = connection.execute(
                 select(mcp_servers.c.server_id).where(mcp_servers.c.user_id == user_id, mcp_servers.c.slug == slug)
@@ -200,7 +299,7 @@ class McpServerService:
             candidate = McpServerConfig(
                 server_id=f"mcp_{uuid4().hex}", user_id=user_id, slug=slug, display_name=display_name,
                 transport=transport, command=command.get("command"), args=tuple(command.get("args") or ()),
-                url=command.get("url"), secret_names=tuple(str(item) for item in command.get("secret_names") or ()),
+                url=command.get("url"), secret_names=secret_names,
                 catalog_id=command.get("catalog_id"),
                 tool_allowlist=tuple(command.get("tool_allowlist")) if command.get("tool_allowlist") is not None else None,
             )
@@ -221,15 +320,22 @@ class McpServerService:
         row = self._row(user_id, server_id)
         config = row_to_config(row)
         self._require_transport(config.transport)
+        cleaned_secrets = validate_mcp_secrets(secrets, expected_names=config.secret_names)
         try:
-            protocol_version, tools = connect(config, secrets)
+            protocol_version, tools = connect(config, cleaned_secrets)
         except HttpUnauthorized as error:
-            if secrets:
-                reason = "o servidor recusou a credencial informada"
+            if cleaned_secrets or config.secret_names:
+                sent_headers = _sent_header_names(cleaned_secrets, config.secret_names)
+                if len(sent_headers) == 1:
+                    reason = f"o servidor recusou a credencial informada (401) no cabeçalho {sent_headers[0]}"
+                elif len(sent_headers) > 1:
+                    reason = f"o servidor recusou a credencial informada (401) nos cabeçalhos {', '.join(sent_headers)}"
+                else:
+                    reason = "o servidor recusou a credencial informada (401)"
                 with self.engine.begin() as connection:
                     connection.execute(
                         update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
-                        .values(state_reason=reason, updated_at=_now())
+                        .values(auth_kind=McpAuthKind.STATIC.value, state_reason=reason[:MAX_STATE_REASON_CHARS], updated_at=_now())
                     )
                 raise McpConnectionFailed(f"could not connect to '{config.display_name}': {reason}") from error
             with self.engine.begin() as connection:
@@ -237,9 +343,11 @@ class McpServerService:
                     update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
                     .values(auth_kind=McpAuthKind.OAUTH.value, state_reason="", updated_at=_now())
                 )
-            raise McpAuthorizationRequired(f"'{config.display_name}' asks you to sign in") from error
+            raise McpAuthorizationRequired(
+                f"'{config.display_name}' asks you to sign in (or configure an Authorization header with a static key)"
+            ) from error
         except Exception as error:
-            reason = str(error)[:MAX_STATE_REASON_CHARS]
+            reason = redact_secret_values(str(error), cleaned_secrets.values(), url=config.url)[:MAX_STATE_REASON_CHARS]
             with self.engine.begin() as connection:
                 connection.execute(
                     update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
@@ -247,15 +355,17 @@ class McpServerService:
                 )
             raise McpConnectionFailed(f"could not connect to '{config.display_name}': {reason}") from error
 
-        ciphertext = _cipher().encrypt(json.dumps(dict(secrets)))
+        merged_secret_names = list(validate_mcp_secret_names((*config.secret_names, *cleaned_secrets.keys())))
+        auth_kind = McpAuthKind.STATIC.value if (cleaned_secrets or merged_secret_names) else config.auth_kind.value
+        ciphertext = _cipher().encrypt(json.dumps(dict(cleaned_secrets)))
         now = _now()
         with self.engine.begin() as connection:
             self._replace_tools(connection, server_id, tools, now)
             connection.execute(
                 update(mcp_servers).where(mcp_servers.c.server_id == server_id, mcp_servers.c.user_id == user_id)
-                .values(secrets_ciphertext=ciphertext, protocol_version=protocol_version,
+                .values(secret_names=merged_secret_names, secrets_ciphertext=ciphertext, protocol_version=protocol_version,
                        tools_digest=_tools_digest(tools), state=McpServerState.ACTIVE.value,
-                       state_reason="", updated_at=now)
+                       auth_kind=auth_kind, state_reason="", updated_at=now)
             )
         return self.get(user_id, server_id)
 
@@ -327,7 +437,8 @@ class McpServerService:
         try:
             protocol_version, tools = connect(config, secrets)
         except Exception as error:
-            return {"connected": False, "protocol_version": "", "tools": [], "error": str(error)[:MAX_STATE_REASON_CHARS]}
+            redacted = redact_secret_values(str(error), secrets.values(), url=config.url)[:MAX_STATE_REASON_CHARS]
+            return {"connected": False, "protocol_version": "", "tools": [], "error": redacted}
 
         now = _now()
         with self.engine.begin() as connection:

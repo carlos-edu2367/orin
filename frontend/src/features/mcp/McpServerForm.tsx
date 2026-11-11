@@ -1,19 +1,33 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import type { ApiClient } from '../../api/client'
 import { useSession } from '../../app/useSession'
-import { createMcpServer, listMcpCatalog, type McpCatalogEntry, type McpTransport } from '../../api/mcp'
+import {
+  approveMcpServer,
+  createMcpServer,
+  isMcpAuthorizationRequired,
+  listMcpCatalog,
+  type McpCatalogEntry,
+  type McpTransport,
+} from '../../api/mcp'
+import {
+  parseClaudeMcpAddCommand,
+  validateMcpHeaderName,
+  type McpHeaderInput,
+} from './claudeCommandParser'
 
 type Mode = 'catalog' | 'manual'
 
 type McpServerFormProps = {
   client: ApiClient
-  onCreated: () => void
+  /** keepOpen: the server was created but connecting failed; the form stays open to show why. */
+  onCreated: (options?: { keepOpen?: boolean }) => void
   onClose: () => void
 }
 
 /**
  * Proposing a server only ever needs names and shape, never a credential
- * value — the value is typed later, at approval, on the server's own card.
+ * value — the value is typed later, at approval, on the server's own card
+ * (or sent immediately via approveMcpServer when HTTP header values are supplied).
  */
 export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps) {
   const { capabilities } = useSession()
@@ -26,12 +40,14 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const [commandInput, setCommandInput] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [transport, setTransport] = useState<McpTransport>(allowStdio ? 'stdio' : 'http')
   const [command, setCommand] = useState('')
   const [args, setArgs] = useState('')
   const [url, setUrl] = useState('')
   const [secretNames, setSecretNames] = useState('')
+  const [headers, setHeaders] = useState<McpHeaderInput[]>([])
 
   useEffect(() => {
     if (mode !== 'catalog') return
@@ -43,6 +59,40 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
       .finally(() => setLoadingCatalog(false))
     return () => controller.abort()
   }, [client, mode, query, allowStdio])
+
+  function handleImportCommand() {
+    const parsed = parseClaudeMcpAddCommand(commandInput)
+    if (!parsed.ok) {
+      setError(parsed.error)
+      return
+    }
+    setError(null)
+    setDisplayName(parsed.displayName)
+    setTransport(parsed.transport)
+    if (parsed.transport === 'http') {
+      setUrl(parsed.url ?? '')
+      setHeaders(parsed.headers.map((item) => ({ name: item.name, value: item.value })))
+    } else {
+      setCommand(parsed.command ?? '')
+      setArgs((parsed.args ?? []).join(' '))
+      setHeaders([])
+    }
+    setSecretNames(parsed.secretNames.join(', '))
+  }
+
+  function addHeaderRow() {
+    setHeaders((current) => [...current, { name: '', value: '' }])
+  }
+
+  function updateHeaderRow(index: number, patch: Partial<McpHeaderInput>) {
+    setHeaders((current) =>
+      current.map((item, idx) => (idx === index ? { ...item, ...patch } : item)),
+    )
+  }
+
+  function removeHeaderRow(index: number) {
+    setHeaders((current) => current.filter((_, idx) => idx !== index))
+  }
 
   async function proposeFromCatalog(entry: McpCatalogEntry) {
     setSubmitting(true)
@@ -58,22 +108,85 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
 
   async function submitManual(event: FormEvent) {
     event.preventDefault()
+
+    const activeHeaders =
+      transport === 'http'
+        ? headers.filter((row) => row.name.trim() !== '' || row.value.trim() !== '')
+        : []
+
+    for (const row of activeHeaders) {
+      const trimmedName = row.name.trim()
+      if (!trimmedName) {
+        setError('Informe o nome do cabeçalho HTTP.')
+        return
+      }
+      const validationError = validateMcpHeaderName(trimmedName)
+      if (validationError) {
+        setError(validationError)
+        return
+      }
+      if (/[\r\n]/.test(row.value)) {
+        setError(`O valor do cabeçalho "${trimmedName}" não pode conter quebras de linha.`)
+        return
+      }
+    }
+
+    const combinedSecretNames = secretNames
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean)
+
+    const headerSecrets: Record<string, string> = {}
+    for (const row of activeHeaders) {
+      const headerSecretName = `header:${row.name.trim()}`
+      if (!combinedSecretNames.includes(headerSecretName)) {
+        combinedSecretNames.push(headerSecretName)
+      }
+      const trimmedValue = row.value.trim()
+      if (trimmedValue) {
+        headerSecrets[headerSecretName] = trimmedValue
+      }
+    }
+
     setSubmitting(true)
     setError(null)
+    let createdServerId: string
     try {
-      await createMcpServer(client, {
+      const created = await createMcpServer(client, {
         display_name: displayName,
         transport,
         command: transport === 'stdio' ? command.trim() || undefined : undefined,
         args: transport === 'stdio' ? args.split(/\s+/).filter(Boolean) : undefined,
         url: transport === 'http' ? url.trim() || undefined : undefined,
-        secret_names: secretNames.split(',').map((item) => item.trim()).filter(Boolean),
+        secret_names: combinedSecretNames,
       })
-      onCreated()
+      createdServerId = created.server_id
     } catch {
       setError('Não foi possível adicionar o servidor.')
       setSubmitting(false)
+      return
     }
+
+    setHeaders([])
+    setCommandInput('')
+
+    if (Object.keys(headerSecrets).length > 0) {
+      try {
+        await approveMcpServer(client, createdServerId, headerSecrets)
+      } catch (approveFailure) {
+        if (isMcpAuthorizationRequired(approveFailure)) {
+          setError('Servidor adicionado, mas o servidor pediu login (OAuth). Autorize o acesso no card do servidor.')
+        } else {
+          setError('Servidor adicionado, mas o servidor recusou a credencial. Confira os valores no card do servidor.')
+        }
+        setSubmitting(false)
+        onCreated({ keepOpen: true })
+        return
+      }
+    }
+
+    setSubmitting(false)
+    onCreated()
   }
 
   return (
@@ -119,6 +232,18 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
         </div>
       ) : (
         <form className="mcp-server-form__manual" onSubmit={(event) => void submitManual(event)}>
+          <div className="mcp-server-form__import">
+            <label>
+              Colar comando `claude mcp add`
+              <textarea
+                rows={2}
+                value={commandInput}
+                onChange={(event) => setCommandInput(event.target.value)}
+                placeholder='claude mcp add --transport http clickup https://... --header "Authorization: Bearer ..."'
+              />
+            </label>
+            <button type="button" onClick={handleImportCommand}>Importar</button>
+          </div>
           <label>Nome<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /></label>
           <label>
             Transporte
@@ -133,7 +258,38 @@ export function McpServerForm({ client, onCreated, onClose }: McpServerFormProps
               <label>Argumentos<input value={args} onChange={(event) => setArgs(event.target.value)} placeholder="separados por espaço" /></label>
             </>
           ) : (
-            <label>URL<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" /></label>
+            <>
+              <label>URL<input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://" /></label>
+              <div className="mcp-server-form__headers" role="group" aria-label="Cabeçalhos HTTP">
+                <div className="mcp-server-form__headers-head">
+                  <span>Cabeçalhos HTTP</span>
+                  <button type="button" onClick={addHeaderRow}>Adicionar cabeçalho</button>
+                </div>
+                {headers.map((header, index) => (
+                  <div key={index} className="mcp-server-form__header-row">
+                    <label>
+                      Nome do cabeçalho
+                      <input
+                        value={header.name}
+                        onChange={(event) => updateHeaderRow(index, { name: event.target.value })}
+                        placeholder="Authorization"
+                      />
+                    </label>
+                    <label>
+                      Valor do cabeçalho
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        value={header.value}
+                        onChange={(event) => updateHeaderRow(index, { value: event.target.value })}
+                        placeholder="Bearer ..."
+                      />
+                    </label>
+                    <button type="button" onClick={() => removeHeaderRow(index)}>Remover</button>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
           <label>Credenciais necessárias<input value={secretNames} onChange={(event) => setSecretNames(event.target.value)} placeholder="separadas por vírgula" /></label>
           <button type="submit" disabled={submitting}>{submitting ? 'Adicionando…' : 'Adicionar'}</button>

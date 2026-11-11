@@ -12,6 +12,16 @@ DEFAULT_CODEX_CONTEXT_WINDOW: int = 272_000
 
 _CODEX_LABEL_SUFFIX = "(Assinatura Codex)"
 
+CODEX_IMAGE_MODEL_ID: str = "codex-image"
+CODEX_IMAGE_MODEL: CliModelInfo = CliModelInfo(
+    id=CODEX_IMAGE_MODEL_ID,
+    display_name="Imagem (Codex – assinatura)",
+    context_window=0,
+    supported_efforts=(),
+    input_modalities=("text",),
+    output_modalities=("image",),
+)
+
 FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
     CliModelInfo(
         "gpt-6.1-sol",
@@ -197,6 +207,8 @@ def context_window_for(
 
 
 __all__ = [
+    "CODEX_IMAGE_MODEL",
+    "CODEX_IMAGE_MODEL_ID",
     "DEFAULT_CODEX_CONTEXT_WINDOW",
     "FALLBACK_CODEX_MODELS",
     "context_window_for",

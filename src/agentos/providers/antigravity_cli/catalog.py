@@ -17,6 +17,16 @@ DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW: int = 1_000_000
 ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS: float = 30 * 60.0
 _ANTIGRAVITY_LABEL_SUFFIX = "(Assinatura Antigravity)"
 
+ANTIGRAVITY_IMAGE_MODEL_ID: str = "antigravity-image"
+ANTIGRAVITY_IMAGE_MODEL: CliModelInfo = CliModelInfo(
+    id=ANTIGRAVITY_IMAGE_MODEL_ID,
+    display_name="Imagem (Antigravity – assinatura)",
+    context_window=0,
+    supported_efforts=(),
+    input_modalities=("text",),
+    output_modalities=("image",),
+)
+
 _EFFORTS_STD: tuple[str, ...] = ("low", "medium", "high")
 
 _MODELS_CACHE_LOCK = threading.Lock()
@@ -33,8 +43,9 @@ def _infer_supported_efforts(slug: str) -> tuple[str, ...]:
 
 # Gemini and Claude read images. Antigravity's stream-json input accepts only
 # text, but an image returned by an MCP tool result (Orin's view_file) reaches
-# the model, so these models see attachments through that tool. gpt-oss is
-# text-only, and an unknown family stays text-only until proven otherwise.
+# the model, so these models see attachments through that tool. Gemini models on
+# agy also perceive workspace audio and video via agy's gated native read_file.
+# gpt-oss is text-only, and an unknown family stays text-only until proven otherwise.
 _IMAGE_FAMILIES: tuple[str, ...] = ("gemini-", "claude-")
 
 
@@ -43,6 +54,8 @@ def antigravity_input_modalities(slug: str) -> tuple[str, ...]:
     lower = slug.strip().lower()
     if lower.startswith("google-antigravity/"):
         lower = lower[len("google-antigravity/") :]
+    if lower.startswith("gemini-"):
+        return ("text", "image", "audio", "video")
     if lower.startswith(_IMAGE_FAMILIES):
         return ("text", "image")
     return ("text",)
@@ -241,6 +254,8 @@ def context_window_for(
 
 
 __all__ = [
+    "ANTIGRAVITY_IMAGE_MODEL",
+    "ANTIGRAVITY_IMAGE_MODEL_ID",
     "ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS",
     "DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW",
     "FALLBACK_ANTIGRAVITY_MODELS",

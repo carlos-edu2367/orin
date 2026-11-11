@@ -195,11 +195,12 @@ export function Home({ client, bootstrap }: HomeProps) {
     listProviderModels(apiClient, provider, controller.signal)
       .then((items) => {
         if (controller.signal.aborted) return
-        setModels(items)
+        const textItems = items.filter((item) => item.output_modalities.length === 0 || item.output_modalities.includes('text'))
+        setModels(textItems)
         const remembered = readStored(MODEL_STORAGE_KEY, '')
-        const preferred = items.find((item) => item.model_id === remembered)
-          ?? items.find((item) => item.is_favorite)
-          ?? items[0]
+        const preferred = textItems.find((item) => item.model_id === remembered)
+          ?? textItems.find((item) => item.is_favorite)
+          ?? textItems[0]
         setModelId(preferred?.model_id ?? '')
       })
       .catch(() => { if (!controller.signal.aborted) { setModels([]); setCatalogFailed(true) } })

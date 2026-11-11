@@ -202,3 +202,111 @@ def test_propose_rejects_unknown_catalog_id_without_transport(service):
             "display_name": "Unknown",
         })
 
+
+@pytest.mark.parametrize(
+    "bad_secret_name",
+    [
+        "header:",
+        "header:Bad Header",
+        "header:Authorization:Bearer",
+        "header:Host",
+        "header:host",
+        "header:Content-Length",
+        "header:Content-Type",
+        "header:Accept",
+        "header:Mcp-Session-Id",
+        "header:MCP-Protocol-Version",
+        "header:Connection",
+        "header:Transfer-Encoding",
+        "header:Cookie",
+    ],
+)
+def test_propose_and_approve_reject_invalid_or_forbidden_header_names(service, bad_secret_name):
+    with pytest.raises(McpServiceError):
+        service.propose(_proposal(
+            transport="http", command=None, args=[], url="https://mcp.example.com/mcp",
+            secret_names=[bad_secret_name],
+        ))
+
+    record = _remote(service)
+    with pytest.raises(McpServiceError):
+        service.approve(
+            user_id="u1",
+            server_id=record["server_id"],
+            secrets={bad_secret_name: "val"},
+            connect=lambda config, secrets: ("2025-06-18", ()),
+        )
+
+
+@pytest.mark.parametrize("bad_value", ["Bearer abc\r\nX-Injected: 1", "Bearer abc\n", "Bearer abc\r"])
+def test_approve_rejects_header_values_with_cr_or_lf(service, bad_value):
+    record = service.propose(_proposal(
+        transport="http", command=None, args=[], url="https://mcp.example.com/mcp",
+        secret_names=["header:Authorization"],
+    ))
+    assert record["auth_kind"] == "static"
+    with pytest.raises(McpServiceError):
+        service.approve(
+            user_id="u1",
+            server_id=record["server_id"],
+            secrets={"header:Authorization": bad_value},
+            connect=lambda config, secrets: ("2025-06-18", ()),
+        )
+
+
+def test_approve_with_header_secrets_and_401_does_not_flip_to_oauth_and_redacts_value(service):
+    record = service.propose(_proposal(
+        display_name="ClickUp",
+        transport="http",
+        command=None,
+        args=[],
+        url="https://mcp.example.com/mcp",
+        secret_names=["header:Authorization"],
+    ))
+    assert record["auth_kind"] == "static"
+    secret_value = "Bearer pk_super_secret_token_999"
+
+    with pytest.raises(McpConnectionFailed) as exc_info:
+        service.approve(
+            user_id="u1",
+            server_id=record["server_id"],
+            secrets={"header:Authorization": secret_value},
+            connect=_unauthorized,
+        )
+
+    after = service.get("u1", record["server_id"])
+    assert after["auth_kind"] == "static"
+    assert after["state"] == McpServerState.PENDING_APPROVAL.value
+    assert "Authorization" in after["state_reason"]
+    assert "pk_super_secret_token_999" not in after["state_reason"]
+    assert secret_value not in after["state_reason"]
+    assert "pk_super_secret_token_999" not in str(exc_info.value)
+
+
+def test_approve_redacts_secret_values_when_connection_raises_generic_error(service):
+    record = service.propose(_proposal(
+        display_name="ClickUp",
+        transport="http",
+        command=None,
+        args=[],
+        url="https://mcp.example.com/mcp",
+        secret_names=["header:Authorization"],
+    ))
+    secret_value = "Bearer pk_ leaked_value_12345"
+
+    def echoing_fail(config, secrets):
+        raise RuntimeError(f"upstream rejected {secrets['header:Authorization']}")
+
+    with pytest.raises(McpConnectionFailed) as exc_info:
+        service.approve(
+            user_id="u1",
+            server_id=record["server_id"],
+            secrets={"header:Authorization": secret_value},
+            connect=echoing_fail,
+        )
+
+    after = service.get("u1", record["server_id"])
+    assert "leaked_value_12345" not in after["state_reason"]
+    assert "leaked_value_12345" not in str(exc_info.value)
+
+

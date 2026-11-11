@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import time
 
 import pytest
@@ -69,6 +70,8 @@ def test_build_codex_command_new_ephemeral_turn(tmp_path: Path) -> None:
         'web_search="disabled"',
         "-c",
         "features.view_image=false",
+        "-c",
+        "features.image_generation=false",
         "-c",
         "features.multi_agent=false",
         "-c",
@@ -384,6 +387,53 @@ def test_resolve_codex_binary_windows_apps_numeric_version_order_and_skips_broke
     assert resolve_codex_binary(env) == str(v167)
 
 
+def _fake_codex_store_install(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A Store install whose package folder is known only through an alias (WindowsApps is not listable)."""
+    package = tmp_path / "Program Files" / "WindowsApps" / "OpenAI.Codex_26.1103.7773.0_x64__2p2nqsd0c76g0"
+    codex_exe = package / "app" / "resources" / "codex.exe"
+    codex_exe.parent.mkdir(parents=True)
+    codex_exe.write_bytes(b"MZ-codex")
+    alias_root = tmp_path / "Local" / "Microsoft" / "WindowsApps"
+    alias = alias_root / "OpenAI.Codex_2p2nqsd0c76g0" / "chatgpt-desktop.exe"
+    alias.parent.mkdir(parents=True)
+    alias.write_bytes(b"")
+    (alias_root / "unrelated.exe").write_bytes(b"")
+    return alias_root, alias, codex_exe
+
+
+def test_codex_package_dirs_from_aliases_reads_alias_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentos.providers.codex_cli import command as codex_command
+
+    alias_root, alias, codex_exe = _fake_codex_store_install(tmp_path)
+    package = codex_exe.parent.parent.parent
+    targets = {str(alias): str(package / "app" / "ChatGPT.exe")}
+    monkeypatch.setattr(codex_command, "_read_app_exec_link_target", lambda path: targets.get(str(path)))
+
+    assert codex_command._codex_package_dirs_from_aliases(alias_root) == [package]
+    assert codex_command._codex_package_dirs_from_aliases(tmp_path / "missing") == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="app execution aliases exist only on Windows")
+def test_resolve_codex_binary_finds_store_install_through_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentos.providers.codex_cli import command as codex_command
+
+    alias_root, alias, codex_exe = _fake_codex_store_install(tmp_path)
+    package = codex_exe.parent.parent.parent
+    monkeypatch.setattr(
+        codex_command,
+        "_read_app_exec_link_target",
+        lambda path: str(package / "app" / "ChatGPT.exe") if str(path) == str(alias) else None,
+    )
+    empty_path = tmp_path / "empty_bin"
+    empty_path.mkdir()
+    env = {"PATH": str(empty_path), "LOCALAPPDATA": str(tmp_path / "Local")}
+    assert resolve_codex_binary(env) == str(codex_exe)
+
+
 @pytest.mark.parametrize(
     "bad_resume",
     [
@@ -522,6 +572,7 @@ def test_redact_codex_argv_handles_chained_flags_and_attached_c_values() -> None
         ("-c", 'approval_policy="on-request"'),
         ("-c", 'web_search="enabled"'),
         ("-c", "features.view_image=true"),
+        ("-c", "features.image_generation=true"),
         ("-c", 'model_instructions_file="/etc/passwd"'),
         ("--dangerously-bypass-approvals-and-sandbox",),
         ("--full-auto",),

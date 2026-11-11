@@ -45,10 +45,10 @@ def _isolated_antigravity_models_cache() -> Iterator[None]:
 @pytest.mark.parametrize(
     ("slug", "expected"),
     [
-        ("gemini-4-argon-high", ("text", "image")),
-        ("gemini-3.8-flash-low", ("text", "image")),
+        ("gemini-4-argon-high", ("text", "image", "audio", "video")),
+        ("gemini-3.8-flash-low", ("text", "image", "audio", "video")),
         ("claude-opus-5-5-medium", ("text", "image")),
-        ("google-antigravity/gemini-4-argon-low", ("text", "image")),
+        ("google-antigravity/gemini-4-argon-low", ("text", "image", "audio", "video")),
         ("gpt-oss-120b-medium", ("text",)),
         ("some-future-model", ("text",)),
     ],
@@ -59,7 +59,7 @@ def test_input_modalities_follow_the_model_family(slug: str, expected: tuple[str
 
 def test_fallback_catalog_declares_vision_for_gemini_and_claude() -> None:
     by_id = {model.id: model.input_modalities for model in FALLBACK_ANTIGRAVITY_MODELS}
-    assert by_id["gemini-4-argon-high"] == ("text", "image")
+    assert by_id["gemini-4-argon-high"] == ("text", "image", "audio", "video")
     assert by_id["claude-sonnet-5-5-low"] == ("text", "image")
     assert by_id["gpt-oss-120b-medium"] == ("text",)
     assert all(model.input_modalities for model in FALLBACK_ANTIGRAVITY_MODELS)
@@ -104,7 +104,7 @@ def test_list_refreshes_a_catalog_stored_as_text_only_and_keeps_favorites(
 
     models = {item.model_id: item for item in service.list(ctx, "google-antigravity")}
 
-    assert models["gemini-4-argon-high"].input_modalities == ("text", "image")
+    assert models["gemini-4-argon-high"].input_modalities == ("text", "image", "audio", "video")
     assert models["gpt-oss-120b-medium"].input_modalities == ("text",)
     assert models["gemini-4-argon-high"].is_favorite is True
 
@@ -134,7 +134,7 @@ def test_a_custom_gemini_model_is_added_as_seeing_images(monkeypatch: pytest.Mon
     _, service, ctx = _service(monkeypatch)
     service.refresh(ctx, "google-antigravity")
     record = service.add_custom(ctx, "google-antigravity", "gemini-custom-preview")
-    assert record.input_modalities == ("text", "image")
+    assert record.input_modalities == ("text", "image", "audio", "video")
 
 
 def test_fallback_includes_gemini_4_carbon_at_top_with_readable_labels() -> None:
@@ -150,7 +150,10 @@ def test_fallback_includes_gemini_4_carbon_at_top_with_readable_labels() -> None
         "Gemini 4 Carbon (Low) (Assinatura Antigravity)",
     ]
     assert all(m.context_window == 1_000_000 for m in top_three)
-    assert all(m.input_modalities == ("text", "image") for m in top_three)
+    assert all(
+        m.input_modalities == ("text", "image", "audio", "video")
+        for m in top_three
+    )
     for model in FALLBACK_ANTIGRAVITY_MODELS:
         assert model.display_name.endswith("(Assinatura Antigravity)")
         assert not model.display_name.startswith(model.id)
@@ -340,14 +343,14 @@ def test_service_refresh_uses_adapter_refresh_models(
         display_name="Gemini 4 Carbon (High) (Assinatura Antigravity)",
         context_window=1_000_000,
         supported_efforts=("high",),
-        input_modalities=("text", "image"),
+        input_modalities=("text", "image", "audio", "video"),
     )
     brand_new_model = CliModelInfo(
         id="gemini-4-xenon-medium",
         display_name="Gemini 4 Xenon (Medium) (Assinatura Antigravity)",
         context_window=1_000_000,
         supported_efforts=("medium",),
-        input_modalities=("text", "image"),
+        input_modalities=("text", "image", "audio", "video"),
     )
 
     def _fake_refresh_models(self: AntigravityCliAdapter, env: object = None) -> tuple[CliModelInfo, ...]:
@@ -360,10 +363,11 @@ def test_service_refresh_uses_adapter_refresh_models(
     stored = {item.model_id: item for item in service.list(ctx, "google-antigravity")}
 
     assert len(refresh_calls) == 1
-    assert receipt.count == 2
-    assert set(stored) == {"gemini-4-carbon-high", "gemini-4-xenon-medium"}
+    assert receipt.count == 3
+    assert set(stored) == {"gemini-4-carbon-high", "gemini-4-xenon-medium", "antigravity-image"}
     assert stored["gemini-4-xenon-medium"].display_name == "Gemini 4 Xenon (Medium) (Assinatura Antigravity)"
-    assert stored["gemini-4-xenon-medium"].input_modalities == ("text", "image")
+    assert stored["gemini-4-xenon-medium"].input_modalities == ("text", "image", "audio", "video")
+    assert stored["antigravity-image"].output_modalities == ("image",)
 
 
 def test_build_command_infers_supported_efforts_from_suffix_for_unknown_model(

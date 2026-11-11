@@ -10177,3 +10177,11 @@ body.reduce-motion .security-ref15__card {
   font-size: 11px;
   color: var(--orin-text-secondary, #9E9BAE);
 }
+
+.mcp-server-form__manual textarea { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--ink); color: var(--text); font-family: inherit; font-size: 12px; }
+.mcp-server-form__import { display: grid; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.mcp-server-form__import button, .mcp-server-form__headers-head button, .mcp-server-form__header-row button { justify-self: start; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font: 11px var(--mono); }
+.mcp-server-form__import button:hover, .mcp-server-form__headers-head button:hover, .mcp-server-form__header-row button:hover { border-color: var(--line-strong); color: var(--text); }
+.mcp-server-form__headers { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgb(var(--orin-ink-rgb) / .18); }
+.mcp-server-form__headers-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--faint); font: 10px var(--mono); letter-spacing: .04em; }
+.mcp-server-form__header-row { display: grid; grid-template-columns: 1fr 1fr auto; align-items: end; gap: 8px; }

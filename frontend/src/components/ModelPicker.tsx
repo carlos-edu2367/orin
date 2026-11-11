@@ -13,6 +13,10 @@ function lacksToolSupport(model: ProviderModel): boolean {
   return model.capabilities.length > 0 && !model.capabilities.includes('tools')
 }
 
+function isChatCapableModel(model: ProviderModel): boolean {
+  return model.output_modalities.length === 0 || model.output_modalities.includes('text')
+}
+
 export type ModelPickerProps = {
   providers: ProviderName[]
   provider: ProviderName
@@ -77,14 +81,15 @@ export function ModelPicker(props: ModelPickerProps) {
     }
   }
 
-  const selected = useMemo(() => props.models.find((model) => model.model_id === props.modelId), [props.models, props.modelId])
+  const chatModels = useMemo(() => props.models.filter(isChatCapableModel), [props.models])
+  const selected = useMemo(() => chatModels.find((model) => model.model_id === props.modelId), [chatModels, props.modelId])
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase()
-    const ranked = [...props.models].sort((a, b) =>
+    const ranked = [...chatModels].sort((a, b) =>
       Number(lacksToolSupport(a)) - Number(lacksToolSupport(b)) || Number(b.is_favorite) - Number(a.is_favorite))
     if (!needle) return ranked.slice(0, 60)
     return ranked.filter((model) => `${model.display_name} ${model.model_id}`.toLowerCase().includes(needle)).slice(0, 60)
-  }, [props.models, query])
+  }, [chatModels, query])
 
   const panelMotion = reduced
     ? { initial: false as const, animate: { opacity: 1 }, exit: { opacity: 0 } }

@@ -106,3 +106,19 @@ def test_the_reminder_names_only_orin_tools() -> None:
     assert "`mcp_orin_ListFiles`" in text
     assert "did not run" in text
     assert "Nothing replaces it" in builtin_tool_reminder("finish", [])
+
+
+def test_a_refused_native_read_file_keeps_it_for_media() -> None:
+    from agentos.providers.antigravity_cli.stream import (
+        ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES,
+        RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS,
+    )
+
+    assert "read_file" in RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS
+    assert dict(ANTIGRAVITY_BUILTIN_TOOL_ALTERNATIVES)["read_file"] == ("read_file", "view_file")
+    text = builtin_tool_reminder("read_file", ["Read", "ViewFile"], prefix="mcp_orin_")
+    assert "does not exist here" not in text
+    assert "audio, video and image files" in text
+    assert "ABSOLUTE path" in text
+    assert "`mcp_orin_Read`, `mcp_orin_ViewFile`" in text
+    assert "did not run" in text

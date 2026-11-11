@@ -115,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     # It is a contract between the launcher and the children it spawns.
     internal = commands.add_parser("internal-service")
     internal.add_argument("service", choices=SERVICES)
+    commands.add_parser("internal-agy-media-gate")
 
     return parser
 
@@ -678,9 +679,13 @@ def _invoked_as_orin_code() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(argv if argv is not None else sys.argv[1:])
-    # The runtime re-executes sys.executable with `internal-service` (and `orin code` may start it with `start`): a
-    # frozen copy named orin-code must still run those as the launcher.
-    as_code = argv is None and _invoked_as_orin_code() and raw[:1] not in (["internal-service"], ["start"])
+    # The runtime re-executes sys.executable with `internal-service` or `internal-agy-media-gate`
+    # (and `orin code` may start it with `start`): a frozen copy named orin-code must still run those as the launcher.
+    as_code = argv is None and _invoked_as_orin_code() and raw[:1] not in (
+        ["internal-service"],
+        ["internal-agy-media-gate"],
+        ["start"],
+    )
     if raw[:1] == ["code"] or as_code:
         from agentos.cli_code.main import main as code_main
 
@@ -690,6 +695,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if getattr(arguments, "command", None) == "internal-service":
         return run_service(arguments.service)
+
+    if getattr(arguments, "command", None) == "internal-agy-media-gate":
+        from agentos.providers.antigravity_cli.media_gate import main as run_media_gate
+
+        return run_media_gate([])
 
     profile = runtime_profile()
     if arguments.version:

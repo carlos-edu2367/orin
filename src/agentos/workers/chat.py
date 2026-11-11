@@ -1637,9 +1637,13 @@ class ChatWorker:
         )
 
     def _media_client_for_turn(self, turn: dict[str, object]):
+        from agentos.agentic.cli_media_client import CliImageGenerationClient
         from agentos.agentic.media_client import MediaGenerationClient
+        from agentos.providers.cli_registry import _is_valid_risk_acknowledgement
 
-        def build(target_provider: str | None = None, *, transport=None) -> MediaGenerationClient | None:
+        def build(
+            target_provider: str | None = None, *, transport=None
+        ) -> MediaGenerationClient | CliImageGenerationClient | None:
             provider = str(target_provider or turn.get("provider") or "").strip().lower()
             user_id = str(turn.get("user_id") or "").strip()
             if not provider or not user_id:
@@ -1650,6 +1654,7 @@ class ChatWorker:
                         provider_configurations.c.base_url,
                         provider_configurations.c.enabled,
                         provider_configurations.c.key_cooldown_seconds,
+                        provider_configurations.c.risk_acknowledged_at,
                     )
                     .where(
                         provider_configurations.c.user_id == user_id,
@@ -1658,6 +1663,12 @@ class ChatWorker:
                 ).mappings().first()
             if credential is None or not credential["enabled"]:
                 return None
+            if provider in {"openai-codex", "google-antigravity"}:
+                if provider == "google-antigravity" and not _is_valid_risk_acknowledgement(
+                    credential.get("risk_acknowledged_at")
+                ):
+                    return None
+                return CliImageGenerationClient(provider=provider)
             key_pool = PostgresProviderApiKeyAdapter(
                 self.store._engine,
                 cipher=ProviderSecretCipher.from_environment(required=True),
