@@ -60,3 +60,21 @@ def test_malformed_arguments_never_raise():
     ledger.note_tool_outcome("run_command", "not a mapping", "succeeded")  # type: ignore[arg-type]
 
     assert ledger.mechanical_memories("project") == ()
+
+
+def test_ephemeral_polling_loops_and_temp_scripts_are_ignored():
+    ledger = TurnLearningLedger()
+    ledger.note_tool_outcome(
+        "run_command",
+        {"command": "for i in 1 2 3; do gh run view 123; sleep 30; done"},
+        "failed",
+    )
+    ledger.note_tool_outcome(
+        "run_command",
+        {"command": "for i in 1 2 3; do gh run view 456; sleep 30; done"},
+        "succeeded",
+    )
+    ledger.note_tool_outcome("run_command", {"command": "psql -f .orin/tmp/q1.sql"}, "failed")
+    ledger.note_tool_outcome("run_command", {"command": "psql -f .orin/tmp/q2.sql"}, "succeeded")
+
+    assert ledger.mechanical_memories("project") == ()

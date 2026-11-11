@@ -145,7 +145,10 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
         )
     if has("remember"):
         recall = f" Use {t('recall')} when you suspect you dealt with something before." if has("recall") else ""
-        extras.append(f"- Save with {t('remember')} what stays true after this conversation: a correction from the user, a stated preference, an unwritten project convention.{recall}")
+        extras.append(
+            f"- Save with {t('remember')} what stays true after this conversation: a correction from the user, "
+            f"a stated preference (`scope=\"user\"`, `kind=\"preference\"`), or an unwritten project convention (`scope=\"project\"`).{recall}"
+        )
     if has("transcribe_pdf"):
         extras.append(f"- For a PDF whose text is enough, use {t('transcribe_pdf')}; read it visually only when layout, images or tables matter.")
     if extras:

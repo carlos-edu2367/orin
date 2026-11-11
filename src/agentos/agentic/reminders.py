@@ -15,6 +15,7 @@ from dataclasses import dataclass
 REMINDER_OPEN = "<system-reminder>"
 REMINDER_CLOSE = "</system-reminder>"
 MAX_REMINDER_CHARS = 10_000
+VOLATILE_REMINDER_CHARS = 40_000
 MAX_PENDING_REMINDERS = 32
 # W4-R9: monitor reminders may take at most half the queue and a fixed character budget per request.
 MONITOR_KIND = "monitor"
@@ -110,5 +111,5 @@ def render_reminders(items: Iterable[Reminder]) -> str:
 
 __all__ = [
     "MAX_MONITOR_REMINDERS", "MAX_REMINDER_CHARS", "MONITOR_CHAR_BUDGET", "MONITOR_KIND", "REMINDER_CLOSE", "REMINDER_OPEN",
-    "Reminder", "ReminderQueue", "render_reminders", "system_reminder",
+    "VOLATILE_REMINDER_CHARS", "Reminder", "ReminderQueue", "render_reminders", "system_reminder",
 ]

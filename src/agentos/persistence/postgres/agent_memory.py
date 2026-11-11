@@ -14,6 +14,7 @@ from uuid import uuid4
 from sqlalchemy import delete, inspect, insert, select, text, update
 from sqlalchemy.engine import Engine
 
+from agentos.agentic.learning import is_ephemeral_mechanical_fact
 from agentos.memory.security import validate_memory_content
 
 from .schema import agent_memories
@@ -252,21 +253,41 @@ class PostgresAgentMemoryStore:
         if limit <= 0:
             return []
         preference_slots = min(4, limit)
-        rows = [row for row in self._all() if row["superseded_by"] is None]
+        rows = [
+            row
+            for row in self._all()
+            if row["superseded_by"] is None
+            and not (row.get("source") == "mechanical" and is_ephemeral_mechanical_fact(str(row.get("fact") or "")))
+        ]
         preferences = sorted(
             (row for row in rows if row["kind"] == "preference"),
             key=lambda row: (float(row["confidence"] or 0.0), row["updated_at"]),
             reverse=True,
         )[:preference_slots]
         chosen = {str(row["memory_id"]): row for row in preferences}
+        if self._project_id and limit >= 4 and len(chosen) < preference_slots:
+            user_standing = sorted(
+                (
+                    row
+                    for row in rows
+                    if row.get("scope_type") == "user"
+                    and row.get("source") != "mechanical"
+                    and str(row["memory_id"]) not in chosen
+                ),
+                key=lambda row: (float(row["confidence"] or 0.0), row["updated_at"]),
+                reverse=True,
+            )[: preference_slots - len(chosen)]
+            for row in user_standing:
+                chosen[str(row["memory_id"])] = row
 
         wanted = _terms(task)
 
-        def score(row) -> tuple[int, int, float]:
+        def score(row) -> tuple[int, int, int, float]:
             haystack = _terms(str(row["fact"])) | {str(tag).lower() for tag in (row["tags"] or [])}
             return (
                 len(wanted & haystack),
                 1 if row["scope_type"] == "project" else 0,
+                0 if row.get("source") == "mechanical" else 1,
                 float(row["confidence"] or 0.0),
             )
 

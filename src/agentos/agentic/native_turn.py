@@ -49,7 +49,7 @@ from agentos.providers.cli_tools_mcp import (
 
 from . import phases, transcript
 from .lifecycle import HookEvent
-from .reminders import render_reminders, system_reminder
+from .reminders import VOLATILE_REMINDER_CHARS, render_reminders, system_reminder
 from .runtime import (
     CLOSING_INSTRUCTION,
     INTERRUPTED_TOOL_RESULT,
@@ -1888,7 +1888,7 @@ class NativeTurnRunner:
                 f"Ferramentas disponíveis agora: {published}."
             )
         volatile_text = (
-            system_reminder("\n\n".join(volatile_parts))
+            system_reminder("\n\n".join(volatile_parts), limit=VOLATILE_REMINDER_CHARS)
             if volatile_parts
             else ""
         )

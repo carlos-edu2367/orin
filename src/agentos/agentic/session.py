@@ -623,6 +623,7 @@ def build_system_prompt(
             "",
             "## Memória",
             "- Guarde com `remember` no momento em que aprende, não no fim: uma memória é o que continua verdadeiro depois que esta conversa acabar.",
+            "- Use `scope=\"user\"` para fatos pessoais, objetivos e preferências globais da pessoa (`kind=\"preference\"`), e `scope=\"project\"` para arquitetura, stack e convenções do projeto atual.",
             "- Guarde quando a pessoa corrige você (\"não, é assim\", \"prefiro X\"), quando ela declara como quer trabalhar, e quando você descobre uma convenção do projeto que não estava escrita em lugar nenhum.",
             "- Guarde também o que custou caro descobrir: um comando que só funciona de um jeito, uma armadilha que já te derrubou aqui.",
             "- Escreva a memória como uma frase completa e autoexplicativa, que faça sentido daqui a um mês sem esta conversa junto.",
@@ -6268,7 +6269,10 @@ class TurnSession:
         else:
             ledger = ()
         try:
-            entries = self.workspace.list_entries(depth=3)
+            entries = sorted(
+                self.workspace.list_entries(depth=3),
+                key=lambda item: (str(item["path"]).count("/"), str(item["path"]).startswith("."), str(item["path"])),
+            )
             lines = tuple(f"{item['kind'][:1]} {item['path']}" for item in entries)
             tree = lines[:60]
             missing_manifests = tuple(

@@ -95,3 +95,18 @@ def test_relevant_prefers_project_scope_over_global_on_a_tie():
     scoped.save("o build usa make aqui", kind="operational")
 
     assert scoped.relevant("build", limit=1)[0]["fact"] == "o build usa make aqui"
+
+
+def test_relevant_preserves_user_scope_standing_context_inside_a_project():
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    global_store = PostgresAgentMemoryStore(engine, "user:1")
+    global_store.save("Carlos gerencia 7 projetos ativos e metas Q4", kind="fact", confidence=1.0)
+    scoped = PostgresAgentMemoryStore(engine, "user:1", project_id="project:orin")
+    for fact in _UNRELATED_FACTS[:14]:
+        scoped.save(fact, kind="operational", confidence=0.7, source="mechanical")
+
+    facts = [row["fact"] for row in scoped.relevant("verifica o que ta rolando", limit=12)]
+
+    assert "Carlos gerencia 7 projetos ativos e metas Q4" in facts
+    assert len(facts) == 12

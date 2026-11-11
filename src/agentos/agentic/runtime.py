@@ -29,7 +29,7 @@ from .phases import DEFAULT_PHASE_BUDGETS, Phase, PhaseBudget, PhaseController
 from .lifecycle import HookEvent, LifecycleBus
 from .loop_settings import BudgetMeter
 from .tools.public_names import public_name as _public_tool_name
-from .reminders import ReminderQueue, render_reminders, system_reminder
+from .reminders import VOLATILE_REMINDER_CHARS, ReminderQueue, render_reminders, system_reminder
 from .retry import backoff_delay, is_retryable, retry_after_of, status_code_of
 from .compaction import (
     COMPACTION_HEADER,
@@ -2383,7 +2383,7 @@ class AgenticTurnRuntime:
                 position,
                 {
                     "role": "user",
-                    "content": system_reminder(self.first_user_context),
+                    "content": system_reminder(self.first_user_context, limit=VOLATILE_REMINDER_CHARS),
                     "_first_user_context": True,
                 },
             )

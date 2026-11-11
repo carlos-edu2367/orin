@@ -14,6 +14,7 @@ correction) needs a model to shape it into a sentence, which is a later phase.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Mapping
 
 
@@ -23,6 +24,42 @@ from typing import Mapping
 # differ, that is the whole lesson -- while "npm install" and "git status"
 # share nothing at any threshold below this.
 _SAME_PURPOSE_OVERLAP = 0.3
+_MAX_LEARNABLE_COMMAND_CHARS = 140
+_MAX_LEARNABLE_COMMAND_WORDS = 14
+_EPHEMERAL_COMMAND_RE = re.compile(
+    r"(?i)(?:"
+    r"\b(?:for\s+\w+\s+in|while\s+|until\s+|sleep\s+\d+|start-sleep|timeout\s+/t)\b"
+    r"|\bgh\s+(?:run|pr)\s+(?:view|watch|checks|list)\b"
+    r"|\b(?:python|python3|py)\s+-c\b"
+    r"|\bnode\s+-e\b"
+    r"|\.orin[/\\]tmp\b"
+    r"|[/\\]tmp[/\\]"
+    r"|\b(?:curl|wget)\s+https?://"
+    r")"
+)
+_BACKTICK_SPAN_RE = re.compile(r"`([^`]+)`")
+
+
+def _is_ephemeral_command(command: str) -> bool:
+    """Whether a shell command is an ad-hoc polling loop, temp script or one-off check."""
+    text = (command or "").strip()
+    if not text:
+        return True
+    if len(text) > _MAX_LEARNABLE_COMMAND_CHARS:
+        return True
+    if len(text.split()) > _MAX_LEARNABLE_COMMAND_WORDS:
+        return True
+    if "\n" in text or text.count(";") >= 3:
+        return True
+    return bool(_EPHEMERAL_COMMAND_RE.search(text))
+
+
+def is_ephemeral_mechanical_fact(fact: str) -> bool:
+    """Whether a stored mechanical memory was derived from an ephemeral shell command."""
+    spans = _BACKTICK_SPAN_RE.findall(fact or "")
+    if spans:
+        return any(_is_ephemeral_command(span) for span in spans)
+    return _is_ephemeral_command(fact or "")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +106,7 @@ class TurnLearningLedger:
         if name != "run_command":
             return
         command = _command_of(arguments)
-        if not command:
+        if not command or _is_ephemeral_command(command):
             return
         if status == "failed":
             if command not in self._failed_commands:
@@ -95,4 +132,4 @@ class TurnLearningLedger:
         )
 
 
-__all__ = ["LearnedMemory", "TurnLearningLedger"]
+__all__ = ["LearnedMemory", "TurnLearningLedger", "_is_ephemeral_command", "is_ephemeral_mechanical_fact"]
