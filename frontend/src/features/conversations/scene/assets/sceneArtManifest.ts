@@ -12,12 +12,12 @@ export interface SceneArtFrame {
   readonly s: number
 }
 
-export const SCENE_ART_ATLAS_SIZE = { w: 1400, h: 698 } as const
+export const SCENE_ART_ATLAS_SIZE = { w: 1400, h: 871 } as const
 
 export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
   "orin.ask": {
-    "x": 601,
-    "y": 182,
+    "x": 1163,
+    "y": 196,
     "w": 106,
     "h": 156,
     "ax": 49.5,
@@ -25,8 +25,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.dash": {
-    "x": 1055,
-    "y": 494,
+    "x": 980,
+    "y": 669,
     "w": 154,
     "h": 95,
     "ax": 81.0,
@@ -34,8 +34,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.happy": {
-    "x": 462,
-    "y": 494,
+    "x": 387,
+    "y": 669,
     "w": 104,
     "h": 124,
     "ax": 54.0,
@@ -43,8 +43,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.idle": {
-    "x": 946,
-    "y": 494,
+    "x": 871,
+    "y": 669,
     "w": 107,
     "h": 101,
     "ax": 53.0,
@@ -52,8 +52,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.move": {
-    "x": 799,
-    "y": 494,
+    "x": 724,
+    "y": 669,
     "w": 145,
     "h": 103,
     "ax": 76.0,
@@ -61,8 +61,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.scared": {
-    "x": 356,
-    "y": 494,
+    "x": 281,
+    "y": 669,
     "w": 104,
     "h": 129,
     "ax": 49.5,
@@ -70,8 +70,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.sleep": {
-    "x": 568,
-    "y": 494,
+    "x": 493,
+    "y": 669,
     "w": 116,
     "h": 112,
     "ax": 54.0,
@@ -79,8 +79,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.sparkle": {
-    "x": 686,
-    "y": 494,
+    "x": 611,
+    "y": 669,
     "w": 111,
     "h": 109,
     "ax": 49.0,
@@ -88,8 +88,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "orin.think": {
-    "x": 846,
-    "y": 182,
+    "x": 137,
+    "y": 363,
     "w": 113,
     "h": 153,
     "ax": 50.0,
@@ -97,8 +97,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.22
   },
   "p1.ask": {
-    "x": 864,
-    "y": 0,
+    "x": 101,
+    "y": 196,
     "w": 88,
     "h": 164,
     "ax": 41.0,
@@ -106,8 +106,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.desk": {
-    "x": 1241,
-    "y": 345,
+    "x": 1154,
+    "y": 521,
     "w": 151,
     "h": 139,
     "ax": 75.5,
@@ -115,8 +115,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.idle": {
-    "x": 1162,
-    "y": 345,
+    "x": 1075,
+    "y": 521,
     "w": 77,
     "h": 140,
     "ax": 38.5,
@@ -124,8 +124,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.laptop": {
-    "x": 150,
-    "y": 494,
+    "x": 75,
+    "y": 669,
     "w": 127,
     "h": 135,
     "ax": 64.0,
@@ -133,8 +133,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.relax": {
-    "x": 868,
-    "y": 345,
+    "x": 781,
+    "y": 521,
     "w": 120,
     "h": 143,
     "ax": 67.5,
@@ -142,8 +142,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.scared": {
-    "x": 961,
-    "y": 182,
+    "x": 252,
+    "y": 363,
     "w": 99,
     "h": 152,
     "ax": 55.0,
@@ -152,7 +152,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
   },
   "p1.seated": {
     "x": 79,
-    "y": 634,
+    "y": 807,
     "w": 74,
     "h": 63,
     "ax": 31.0,
@@ -160,8 +160,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.think": {
-    "x": 1236,
-    "y": 0,
+    "x": 473,
+    "y": 196,
     "w": 87,
     "h": 161,
     "ax": 43.5,
@@ -169,8 +169,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.wait": {
-    "x": 0,
-    "y": 494,
+    "x": 1307,
+    "y": 521,
     "w": 73,
     "h": 138,
     "ax": 39.5,
@@ -178,8 +178,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.walk1": {
-    "x": 75,
-    "y": 494,
+    "x": 0,
+    "y": 669,
     "w": 73,
     "h": 136,
     "ax": 35.5,
@@ -187,8 +187,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p1.walk2": {
-    "x": 279,
-    "y": 494,
+    "x": 204,
+    "y": 669,
     "w": 75,
     "h": 134,
     "ax": 32.0,
@@ -196,7 +196,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.ask": {
-    "x": 103,
+    "x": 456,
     "y": 0,
     "w": 112,
     "h": 175,
@@ -205,8 +205,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.desk": {
-    "x": 95,
-    "y": 182,
+    "x": 657,
+    "y": 196,
     "w": 156,
     "h": 160,
     "ax": 79.0,
@@ -214,8 +214,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.idle": {
-    "x": 1049,
-    "y": 0,
+    "x": 286,
+    "y": 196,
     "w": 89,
     "h": 163,
     "ax": 44.5,
@@ -223,8 +223,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.laptop": {
-    "x": 358,
-    "y": 182,
+    "x": 920,
+    "y": 196,
     "w": 138,
     "h": 158,
     "ax": 69.5,
@@ -232,7 +232,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.relax": {
-    "x": 440,
+    "x": 939,
     "y": 0,
     "w": 127,
     "h": 170,
@@ -241,7 +241,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.scared": {
-    "x": 318,
+    "x": 671,
     "y": 0,
     "w": 120,
     "h": 171,
@@ -250,8 +250,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.seated": {
-    "x": 1211,
-    "y": 494,
+    "x": 1136,
+    "y": 669,
     "w": 72,
     "h": 70,
     "ax": 36.0,
@@ -259,7 +259,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.think": {
-    "x": 0,
+    "x": 353,
     "y": 0,
     "w": 101,
     "h": 180,
@@ -268,7 +268,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.wait": {
-    "x": 217,
+    "x": 570,
     "y": 0,
     "w": 99,
     "h": 172,
@@ -277,8 +277,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.walk1": {
-    "x": 1140,
-    "y": 0,
+    "x": 377,
+    "y": 196,
     "w": 94,
     "h": 162,
     "ax": 50.0,
@@ -286,8 +286,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p2.walk2": {
-    "x": 0,
-    "y": 182,
+    "x": 562,
+    "y": 196,
     "w": 93,
     "h": 161,
     "ax": 45.5,
@@ -295,8 +295,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.ask": {
-    "x": 763,
-    "y": 0,
+    "x": 0,
+    "y": 196,
     "w": 99,
     "h": 165,
     "ax": 45.5,
@@ -304,8 +304,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.desk": {
-    "x": 170,
-    "y": 345,
+    "x": 83,
+    "y": 521,
     "w": 153,
     "h": 146,
     "ax": 77.5,
@@ -313,8 +313,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.idle": {
-    "x": 87,
-    "y": 345,
+    "x": 0,
+    "y": 521,
     "w": 81,
     "h": 146,
     "ax": 45.0,
@@ -322,8 +322,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.laptop": {
-    "x": 1062,
-    "y": 182,
+    "x": 353,
+    "y": 363,
     "w": 126,
     "h": 149,
     "ax": 64.0,
@@ -331,8 +331,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.relax": {
-    "x": 709,
-    "y": 182,
+    "x": 0,
+    "y": 363,
     "w": 135,
     "h": 156,
     "ax": 79.5,
@@ -340,8 +340,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.scared": {
-    "x": 498,
-    "y": 182,
+    "x": 1060,
+    "y": 196,
     "w": 101,
     "h": 158,
     "ax": 45.5,
@@ -349,8 +349,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.seated": {
-    "x": 1285,
-    "y": 494,
+    "x": 1278,
+    "y": 669,
     "w": 66,
     "h": 68,
     "ax": 32.0,
@@ -358,8 +358,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.think": {
-    "x": 954,
-    "y": 0,
+    "x": 191,
+    "y": 196,
     "w": 93,
     "h": 164,
     "ax": 45.0,
@@ -367,8 +367,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.wait": {
-    "x": 569,
-    "y": 345,
+    "x": 482,
+    "y": 521,
     "w": 77,
     "h": 145,
     "ax": 41.0,
@@ -376,8 +376,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.walk1": {
-    "x": 484,
-    "y": 345,
+    "x": 397,
+    "y": 521,
     "w": 83,
     "h": 145,
     "ax": 43.5,
@@ -385,8 +385,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p3.walk2": {
-    "x": 648,
-    "y": 345,
+    "x": 561,
+    "y": 521,
     "w": 85,
     "h": 144,
     "ax": 38.0,
@@ -394,7 +394,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.ask": {
-    "x": 662,
+    "x": 1256,
     "y": 0,
     "w": 99,
     "h": 166,
@@ -403,8 +403,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.desk": {
-    "x": 325,
-    "y": 345,
+    "x": 238,
+    "y": 521,
     "w": 157,
     "h": 146,
     "ax": 80.5,
@@ -412,8 +412,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.idle": {
-    "x": 1310,
-    "y": 182,
+    "x": 899,
+    "y": 363,
     "w": 88,
     "h": 147,
     "ax": 47.5,
@@ -421,8 +421,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.laptop": {
-    "x": 735,
-    "y": 345,
+    "x": 648,
+    "y": 521,
     "w": 131,
     "h": 144,
     "ax": 66.5,
@@ -430,8 +430,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.relax": {
-    "x": 1190,
-    "y": 182,
+    "x": 779,
+    "y": 363,
     "w": 118,
     "h": 148,
     "ax": 66.0,
@@ -439,8 +439,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.scared": {
-    "x": 253,
-    "y": 182,
+    "x": 815,
+    "y": 196,
     "w": 103,
     "h": 160,
     "ax": 58.0,
@@ -449,7 +449,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
   },
   "p4.seated": {
     "x": 0,
-    "y": 634,
+    "y": 807,
     "w": 77,
     "h": 64,
     "ax": 36.0,
@@ -457,7 +457,7 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.think": {
-    "x": 569,
+    "x": 1068,
     "y": 0,
     "w": 91,
     "h": 169,
@@ -466,8 +466,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.wait": {
-    "x": 990,
-    "y": 345,
+    "x": 903,
+    "y": 521,
     "w": 85,
     "h": 142,
     "ax": 49.0,
@@ -475,8 +475,8 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.walk1": {
-    "x": 0,
-    "y": 345,
+    "x": 989,
+    "y": 363,
     "w": 85,
     "h": 147,
     "ax": 43.0,
@@ -484,12 +484,111 @@ export const SCENE_ART_FRAMES: Readonly<Record<string, SceneArtFrame>> = {
     "s": 0.3
   },
   "p4.walk2": {
-    "x": 1077,
-    "y": 345,
+    "x": 990,
+    "y": 521,
     "w": 83,
     "h": 141,
     "ax": 37.5,
     "ay": 139.0,
+    "s": 0.3
+  },
+  "p5.ask": {
+    "x": 123,
+    "y": 0,
+    "w": 118,
+    "h": 185,
+    "ax": 55.5,
+    "ay": 184.0,
+    "s": 0.3
+  },
+  "p5.desk": {
+    "x": 630,
+    "y": 363,
+    "w": 147,
+    "h": 149,
+    "ax": 76.0,
+    "ay": 148.0,
+    "s": 0.3
+  },
+  "p5.idle": {
+    "x": 1076,
+    "y": 363,
+    "w": 81,
+    "h": 147,
+    "ax": 44.0,
+    "ay": 146.0,
+    "s": 0.3
+  },
+  "p5.laptop": {
+    "x": 481,
+    "y": 363,
+    "w": 147,
+    "h": 149,
+    "ax": 76.0,
+    "ay": 148.0,
+    "s": 0.3
+  },
+  "p5.relax": {
+    "x": 793,
+    "y": 0,
+    "w": 144,
+    "h": 171,
+    "ax": 84.5,
+    "ay": 171.0,
+    "s": 0.3
+  },
+  "p5.scared": {
+    "x": 243,
+    "y": 0,
+    "w": 108,
+    "h": 185,
+    "ax": 59.5,
+    "ay": 184.0,
+    "s": 0.3
+  },
+  "p5.seated": {
+    "x": 1210,
+    "y": 669,
+    "w": 66,
+    "h": 69,
+    "ax": 33.0,
+    "ay": 69.0,
+    "s": 0.3
+  },
+  "p5.think": {
+    "x": 0,
+    "y": 0,
+    "w": 121,
+    "h": 194,
+    "ax": 58.5,
+    "ay": 193.0,
+    "s": 0.3
+  },
+  "p5.wait": {
+    "x": 1161,
+    "y": 0,
+    "w": 93,
+    "h": 169,
+    "ax": 50.5,
+    "ay": 168.0,
+    "s": 0.3
+  },
+  "p5.walk1": {
+    "x": 1159,
+    "y": 363,
+    "w": 89,
+    "h": 147,
+    "ax": 50.5,
+    "ay": 146.0,
+    "s": 0.3
+  },
+  "p5.walk2": {
+    "x": 1250,
+    "y": 363,
+    "w": 84,
+    "h": 147,
+    "ax": 48.5,
+    "ay": 147.0,
     "s": 0.3
   }
 }

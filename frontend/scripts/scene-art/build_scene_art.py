@@ -136,6 +136,72 @@ def slice_sheet(sheet: Image.Image) -> list[dict]:
     return frames
 
 
+def slice_p5_sheet(sheet: Image.Image) -> list[dict]:
+    """Slices the 2-row Chibi Professional sheet (`source/p5.png`) into p5.* frames."""
+    rgba = np.asarray(sheet)
+    solid = rgba[..., 3] > 160
+    rows = find_bands(solid, axis=1, min_count=20, min_len=30)
+    if len(rows) != 2:
+        raise SystemExit(f"p5.png: expected 2 sprite rows, found {len(rows)}: {rows}")
+
+    row_poses = [
+        [None, "idle", "walk1", "walk2", "laptop"],
+        ["think", "ask", "scared", "wait", "relax"],
+    ]
+    p5_downscale = 0.45
+    frames: list[dict] = []
+    by_pose: dict[str, Image.Image] = {}
+
+    for r_idx, (y0, y1) in enumerate(rows):
+        cells = merge_close(find_bands(solid[y0:y1], axis=0, min_count=2, min_len=5), gap=5)
+        poses = row_poses[r_idx]
+        if len(cells) != len(poses):
+            raise SystemExit(f"p5 row {r_idx}: expected {len(poses)} cells, found {len(cells)}: {cells}")
+        for (x0, x1), pose in zip(cells, poses):
+            if pose is None:
+                continue
+            gx0, gx1 = max(0, x0 - 4), min(sheet.width, x1 + 4)
+            gy0, gy1 = max(0, y0 - 4), min(sheet.height, y1 + 4)
+            crop = sheet.crop((gx0, gy0, gx1, gy1))
+            a = np.asarray(crop)[..., 3].copy()
+            a[a < 40] = 0
+            bx0, by0, bx1, by1 = tight_box(a)
+            img = crop.crop((bx0, by0, bx1, by1))
+            arr = np.array(img)
+            arr[..., 3][arr[..., 3] < 40] = 0
+            img = Image.fromarray(arr)
+            target_w = max(1, round(img.width * p5_downscale))
+            target_h = max(1, round(img.height * p5_downscale))
+            img = img.resize((target_w, target_h), Image.LANCZOS)
+            arr = np.array(img)
+            arr[..., 3][arr[..., 3] < 40] = 0
+            img = Image.fromarray(arr)
+            by_pose[pose] = img
+            ax, ay = foot_anchor(arr[..., 3])
+            frames.append({"name": f"p5.{pose}", "img": img, "ax": ax, "ay": ay, "s": ART_SCALE})
+
+    # p5.desk shares the working-at-desk frame with p5.laptop
+    laptop_img = by_pose["laptop"]
+    laptop_arr = np.asarray(laptop_img)
+    lax, lay = foot_anchor(laptop_arr[..., 3])
+    frames.append({"name": "p5.desk", "img": laptop_img.copy(), "ax": lax, "ay": lay, "s": ART_SCALE})
+
+    # p5.seated is the head-and-shoulders cut anchored on the office chair backrest
+    idle_img = by_pose["idle"]
+    seated_crop = idle_img.crop((0, 0, idle_img.width, min(idle_img.height, 84)))
+    seated_w = max(1, round(seated_crop.width * 0.82))
+    seated_h = max(1, round(seated_crop.height * 0.82))
+    seated_img = seated_crop.resize((seated_w, seated_h), Image.LANCZOS)
+    frames.append({
+        "name": "p5.seated",
+        "img": seated_img,
+        "ax": round(seated_w / 2, 1),
+        "ay": float(seated_h),
+        "s": ART_SCALE,
+    })
+    return frames
+
+
 def seated_cut(sheet: Image.Image, row: int) -> dict:
     poly = SEATED_CUTS[row]
     xs = [p[0] for p in poly]
@@ -156,18 +222,54 @@ def seated_cut(sheet: Image.Image, row: int) -> dict:
     }
 
 
+def _label_blobs_4conn(mask: np.ndarray) -> list[tuple[slice, slice]]:
+    """Pure-numpy 4-connected component bounding-box finder (fallback when scipy is absent)."""
+    h, w = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
+    boxes: list[tuple[slice, slice]] = []
+    for y in range(h):
+        for x in range(w):
+            if not mask[y, x] or visited[y, x]:
+                continue
+            stack = [(y, x)]
+            visited[y, x] = True
+            min_y = max_y = y
+            min_x = max_x = x
+            while stack:
+                cy, cx = stack.pop()
+                if cy < min_y:
+                    min_y = cy
+                if cy > max_y:
+                    max_y = cy
+                if cx < min_x:
+                    min_x = cx
+                if cx > max_x:
+                    max_x = cx
+                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                    if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+            boxes.append((slice(min_y, max_y + 1), slice(min_x, max_x + 1)))
+    return boxes
+
+
 def find_rack_leds(office_src: Image.Image) -> list[list[float]]:
     """Small saturated blobs on the server racks, as logical [x, y, w, h] rects."""
-    from scipy import ndimage
-
     x0, y0, x1, y1 = RACK_BOX
     sub = np.asarray(office_src.convert("RGB")).astype(int)[y0:y1, x0:x1]
     hi, lo = sub.max(-1), sub.min(-1)
-    labels, _ = ndimage.label((hi > 150) & ((hi - lo) > 70))
+    mask = (hi > 150) & ((hi - lo) > 70)
+    try:
+        from scipy import ndimage  # type: ignore[import-not-found]
+
+        labels, _ = ndimage.label(mask)
+        objects = ndimage.find_objects(labels)
+    except ImportError:
+        objects = _label_blobs_4conn(mask)
     kx = SCENE_W / office_src.width
     ky = SCENE_H / office_src.height
     leds: list[list[float]] = []
-    for sl in ndimage.find_objects(labels):
+    for sl in objects:
         h = sl[0].stop - sl[0].start
         w = sl[1].stop - sl[1].start
         if h * w < 6 or h > 14 or w > 14:
@@ -255,6 +357,9 @@ def main() -> None:
     sheet = Image.open(SOURCE / "sprites.png").convert("RGBA")
 
     frames = slice_sheet(sheet)
+    p5_path = SOURCE / "p5.png"
+    if p5_path.exists():
+        frames.extend(slice_p5_sheet(Image.open(p5_path).convert("RGBA")))
     atlas = pack(frames)
 
     OUT.mkdir(parents=True, exist_ok=True)

@@ -148,7 +148,9 @@ describe('sceneArt', () => {
   it('gives simultaneous subagents different people and keeps each look when others arrive', () => {
     const anim = createAnimator()
     const orin = agent(MAIN_AGENT_ID, 'Orin')
-    const subs = [1, 2, 3, 4].map((i) => agent(`agent:sub-${i}`, `Agente ${i}`))
+    const subs = Array.from({ length: ART_PERSON_LOOKS }, (_, idx) =>
+      agent(`agent:sub-${idx + 1}`, `Agente ${idx + 1}`)
+    )
 
     syncAnimator(anim, scene([orin, subs[0]!, subs[1]!]), 0, { reducedMotion: true })
     const firstLooks = [anim.agents.get('agent:sub-1')!.look, anim.agents.get('agent:sub-2')!.look]

@@ -2,6 +2,7 @@ import charactersUrl from './assets/characters.webp'
 import officeUrl from './assets/office.webp'
 import { SCENE_ART_FRAMES, type SceneArtFrame } from './assets/sceneArtManifest'
 import { seatAt, type SceneSeat } from './sceneLayout'
+import { ART_PERSON_LOOKS } from './sceneSprites'
 import type { ScenePose, SceneStationId } from './sceneTypes'
 
 /**
@@ -116,7 +117,7 @@ function frameName(agent: ArtCharacter, seated: boolean, nowMs: number): string 
     if (agent.pose === 'work') return Math.floor(nowMs / 1400) % 3 === 2 ? 'orin.happy' : 'orin.idle'
     return ORIN_POSE_FRAMES[agent.pose]
   }
-  const person = `p${(Math.abs(agent.look) % 4) + 1}`
+  const person = `p${(Math.abs(agent.look) % ART_PERSON_LOOKS) + 1}`
   if (seated) return `${person}.seated`
   if (agent.pose === 'walk') return `${person}.${agent.frame % 2 === 0 ? 'walk1' : 'walk2'}`
   return `${person}.${PERSON_POSE_FRAMES[agent.pose]}`

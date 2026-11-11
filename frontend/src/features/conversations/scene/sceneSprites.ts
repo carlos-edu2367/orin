@@ -5,8 +5,8 @@ export type PixelMatrix = readonly string[]
 export const CHARACTER_W = 16
 export const CHARACTER_H = 24
 
-/** People drawn in the office art sprite sheet (`assets/characters.webp`, rows p1..p4). */
-export const ART_PERSON_LOOKS = 4
+/** People drawn in the office art sprite sheet (`assets/characters.webp`, rows p1..p5). */
+export const ART_PERSON_LOOKS = 5
 
 /**
  * Canonical pixel-art palette derived from Orin's design tokens.
