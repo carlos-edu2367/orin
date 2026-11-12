@@ -109,6 +109,7 @@ def find_forbidden_item_kind(
     raw_line: str | None = None,
     tool_name: str | None = None,
     allowed_media_root: Path | str | None = None,
+    media_policy: Any | None = None,
 ) -> str | None:
     matches = find_forbidden_item_kinds(
         forbidden,
@@ -116,6 +117,7 @@ def find_forbidden_item_kind(
         raw_line=raw_line,
         tool_name=tool_name,
         allowed_media_root=allowed_media_root,
+        media_policy=media_policy,
     )
     return matches[0] if matches else None
 
@@ -124,25 +126,23 @@ def _is_allowed_antigravity_media_step(
     tool_name: str,
     tool_info: Any,
     allowed_media_root: Path | str | None,
+    media_policy: Any | None = None,
+    state: str = "DONE",
 ) -> bool:
-    if tool_name != "read_file" or allowed_media_root is None:
-        return False
-    if not isinstance(tool_info, Mapping):
-        return False
-    raw_params = tool_info.get("parameters")
-    if not isinstance(raw_params, Mapping):
-        raw_params = tool_info.get("args")
-    if not isinstance(raw_params, Mapping):
-        return False
-    raw_path = (
-        raw_params.get("Path")
-        if "Path" in raw_params
-        else raw_params.get("AbsolutePath")
-    )
-    from agentos.providers.antigravity_cli.media_gate import is_allowed_media_path
+    """True when a native `read_file` step must not stop the agy process (see `native_read_file_tolerated`).
 
-    allowed, _ = is_allowed_media_path(raw_path, allowed_root=allowed_media_root)
-    return allowed
+    `media_policy` (a `MediaReadPolicy`: roots, unrestricted, the model's extensions) wins; a bare
+    `allowed_media_root` stands for one root and every media extension.
+    """
+    if tool_name != "read_file":
+        return False
+    from agentos.providers.antigravity_cli.media_gate import MediaReadPolicy
+    from agentos.providers.antigravity_cli.stream import native_read_file_tolerated
+
+    policy = media_policy
+    if policy is None and allowed_media_root is not None:
+        policy = MediaReadPolicy(roots=(str(allowed_media_root),))
+    return native_read_file_tolerated(tool_name, tool_info, state, policy)
 
 
 def find_forbidden_item_kinds(
@@ -152,6 +152,7 @@ def find_forbidden_item_kinds(
     raw_line: str | None = None,
     tool_name: str | None = None,
     allowed_media_root: Path | str | None = None,
+    media_policy: Any | None = None,
 ) -> list[str]:
     """Every forbidden kind/tool in the event, first match first (empty when there is none)."""
     if not forbidden:
@@ -212,7 +213,11 @@ def find_forbidden_item_kinds(
                         orin_tool_names.add(tname[len(prefix):].strip())
                         break
                 if not _is_allowed_antigravity_media_step(
-                    tname, tool_info, allowed_media_root
+                    tname,
+                    tool_info,
+                    allowed_media_root,
+                    media_policy,
+                    str(step_obj.get("state") or "").strip().upper(),
                 ):
                     candidates.append(tname)
                     if (
@@ -378,9 +383,11 @@ class NativeTurnHandle:
         on_waiting_slot: Callable[..., None] | None = None,
         process_cwd: Path | None = None,
         allowed_media_root: Path | None = None,
+        media_policy: Any | None = None,
     ) -> None:
         self._process_cwd = process_cwd
         self._allowed_media_root = allowed_media_root
+        self._media_policy = media_policy
         self._adapter: CliAgentAdapter = (
             adapter if adapter is not None else ClaudeCliAdapter()
         )
@@ -410,6 +417,8 @@ class NativeTurnHandle:
             self._parser, "allowed_media_root"
         ):
             self._parser.allowed_media_root = self._allowed_media_root
+        if self._media_policy is not None and hasattr(self._parser, "media_policy"):
+            self._parser.media_policy = self._media_policy
         self._tool_bytes: dict[str, int] = {}
         self._tool_names: dict[str, str] = {}
         self._had_visible_output = False
@@ -571,6 +580,7 @@ class NativeTurnHandle:
             raw=ev.raw if isinstance(ev.raw, Mapping) else None,
             tool_name=ev.tool_name,
             allowed_media_root=self._allowed_media_root,
+            media_policy=self._media_policy,
         )
         if bad_kinds:
             self._stop_for_forbidden(bad_kinds)
@@ -950,6 +960,7 @@ class NativeTurnHandle:
                 self._adapter.capabilities.forbidden_item_kinds,
                 raw_line=line,
                 allowed_media_root=self._allowed_media_root,
+                media_policy=self._media_policy,
             )
             if bad_line_kinds:
                 self._stop_for_forbidden(bad_line_kinds)
@@ -1248,12 +1259,39 @@ def start_native_turn_for_provider(
 
     effective_model = request.model or provider.model
     allowed_media_root: Path | None = None
+    media_policy: Any | None = None
+    media_additional_roots: tuple[Path, ...] = ()
+    media_unrestricted = False
     if getattr(adapter, "name", "") == "antigravity" and workspace_root is not None:
         from agentos.providers.antigravity_cli.command import (
-            is_antigravity_gemini_model,
+            antigravity_native_media_policy,
         )
 
-        if is_antigravity_gemini_model(effective_model):
+        # The folders the person added (`/add-dir`) and the unrestricted mode (`full_autonomy`) live on the
+        # tool set's workspace; the native read_file of the agy process follows the same reach, for media only.
+        for target_ts in (
+            getattr(request.executor, "toolset", None),
+            getattr(getattr(request.executor, "runtime", None), "toolset", None),
+            request.executor,
+        ):
+            ws_obj = getattr(target_ts, "workspace", None) if target_ts is not None else None
+            if ws_obj is None:
+                continue
+            raw_extra = getattr(ws_obj, "additional_roots", ())
+            media_additional_roots = tuple(
+                Path(item)
+                for item in (raw_extra if isinstance(raw_extra, (list, tuple)) else ())
+                if isinstance(item, (str, Path))
+            )
+            media_unrestricted = getattr(ws_obj, "unrestricted", False) is True
+            break
+        media_policy = antigravity_native_media_policy(
+            effective_model,
+            workspace_root,
+            additional_roots=media_additional_roots,
+            unrestricted=media_unrestricted,
+        )
+        if media_policy is not None:
             try:
                 allowed_media_root = workspace_root.resolve()
             except OSError:
@@ -1283,12 +1321,18 @@ def start_native_turn_for_provider(
         if callable(wire_fn):
             wiring_dir = run_cwd if uses_cwd_wiring else Path(tempfile.gettempdir())
             if workspace_root is not None:
+                wire_kwargs: dict[str, Any] = {
+                    "model": effective_model,
+                    "workspace_root": workspace_root,
+                }
+                if media_policy is not None:
+                    wire_kwargs["additional_roots"] = media_additional_roots
+                    wire_kwargs["unrestricted"] = media_unrestricted
                 try:
                     wiring = wire_fn(
                         bg_server.handle,
                         wiring_dir,
-                        model=effective_model,
-                        workspace_root=workspace_root,
+                        **wire_kwargs,
                     )
                 except TypeError:
                     wiring = wire_fn(
@@ -1487,6 +1531,7 @@ def start_native_turn_for_provider(
             on_waiting_slot=request.on_waiting_slot,
             process_cwd=process_cwd,
             allowed_media_root=allowed_media_root,
+            media_policy=media_policy,
         )
         wrapped_executor.handle = handle
         return handle

@@ -7,6 +7,7 @@ as well as via ``orin.exe internal-agy-media-gate`` in frozen PyInstaller builds
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,17 @@ ALLOWED_MEDIA_EXTENSIONS: frozenset[str] = (
 
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+_OUTSIDE_REASONS = frozenset(
+    {
+        "Path is outside the allowed workspace root.",
+        "Resolved path is outside the allowed workspace root.",
+    }
+)
+_ROOT_CONFIG_REASON_PREFIX = "Allowed workspace root"
+# agy's own conversation store holds the media of every conversation: it is never readable, not even
+# when the turn runs without restrictions (a tool image is handed over under `.orin/tool-media`).
+_FORBIDDEN_DIR_SEQUENCE: tuple[str, ...] = (".gemini", "antigravity-cli", "brain")
 
 
 def _strip_extended_prefix(path_str: str) -> str:
@@ -110,102 +122,201 @@ def _normalize_extensions(raw_extensions: Iterable[str] | None) -> frozenset[str
     return frozenset(normalized)
 
 
+def _parse_candidate(raw_path: object) -> tuple[str, Path | None, str]:
+    """Syntactic checks shared by every mode; returns ``(cleaned, candidate, reason)``."""
+    if not isinstance(raw_path, str):
+        return "", None, "Path parameter is missing or not a string."
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_path):
+        return "", None, "Path contains control characters."
+    cleaned_raw = raw_path.strip()
+    if not cleaned_raw:
+        return "", None, "Path is empty."
+
+    # Reject UNC and Windows device paths (`\\?\`, `\\.\`, `\\server\share`, `//server/share`).
+    if cleaned_raw.startswith(("\\\\", "//")):
+        return "", None, "UNC and device paths are not allowed."
+
+    # Reject Alternate Data Streams (`:` anywhere after an optional Windows drive letter).
+    after_drive = (
+        cleaned_raw[2:] if _DRIVE_PREFIX_RE.match(cleaned_raw) else cleaned_raw
+    )
+    if ":" in after_drive:
+        return "", None, "Alternate data streams are not allowed."
+
+    # Reject dot/dot-dot traversal segments and Windows trailing dot/space tricks in raw input.
+    raw_parts = [p for p in re.split(r"[\\/]+", after_drive) if p != ""]
+    for part in raw_parts:
+        if part in (".", ".."):
+            return "", None, "Relative path traversal segments are not allowed."
+        if part.endswith((" ", ".")):
+            return "", None, "Path segments may not end with a space or period."
+
+    candidate = Path(cleaned_raw)
+    if not candidate.is_absolute():
+        return "", None, "Path must be an absolute path inside the workspace."
+    if os.name == "nt":
+        if not candidate.drive or candidate.drive.startswith(("\\\\", "//")):
+            return "", None, "Path must include a local drive letter."
+    return cleaned_raw, candidate, ""
+
+
+def _in_forbidden_store(path: Path) -> bool:
+    lowered = [part.lower() for part in path.parts]
+    n = len(_FORBIDDEN_DIR_SEQUENCE)
+    return any(
+        tuple(lowered[i : i + n]) == _FORBIDDEN_DIR_SEQUENCE
+        for i in range(len(lowered) - n + 1)
+    )
+
+
+def _resolve_in_root(
+    cleaned_raw: str, candidate: Path, root_value: object
+) -> tuple[Path | None, str]:
+    """Resolve ``candidate`` strictly inside one root; ``(None, reason)`` when it is not."""
+    root_str = str(root_value).strip() if root_value is not None else ""
+    if not root_str or root_str.startswith(("\\\\", "//")):
+        return None, "Allowed workspace root is invalid."
+    root_path = Path(root_str)
+    if not root_path.is_absolute():
+        return None, "Allowed workspace root must be an absolute path."
+    if _is_reparse_or_symlink(root_path):
+        return None, "Allowed workspace root may not be a symlink or junction."
+
+    try:
+        root_resolved = Path(_strip_extended_prefix(str(root_path.resolve(strict=True))))
+    except OSError:
+        return None, "Allowed workspace root does not exist."
+    if not root_resolved.is_dir():
+        return None, "Allowed workspace root is not a directory."
+
+    # Check lexical containment before following the filesystem.
+    lexical_candidate = Path(_strip_extended_prefix(os.path.abspath(cleaned_raw)))
+    lexical_root = Path(_strip_extended_prefix(os.path.abspath(str(root_resolved))))
+    if not lexical_candidate.is_relative_to(lexical_root) or lexical_candidate == lexical_root:
+        return None, "Path is outside the allowed workspace root."
+
+    # Walk from lexical candidate up to lexical root to catch any symlink/junction before resolve().
+    cur = lexical_candidate
+    while True:
+        if _is_reparse_or_symlink(cur):
+            return None, "Symlinks and junctions are not allowed."
+        if cur == lexical_root or cur.parent == cur:
+            break
+        cur = cur.parent
+
+    try:
+        target = Path(_strip_extended_prefix(str(candidate.resolve(strict=True))))
+    except FileNotFoundError:
+        return None, "File does not exist."
+    except OSError:
+        return None, "Unable to resolve file path."
+
+    if not target.is_relative_to(root_resolved) or target == root_resolved:
+        return None, "Resolved path is outside the allowed workspace root."
+
+    # Verify no symlink/junction on resolved chain either.
+    cur_resolved = target
+    while True:
+        if _is_reparse_or_symlink(cur_resolved):
+            return None, "Symlinks and junctions are not allowed."
+        if cur_resolved == root_resolved or cur_resolved.parent == cur_resolved:
+            break
+        cur_resolved = cur_resolved.parent
+    return target, ""
+
+
+def _resolve_unrestricted(cleaned_raw: str, candidate: Path) -> tuple[Path | None, str]:
+    """Resolve ``candidate`` anywhere on a local drive (a turn running without restrictions).
+
+    No root bounds it, so what is left to refuse is a link anywhere in the chain (the resolved path must
+    equal the lexical one) and agy's own conversation store.
+    """
+    lexical = Path(_strip_extended_prefix(os.path.abspath(cleaned_raw)))
+    if _in_forbidden_store(lexical):
+        return None, "agy's conversation store is not readable."
+    if _is_reparse_or_symlink(lexical):
+        return None, "Symlinks and junctions are not allowed."
+    try:
+        target = Path(_strip_extended_prefix(str(candidate.resolve(strict=True))))
+    except FileNotFoundError:
+        return None, "File does not exist."
+    except OSError:
+        return None, "Unable to resolve file path."
+    if os.path.normcase(str(target)) != os.path.normcase(str(lexical)):
+        return None, "Symlinks and junctions are not allowed."
+    if _in_forbidden_store(target):
+        return None, "agy's conversation store is not readable."
+    return target, ""
+
+
+def _reason_priority(reason: str) -> int:
+    if reason in _OUTSIDE_REASONS:
+        return 1
+    if reason.startswith(_ROOT_CONFIG_REASON_PREFIX):
+        return 2
+    return 0
+
+
+def collect_media_roots(
+    allowed_root: object = None, allowed_roots: object = None
+) -> list[str]:
+    """The configured roots as strings: ``allowed_roots`` first, then the legacy single ``allowed_root``."""
+    roots: list[str] = []
+    if isinstance(allowed_roots, (list, tuple, set, frozenset)):
+        for item in allowed_roots:
+            if isinstance(item, (str, Path)) and str(item).strip():
+                text = str(item).strip()
+                if text not in roots:
+                    roots.append(text)
+    elif isinstance(allowed_roots, (str, Path)) and str(allowed_roots).strip():
+        roots.append(str(allowed_roots).strip())
+    if isinstance(allowed_root, (str, Path)) and str(allowed_root).strip():
+        legacy = str(allowed_root).strip()
+        if legacy not in roots:
+            roots.append(legacy)
+    return roots
+
+
 def is_allowed_media_path(
     raw_path: object,
     *,
-    allowed_root: str | Path | None,
+    allowed_root: str | Path | None = None,
+    allowed_roots: Iterable[str | Path] | None = None,
+    unrestricted: bool = False,
     allowed_extensions: Iterable[str] | None = None,
     max_bytes: int = DEFAULT_MAX_MEDIA_BYTES,
 ) -> tuple[bool, str]:
-    """Validate whether ``raw_path`` is an allowed media file inside ``allowed_root``."""
+    """Validate whether ``raw_path`` is an allowed media file inside one of the allowed roots.
+
+    ``allowed_root`` (a single root) stays for configurations written before ``allowed_roots`` existed.
+    ``unrestricted`` lifts only the root bound: the extension, size, absolute-path, UNC/device-path and
+    link checks all still apply.
+    """
     try:
-        if not isinstance(raw_path, str):
-            return False, "Path parameter is missing or not a string."
-        if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_path):
-            return False, "Path contains control characters."
-        cleaned_raw = raw_path.strip()
-        if not cleaned_raw:
-            return False, "Path is empty."
+        cleaned_raw, candidate, reason = _parse_candidate(raw_path)
+        if candidate is None:
+            return False, reason
 
-        # Reject UNC and Windows device paths (`\\?\`, `\\.\`, `\\server\share`, `//server/share`).
-        if cleaned_raw.startswith(("\\\\", "//")):
-            return False, "UNC and device paths are not allowed."
-
-        # Reject Alternate Data Streams (`:` anywhere after an optional Windows drive letter).
-        after_drive = (
-            cleaned_raw[2:]
-            if _DRIVE_PREFIX_RE.match(cleaned_raw)
-            else cleaned_raw
-        )
-        if ":" in after_drive:
-            return False, "Alternate data streams are not allowed."
-
-        # Reject dot/dot-dot traversal segments and Windows trailing dot/space tricks in raw input.
-        raw_parts = [p for p in re.split(r"[\\/]+", after_drive) if p != ""]
-        for part in raw_parts:
-            if part in (".", ".."):
-                return False, "Relative path traversal segments are not allowed."
-            if part.endswith((" ", ".")):
-                return False, "Path segments may not end with a space or period."
-
-        candidate = Path(cleaned_raw)
-        if not candidate.is_absolute():
-            return False, "Path must be an absolute path inside the workspace."
-        if os.name == "nt":
-            if not candidate.drive or candidate.drive.startswith(("\\\\", "//")):
-                return False, "Path must include a local drive letter."
-
-        if allowed_root is None:
-            return False, "Allowed workspace root is not configured."
-        root_str = str(allowed_root).strip()
-        if not root_str or root_str.startswith(("\\\\", "//")):
-            return False, "Allowed workspace root is invalid."
-        root_path = Path(root_str)
-        if not root_path.is_absolute():
-            return False, "Allowed workspace root must be an absolute path."
-        if _is_reparse_or_symlink(root_path):
-            return False, "Allowed workspace root may not be a symlink or junction."
-
-        try:
-            root_resolved = Path(_strip_extended_prefix(str(root_path.resolve(strict=True))))
-        except OSError:
-            return False, "Allowed workspace root does not exist."
-        if not root_resolved.is_dir():
-            return False, "Allowed workspace root is not a directory."
-
-        # Check lexical containment before following the filesystem.
-        lexical_candidate = Path(_strip_extended_prefix(os.path.abspath(cleaned_raw)))
-        lexical_root = Path(_strip_extended_prefix(os.path.abspath(str(root_resolved))))
-        if not lexical_candidate.is_relative_to(lexical_root) or lexical_candidate == lexical_root:
-            return False, "Path is outside the allowed workspace root."
-
-        # Walk from lexical candidate up to lexical root to catch any symlink/junction before resolve().
-        cur = lexical_candidate
-        while True:
-            if _is_reparse_or_symlink(cur):
-                return False, "Symlinks and junctions are not allowed."
-            if cur == lexical_root or cur.parent == cur:
-                break
-            cur = cur.parent
-
-        try:
-            target = Path(_strip_extended_prefix(str(candidate.resolve(strict=True))))
-        except FileNotFoundError:
-            return False, "File does not exist."
-        except OSError:
-            return False, "Unable to resolve file path."
-
-        if not target.is_relative_to(root_resolved) or target == root_resolved:
-            return False, "Resolved path is outside the allowed workspace root."
-
-        # Verify no symlink/junction on resolved chain either.
-        cur_resolved = target
-        while True:
-            if _is_reparse_or_symlink(cur_resolved):
-                return False, "Symlinks and junctions are not allowed."
-            if cur_resolved == root_resolved or cur_resolved.parent == cur_resolved:
-                break
-            cur_resolved = cur_resolved.parent
+        target: Path | None
+        if unrestricted:
+            target, reason = _resolve_unrestricted(cleaned_raw, candidate)
+        else:
+            roots = collect_media_roots(allowed_root, allowed_roots)
+            if not roots:
+                return False, "Allowed workspace root is not configured."
+            target = None
+            reason = ""
+            best_priority = 99
+            for root_value in roots:
+                found, why = _resolve_in_root(cleaned_raw, candidate, root_value)
+                if found is not None:
+                    target = found
+                    break
+                priority = _reason_priority(why)
+                if priority < best_priority:
+                    best_priority, reason = priority, why
+        if target is None:
+            return False, reason
 
         exts = _normalize_extensions(allowed_extensions)
         if not exts:
@@ -214,8 +325,9 @@ def is_allowed_media_path(
         if not ext or ext not in exts or candidate.suffix.lower() != ext:
             return (
                 False,
-                f"Extension {ext or '<none>'} is not allowed by native read_file; "
-                "use Orin's MCP tools for text and code files.",
+                f"Extension {ext or '<none>'} is not allowed by native read_file for this model; "
+                "use Orin's MCP tools for text, code and documents "
+                "(native read_file is only for images, and for audio/video on models that hear them).",
             )
 
         try:
@@ -234,6 +346,25 @@ def is_allowed_media_path(
         return True, ""
     except Exception:
         return False, "Media gate validation failed."
+
+
+@dataclass(frozen=True)
+class MediaReadPolicy:
+    """What the native ``read_file`` of one agy process may open: the same rules the hook applies."""
+
+    roots: tuple[str, ...] = ()
+    unrestricted: bool = False
+    extensions: frozenset[str] = ALLOWED_MEDIA_EXTENSIONS
+    max_bytes: int = DEFAULT_MAX_MEDIA_BYTES
+
+    def check(self, raw_path: object) -> tuple[bool, str]:
+        return is_allowed_media_path(
+            raw_path,
+            allowed_roots=self.roots,
+            unrestricted=self.unrestricted,
+            allowed_extensions=self.extensions,
+            max_bytes=self.max_bytes,
+        )
 
 
 def decide(payload: Any, config: Any) -> dict[str, str]:
@@ -260,7 +391,15 @@ def decide(payload: Any, config: Any) -> dict[str, str]:
             return {"decision": "deny", "reason": "Missing toolCall.args in hook payload."}
 
         raw_path = args.get("Path") if "Path" in args else args.get("AbsolutePath")
-        allowed_root = config.get("allowed_root")
+        raw_roots = config.get("allowed_roots")
+        if raw_roots is not None and (
+            not isinstance(raw_roots, (list, tuple))
+            or not all(isinstance(item, str) for item in raw_roots)
+        ):
+            return {"decision": "deny", "reason": "Invalid allowed_roots configuration."}
+        raw_unrestricted = config.get("unrestricted", False)
+        if not isinstance(raw_unrestricted, bool):
+            return {"decision": "deny", "reason": "Invalid unrestricted configuration."}
         raw_exts = config.get("allowed_extensions")
         if raw_exts is not None and (
             not isinstance(raw_exts, Iterable) or isinstance(raw_exts, (str, bytes))
@@ -273,7 +412,9 @@ def decide(payload: Any, config: Any) -> dict[str, str]:
 
         allowed, reason = is_allowed_media_path(
             raw_path,
-            allowed_root=allowed_root,
+            allowed_root=config.get("allowed_root"),
+            allowed_roots=raw_roots,
+            unrestricted=raw_unrestricted,
             allowed_extensions=raw_exts,
             max_bytes=max_bytes,
         )

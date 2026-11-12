@@ -59,10 +59,12 @@ class AntigravityCliAdapter:
     capabilities: CliCapabilities = CliCapabilities(
         native_tool_loop=True,
         tool_list_changed=False,
-        # agy forwards an image block of an MCP tool result to the model
-        # (it offloads the bytes to a file and attaches them), so Orin's
-        # view_file can hand Gemini and Claude the picture itself.
+        # agy 1.5.6 attaches an image block of an MCP tool result to the model only up to ~10 KB; a larger
+        # one is saved under its brain folder and the model gets just the path. The block is still sent (it
+        # works for small images), and `offload_tool_images` has Orin also save every tool image in the
+        # workspace and name the file, so the model opens it with the native `read_file`.
         images_in_tool_results=True,
+        offload_tool_images=True,
         persistent_stdin=True,
         reports_tool_inventory=True,
         forbidden_item_kinds=FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS,
@@ -138,6 +140,8 @@ class AntigravityCliAdapter:
         *,
         model: str | None = None,
         workspace_root: Path | str | None = None,
+        additional_roots: Sequence[Path | str] = (),
+        unrestricted: bool = False,
     ) -> ToolServerWiring:
         server_name = getattr(handle, "server_name", "orin") or "orin"
         return wire_antigravity_tool_server(
@@ -146,6 +150,8 @@ class AntigravityCliAdapter:
             server_name=server_name,
             model=model,
             workspace_root=workspace_root,
+            additional_roots=additional_roots,
+            unrestricted=unrestricted,
         )
 
     def wire_no_tools(
@@ -204,9 +210,12 @@ class AntigravityCliAdapter:
         *,
         model: str = "",
         allowed_media_root: Path | str | None = None,
+        media_policy: Any | None = None,
     ) -> CliStreamTranslator:
         return AntigravityStreamTranslator(
-            model=model, allowed_media_root=allowed_media_root
+            model=model,
+            allowed_media_root=allowed_media_root,
+            media_policy=media_policy,
         )
 
     def classify_error(

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from agentos.providers.antigravity_cli.media_gate import is_allowed_media_path
+from agentos.providers.antigravity_cli.media_gate import MediaReadPolicy
 from agentos.providers.cli_adapter import (
     CliEvent,
     CliEventKind,
@@ -157,6 +157,40 @@ _ORIN_TOOL_PREFIXES: tuple[str, ...] = (
 )
 
 
+def native_read_file_tolerated(
+    tool_name: str,
+    tool_info: Any,
+    state: str,
+    policy: MediaReadPolicy | None,
+) -> bool:
+    """True when a native `read_file` step is not a reason to stop the agy process.
+
+    With the media gate on (`policy`), the PreToolUse hook decides before anything is read: a call it
+    denies still shows up as a step, first ACTIVE, then ERROR with the hook's message, and the model must
+    get that message to correct itself. So only a step that COMPLETED (`DONE`) on a path outside the
+    policy is a breach, and that still stops the process (defense in depth). Without a policy (the gate is
+    off for this model) every `read_file` stays forbidden, as before.
+    """
+    if tool_name != "read_file" or policy is None:
+        return False
+    if state and state != "DONE":
+        return True
+    if not isinstance(tool_info, Mapping):
+        return False
+    raw_params = tool_info.get("parameters")
+    if not isinstance(raw_params, Mapping):
+        raw_params = tool_info.get("args")
+    if not isinstance(raw_params, Mapping):
+        return False
+    raw_path = (
+        raw_params.get("Path")
+        if "Path" in raw_params
+        else raw_params.get("AbsolutePath")
+    )
+    allowed, _ = policy.check(raw_path)
+    return allowed
+
+
 def _non_neg_int(mapping: Mapping[str, Any], *keys: str) -> int:
     for key in keys:
         val = mapping.get(key)
@@ -203,11 +237,13 @@ class AntigravityStreamTranslator:
         *,
         model: str = "",
         allowed_media_root: Path | str | None = None,
+        media_policy: MediaReadPolicy | None = None,
     ) -> None:
         self._model: str = model.strip() if isinstance(model, str) else ""
         self.allowed_media_root: Path | None = (
             Path(allowed_media_root) if allowed_media_root is not None else None
         )
+        self.media_policy: MediaReadPolicy | None = media_policy
         self.init: CliInit | None = None
         self.result: CliResult | None = None
         self.rate_limit: RateLimitState | None = None
@@ -333,28 +369,22 @@ class AntigravityStreamTranslator:
 
         return CliUsage()
 
+    def _effective_media_policy(self) -> MediaReadPolicy | None:
+        if self.media_policy is not None:
+            return self.media_policy
+        if self.allowed_media_root is not None:
+            return MediaReadPolicy(roots=(str(self.allowed_media_root),))
+        return None
+
     def _is_allowed_native_media_read(
         self,
         raw_tool_name: str,
         tool_info: Mapping[str, Any],
+        state: str = "DONE",
     ) -> bool:
-        if raw_tool_name != "read_file" or self.allowed_media_root is None:
-            return False
-        raw_params = tool_info.get("parameters")
-        if not isinstance(raw_params, Mapping):
-            raw_params = tool_info.get("args")
-        if not isinstance(raw_params, Mapping):
-            return False
-        raw_path = (
-            raw_params.get("Path")
-            if "Path" in raw_params
-            else raw_params.get("AbsolutePath")
+        return native_read_file_tolerated(
+            raw_tool_name, tool_info, state, self._effective_media_policy()
         )
-        allowed, _ = is_allowed_media_path(
-            raw_path,
-            allowed_root=self.allowed_media_root,
-        )
-        return allowed
 
     def feed_line(self, line: str) -> list[CliEvent]:
         if not isinstance(line, str):
@@ -551,7 +581,7 @@ class AntigravityStreamTranslator:
                 canonical_name = _strip_orin_prefix(raw_tool_name)
                 if canonical_name is None:
                     if self._is_allowed_native_media_read(
-                        raw_tool_name, tool_info
+                        raw_tool_name, tool_info, state
                     ):
                         return []
                     bad_name = (
@@ -733,4 +763,5 @@ __all__ = [
     "AntigravityStreamTranslator",
     "FORBIDDEN_ANTIGRAVITY_BUILTIN_TOOLS",
     "RECOVERABLE_ANTIGRAVITY_BUILTIN_TOOLS",
+    "native_read_file_tolerated",
 ]
