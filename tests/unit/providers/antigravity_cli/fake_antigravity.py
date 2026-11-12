@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 import urllib.request
@@ -285,6 +286,67 @@ def main() -> int:
                         "conversation_id": conv_id,
                         "status": "SUCCESS",
                         "response": "No background tasks are currently running.",
+                        "duration_seconds": 0.1,
+                        "num_turns": turn_idx,
+                        "usage": {"input_tokens": 10, "output_tokens": 1, "thinking_tokens": 0,
+                                  "cache_read_tokens": 0, "total_tokens": 11},
+                    },
+                }
+            )
+            continue
+
+        native_read = re.search(r"NATIVE_READ_(DENIED|DONE)=(\S+)", prompt_text)
+        if native_read is not None:
+            # A native read_file: `DENIED` is what agy emits when the PreToolUse hook refuses the call
+            # (ACTIVE, then ERROR with the hook's message) and the model carries on; `DONE` is a read
+            # that really completed.
+            denied = native_read.group(1) == "DENIED"
+            info: dict[str, Any] = {
+                "name": "read_file",
+                "parameters": {"Path": native_read.group(2)},
+            }
+            _emit(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": conv_id,
+                        "step_index": step_idx,
+                        "state": "ACTIVE",
+                        "step_type": "tool",
+                        "tool_name": "read_file",
+                        "tool_info": info,
+                    },
+                }
+            )
+            if denied:
+                info = {
+                    **info,
+                    "error": {
+                        "type": "TOOL_ERROR",
+                        "message": "tool call denied by pre-tool hook: Extension .txt is not allowed",
+                    },
+                }
+            _emit(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": conv_id,
+                        "step_index": step_idx,
+                        "state": "ERROR" if denied else "DONE",
+                        "step_type": "tool",
+                        "tool_name": "read_file",
+                        "tool_info": info,
+                    },
+                }
+            )
+            step_idx += 1
+            _emit(
+                {
+                    "event": "result",
+                    "result": {
+                        "conversation_id": conv_id,
+                        "status": "SUCCESS",
+                        "response": "carried on after read_file",
                         "duration_seconds": 0.1,
                         "num_turns": turn_idx,
                         "usage": {"input_tokens": 10, "output_tokens": 1, "thinking_tokens": 0,

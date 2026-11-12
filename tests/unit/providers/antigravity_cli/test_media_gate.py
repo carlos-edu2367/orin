@@ -356,7 +356,7 @@ def test_frozen_vs_dev_hook_command_and_launcher_subcommand_dispatch(
     }
 
 
-def test_wiring_gemini_enables_media_gate_while_claude_stays_byte_for_byte_unchanged(
+def test_wiring_enables_media_gate_per_model_and_text_only_stays_byte_for_byte_unchanged(
     tmp_path: Path,
 ) -> None:
     handle = FakeToolServerHandle()
@@ -371,14 +371,14 @@ def test_wiring_gemini_enables_media_gate_while_claude_stays_byte_for_byte_uncha
         handle, base_dir, server_name="orin", system_prompt_file=sys_file
     )
 
-    # 2. Claude model with workspace_root -> must be byte-for-byte identical to baseline!
-    claude_dir = tmp_path / "agy_claude"
+    # 2. Text-only model with workspace_root -> must be byte-for-byte identical to baseline!
+    claude_dir = tmp_path / "agy_text_only"
     claude_wiring = wire_antigravity_tool_server(
         handle,
         claude_dir,
         server_name="orin",
         system_prompt_file=sys_file,
-        model="claude-sonnet-5-5-low",
+        model="gpt-oss-120b-medium",
         workspace_root=ws_root,
     )
     assert len(claude_wiring.files) == 3
@@ -442,6 +442,8 @@ def test_wiring_gemini_enables_media_gate_while_claude_stays_byte_for_byte_uncha
 
     gate_data = json.loads(gate_json.read_text(encoding="utf-8"))
     assert gate_data["allowed_root"] == str(ws_root.resolve())
+    assert gate_data["allowed_roots"] == [str(ws_root.resolve())]
+    assert gate_data["unrestricted"] is False
     assert set(gate_data["allowed_extensions"]) == set(ALLOWED_MEDIA_EXTENSIONS)
     assert gate_data["max_bytes"] == DEFAULT_MAX_MEDIA_BYTES
 

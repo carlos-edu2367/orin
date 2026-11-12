@@ -230,6 +230,10 @@ class CliCapabilities:
     recoverable_builtin_tools: frozenset[str] = frozenset()
     # (built-in tool, Orin tools that do that job), named in the note the resumed turn reads.
     builtin_tool_alternatives: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    # The CLI drops most images a tool returns (agy 1.5.6: above ~10 KB the model gets only a path in the
+    # CLI's own store). When set, Orin saves each tool image in the workspace (`.orin/tool-media`) and names
+    # the file in the tool result, so the model can open it with the CLI's native file reader.
+    offload_tool_images: bool = False
 
 
 AdapterCapabilities = CliCapabilities

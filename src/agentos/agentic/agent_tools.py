@@ -216,6 +216,7 @@ class AgentToolset(
         policy: object | None = None,
         model_sees_images: bool = False,
         visual_reader: object | None = None,
+        cli_native_media: bool = False, native_media_hears: bool = False, media_transcriber_factory: Callable[[], object | None] | None = None,
         browser_capability: str = "interact",
         mcp_provider: object | None = None,
         mcp_service: object | None = None,
@@ -311,6 +312,8 @@ class AgentToolset(
         self.memory = memory
         self.model_sees_images = bool(model_sees_images)
         self._visual_reader = visual_reader
+        self.cli_native_media, self.native_media_hears = bool(cli_native_media), bool(native_media_hears)  # see files/read.py
+        self._media_transcriber_factory = media_transcriber_factory
         self._delegate = delegate
         self._delegate_batch = delegate_batch
         self._create_agent = create_agent

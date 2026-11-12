@@ -14,7 +14,7 @@ import re
 import shutil
 from uuid import uuid4
 
-from .media import MAX_UPLOAD_BYTES, UploadRejected, classify, safe_filename
+from .media import MAX_MEDIA_UPLOAD_BYTES, MAX_UPLOAD_BYTES, MEDIA_KINDS, UploadRejected, classify, safe_filename
 
 _UPLOAD_ID = re.compile(r"^upl_[0-9a-f]{32}$")
 _OWNER = re.compile(r"[^A-Za-z0-9._-]")
@@ -31,9 +31,14 @@ class StagedUpload:
 
 
 class UploadStaging:
-    def __init__(self, root: Path | str, *, max_bytes: int = MAX_UPLOAD_BYTES, clock=None) -> None:
+    def __init__(
+        self, root: Path | str, *, max_bytes: int = MAX_UPLOAD_BYTES,
+        max_media_bytes: int = MAX_MEDIA_UPLOAD_BYTES, clock=None,
+    ) -> None:
         self._root = Path(root)
         self._max_bytes = int(max_bytes)
+        # Audio and video have a limit of their own, which a small ``max_bytes`` does not lower.
+        self._max_media_bytes = max(int(max_media_bytes), self._max_bytes)
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def _owner_directory(self, user_id: str) -> Path:
@@ -41,12 +46,14 @@ class UploadStaging:
         return self._root / owner
 
     def store(self, user_id: str, filename: str, data: bytes) -> StagedUpload:
-        if len(data) > self._max_bytes:
+        if len(data) > self._max_media_bytes:
             raise UploadRejected("file exceeds the upload limit")
         if not data:
             raise UploadRejected("file is empty")
         name = safe_filename(filename)
         media_type, kind = classify(name, data)
+        if kind not in MEDIA_KINDS and len(data) > self._max_bytes:
+            raise UploadRejected("file exceeds the upload limit")
         upload_id = f"upl_{uuid4().hex}"
         directory = self._owner_directory(user_id) / upload_id
         directory.mkdir(parents=True, exist_ok=True)

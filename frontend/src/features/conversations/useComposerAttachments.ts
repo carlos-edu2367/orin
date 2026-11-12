@@ -5,6 +5,8 @@ import type { ComposerAttachment } from './AttachmentChips'
 
 function guessKind(file: File): ComposerAttachment['kind'] {
   if (file.type.startsWith('image/')) return 'image'
+  if (file.type.startsWith('audio/')) return 'audio'
+  if (file.type.startsWith('video/')) return 'video'
   if (file.type === 'application/pdf') return 'pdf'
   if (file.type.includes('officedocument')) return 'office'
   return 'text'

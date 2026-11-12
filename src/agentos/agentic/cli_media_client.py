@@ -230,6 +230,10 @@ def has_known_image_type(*, has_magic: bool, is_known_suffix: bool) -> bool:
 class CliImageGenerationClient:
     """Executes headless image generation through subscription CLIs (Codex and Antigravity)."""
 
+    # What the process is doing, for the messages of `_run_streaming_process` (a subclass changes them).
+    _ACTIVITY_NOUN = "Geração de imagem"
+    _ACTIVITY_VERB = "gerar imagem"
+
     def __init__(
         self,
         provider: str,
@@ -457,13 +461,13 @@ class CliImageGenerationClient:
                 if callable(self._cancel_check) and self._cancel_check():
                     kill_process_tree(proc)
                     raise MediaGenerationError(
-                        f"Geração de imagem pelo {provider_label} cancelada."
+                        f"{self._ACTIVITY_NOUN} pelo {provider_label} cancelada."
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     kill_process_tree(proc)
                     raise MediaGenerationError(
-                        f"Tempo limite excedido ({int(self._timeout_seconds)}s) ao gerar imagem pelo {provider_label}."
+                        f"Tempo limite excedido ({int(self._timeout_seconds)}s) ao {self._ACTIVITY_VERB} pelo {provider_label}."
                     )
                 try:
                     line = stdout_queue.get(timeout=min(0.05, remaining))

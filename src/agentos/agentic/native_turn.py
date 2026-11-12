@@ -39,6 +39,7 @@ from agentos.providers.claude_cli.text_protocol import (
     TranscriptState,
     _extract_content_text_and_images,
 )
+from agentos.agentic.tool_media import save_tool_images, tool_media_note
 from agentos.agentic.tools.public_names import public_name as _public_tool_name
 from agentos.providers.cli_tools_mcp import (
     McpToolSpec,
@@ -482,9 +483,12 @@ class RuntimeToolExecutor(ToolExecutor):
         same_message_read_window: float = SAME_MESSAGE_READ_WINDOW_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         max_tool_call_seconds: int | float | None = None,
+        offload_tool_images: bool = False,
     ) -> None:
         self.runtime = runtime
         self.turn = turn
+        # The CLI drops most images a tool returns (agy): also save each one in the workspace and name the file.
+        self.offload_tool_images = bool(offload_tool_images)
         self._same_message_read_window = max(0.0, float(same_message_read_window))
         self._clock = clock
         self._allow_deferral = bool(allow_deferral)
@@ -549,6 +553,18 @@ class RuntimeToolExecutor(ToolExecutor):
 
     def close(self) -> None:
         self._closed.set()
+
+    def _offload_tool_images(self, call_id: str, images: Sequence[Mapping[str, str]]) -> str:
+        """Save a tool's images in the workspace; the note naming the files (empty when nothing was saved)."""
+        workspace = getattr(self.runtime.toolset, "workspace", None)
+        root = getattr(workspace, "root", None)
+        if not isinstance(root, (str, Path)):
+            return ""
+        try:
+            saved = save_tool_images(root, call_id, images)
+        except Exception:  # noqa: BLE001 - the inline image still goes to the model
+            return ""
+        return tool_media_note(saved)
 
     def is_known_tool(self, name: str) -> bool:
         raw_name = _strip_mcp_prefix(name)
@@ -1278,6 +1294,10 @@ class RuntimeToolExecutor(ToolExecutor):
             elif trailing_notes and idx == len(results) - 1:
                 text = f"{text}\n\n{trailing_notes}" if text else trailing_notes
             images = _convert_tool_images(res.get("images"))
+            if images and self.offload_tool_images:
+                note = self._offload_tool_images(str(res.get("id") or f"call_{idx}"), images)
+                if note:
+                    text = f"{text}\n\n{note}" if text else note
             out_results.append(
                 ToolCallResult(
                     text=text,
@@ -2203,6 +2223,7 @@ class NativeTurnRunner:
                 if adapter_caps is not None
                 else None
             ),
+            offload_tool_images=bool(getattr(adapter_caps, "offload_tool_images", False)),
         )
         self._executor = executor
         sink = _RunnerSink(self, executor)

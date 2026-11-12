@@ -1062,6 +1062,49 @@ class ChatWorker:
         # _model_calls_tools below for the same reason.
         return not names or "image" in names
 
+    def _model_hears_audio(self, turn: dict[str, object]) -> bool:
+        """True only when the catalog lists ``audio`` among the model's input modalities (unknown: it does not)."""
+        row = self._catalog_row_for(turn) or {}
+        modalities = row.get("input_modalities") or ()
+        if isinstance(modalities, str):
+            modalities = [item.strip() for item in modalities.split(",")]
+        return "audio" in {str(item).lower() for item in modalities}
+
+    def _media_transcriber_factory(self, turn: dict[str, object]) -> Callable[[], object | None]:
+        """Builds the audio/video transcriber (agy with Gemini Flash, on the subscription) when the person enabled it.
+
+        Cheap until called: it only checks that Antigravity is configured and acknowledged for this user.
+        """
+
+        def build() -> object | None:
+            from agentos.agentic.media_transcriber import AgyMediaTranscriber
+            from agentos.providers.cli_registry import _is_valid_risk_acknowledgement
+
+            user_id = str(turn.get("user_id") or "").strip()
+            if not user_id:
+                return None
+            try:
+                with self.store._engine.connect() as c:
+                    credential = c.execute(
+                        select(
+                            provider_configurations.c.enabled,
+                            provider_configurations.c.risk_acknowledged_at,
+                        ).where(
+                            provider_configurations.c.user_id == user_id,
+                            provider_configurations.c.provider == "google-antigravity",
+                        )
+                    ).mappings().first()
+            except Exception:
+                return None
+            if credential is None or not credential["enabled"]:
+                return None
+            if not _is_valid_risk_acknowledgement(credential.get("risk_acknowledged_at")):
+                return None
+            transcriber = AgyMediaTranscriber(cancel_check=lambda: bool(self._is_turn_cancelled(turn)))
+            return transcriber if transcriber.available() else None
+
+        return build
+
     def _model_calls_tools(self, turn: dict[str, object]) -> bool:
         row = self._catalog_row_for(turn) or {}
         capabilities = row.get("capabilities") or ()
@@ -1794,6 +1837,14 @@ class ChatWorker:
             browser=None,
             enable_subagents=self._enable_subagents,
             model_sees_images=self._model_sees_images(turn),
+            model_sees_images_for=lambda model_id, provider=None: self._model_sees_images(
+                {**turn, "model_id": model_id, "provider": provider or turn["provider"]}
+            ),
+            model_hears_audio=self._model_hears_audio(turn),
+            model_hears_audio_for=lambda model_id, provider=None: self._model_hears_audio(
+                {**turn, "model_id": model_id, "provider": provider or turn["provider"]}
+            ),
+            media_transcriber_factory=self._media_transcriber_factory(turn),
             model_calls_tools=self._model_calls_tools(turn),
             vision_reader_factory=self._vision_reader_factory(turn),
             child_model_ids=self._favorite_child_model_ids(turn),

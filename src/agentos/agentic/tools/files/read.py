@@ -30,6 +30,10 @@ from agentos.agentic.tools.spec import MAX_RESULT_CHARS_DEFAULT, ToolSpec, ToolI
 
 
 OFFICE_SUFFIXES = frozenset({".docx", ".xlsx", ".pptx"})
+AUDIO_VIDEO_SUFFIXES = frozenset({
+    ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".aac", ".flac",
+    ".mp4", ".webm", ".mov", ".mkv", ".m4v",
+})
 NOTEBOOK_SUFFIX = ".ipynb"
 MAX_NOTEBOOK_CELL_CHARS = 4_000
 MAX_NOTEBOOK_OUTPUT_CHARS = 2_000
@@ -409,7 +413,7 @@ class ReadTools:
             if suffix == NOTEBOOK_SUFFIX:
                 return self._read_notebook(path, target)
             media_type = media_type_for(target)
-            if media_type.startswith("image/") or suffix in OFFICE_SUFFIXES:
+            if media_type.startswith(("image/", "audio/", "video/")) or suffix in OFFICE_SUFFIXES or suffix in AUDIO_VIDEO_SUFFIXES:
                 result = self.view_file(path)
                 info = {"filePath": str(target), "originalSize": target.stat().st_size}
                 if media_type.startswith("image/"):
@@ -562,6 +566,8 @@ class ReadTools:
             raise AgentToolError(f"'{path}' is not a file in this workspace.")
         self._record_file_read(path)
         media_type = media_type_for(target)
+        if target.suffix.lower() in AUDIO_VIDEO_SUFFIXES or media_type.startswith(("audio/", "video/")):
+            return self._view_audio_video(path, target, media_type, question)
         if media_type.startswith("image/"):
             return self._view_image(path, target, media_type, question)
         try:
@@ -649,9 +655,16 @@ class ReadTools:
         except ImageTooLarge as error:
             raise AgentToolError(str(error)) from error
         if self.model_sees_images:
+            where = ""
+            if getattr(self, "cli_native_media", False):
+                # agy keeps most of a tool's image from the model: name the file so `read_file` can open it.
+                where = (
+                    f" Arquivo original: {target.resolve().as_posix()}. Se a imagem não aparecer, "
+                    "chame sua ferramenta nativa read_file com esse caminho absoluto."
+                )
             return {
                 "summary": f"Abriu {path}",
-                "content": f"A imagem '{path}' está anexada logo abaixo.",
+                "content": f"A imagem '{path}' está anexada logo abaixo.{where}",
                 "payload": {"path": path, "media_type": media_type, "label": path},
                 "images": [image_block(normalized_type, data)],
             }
@@ -662,6 +675,62 @@ class ReadTools:
             "summary": f"Leitura visual de {path}",
             "content": f"Leitura visual de '{path}':\n\n{text}",
             "payload": {"path": path, "media_type": media_type, "label": path, "visual_read": True},
+            "images": [],
+        }
+
+    def _view_audio_video(self, path: str, target, media_type: str, question: str) -> dict[str, Any]:
+        """An audio or video file: the model's own player when it has one, else Orin's transcription."""
+        from agentos.agentic.media_transcriber import MediaTranscriptionError, media_kind
+
+        kind = media_kind(target)
+        payload = {"path": path, "media_type": media_type, "label": path}
+        if getattr(self, "native_media_hears", False):
+            absolute = target.resolve().as_posix()
+            return {
+                "summary": f"Abriu {path}",
+                "content": (
+                    f"'{path}' é um arquivo de {'vídeo' if kind == 'video' else 'áudio'}. Você o "
+                    f"{'assiste' if kind == 'video' else 'ouve'} com sua ferramenta nativa read_file: chame-a "
+                    f"com o caminho absoluto {absolute}."
+                ),
+                "payload": payload,
+                "images": [],
+            }
+        suggestion = "Troque para um modelo Gemini, que ouve áudio e assiste a vídeo."
+        factory = getattr(self, "_media_transcriber_factory", None)
+        transcriber = None
+        if callable(factory):
+            try:
+                transcriber = factory()
+            except Exception:  # noqa: BLE001 - an unavailable transcriber is the message below
+                transcriber = None
+        if transcriber is None:
+            return {
+                "summary": f"Não foi possível ler {path}",
+                "content": (
+                    f"O modelo deste turno não ouve áudio nem assiste a vídeo ('{path}') e a transcrição "
+                    f"automática não está disponível (ela usa o Antigravity CLI com um modelo Gemini, pela "
+                    f"assinatura). {suggestion}"
+                ),
+                "payload": payload,
+                "images": [],
+            }
+        try:
+            text = transcriber.transcribe(target, kind=kind, question=question)
+        except MediaTranscriptionError as error:
+            return {
+                "summary": f"Não foi possível transcrever {path}",
+                "content": f"Não foi possível transcrever '{path}': {error} {suggestion}",
+                "payload": payload,
+                "images": [],
+            }
+        return {
+            "summary": f"Transcrição de {path}",
+            "content": (
+                f"Transcrição de '{path}' ({'vídeo' if kind == 'video' else 'áudio'}), feita pelo Orin com um "
+                f"modelo Gemini (seu modelo não ouve):\n\n{text}"
+            ),
+            "payload": {**payload, "transcribed": True},
             "images": [],
         }
 
@@ -778,7 +847,7 @@ SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         key="view_file",
-        description="Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, or a picture. Use this instead of read_file whenever the file is not plain text.",
+        description="Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, a picture, or an audio/video file (returned as a transcription when your model cannot listen). Use this instead of read_file whenever the file is not plain text.",
         legacy_schema=_schema({
             "path": {**_TEXT, "description": "Workspace-relative path, e.g. .orin/uploads/nota.pdf"},
             "question": {**_TEXT, "description": "What you need from the file. Guides the visual reading of an image or a scanned page."},

@@ -51,3 +51,14 @@ def test_send_message_rejects_a_blank_message_with_no_attachments(tmp_path):
         headers=_AUTH,
     )
     assert response.status_code == 422
+
+
+def test_upload_accepts_audio_and_video(tmp_path):
+    client = _client(tmp_path)
+    wav = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 16
+    mp4 = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00" + b"\x00" * 32
+    mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 32
+    for name, data, kind in (("fala.wav", wav, "audio"), ("fala.mp3", mp3, "audio"), ("clip.mp4", mp4, "video")):
+        response = client.post("/v1/uploads", files={"file": (name, data, "application/octet-stream")}, headers=_AUTH)
+        assert response.status_code == 201, name
+        assert response.json()["kind"] == kind and response.json()["bytes"] == len(data)

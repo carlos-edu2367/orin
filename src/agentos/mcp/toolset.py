@@ -46,7 +46,9 @@ BROWSER_TIMEOUT_SECONDS = 120.0
 MAX_BROWSER_SESSIONS = 4
 DEFAULT_BROWSER_SLOT_TIMEOUT_SECONDS = 30.0
 
-SessionKey = tuple[str, str | None]
+# (server id, agent id, workspace root): a browser server gets one session per agent and per workspace, so two
+# conversations on different projects never share the folder the first one pointed it at.
+SessionKey = tuple[str, str | None, str | None]
 
 
 def _is_browser_server(config: McpServerConfig) -> bool:
@@ -65,6 +67,23 @@ def _with_isolated_arg(config: McpServerConfig) -> McpServerConfig:
     if any(str(arg).strip() == "--isolated" or str(arg).strip().startswith("--isolated=") for arg in args):
         return config
     return replace(config, args=(*args, "--isolated"))
+
+
+def _with_workspace_output(config: McpServerConfig, workspace_root: str | os.PathLike[str] | None) -> McpServerConfig:
+    """Start a browser server in the conversation's workspace and write its automatic files under it.
+
+    `@playwright/mcp` only reads and writes inside its workspace root (the working folder when the client
+    announces none) and puts a screenshot taken without a file name in `--output-dir`. Started from the
+    worker's folder it refused every path in the project and saved images where no tool of the turn may read
+    them. A server that already sets its own folder or `--output-dir` keeps it.
+    """
+    if not workspace_root:
+        return config
+    root = os.fspath(workspace_root)
+    args = tuple(config.args or ())
+    if not any(str(arg).strip() == "--output-dir" or str(arg).strip().startswith("--output-dir=") for arg in args):
+        args = (*args, "--output-dir", os.path.join(root, ".orin", "playwright"))
+    return replace(config, cwd=config.cwd or root, args=args)
 
 
 def mcp_output_limit_chars() -> int:
@@ -165,7 +184,9 @@ class McpToolProvider:
         *,
         max_browser_sessions: int = MAX_BROWSER_SESSIONS,
         browser_slot_timeout: float = DEFAULT_BROWSER_SLOT_TIMEOUT_SECONDS,
+        workspace_root: str | os.PathLike[str] | None = None,
     ) -> None:
+        self._workspace_root: str | None = os.fspath(workspace_root) if workspace_root else None
         self._bundles = list(bundles)
         self._client_factory = client_factory
         self._oauth = oauth
@@ -185,6 +206,10 @@ class McpToolProvider:
     @property
     def open_session_count(self) -> int:
         return len(self._sessions)
+
+    def bind_workspace(self, workspace_root: str | os.PathLike[str] | None) -> None:
+        """The folder browser servers start in and write to (the conversation's workspace); set before the first call."""
+        self._workspace_root = os.fspath(workspace_root) if workspace_root else None
 
     def add_bundles(self, bundles: Iterable[ServerBundle]) -> None:
         """Servers read from configuration files join this turn's servers (W5)."""
@@ -217,12 +242,16 @@ class McpToolProvider:
 
     def _session_key(self, config: McpServerConfig) -> SessionKey:
         if _is_browser_server(config):
-            return (config.server_id, get_current_agent_id())
-        return (config.server_id, None)
+            return (config.server_id, get_current_agent_id(), self._workspace_root)
+        return (config.server_id, None, None)
 
     @staticmethod
-    def _normalize_key(key: SessionKey | str) -> SessionKey:
-        return (key, None) if isinstance(key, str) else key
+    def _normalize_key(key: SessionKey | tuple[str, str | None] | str) -> SessionKey:
+        if isinstance(key, str):
+            return (key, None, None)
+        if len(key) == 2:
+            return (key[0], key[1], None)
+        return key  # type: ignore[return-value]
 
     def _with_session(self, config: McpServerConfig, secrets: Mapping[str, str], action: Callable[[Any], Any]) -> Any:
         from .protocol import McpProtocolError
@@ -349,6 +378,8 @@ class McpToolProvider:
                 if (is_browser and resolved_key[1] is not None)
                 else config
             )
+            if is_browser:
+                effective_config = _with_workspace_output(effective_config, resolved_key[2])
             if is_browser:
                 self._acquire_browser_slot(resolved_key, effective_config)
             try:

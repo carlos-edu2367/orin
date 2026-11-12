@@ -2,7 +2,7 @@ export type ComposerAttachment = {
   /** Client-side identity, stable from the moment the file is picked. */
   id: string
   filename: string
-  kind: 'text' | 'image' | 'pdf' | 'office'
+  kind: 'text' | 'image' | 'pdf' | 'office' | 'audio' | 'video'
   bytes: number
   state: 'uploading' | 'ready' | 'failed'
   upload_id?: string
@@ -16,7 +16,7 @@ export function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-const GLYPH: Record<ComposerAttachment['kind'], string> = { text: '≡', image: '▣', pdf: '❐', office: '▤' }
+const GLYPH: Record<ComposerAttachment['kind'], string> = { text: '≡', image: '▣', pdf: '❐', office: '▤', audio: '♪', video: '▶' }
 
 /** The files waiting to be sent, shown under the composer input. */
 export function AttachmentChips({ items, onRemove }: { items: ComposerAttachment[]; onRemove: (id: string) => void }) {

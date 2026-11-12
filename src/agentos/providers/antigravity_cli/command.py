@@ -12,11 +12,14 @@ from typing import Any, Mapping, Sequence
 
 from agentos.providers.antigravity_cli.media_gate import (
     ALLOWED_AUDIO_EXTENSIONS,
+    ALLOWED_IMAGE_EXTENSIONS,
     ALLOWED_MEDIA_EXTENSIONS,
     ALLOWED_VIDEO_EXTENSIONS,
     DEFAULT_MAX_MEDIA_BYTES,
     MEDIA_GATE_CONFIG_FILENAME,
+    MediaReadPolicy,
     build_media_gate_hook_command,
+    collect_media_roots,
     is_allowed_media_path,
 )
 from agentos.providers.cli_adapter import CliTurnRequest, ToolServerWiring
@@ -376,16 +379,153 @@ def is_antigravity_gemini_model(model: str | None) -> bool:
     return cleaned.lower().startswith("gemini-")
 
 
-def antigravity_media_prompt_note(workspace_root: Path | str) -> str:
-    """Return the system-prompt instruction for native audio/video viewing on Gemini agy turns."""
+def antigravity_native_media_extensions(model: str | None) -> frozenset[str]:
+    """File extensions the native `read_file` of an agy model may open (empty: it is off for this model).
+
+    Follows what the model perceives: Gemini sees images and hears audio/video; Claude (and any model that
+    sees images) only images; a text-only model and `antigravity-image` get nothing.
+    """
+    try:
+        cleaned = clean_antigravity_model_id(model)
+    except ValueError:
+        return frozenset()
+    if not cleaned or cleaned == "antigravity-image":
+        return frozenset()
+    from agentos.providers.antigravity_cli.catalog import antigravity_input_modalities
+
+    modalities = antigravity_input_modalities(cleaned)
+    extensions: set[str] = set()
+    if "image" in modalities:
+        extensions |= ALLOWED_IMAGE_EXTENSIONS
+    if "audio" in modalities:
+        extensions |= ALLOWED_AUDIO_EXTENSIONS
+    if "video" in modalities:
+        extensions |= ALLOWED_VIDEO_EXTENSIONS
+    return frozenset(extensions)
+
+
+def resolve_media_roots(
+    workspace_root: Path | str | None,
+    additional_roots: Sequence[Path | str] = (),
+) -> tuple[Path, ...]:
+    """The workspace first, then the extra folders the person added (`/add-dir`): absolute, existing, deduplicated."""
+    resolved: list[Path] = []
+    candidates: list[tuple[Path | str, bool]] = []
+    if workspace_root is not None:
+        candidates.append((workspace_root, True))
+    candidates.extend((item, False) for item in (additional_roots or ()))
+    for item, is_workspace in candidates:
+        try:
+            text = str(item)
+            if not text.strip() or _has_forbidden_control_or_linebreak(text):
+                continue
+            path = Path(text)
+            try:
+                path = path.resolve()
+            except OSError:
+                path = path.absolute()
+            if path in resolved:
+                continue
+            if is_workspace or path.is_dir():
+                resolved.append(path)
+        except (OSError, ValueError):
+            continue
+    return tuple(resolved)
+
+
+def antigravity_native_media_policy(
+    model: str | None,
+    workspace_root: Path | str | None,
+    *,
+    additional_roots: Sequence[Path | str] = (),
+    unrestricted: bool = False,
+) -> MediaReadPolicy | None:
+    """The native `read_file` policy of one agy turn, or None when it must stay off."""
+    extensions = antigravity_native_media_extensions(model)
+    if not extensions or workspace_root is None:
+        return None
+    roots = resolve_media_roots(workspace_root, additional_roots)
+    if not roots:
+        return None
+    return MediaReadPolicy(
+        roots=tuple(str(root) for root in roots),
+        unrestricted=bool(unrestricted),
+        extensions=extensions,
+    )
+
+
+def antigravity_media_prompt_note(
+    workspace_root: Path | str,
+    *,
+    extensions: Sequence[str] | frozenset[str] | None = None,
+    additional_roots: Sequence[Path | str] = (),
+    unrestricted: bool = False,
+) -> str:
+    """System-prompt instruction for the native `read_file` of an agy turn (image; audio/video when the model hears)."""
     root_posix = Path(workspace_root).resolve().as_posix()
-    return (
-        f"To hear an audio file or watch a video file in the conversation workspace "
-        f"(workspace root: `{root_posix}`), call your native `read_file` tool with "
-        f"the file's ABSOLUTE path (for example, `{root_posix}/...`). "
-        f"Your native `read_file` tool ONLY accepts audio, video, and image files "
-        f"inside `{root_posix}`; for all text, code, PDF, and document files, "
-        f"keep using Orin's MCP tools."
+    exts = (
+        ALLOWED_MEDIA_EXTENSIONS
+        if extensions is None
+        else frozenset(str(e).lower() for e in extensions)
+    )
+    hears = bool(exts & (ALLOWED_AUDIO_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS))
+    if unrestricted:
+        scope = (
+            f"inside the conversation workspace (`{root_posix}`) or anywhere else on this machine"
+        )
+    else:
+        extras = [
+            Path(item).resolve().as_posix()
+            for item in additional_roots
+            if str(item).strip() and Path(item).resolve().as_posix() != root_posix
+        ]
+        scope = f"inside the conversation workspace (`{root_posix}`)"
+        if extras:
+            scope += " and these folders the person added: " + ", ".join(
+                f"`{item}`" for item in extras
+            )
+    if hears:
+        kinds = "image, audio and video files"
+        verbs = "see an image, hear an audio file or watch a video"
+    else:
+        kinds = "image files"
+        verbs = "see an image"
+    note = (
+        f"To {verbs}, call your native `read_file` tool with the file's ABSOLUTE path "
+        f"(for example, `{root_posix}/...`); a relative path is denied. "
+        f"Orin's view_file/Read tools do NOT show you a picture on this CLI (it keeps large "
+        f"images out of the conversation): for an image they only report the file's absolute "
+        f"path, to open with `read_file`. "
+        f"Your native `read_file` tool ONLY accepts {kinds} {scope}; "
+        f"for all text, code, PDF, and document files, keep using Orin's MCP tools."
+    )
+    if not hears:
+        note += (
+            " Your model does not hear audio or watch video through `read_file`: for an audio or "
+            "video file call Orin's view_file with its path, and Orin returns a transcription "
+            "made for you."
+        )
+    return note
+
+
+def _media_note_from_gate_config(
+    cfg: Mapping[str, Any], fallback_root: Path | str | None
+) -> str | None:
+    roots = collect_media_roots(cfg.get("allowed_root"), cfg.get("allowed_roots"))
+    primary: Path | str | None = roots[0] if roots else fallback_root
+    if primary is None:
+        return None
+    raw_exts = cfg.get("allowed_extensions")
+    exts = (
+        [str(e) for e in raw_exts]
+        if isinstance(raw_exts, list)
+        else None
+    )
+    return antigravity_media_prompt_note(
+        primary,
+        extensions=exts,
+        additional_roots=roots[1:],
+        unrestricted=cfg.get("unrestricted") is True,
     )
 
 
@@ -398,6 +538,7 @@ def _render_orin_agent_md(
     timeout_seconds: int | None = None,
     allow_native_media_read: bool = False,
     workspace_root: Path | None = None,
+    media_note: str | None = None,
 ) -> str:
     srv, clean_url, clean_token = _validate_mcp_server_params(
         server_name=server_name,
@@ -415,7 +556,8 @@ def _render_orin_agent_md(
     )
     instructions_body = system_prompt.strip()
     if allow_native_media_read and workspace_root is not None:
-        media_note = antigravity_media_prompt_note(workspace_root)
+        if media_note is None:
+            media_note = antigravity_media_prompt_note(workspace_root)
         if media_note not in instructions_body:
             instructions_body = (
                 f"{instructions_body}\n\n{media_note}"
@@ -464,18 +606,18 @@ def _update_agent_md_instructions(
     prefix = existing.split(marker, 1)[0] if marker in existing else ""
     instructions_body = system_prompt.strip()
     if "tools: [read_file]" in prefix:
-        eff_ws_root = workspace_root
-        if eff_ws_root is None:
-            gate_cfg_path = agent_md_path.parent.parent / MEDIA_GATE_CONFIG_FILENAME
-            if gate_cfg_path.is_file() and not gate_cfg_path.is_symlink():
-                try:
-                    gate_cfg = json.loads(gate_cfg_path.read_text(encoding="utf-8"))
-                    if isinstance(gate_cfg, Mapping) and gate_cfg.get("allowed_root"):
-                        eff_ws_root = Path(str(gate_cfg["allowed_root"]))
-                except Exception:
-                    eff_ws_root = None
-        if eff_ws_root is not None:
-            media_note = antigravity_media_prompt_note(eff_ws_root)
+        media_note: str | None = None
+        gate_cfg_path = agent_md_path.parent.parent / MEDIA_GATE_CONFIG_FILENAME
+        if gate_cfg_path.is_file() and not gate_cfg_path.is_symlink():
+            try:
+                gate_cfg = json.loads(gate_cfg_path.read_text(encoding="utf-8"))
+                if isinstance(gate_cfg, Mapping):
+                    media_note = _media_note_from_gate_config(gate_cfg, workspace_root)
+            except Exception:
+                media_note = None
+        if media_note is None and workspace_root is not None:
+            media_note = antigravity_media_prompt_note(workspace_root)
+        if media_note is not None:
             if media_note not in instructions_body:
                 instructions_body = (
                     f"{instructions_body}\n\n{media_note}"
@@ -534,8 +676,15 @@ def wire_antigravity_tool_server(
     tool_timeout_ms: int | None = None,
     model: str | None = None,
     workspace_root: Path | str | None = None,
+    additional_roots: Sequence[Path | str] = (),
+    unrestricted: bool = False,
 ) -> ToolServerWiring:
-    """Create isolated `.agents/agents/orin.md`, `.agents/mcp_config.json`, and `.agents/orin_settings.json`."""
+    """Create isolated `.agents/agents/orin.md`, `.agents/mcp_config.json`, and `.agents/orin_settings.json`.
+
+    For a model that perceives media, the native `read_file` is turned on behind a PreToolUse hook (the
+    media gate): only media files (the model's own kinds), absolute paths, inside the workspace and the
+    folders the person added (`additional_roots`); with `unrestricted`, anywhere on a local drive.
+    """
     srv, clean_url, clean_token = _validate_mcp_server_params(
         server_name=server_name,
         url=getattr(handle, "url", None),
@@ -565,9 +714,12 @@ def wire_antigravity_tool_server(
 
     enable_media_gate = False
     resolved_ws_root: Path | None = None
+    media_roots: tuple[Path, ...] = ()
+    media_extensions: frozenset[str] = frozenset()
     if model is not None or workspace_root is not None:
         eff_model = model if model is not None else DEFAULT_ANTIGRAVITY_MODEL
-        if is_antigravity_gemini_model(eff_model):
+        media_extensions = antigravity_native_media_extensions(eff_model)
+        if media_extensions:
             raw_ws = workspace_root if workspace_root is not None else workdir
             _validate_path_arg(raw_ws, "workspace_root")
             ws_path = Path(raw_ws)
@@ -580,6 +732,15 @@ def wire_antigravity_tool_server(
                 resolved_ws_root = ws_path.resolve()
             except OSError:
                 resolved_ws_root = ws_path.absolute()
+            extra_roots: list[Path | str] = []
+            for extra in additional_roots or ():
+                try:
+                    _validate_path_arg(extra, "additional_root")
+                except ValueError:
+                    continue
+                if not _is_symlink_or_junction(Path(extra)):
+                    extra_roots.append(extra)
+            media_roots = resolve_media_roots(resolved_ws_root, extra_roots)
             enable_media_gate = True
 
     sys_prompt = "You are a helpful assistant."
@@ -635,6 +796,16 @@ def wire_antigravity_tool_server(
             timeout_seconds=timeout_seconds,
             allow_native_media_read=enable_media_gate,
             workspace_root=resolved_ws_root,
+            media_note=(
+                antigravity_media_prompt_note(
+                    resolved_ws_root,
+                    extensions=media_extensions,
+                    additional_roots=media_roots[1:],
+                    unrestricted=bool(unrestricted),
+                )
+                if enable_media_gate and resolved_ws_root is not None
+                else None
+            ),
         )
         _write_owner_only_file(agent_md_path, agent_md_content)
 
@@ -656,10 +827,11 @@ def wire_antigravity_tool_server(
             resolved_workdir = str(workdir.absolute())
 
         if enable_media_gate and resolved_ws_root is not None:
-            allow_rules = [
-                f"mcp({srv}/*)",
-                f"read_file({resolved_ws_root.as_posix()})",
-            ]
+            allow_rules = [f"mcp({srv}/*)"]
+            if unrestricted:
+                allow_rules.append("read_file(*)")
+            else:
+                allow_rules.extend(f"read_file({root.as_posix()})" for root in media_roots)
             deny_rules = [
                 "command(*)",
                 "write_file(*)",
@@ -715,8 +887,11 @@ def wire_antigravity_tool_server(
                 json.dumps(hooks_payload, ensure_ascii=True, indent=2) + "\n",
             )
             gate_config_payload = {
+                # `allowed_root` (the workspace) stays for readers of the single-root format.
                 "allowed_root": str(resolved_ws_root),
-                "allowed_extensions": sorted(ALLOWED_MEDIA_EXTENSIONS),
+                "allowed_roots": [str(root) for root in media_roots],
+                "unrestricted": bool(unrestricted),
+                "allowed_extensions": sorted(media_extensions),
                 "max_bytes": DEFAULT_MAX_MEDIA_BYTES,
             }
             _write_owner_only_file(
@@ -733,6 +908,132 @@ def wire_antigravity_tool_server(
                 pass
         raise
 
+    return ToolServerWiring(
+        argv=("--agent", "orin", "--settings", str(settings_file)),
+        env={},
+        files=wiring_files,
+    )
+
+
+def wire_antigravity_media_reader(
+    directory: Path,
+    *,
+    media_dir: Path,
+    model: str,
+    instructions: str,
+) -> ToolServerWiring:
+    """Wire a short-lived agy process whose only tool is the native `read_file`, gated to ``media_dir``.
+
+    Orin starts it to have a Gemini model listen to or watch a file for a model that cannot (transcription),
+    using the subscription and the same media gate as a chat turn: `.agents/hooks.json` plus
+    `orin_media_gate.json` allow only audio/video files inside ``media_dir`` (absolute paths, no links).
+    """
+    _validate_path_arg(directory, "directory")
+    _validate_path_arg(media_dir, "media_dir")
+    extensions = antigravity_native_media_extensions(model) & (
+        ALLOWED_AUDIO_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
+    )
+    if not extensions:
+        raise ValueError(f"Model {model!r} does not take audio or video through the native read_file.")
+    workdir = Path(directory)
+    if _is_symlink_or_junction(workdir):
+        raise ValueError(f"Refusing symlinked working directory: {workdir}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    git_dir = workdir / ".git"
+    if _is_symlink_or_junction(git_dir):
+        raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
+    git_dir.mkdir(exist_ok=True)
+    agents_dir = workdir / ".agents"
+    agents_subdir = agents_dir / "agents"
+    for candidate in (agents_dir, agents_subdir):
+        if _is_symlink_or_junction(candidate):
+            raise ValueError(f"Refusing symlinked directory: {candidate}")
+    try:
+        resolved_media_dir = Path(media_dir).resolve()
+    except OSError:
+        resolved_media_dir = Path(media_dir).absolute()
+    agent_md_path = agents_subdir / "orin.md"
+    settings_file = agents_dir / "orin_settings.json"
+    hooks_file = agents_dir / "hooks.json"
+    gate_config_file = agents_dir / MEDIA_GATE_CONFIG_FILENAME
+    wiring_files = (agent_md_path, settings_file, hooks_file, gate_config_file)
+    try:
+        for fpath in wiring_files:
+            if _is_symlink_or_junction(fpath):
+                raise ValueError(f"Refusing to write to symlink: {fpath}")
+        _write_owner_only_file(
+            agent_md_path,
+            "---\n"
+            "name: orin\n"
+            "description: Orin media reader\n"
+            "mainAgent: true\n"
+            "excludeDefaultComponents: true\n"
+            "inheritMcp: false\n"
+            "tools: [read_file]\n"
+            "---\n\n"
+            "# Instructions\n\n"
+            f"{instructions.strip()}\n",
+        )
+        try:
+            resolved_workdir = str(workdir.resolve())
+        except OSError:
+            resolved_workdir = str(workdir.absolute())
+        settings_payload = {
+            "trustedWorkspaces": [resolved_workdir],
+            "allowNonWorkspaceAccess": False,
+            "enableTerminalSandbox": True,
+            "disableSlashCommands": True,
+            "permissions": {
+                "allow": [f"read_file({resolved_media_dir.as_posix()})"],
+                "deny": [
+                    "command(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "unsandboxed(*)",
+                ],
+            },
+        }
+        _write_owner_only_file(
+            settings_file, json.dumps(settings_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+        hooks_payload = {
+            "orin-media-gate": {
+                "PreToolUse": [
+                    {
+                        "matcher": "read_file",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": build_media_gate_hook_command(),
+                                "timeout": 10,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        _write_owner_only_file(
+            hooks_file, json.dumps(hooks_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+        gate_payload = {
+            "allowed_root": str(resolved_media_dir),
+            "allowed_roots": [str(resolved_media_dir)],
+            "unrestricted": False,
+            "allowed_extensions": sorted(extensions),
+            "max_bytes": DEFAULT_MAX_MEDIA_BYTES,
+        }
+        _write_owner_only_file(
+            gate_config_file, json.dumps(gate_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+    except Exception:
+        for fpath in wiring_files:
+            try:
+                if not _is_symlink_or_junction(fpath):
+                    fpath.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
     return ToolServerWiring(
         argv=("--agent", "orin", "--settings", str(settings_file)),
         env={},
@@ -1012,7 +1313,8 @@ def build_antigravity_command(
 
 ANTIGRAVITY_OMITTED_MEDIA_NOTE = (
     "[Imagem/mídia omitida: o Antigravity CLI não recebe imagens na mensagem. "
-    "Para ver um arquivo visual, chame a ferramenta view_file com o caminho dele.]"
+    "Para ver um arquivo visual, chame sua ferramenta nativa read_file com o caminho ABSOLUTO dele "
+    "(a ferramenta view_file do Orin informa esse caminho).]"
 )
 
 _MEDIA_KEYS: tuple[str, ...] = (
@@ -1030,16 +1332,25 @@ _AUDIO_VIDEO_EXTENSIONS: frozenset[str] = (
 
 
 def format_antigravity_workspace_media_note(abs_path: Path | str) -> str:
-    """Return a pt-BR note directing the model to use native `read_file` for a workspace audio/video file."""
-    resolved_posix = Path(abs_path).resolve().as_posix()
+    """Return a pt-BR note directing the model to use native `read_file` for a workspace image/audio/video file."""
+    path = Path(abs_path).resolve()
+    resolved_posix = path.as_posix()
+    if path.suffix.lower() in ALLOWED_IMAGE_EXTENSIONS:
+        return (
+            f"[Imagem no workspace: {resolved_posix} — "
+            f"o Antigravity CLI não recebe imagem embutida na mensagem. "
+            f'Para ver a imagem, chame sua ferramenta nativa read_file com o caminho absoluto "{resolved_posix}".]'
+        )
     return (
         f"[Arquivo de áudio/vídeo no workspace: {resolved_posix} — "
         f"o Antigravity CLI não recebe áudio/vídeo embutido na mensagem. "
-        f'Para ouvir o áudio ou assistir ao vídeo, chame sua ferramenta nativa read_file com o caminho absoluto "{resolved_posix}".]'
+        f'Para ouvir o áudio ou assistir ao vídeo, chame sua ferramenta nativa read_file com o caminho absoluto "{resolved_posix}"; '
+        f"se o seu modelo não ouve áudio/vídeo, chame a ferramenta view_file do Orin com esse mesmo caminho, "
+        f"que devolve a transcrição.]"
     )
 
 
-def _extract_workspace_audio_video_path(
+def _extract_workspace_media_path(
     block: Mapping[str, Any],
     workspace_root: Path | str | None,
 ) -> Path | None:
@@ -1096,7 +1407,7 @@ def _extract_workspace_audio_video_path(
         ok, _ = is_allowed_media_path(
             str(cand),
             allowed_root=eff_root,
-            allowed_extensions=_AUDIO_VIDEO_EXTENSIONS,
+            allowed_extensions=ALLOWED_MEDIA_EXTENSIONS,
         )
         if ok:
             try:
@@ -1117,7 +1428,7 @@ def encode_antigravity_user_turn(
     image only as an MCP tool result (view_file). A media block here is history replayed
     after a restart (the image a view_file call returned, kept as a user message) or the
     text-protocol fallback: it becomes a short text note, never bytes and never an error.
-    When an audio/video block points to a file on disk in the workspace, the note includes
+    When an image/audio/video block points to a file on disk in the workspace, the note includes
     its absolute path and instructs the model to call its native `read_file` tool.
     """
     text_blocks: list[dict[str, str]] = []
@@ -1138,9 +1449,7 @@ def encode_antigravity_user_turn(
                 or btype not in ("text", "input_text")
                 or any(media_key in block for media_key in _MEDIA_KEYS)
             ):
-                media_path = _extract_workspace_audio_video_path(
-                    block, workspace_root
-                )
+                media_path = _extract_workspace_media_path(block, workspace_root)
                 if media_path is not None:
                     if omitted_pending:
                         text_blocks.append(
@@ -1252,6 +1561,8 @@ __all__ = [
     "MIN_ANTIGRAVITY_VERSION",
     "VALID_EFFORT_LEVELS",
     "antigravity_media_prompt_note",
+    "antigravity_native_media_extensions",
+    "antigravity_native_media_policy",
     "antigravity_version",
     "build_antigravity_command",
     "build_isolated_antigravity_env",
@@ -1263,5 +1574,7 @@ __all__ = [
     "redact_antigravity_argv",
     "resolve_antigravity_binary",
     "resolve_antigravity_home",
+    "resolve_media_roots",
+    "wire_antigravity_media_reader",
     "wire_antigravity_tool_server",
 ]
