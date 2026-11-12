@@ -916,3 +916,42 @@ def test_encode_user_turn_rejection_happens_before_popen_and_cleans_wiring(
     for f in adapter.last_wiring_files:
         assert not f.exists()
 
+
+
+@pytest.mark.parametrize(
+    ("permission_mode", "expected", "unexpected"),
+    [
+        ("full_autonomy", "Orin permission mode: bypassPermissions.", "this turn is read-only"),
+        ("plan_mode", "Orin permission mode: plan.", "bypassPermissions"),
+    ],
+)
+def test_system_prompt_file_states_orin_permission_mode_and_workspace(
+    tmp_path: Path, permission_mode: str, expected: str, unexpected: str
+) -> None:
+    script = _write_fake_oneshot_script(tmp_path)
+    adapter = _FakeOneShotAdapter(script)
+    provider = ClaudeCliProvider(binary=str(script), adapter=adapter, env={"FAKE_ONESHOT_MODE": "mcp_tool_call"})
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    workspace = tmp_path / "real-workspace"
+    workspace.mkdir()
+    req = NativeTurnRequest(
+        model="gpt-5.4",
+        system_prompt="You are a test agent.",
+        user_content=[{"type": "text", "text": "Hello"}],
+        executor=_EchoExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 30.0,
+        max_turns=5,
+        cwd=cwd,
+        workspace_root=workspace,
+        permission_mode=permission_mode,
+    )
+    handle = provider.start_native_turn(req)
+    try:
+        prompt = Path(adapter.built_requests[-1].system_prompt_file).read_text(encoding="utf-8")
+    finally:
+        handle.close()
+    assert prompt.startswith("You are a test agent.")
+    assert expected in prompt and unexpected not in prompt
+    assert str(workspace) in prompt

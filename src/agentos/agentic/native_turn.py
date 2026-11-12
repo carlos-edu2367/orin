@@ -1801,6 +1801,14 @@ class NativeTurnRunner:
         self.last_context: dict[str, object] = {}
         self.clock: Callable[[], Any] = runtime.clock
 
+    def _effective_permission_mode(self) -> str | None:
+        """The mode the turn's tools enforce now (plan mode included), for the CLI's system prompt."""
+        toolset = self.runtime.toolset
+        if getattr(toolset, "_plan_mode_active", False) is True:
+            return "plan_mode"
+        value = getattr(getattr(toolset, "_permission_mode", None), "value", None)
+        return value if isinstance(value, str) and value.strip() else None
+
     def _stop_code_after_stream_error(self, exc: BaseException, executor: RuntimeToolExecutor) -> str | None:
         """Why the turn really stopped when the CLI stream ended in an error: a limit that fired, or the deadline."""
         if executor.abort_code in _LIMIT_ABORT_CODES:
@@ -2291,6 +2299,7 @@ class NativeTurnRunner:
                 resume_session_id=resume_session_id,
                 conversation_id=str(self.turn.get("conversation_id") or ""),
                 on_waiting_slot=_on_waiting_slot,
+                permission_mode=self._effective_permission_mode(),
             )
 
             handle: NativeTurnHandle | Any | None = None

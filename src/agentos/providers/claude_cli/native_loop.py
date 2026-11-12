@@ -73,29 +73,83 @@ def native_workdir(adapter_name: str = "claude") -> Path:
     return orin_paths().data / f"{slug}-cli" / "workdir"
 
 
-def isolated_cli_note(server_name: str) -> str:
-    """Tells the model that the CLI's own sandbox/cwd notes do not limit it.
+_PERMISSION_MODE_SUMMARY: dict[str, str] = {
+    "bypassPermissions": "Full autonomy: act on the workspace and run commands without asking first.",
+    "acceptEdits": "Edit files in the workspace and run local, safe commands without asking first.",
+    "default": "File edits and shell commands may need the user's approval, which Orin asks for when needed.",
+    "auto": "A classifier approves safe actions; risky ones are refused or sent to the user.",
+    "dontAsk": "Anything a rule does not already allow is refused instead of asked.",
+    "plan": (
+        "This turn is read-only: explore and plan; do not change files (except the plan file Orin's tools allow) and "
+        "do not run commands that change state until the plan is approved."
+    ),
+}
+
+
+def _public_permission_label(permission_mode: str | None) -> str | None:
+    text = str(permission_mode or "").strip()
+    if not text:
+        return None
+    from agentos.code_mode.models import known_permission_mode, public_permission_mode
+
+    return public_permission_mode(known_permission_mode(text))
+
+
+def isolated_cli_note(
+    server_name: str,
+    *,
+    permission_mode: str | None = None,
+    workspace_root: Path | str | None = None,
+    read_only: bool = False,
+) -> str:
+    """Tells the model that the CLI's own sandbox/cwd notes do not limit it, and what Orin's tools may do.
 
     Orin starts every CLI (Claude, Codex, Antigravity) in an empty folder with the CLI's built-in tools off, so each
     CLI describes that folder, and Codex a read-only sandbox, as the environment. A model that believed it concluded
     it could not change files ("read-only filesystem") although Orin's tools act on the real workspace with the
-    turn's permission mode: subagents on Codex and Antigravity never edited anything.
+    turn's permission mode: subagents on Codex and Antigravity never edited anything. The permission mode and the
+    workspace go here, in the system prompt (the developer channel): the CLI's own notice arrives after it, and
+    without them it would be the only statement about what the model may do.
     """
     srv = str(server_name or "orin").strip() or "orin"
-    return (
+    note = (
         "# Where you work\n"
         "Orin runs this CLI from an empty, isolated folder with the CLI's own built-in tools (shell, file editing, "
         "apply_patch, its sandbox) turned off. Any environment, sandbox or permission information the CLI itself adds "
         "(current directory, workspace roots, read-only filesystem, permission profile, approval policy) describes "
         "only that isolated folder and those disabled tools: it does not apply to you. Do all the work through the "
-        f"tools of the `{srv}` MCP server. They act on the working directory and with the permission mode stated in "
-        "these instructions, and they can write and edit files and run commands; use them for that instead of "
-        "concluding that you cannot."
+        f"tools of the `{srv}` MCP server (namespace `mcp__{srv}`; in Codex they may be deferred inside "
+        "`functions.exec`). They act on the real workspace and with the Orin permission mode below, and they can "
+        "write and edit files and run commands; use them for that instead of concluding that you cannot."
     )
+    label = _public_permission_label(permission_mode)
+    root = str(workspace_root).strip() if workspace_root is not None else ""
+    if label is None and not root and not read_only:
+        return note
+    lines = [note, "", "## Orin session"]
+    if read_only:
+        lines.append(
+            "- Orin permission mode: read-only agent. Inspect and report; never change files or run commands that "
+            "change state."
+        )
+    elif label is not None:
+        lines.append(f"- Orin permission mode: {label}. {_PERMISSION_MODE_SUMMARY.get(label, '')}".rstrip())
+    if root:
+        lines.append(f"- Workspace (where the `{srv}` tools act): {root}")
+    return "\n".join(lines)
 
 
-def with_isolated_cli_note(system_prompt: str, server_name: str) -> str:
-    note = isolated_cli_note(server_name)
+def with_isolated_cli_note(
+    system_prompt: str,
+    server_name: str,
+    *,
+    permission_mode: str | None = None,
+    workspace_root: Path | str | None = None,
+    read_only: bool = False,
+) -> str:
+    note = isolated_cli_note(
+        server_name, permission_mode=permission_mode, workspace_root=workspace_root, read_only=read_only
+    )
     base = str(system_prompt or "").rstrip()
     if note in base:
         return base
@@ -283,6 +337,8 @@ class NativeTurnRequest:
     conversation_id: str = ""
     on_waiting_slot: Callable[..., None] | None = None
     workspace_root: Path | None = None
+    # Orin's effective permission mode for the turn (internal id or public name), told to the model in the system prompt.
+    permission_mode: str | None = None
 
 
 class NativeTurnSink(Protocol):
@@ -1246,6 +1302,24 @@ def start_native_turn_for_provider(
                 workspace_root = Path(ws_root_cand)
                 break
 
+    effective_permission_mode: str | None = request.permission_mode or None
+    effective_read_only = False
+    for target_ts in (
+        getattr(request.executor, "toolset", None),
+        getattr(getattr(request.executor, "runtime", None), "toolset", None),
+    ):
+        if target_ts is None:
+            continue
+        if getattr(target_ts, "_read_only_mode", False) is True:
+            effective_read_only = True
+        if effective_permission_mode is None:
+            if getattr(target_ts, "_plan_mode_active", False) is True:
+                effective_permission_mode = "plan_mode"
+                continue
+            raw_mode = getattr(getattr(target_ts, "_permission_mode", None), "value", None)
+            if isinstance(raw_mode, str) and raw_mode.strip():
+                effective_permission_mode = raw_mode
+
     effective_model = request.model or provider.model
     allowed_media_root: Path | None = None
     if getattr(adapter, "name", "") == "antigravity" and workspace_root is not None:
@@ -1314,7 +1388,13 @@ def start_native_turn_for_provider(
         mcp_config_path = wiring.files[0] if wiring.files else None
 
         prompt_path = write_owner_only_temp(
-            with_isolated_cli_note(request.system_prompt or "You are a helpful assistant.", request.server_name),
+            with_isolated_cli_note(
+                request.system_prompt or "You are a helpful assistant.",
+                request.server_name,
+                permission_mode=effective_permission_mode,
+                workspace_root=workspace_root,
+                read_only=effective_read_only,
+            ),
             prefix="orin-claude-sys-",
             suffix=".txt",
         )

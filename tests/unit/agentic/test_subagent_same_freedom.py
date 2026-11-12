@@ -95,3 +95,38 @@ def test_every_cli_turn_is_told_the_clis_own_sandbox_does_not_limit_it() -> None
     assert "`orin` MCP server" in prompt
     assert with_isolated_cli_note(prompt, "orin") == prompt, "added once"
     assert isolated_cli_note("") == isolated_cli_note("orin")
+
+
+def test_the_cli_note_states_the_orin_permission_mode_and_workspace(tmp_path) -> None:
+    bypass = with_isolated_cli_note(
+        "You are Orin.", "orin", permission_mode="full_autonomy", workspace_root=tmp_path
+    )
+    assert "Orin permission mode: bypassPermissions." in bypass
+    assert str(tmp_path) in bypass
+    assert "mcp__orin" in bypass and "functions.exec" in bypass
+    assert "read-only" not in bypass.split("## Orin session", 1)[1]
+
+    plan = with_isolated_cli_note("You are Orin.", "orin", permission_mode="plan_mode", workspace_root=tmp_path)
+    assert "Orin permission mode: plan." in plan and "this turn is read-only" in plan.lower()
+
+    # The public names Claude Code uses are accepted as well, and a read-only subagent says so.
+    assert "Orin permission mode: acceptEdits." in with_isolated_cli_note("x", "orin", permission_mode="acceptEdits")
+    assert "read-only agent" in with_isolated_cli_note("x", "orin", read_only=True)
+    # Added once, also with the session facts.
+    assert with_isolated_cli_note(bypass, "orin", permission_mode="full_autonomy", workspace_root=tmp_path) == bypass
+    # Without facts the note is the plain one (backward compatible).
+    assert "## Orin session" not in isolated_cli_note("orin")
+
+
+def test_native_turn_request_carries_the_effective_permission_mode() -> None:
+    from agentos.agentic.native_turn import NativeTurnRunner
+    from agentos.code_mode.models import CodePermissionMode
+
+    def mode_of(toolset) -> str | None:
+        runner = NativeTurnRunner.__new__(NativeTurnRunner)
+        runner.runtime = SimpleNamespace(toolset=toolset)
+        return runner._effective_permission_mode()
+
+    assert mode_of(SimpleNamespace(_permission_mode=CodePermissionMode.FULL_AUTONOMY, _plan_mode_active=False)) == "full_autonomy"
+    assert mode_of(SimpleNamespace(_permission_mode=CodePermissionMode.ASK_PERMISSIONS, _plan_mode_active=True)) == "plan_mode"
+    assert mode_of(SimpleNamespace()) is None
