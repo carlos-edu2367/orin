@@ -638,8 +638,8 @@ def test_passo1_final_review_fixes(
         assert not (iso_dir / entry).exists(), f"{entry} was not purged by ensure_isolated_cwd"
 
     # 3. encode_codex_user_turn rejects image blocks & catalog stores input_modalities==("text",)
-    with pytest.raises(ValueError, match=r"(?i)(imagem|image|mídia|media|texto)"):
-        encode_codex_user_turn([{"type": "image", "source": {"type": "base64", "data": "AAAA"}}])
+    media_note = encode_codex_user_turn([{"type": "image", "source": {"type": "base64", "data": "AAAA"}}]).decode()
+    assert "AAAA" not in media_note and "omitida" in media_note
 
     engine = _sqlite_engine()
     cipher = _cipher()

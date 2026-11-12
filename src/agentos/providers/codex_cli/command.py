@@ -386,6 +386,29 @@ def is_codex_version_supported(
     )
 
 
+# Config that keeps Codex from describing its own sandbox/environment to the model and from exposing native tools Orin
+# does not use (verified on codex 0.167.0-alpha.4.1 and 0.167.2; Codex ignores unknown keys silently, so tests check
+# the effect on the rollout, not only the flag). Do not add `features.code_mode_host=false` (it breaks every MCP call)
+# or the `multi_agent_v2.*` keys (they differ between 0.167 builds).
+CODEX_NEUTRAL_CONFIG: tuple[str, ...] = (
+    "include_permissions_instructions=false",
+    "include_environment_context=false",
+    "include_apps_instructions=false",
+    "include_collaboration_mode_instructions=false",
+    "features.unified_exec=false",
+    "features.unified_exec_tty=false",
+    "features.computer_use=false",
+    "features.browser_use=false",
+    "features.apps=false",
+    "features.plugins=false",
+    "features.sleep_tool=false",
+    "features.skill_mcp_dependency_install=false",
+    "features.skip_host_skill_discovery=true",
+    # skip_host_skill_discovery is "under development": without this Codex emits a warning item (type "error") per run.
+    "suppress_unstable_features_warning=true",
+)
+
+
 def wire_codex_tool_server(
     handle: Any,
     server_name: str = "orin",
@@ -488,8 +511,12 @@ def build_codex_command(
         "features.image_generation=false",
         # Codex's own subagents would bypass Orin's tree, budget and permissions: delegation goes through Agent.
         "features.multi_agent=false",
+        # sandbox/approval stay as they are: they hold back Codex's native apply_patch. What they make Codex tell the
+        # model ("permissions instructions", the <environment_context> permission profile: read-only, commands
+        # rejected) is turned off below, because the model believed it and refused to act through Orin's tools.
         'sandbox_mode="read-only"',
         'approval_policy="never"',
+        *CODEX_NEUTRAL_CONFIG,
     ]
 
     if request.effort is not None and str(request.effort).strip():
@@ -511,6 +538,7 @@ def build_codex_command(
         "features.multi_agent",
         "sandbox_mode",
         "approval_policy",
+        *(value.split("=", 1)[0] for value in CODEX_NEUTRAL_CONFIG),
     }
     seen_c_values: set[str] = set()
     for c_val in base_c_values:
@@ -608,42 +636,98 @@ def redact_codex_argv(argv: Sequence[str]) -> list[str]:
     return redacted
 
 
+CODEX_OMITTED_MEDIA_NOTE = (
+    "[Imagem/mídia omitida: o Codex CLI não recebe imagens na mensagem. "
+    "Para ver um arquivo visual, chame a ferramenta de leitura de arquivos do Orin com o caminho dele.]"
+)
+
+_MEDIA_BLOCK_KEYS: tuple[str, ...] = (
+    "image",
+    "image_url",
+    "input_image",
+    "document",
+    "audio",
+    "video",
+    "source",
+)
+_MEDIA_PATH_KEYS: tuple[str, ...] = ("path", "file_path", "workspace_path")
+
+
+def _media_block_path(block: Mapping[str, Any]) -> str | None:
+    """A file path carried by a media block, when it names a local file (never a URL or inline data)."""
+    candidates: list[Any] = [block.get(key) for key in _MEDIA_PATH_KEYS]
+    for nested_key in _MEDIA_BLOCK_KEYS:
+        nested = block.get(nested_key)
+        if isinstance(nested, str):
+            candidates.append(nested)
+        elif isinstance(nested, Mapping):
+            candidates.extend(nested.get(key) for key in _MEDIA_PATH_KEYS)
+    for raw in candidates:
+        if not isinstance(raw, str):
+            continue
+        text = raw.strip()
+        if (
+            not text
+            or len(text) > 1024
+            or text.lower().startswith(("http://", "https://", "data:"))
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in text)
+        ):
+            continue
+        if text.startswith("file://"):
+            text = text[len("file://") :]
+            if os.name == "nt" and text.startswith("/") and len(text) >= 3 and text[2] == ":":
+                text = text[1:]
+        return text
+    return None
+
+
+def _media_note(block: Mapping[str, Any] | None) -> str:
+    path = _media_block_path(block) if block is not None else None
+    if path is None:
+        return CODEX_OMITTED_MEDIA_NOTE
+    return (
+        f"[Imagem/mídia no arquivo: {path} — o Codex CLI não recebe imagens na mensagem. "
+        f'Para vê-la, chame a ferramenta de leitura de arquivos do Orin com o caminho "{path}".]'
+    )
+
+
 def encode_codex_user_turn(content: list[dict[str, Any]] | str) -> bytes:
-    """Encode user turn content as single-line UTF-8 bytes terminated by `\\n`."""
+    """Encode a user turn as UTF-8 text for `codex exec -`, which reads stdin until EOF.
+
+    Line breaks are kept (`\\r\\n`/`\\r` become `\\n`) and the text ends with one `\\n`: flattening them into spaces
+    glued the Markdown headings and the role markers of the replayed history into one line. A media block (history
+    replayed after a restart or the text-protocol fallback) becomes a short text note, with its file path when it has
+    one: it never raises, so it never drops the turn.
+    """
     if isinstance(content, str):
         raw_text = content
     else:
         parts: list[str] = []
+        omitted_pending = False
         for block in content:
             if isinstance(block, Mapping):
                 btype = str(block.get("type") or "text").strip().lower()
-                if btype not in ("text", "input_text") or any(
-                    k in block for k in ("image", "image_url", "input_image", "audio", "video", "source")
-                ):
-                    raise ValueError(
-                        "O Codex CLI aceita apenas blocos de texto no stdin; "
-                        "envio de imagens ou mídia não é suportado."
-                    )
-                if "text" in block:
-                    text_val = block.get("text")
-                    if text_val is not None:
-                        parts.append(str(text_val))
+                if btype not in ("text", "input_text") or any(k in block for k in _MEDIA_BLOCK_KEYS):
+                    parts.append(_media_note(block))
+                    continue
+                text_val = block.get("text")
+                if text_val is not None:
+                    parts.append(str(text_val))
             elif isinstance(block, str):
                 parts.append(block)
             else:
-                raise ValueError(
-                    "O Codex CLI aceita apenas blocos de texto no stdin; "
-                    "envio de imagens ou mídia não é suportado."
-                )
+                omitted_pending = True
+        if omitted_pending:
+            parts.append(CODEX_OMITTED_MEDIA_NOTE)
         raw_text = "\n".join(parts)
 
-    single_line = (
-        raw_text.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
-    )
-    return (single_line + "\n").encode("utf-8")
+    normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+    return (normalized.rstrip("\n") + "\n").encode("utf-8")
 
 
 __all__ = [
+    "CODEX_NEUTRAL_CONFIG",
+    "CODEX_OMITTED_MEDIA_NOTE",
     "DEFAULT_CODEX_MODEL",
     "MAX_CODEX_MAJOR",
     "MIN_CODEX_VERSION",

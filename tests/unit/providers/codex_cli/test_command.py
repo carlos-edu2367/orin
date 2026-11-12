@@ -18,6 +18,8 @@ from agentos.providers.codex_cli.command import (
     build_isolated_codex_env,
     clean_codex_model_id,
     codex_version,
+    CODEX_NEUTRAL_CONFIG,
+    CODEX_OMITTED_MEDIA_NOTE,
     encode_codex_user_turn,
     is_codex_version_supported,
     redact_codex_argv,
@@ -78,6 +80,7 @@ def test_build_codex_command_new_ephemeral_turn(tmp_path: Path) -> None:
         'sandbox_mode="read-only"',
         "-c",
         'approval_policy="never"',
+        *[item for value in CODEX_NEUTRAL_CONFIG for item in ("-c", value)],
         "-c",
         'model_reasoning_effort="xhigh"',
         "-c",
@@ -306,19 +309,62 @@ def test_version_gate_and_codex_version_script(tmp_path: Path) -> None:
     assert is_codex_version_supported(ver) is True
 
 
-def test_encode_codex_user_turn_single_line_utf8() -> None:
+def test_encode_codex_user_turn_keeps_line_breaks_utf8() -> None:
     encoded = encode_codex_user_turn(
         [
             {"type": "text", "text": "olá\nmundo"},
-            {"type": "text", "text": "segunda linha\r\nfinal"},
+            {"type": "text", "text": "segunda linha\r\nfinal\r\r"},
         ]
     )
     assert isinstance(encoded, bytes)
-    decoded = encoded.decode("utf-8")
-    assert decoded.endswith("\n")
-    assert "\n" not in decoded[:-1]
-    assert "\r" not in decoded[:-1]
-    assert "olá" in decoded and "mundo" in decoded
+    assert encoded.decode("utf-8") == "olá\nmundo\nsegunda linha\nfinal\n"
+    assert encode_codex_user_turn("# Session\n- a\n\n[User]\noi").decode("utf-8") == "# Session\n- a\n\n[User]\noi\n"
+
+
+def test_encode_codex_user_turn_turns_media_into_a_note_and_never_raises() -> None:
+    inline = encode_codex_user_turn(
+        [
+            {"type": "text", "text": "veja"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+        ]
+    ).decode("utf-8")
+    assert inline == f"veja\n{CODEX_OMITTED_MEDIA_NOTE}\n"
+    with_path = encode_codex_user_turn(
+        [{"type": "input_image", "image_url": "data:image/png;base64,AAAA", "path": "C:/ws/foto.png"}]
+    ).decode("utf-8")
+    assert "C:/ws/foto.png" in with_path and "AAAA" not in with_path
+    url_only = encode_codex_user_turn([{"type": "image_url", "image_url": {"url": "https://x.test/a.png"}}])
+    assert CODEX_OMITTED_MEDIA_NOTE in url_only.decode("utf-8")
+    assert encode_codex_user_turn([object()]).decode("utf-8").strip() == CODEX_OMITTED_MEDIA_NOTE  # type: ignore[list-item]
+
+
+def test_build_codex_command_neutralises_codex_sandbox_notice_but_keeps_sandbox(tmp_path: Path) -> None:
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("prompt", encoding="utf-8")
+    req = CliTurnRequest(binary="codex", system_prompt_file=prompt_file, model="gpt-6.1-sol")
+    argv = build_codex_command(req)
+    pairs = [argv[i + 1] for i, item in enumerate(argv) if item == "-c"]
+    for key in (
+        "include_permissions_instructions=false",
+        "include_environment_context=false",
+        "include_apps_instructions=false",
+        "include_collaboration_mode_instructions=false",
+        "features.unified_exec=false",
+        "features.unified_exec_tty=false",
+        "features.computer_use=false",
+        "features.browser_use=false",
+        "features.apps=false",
+        "features.plugins=false",
+        "features.sleep_tool=false",
+        "features.skill_mcp_dependency_install=false",
+        "features.skip_host_skill_discovery=true",
+        "suppress_unstable_features_warning=true",
+    ):
+        assert key in pairs
+    # The sandbox is what holds back the native apply_patch: it stays read-only, never loosened.
+    assert 'sandbox_mode="read-only"' in pairs and 'approval_policy="never"' in pairs
+    assert not any("danger-full-access" in item or "workspace-write" in item for item in pairs)
+    assert not any(item.startswith(("features.code_mode_host", "multi_agent_v2")) for item in pairs)
 
 
 @pytest.mark.parametrize(
@@ -573,6 +619,13 @@ def test_redact_codex_argv_handles_chained_flags_and_attached_c_values() -> None
         ("-c", 'web_search="enabled"'),
         ("-c", "features.view_image=true"),
         ("-c", "features.image_generation=true"),
+        ("-c", "include_permissions_instructions=true"),
+        ("-c", "include_environment_context=true"),
+        ("-c", "include_apps_instructions=true"),
+        ("-c", "include_collaboration_mode_instructions=true"),
+        ("-c", "features.unified_exec=true"),
+        ("-c", "features.computer_use=true"),
+        ("-c", "features.skip_host_skill_discovery=false"),
         ("-c", 'model_instructions_file="/etc/passwd"'),
         ("--dangerously-bypass-approvals-and-sandbox",),
         ("--full-auto",),

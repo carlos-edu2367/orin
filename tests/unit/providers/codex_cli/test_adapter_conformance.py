@@ -62,6 +62,11 @@ def _make_error_result(
 
 
 class TestCodexCliAdapterConformance(CliAdapterConformance):
+    def test_encode_user_turn_is_single_line_utf8(self) -> None:
+        # Codex reads stdin until EOF, so the line breaks stay (headings and role markers need them).
+        encoded = self.get_fixtures().adapter.encode_user_turn([{"type": "text", "text": "olá\nmundo"}])
+        assert encoded.decode("utf-8") == "olá\nmundo\n"
+
     def adapter_fixtures(self) -> AdapterFixtures:
         return AdapterFixtures(
             adapter=CodexCliAdapter(),
