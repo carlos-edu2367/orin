@@ -5,7 +5,7 @@ export type UploadedFile = {
   upload_id: string
   filename: string
   media_type: string
-  kind: 'text' | 'image' | 'pdf' | 'office'
+  kind: 'text' | 'image' | 'pdf' | 'office' | 'audio' | 'video'
   bytes: number
 }
 
@@ -23,7 +23,7 @@ function parseUploadedFile(value: unknown): UploadedFile {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()
   const data = value as Record<string, unknown>
   const kind = String(data.kind)
-  if (kind !== 'text' && kind !== 'image' && kind !== 'pdf' && kind !== 'office') throw invalidResponseError()
+  if (kind !== 'text' && kind !== 'image' && kind !== 'pdf' && kind !== 'office' && kind !== 'audio' && kind !== 'video') throw invalidResponseError()
   return {
     upload_id: String(data.upload_id), filename: String(data.filename),
     media_type: String(data.media_type), kind, bytes: Number(data.bytes),

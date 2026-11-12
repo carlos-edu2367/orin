@@ -113,21 +113,83 @@ def _chunked_ids(items: Sequence[str], size: int = 450) -> list[tuple[str, ...]]
     return [seq[i : i + step] for i in range(0, len(seq), step)]
 
 
-def _attachment_label(record: Mapping[str, object]) -> str:
-    kinds = {"image": "imagem", "pdf": "PDF", "office": "documento", "text": "texto"}
+def _attachment_path(record: Mapping[str, object], workspace_root: Path | str | None) -> str:
+    """The attachment's path: absolute when the workspace is known (a CLI's own file reader needs that)."""
+    path = str(record.get("path") or "")
+    if workspace_root is None or not path:
+        return path
+    try:
+        return (Path(workspace_root) / path).as_posix()
+    except (TypeError, ValueError):
+        return path
+
+
+def _attachment_label(record: Mapping[str, object], workspace_root: Path | str | None = None) -> str:
+    kinds = {
+        "image": "imagem", "pdf": "PDF", "office": "documento", "text": "texto", "audio": "áudio", "video": "vídeo",
+    }
     kind = kinds.get(str(record.get("kind") or ""), "arquivo")
     size = int(record.get("bytes") or 0)
-    return f"{record.get('path')} ({kind}, {max(1, round(size / 1024))} KB)"
+    return f"{_attachment_path(record, workspace_root)} ({kind}, {max(1, round(size / 1024))} KB)"
 
 
-def _attachment_marker(records: Sequence[Mapping[str, object]]) -> str:
-    """The line appended to a user message so the model knows the files exist."""
-    listed = ", ".join(_attachment_label(record) for record in records)
-    return (
-        f"\n\n[anexos enviados pela pessoa: {listed}]\n"
-        "Use view_file(path=\"…\") para ler o conteúdo de um anexo visual, "
-        "ou read_file para texto."
-    )
+def _attachment_marker(
+    records: Sequence[Mapping[str, object]],
+    *,
+    workspace_root: Path | str | None = None,
+    provider: str | None = None,
+    model_id: str | None = None,
+) -> str:
+    """The line appended to a user message so the model knows the files exist, and how to open them.
+
+    On the Antigravity CLI the CLI drops most images a tool returns, so its own ``read_file`` (absolute path)
+    opens images, and audio/video for Gemini; Orin's ``view_file`` is for PDF, Office and, for a model that
+    cannot listen, the transcription of audio and video. Everywhere else ``view_file`` reads every kind.
+    """
+    listed = ", ".join(_attachment_label(record, workspace_root) for record in records)
+    head = f"\n\n[anexos enviados pela pessoa: {listed}]\n"
+    kinds = {str(record.get("kind") or "") for record in records}
+    if str(provider or "") != "google-antigravity":
+        tail = (
+            "Use view_file(path=\"…\") para ler o conteúdo de um anexo visual, "
+            "ou read_file para texto."
+        )
+        if kinds & {"audio", "video"}:
+            tail += (
+                " Para áudio ou vídeo use view_file: ele devolve a transcrição "
+                "(feita pelo Orin, porque este modelo não ouve)."
+            )
+        return head + tail
+    try:
+        from agentos.providers.antigravity_cli.catalog import antigravity_input_modalities
+
+        modalities = set(antigravity_input_modalities(str(model_id or "")))
+    except Exception:  # noqa: BLE001 - an unknown model gets the conservative text below
+        modalities = {"text"}
+    sees, hears = "image" in modalities, "audio" in modalities
+    native = [
+        label for label, kind, ok in (
+            ("imagem", "image", sees), ("áudio", "audio", hears), ("vídeo", "video", hears),
+        ) if ok and kind in kinds
+    ]
+    via_view: list[str] = []
+    if "image" in kinds and not sees:
+        via_view.append("imagem")
+    if kinds & {"audio", "video"} and not hears:
+        via_view.append("áudio/vídeo (o Orin devolve a transcrição, porque este modelo não ouve)")
+    if kinds & {"pdf", "office"}:
+        via_view.append("PDF e documentos")
+    parts: list[str] = []
+    if native:
+        parts.append(
+            f"Para {'/'.join(native)}, chame sua ferramenta nativa read_file (a do próprio CLI, não a do "
+            "servidor MCP orin) com o caminho ABSOLUTO listado acima."
+        )
+    if via_view:
+        parts.append(f"Para {', '.join(via_view)}, use view_file(path=\"…\").")
+    if "text" in kinds or not parts:
+        parts.append("Para texto, use a ferramenta read_file do Orin.")
+    return head + " ".join(parts)
 
 
 def _attachment_only_instruction(records: Sequence[Mapping[str, object]]) -> str:
@@ -2875,6 +2937,21 @@ class PostgresChatStore:
             except IntegrityError:
                 continue  # another worker created the row first: update it on the second pass
 
+    @staticmethod
+    def _attachment_root(turn: Mapping[str, object]) -> Path | None:
+        """Where this turn's workspace lives on disk (None when it cannot be told here)."""
+        try:
+            local_root = turn.get("workspace_root_path")
+            if isinstance(local_root, str) and local_root.strip():
+                return Path(local_root.strip()).resolve()
+            workspace_id = turn.get("project_workspace_id") if turn.get("project_id") else turn.get("conversation_id")
+            user_id = str(turn.get("user_id") or "")
+            if not isinstance(workspace_id, str) or not workspace_id.strip() or not user_id:
+                return None
+            return orin_paths().user_workspaces(user_id).resolve() / _directory_name(workspace_id)
+        except Exception:  # noqa: BLE001 - without a root the marker keeps the relative path
+            return None
+
     def history_for_turn(self, turn: dict[str, object], *, rehydration_budget_tokens: int = 0) -> list[dict[str, object]]:
         """The conversation as the model should see it, including past tool work.
 
@@ -2966,7 +3043,7 @@ class PostgresChatStore:
             if records:
                 if str(row["role"]) == "user" and not content.strip():
                     content = _attachment_only_instruction(records)
-                content = f"{content}{_attachment_marker(records)}"
+                content = f"{content}{_attachment_marker(records, workspace_root=self._attachment_root(turn), provider=str(turn.get('provider') or '') or None, model_id=str(turn.get('model_id') or '') or None)}"
             if (
                 replayed_messages
                 and str(row["role"]) == "assistant"

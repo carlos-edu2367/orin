@@ -56,3 +56,15 @@ def test_purge_removes_only_what_is_older_than_the_window(tmp_path):
     with pytest.raises(LookupError):
         later.get("user-1", old.upload_id)
     assert later.get("user-1", fresh.upload_id).filename == "novo.png"
+
+
+def test_audio_and_video_get_their_own_limit_while_other_kinds_keep_the_small_one(tmp_path):
+    wav = b"RIFF\x24\x00\x00\x00WAVEfmt " + b"\x00" * 64
+    mp4 = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00" + b"\x00" * 64
+    staging = UploadStaging(tmp_path, max_bytes=16, max_media_bytes=4096)
+    assert staging.store("user-1", "fala.wav", wav).kind == "audio"
+    assert staging.store("user-1", "clip.mp4", mp4).kind == "video"
+    with pytest.raises(UploadRejected):
+        staging.store("user-1", "foto.png", PNG)  # an image keeps the small limit
+    with pytest.raises(UploadRejected):
+        UploadStaging(tmp_path, max_bytes=16, max_media_bytes=32).store("user-1", "fala.wav", wav)

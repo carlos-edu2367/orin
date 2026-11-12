@@ -10,8 +10,11 @@ from pathlib import PurePosixPath
 import re
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+# Audio and video are bigger than a photo or a document: their own, higher limit (the bytes are read whole).
+MAX_MEDIA_UPLOAD_BYTES = 100 * 1024 * 1024
 MAX_FILES_PER_MESSAGE = 10
-MAX_TURN_BYTES = 50 * 1024 * 1024
+MAX_TURN_BYTES = 100 * 1024 * 1024
+MEDIA_KINDS = frozenset({"audio", "video"})
 MAX_FILENAME_CHARS = 120
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._ ()\-]")
@@ -64,13 +67,46 @@ def _is_text(data: bytes) -> bool:
     return True
 
 
+def _classify_audio_video(extension: str, data: bytes) -> tuple[str, str] | None:
+    """Audio and video containers, recognised by their first bytes (the extension only breaks ties)."""
+    head = data[:16]
+    if head[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "audio/wav", "audio"
+    if head[:4] == b"OggS":
+        return ("audio/opus" if extension == ".opus" else "audio/ogg"), "audio"
+    if head[:4] == b"fLaC":
+        return "audio/flac", "audio"
+    if head[:3] == b"ID3":
+        return "audio/mpeg", "audio"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"M4A ", b"M4B ") or extension in {".m4a", ".aac"}:
+            return "audio/mp4", "audio"
+        if brand == b"qt  " or extension == ".mov":
+            return "video/quicktime", "video"
+        return "video/mp4", "video"
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        # EBML: Matroska or WebM.
+        return ("video/x-matroska" if extension == ".mkv" else "video/webm"), "video"
+    # Bare frames carry no signature: they count only when the extension says what they are.
+    if len(head) >= 2 and head[0] == 0xFF:
+        if extension == ".mp3" and head[1] & 0xE0 == 0xE0:
+            return "audio/mpeg", "audio"
+        if extension == ".aac" and head[1] & 0xF6 == 0xF0:
+            return "audio/aac", "audio"
+    return None
+
+
 def classify(filename: str, data: bytes) -> tuple[str, str]:
     """Return ``(media_type, kind)``; raise ``UploadRejected`` for anything else.
 
-    ``kind`` is one of ``text``, ``image``, ``pdf`` or ``office`` and is what
+    ``kind`` is one of ``text``, ``image``, ``pdf``, ``office``, ``audio`` or ``video`` and is what
     the interface and the reading pipeline branch on.
     """
     extension = f".{filename.rpartition('.')[2].lower()}" if "." in filename else ""
+    media = _classify_audio_video(extension, data)
+    if media is not None:
+        return media
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", "image"
     if data.startswith(b"\xff\xd8\xff"):
@@ -93,6 +129,6 @@ def classify(filename: str, data: bytes) -> tuple[str, str]:
 
 
 __all__ = [
-    "MAX_FILES_PER_MESSAGE", "MAX_TURN_BYTES", "MAX_UPLOAD_BYTES",
+    "MAX_FILES_PER_MESSAGE", "MAX_MEDIA_UPLOAD_BYTES", "MAX_TURN_BYTES", "MAX_UPLOAD_BYTES", "MEDIA_KINDS",
     "UploadRejected", "classify", "safe_filename",
 ]

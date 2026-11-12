@@ -113,3 +113,34 @@ def test_an_attachment_only_message_with_visual_files_points_to_them():
 
 def test_a_message_with_text_keeps_its_text_first():
     assert _history_for("veja isto", [TEXT_ATTACHMENT])[0]["content"].startswith("veja isto")
+
+
+def test_history_marker_gives_the_absolute_path_and_the_native_reader_on_agy():
+    from pathlib import Path
+
+    store = _store()
+    image = {"path": ".orin/uploads/foto.png", "original_name": "foto.png", "media_type": "image/png",
+             "kind": "image", "bytes": 4096}
+    receipt = store.create(
+        user_id="user-1", message="o que tem aqui?", provider="google-antigravity",
+        model_id="claude-opus-5-5-high", idempotency_key="k-agy", attachments=[image],
+    )
+    turn = store.claim(receipt.turn_id)
+    content = store.history_for_turn(turn)[0]["content"]
+    listed = content.split("[anexos enviados pela pessoa: ", 1)[1].split(" (imagem", 1)[0]
+    assert Path(listed).is_absolute() and listed.replace("\\", "/").endswith(".orin/uploads/foto.png")
+    assert "ferramenta nativa read_file" in content and "caminho ABSOLUTO" in content
+
+
+def test_history_marker_of_a_local_workspace_uses_its_root(tmp_path):
+    store = _store()
+    audio = {"path": ".orin/uploads/fala.wav", "original_name": "fala.wav", "media_type": "audio/wav",
+             "kind": "audio", "bytes": 4096}
+    receipt = store.create(
+        user_id="user-1", message="transcreva", provider="google-antigravity",
+        model_id="gemini-3.8-flash-high", idempotency_key="k-agy2", attachments=[audio],
+    )
+    turn = {**store.claim(receipt.turn_id), "workspace_root_path": str(tmp_path)}
+    content = store.history_for_turn(turn)[0]["content"]
+    assert f"{(tmp_path.resolve() / '.orin/uploads/fala.wav').as_posix()} (áudio, 4 KB)" in content
+    assert "áudio" in content and "ferramenta nativa read_file" in content

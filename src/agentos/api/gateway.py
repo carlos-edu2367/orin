@@ -60,7 +60,7 @@ from agentos.installation.update_job import update_job
 from agentos.installation import orin_paths, read_installation_status, remove_installed_version, runtime_profile, start_update
 from agentos.agentic.workspace import ConversationWorkspace, WorkspaceError, resolve_workspace
 from agentos.local_workspace import FolderRejected, choose_folder, inspect_folder
-from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_UPLOAD_BYTES, UploadRejected
+from agentos.uploads.media import MAX_FILES_PER_MESSAGE, MAX_MEDIA_UPLOAD_BYTES, MAX_UPLOAD_BYTES, UploadRejected
 from agentos.uploads.promotion import discard_promoted, promote_uploads
 from agentos.mcp.catalog import search_catalog
 from agentos.mcp.auth import McpOAuthCallbackError, McpOAuthUnreachable, McpOAuthUnsupported
@@ -720,7 +720,8 @@ def create_app(services: ApiServices) -> FastAPI:
     async def create_upload(request: Request, file: UploadFile = File(...)) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
-        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        # The staging area applies the per-kind limit once the content is classified (audio and video get a higher one).
+        data = await file.read(max(MAX_UPLOAD_BYTES, MAX_MEDIA_UPLOAD_BYTES) + 1)
         staged = require_port(services.uploads).store(principal.user_id, file.filename or "arquivo", data)  # type: ignore[union-attr]
         return JSONResponse({
             "upload_id": staged.upload_id, "filename": staged.filename,
