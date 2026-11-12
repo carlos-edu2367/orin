@@ -68,7 +68,7 @@ class ShellTaskTools:
 
     def _is_long_lived(self, entry: Mapping[str, Any]) -> bool:
         """A server or watcher the model started on purpose to keep running; a turn does not wait for one."""
-        if entry.get("backgrounded_by_tool_cap"):
+        if entry.get("backgrounded_by_tool_cap") or entry.get("backgrounded_by_time"):
             return False  # a foreground job that outgrew one tool call: it is meant to finish
         command = str(entry.get("command") or "")
         if entry.get("detected_url") or _DEV_SERVER_CMD_RE.search(command) or _LONG_LIVED_CMD_RE.search(command):
@@ -142,6 +142,8 @@ class ShellTaskTools:
             self._mark_exit_notified(pid)
             label = str(entry.get("description") or entry.get("command") or "")[:120]
             outcome = "finished" if code is None else ("finished (exit 0)" if code == 0 else f"failed (exit {code})")
+            if entry.get("timed_out"):
+                outcome = f"was stopped at its {entry.get('timeout_seconds')}s timeout"
             tail = self._background_log_text(str(entry.get("log_path") or ""))[-PROCESS_NOTICE_TAIL_CHARS:].strip()
             notices.append(
                 f"Background process {pid} ({label}) {outcome}."

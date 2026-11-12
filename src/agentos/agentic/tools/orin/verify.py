@@ -108,7 +108,8 @@ class VerifyTools:
             results: list[dict[str, Any]] = []
             artifacts: list[dict[str, Any]] = []
             for command in commands:
-                result = self.run_command(command, timeout_seconds=MAX_COMMAND_TIMEOUT_SECONDS)
+                # Each scaffold step needs the previous one finished: never moved to the background.
+                result = self.run_command(command, timeout_seconds=MAX_COMMAND_TIMEOUT_SECONDS, auto_background=False)
                 payload = result.get("payload") if isinstance(result.get("payload"), Mapping) else {}
                 command_artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
                 artifacts.extend(item for item in command_artifacts if isinstance(item, Mapping))

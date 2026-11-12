@@ -481,13 +481,13 @@ def test_run_command_auto_backgrounded_before_max_tool_call_seconds_cap(
         assert isinstance(pid, int) and pid > 0
         log_rel = capped.payload["log_path"]
         assert str(log_rel).startswith(".orin/logs/")
-        expected_msg = (
-            f"Still running after 1s; moved to background (pid {pid}, log: {log_rel}). "
-            f"Wait for it with read_process_output(pid={pid}, block=true); do not start it again. "
-            "If you end your answer while it runs, the turn waits for it and tells you how it ended."
-        )
-        assert expected_msg in capped.content
-        assert capped.payload["message"] == expected_msg
+        message = capped.payload["message"]
+        assert message in capped.content
+        assert "Your command is taking a while (still running after 1s)" in message
+        assert f"Its id is pid {pid}: check on it with read_process_output(pid={pid}) (log: {log_rel})" in message
+        assert "You will be notified when it finishes, whether it succeeds or fails" in message
+        assert "do not start it again" in message
+        assert f"read_process_output(pid={pid}, block=true)" in message
         assert capped.payload["shell_id"] in toolset._background_shells
     finally:
         if isinstance(pid, int) and pid > 0:
@@ -511,6 +511,32 @@ def test_run_command_auto_backgrounded_before_max_tool_call_seconds_cap(
     assert uncapped.payload["background"] is False
     assert uncapped.payload["exit_code"] == 0
     assert "completed-foreground" in uncapped.content
+
+
+def test_run_command_cap_longer_than_timeout_never_stretches_default_timeout(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    # With agy the cap is the turn's remaining time (~24 h in Code). A script that hung after a traceback
+    # (aiosqlite thread kept the interpreter alive) then held its turn for hours instead of 120 s.
+    from agentos.agentic.tools.shell import bash as bash_module
+
+    monkeypatch.setattr(bash_module, "DEFAULT_COMMAND_TIMEOUT_SECONDS", 2)
+    workspace = ConversationWorkspace(tmp_path, "conv-bash-cap-no-stretch")
+    toolset = AgentToolset(
+        workspace,
+        code_mode_active=True,
+        permission_mode="full_autonomy",
+        max_tool_call_seconds=86399.123,
+    )
+    hung_cmd = f'"{sys.executable}" -u -c "import time; print(\'hung\', flush=True); time.sleep(30)"'
+    started = time.monotonic()
+    outcome = toolset.invoke("run_command", {"command": hung_cmd, "description": "Hung script"})
+    elapsed = time.monotonic() - started
+
+    assert outcome.status == "failed"
+    assert "timed out after 2s" in outcome.content
+    assert elapsed < 10.0
+    assert not toolset._background_shells
 
 
 def test_exit_plan_mode_includes_plan_approval_and_plan_content(tmp_path: Path) -> None:

@@ -11,7 +11,11 @@ from typing import Any
 from pydantic import Field
 
 from agentos.agentic.tools._shared import _TEXT, _schema
-from agentos.agentic.tools.shell.bash import BashOutput
+from agentos.agentic.tools.shell.bash import (
+    LONG_SLEEP_SECONDS,
+    BashOutput,
+    _leading_sleep,
+)
 from agentos.agentic.tools.spec import ToolInput, ToolSpec
 
 # PowerShell 5.1 writes redirected output in the console code page; this makes it UTF-8 (Orin's own prefix,
@@ -66,6 +70,12 @@ class PowerShellTools:
         timeout_seconds: int | None = None,
         description: str = "",
     ) -> dict[str, Any]:
+        leading = None if background else _leading_sleep(command, "powershell") if isinstance(command, str) else None
+        if leading is not None and leading[0] >= LONG_SLEEP_SECONDS:
+            return self._sleep_then_run(
+                command, leading[0], timeout_seconds, description, "powershell",
+                lambda rest=leading[1]: self.powershell(rest, False, timeout_seconds, description),
+            )
         return self._run_shell(
             command, background, timeout_seconds, "", description,
             argv=powershell_argv(command) if isinstance(command, str) and command.strip() else None,
@@ -86,7 +96,10 @@ SPECS: tuple[ToolSpec, ...] = (
         key="powershell",
         description=(
             "Run one Windows PowerShell 5.1 command inside the conversation workspace and return its output. "
-            "Use it for Windows-specific work (cmdlets, registry, services); use run_command for ordinary builds and scripts."
+            "Use it for Windows-specific work (cmdlets, registry, services); use run_command for ordinary builds and scripts. "
+            "Set background=true for a server or for any job that may outlast a couple of minutes; you are told when it "
+            "ends, with its exit code. Do not wait with Start-Sleep. A command still running after 60s moves to the "
+            "background on its own and you are told the same way when it ends."
         ),
         legacy_schema=_schema({
             "command": {**_TEXT, "description": "A single PowerShell command, executed non-interactively."},
@@ -99,7 +112,9 @@ SPECS: tuple[ToolSpec, ...] = (
         input_model=PowerShellInput,
         public_description=(
             "Run a Windows PowerShell command in the workspace. Prefer the file tools for reading, searching and editing "
-            "files. Give a short description. Use run_in_background for long-lived processes."
+            "files. Give a short description. Use run_in_background for servers and for jobs that may take more than a couple "
+            "of minutes; you are notified when they finish, with the exit code, so do not wait with Start-Sleep. "
+            "A command still running after 60s moves to the background on its own and you are notified the same way."
         ),
         output_model=BashOutput,
         policy_tags=("mutates",),

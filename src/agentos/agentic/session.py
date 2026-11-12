@@ -560,7 +560,7 @@ def build_system_prompt(
         "- One reply is bounded, so a single tool call cannot carry an unlimited payload. Write a long file in parts: write_file for the first part, then write_file with mode=\"append\" for each following part. Save a long script with write_file and then run it, instead of passing it inline to run_command.",
         "- Keep the final answer for the user short and useful; the interface already shows every tool step you took.",
         "- When you create a useful workspace file, link it in your final answer as [filename](workspace://relative/path). Prioritize final deliverables and include generator scripts when useful.",
-        "- Use run_command only for commands that finish. To start a local server, call run_command with background=true; on Windows do not use nohup or Unix '&' syntax.",
+        "- To start a local server, or a job that may take more than a couple of minutes (render, long test suite, download), call run_command with background=true; on Windows do not use nohup or Unix '&' syntax. You are told when a background job ends, with its exit code: keep working meanwhile and never wait with sleep. A command still running after 60 seconds moves to the background on its own and you are told the same way. To block on one, use read_process_output(pid=..., block=true).",
     ]
     is_live_or_friend_prompt = bool(live_mode) or str(conversation_mode or "chat").strip().lower() == "friend"
     if not code_mode_context and not is_live_or_friend_prompt:

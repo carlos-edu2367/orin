@@ -5,6 +5,7 @@ from typing import Any, Mapping, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agentos.agentic import write_claims
 from agentos.agentic.tools._shared import AgentToolError, compute_structured_patch, _TEXT, _schema
 from agentos.agentic.tools.files import ORIGINAL_FILE_LIMIT
 from agentos.agentic.tools.files.newlines import dominant_newline, with_newline
@@ -142,6 +143,8 @@ class EditTools:
         artifact["original_sha256"] = original_sha
         artifact["updated_sha256"] = updated_sha
         artifacts = [artifact]
+        # A command running meanwhile in another chat of this folder must not list this file as its own.
+        write_claims.claim(self.workspace.root, [str(artifact.get("path") or path)], getattr(self, "conversation_id", None))
         self._queue_reindex(artifacts)
         notify = getattr(self, "_lsp_after_write", None)
         if callable(notify):

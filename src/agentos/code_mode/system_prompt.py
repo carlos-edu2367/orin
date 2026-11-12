@@ -96,7 +96,7 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
         using.append("- Read a file before you edit or overwrite it. An edit to a file you have not read, or that changed since you read it, is refused.")
     using.append("- When several calls do not depend on each other, make them in the same response so they run in parallel.")
     if has("run_command"):
-        using.append(f"- Give every {t('run_command')} call a short description. Start long-running servers in the background (run_in_background) instead of backgrounding them in the shell.")
+        using.append(f"- Give every {t('run_command')} call a short description. Start servers, and any job that may take more than a couple of minutes, in the background (run_in_background) instead of backgrounding them in the shell. A command still running after 60 seconds moves to the background on its own. You are notified when a background job ends, with its exit code, so keep working instead of waiting; never poll with sleep.")
     if has("search_code"):
         if has("project_map"):
             using.append(f"- {t('search_code')} finds code by meaning and {t('project_map')} summarizes the project's structure; use them before broad text searches.")

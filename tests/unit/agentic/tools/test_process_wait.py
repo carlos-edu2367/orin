@@ -5,9 +5,10 @@ import sys
 import time
 from pathlib import Path
 
+from agentos.agentic import write_claims
 from agentos.agentic.agent_tools import AgentToolset
 from agentos.agentic.tools.registry import default_registry
-from agentos.agentic.tools.shell.bash import _pure_sleep_seconds
+from agentos.agentic.tools.shell.bash import _leading_sleep, _pure_sleep_seconds
 from agentos.agentic.workspace import ConversationWorkspace
 
 PY = f'"{sys.executable}"'
@@ -111,9 +112,121 @@ def test_a_long_sleep_wakes_when_a_background_job_ends(tmp_path: Path) -> None:
     assert outcome.payload["woke_early"] is True
 
 
+def test_leading_sleeps_are_recognised() -> None:
+    assert _leading_sleep("sleep 420; cd out && ls", "posix") == (420, "cd out && ls")
+    assert _leading_sleep("sleep 2m && cat out.log", "posix") == (120, "cat out.log")
+    assert _leading_sleep("Start-Sleep -Seconds 90; Get-Content x.log", "powershell") == (90, "Get-Content x.log")
+    assert _leading_sleep("sleep 300", "posix") is None  # a bare sleep is the other path
+    assert _leading_sleep("echo a; sleep 300", "posix") is None
+    assert _leading_sleep("sleep 300 & echo a", "posix") is None
+    assert _leading_sleep("sleep 300; echo a", "cmd") is None
+
+
+def test_a_leading_sleep_wakes_on_a_background_job_and_then_runs_the_rest(tmp_path: Path, monkeypatch) -> None:
+    from agentos import host_shell
+    from agentos.agentic.tools.shell import bash as bash_module
+
+    toolset = _toolset(tmp_path)
+    pid = _background(toolset, "import time; time.sleep(0.8); print('render ok', flush=True)", "render")
+    posix = host_shell.current_host_shell()
+    if posix.dialect != "posix":
+        import pytest
+
+        pytest.skip("needs a POSIX shell")
+    monkeypatch.setattr(bash_module, "current_host_shell", lambda: posix)
+    began = time.monotonic()
+    outcome = toolset.invoke("run_command", {"command": f"sleep 300; {PY} -c \"print('checked')\"", "timeout_seconds": 600})
+    assert time.monotonic() - began < 20
+    assert outcome.status == "succeeded", outcome.content
+    assert "leading sleep 300" in outcome.content and "because background work finished" in outcome.content
+    assert f"Background process {pid} (render) finished (exit 0)" in outcome.content
+    assert "checked" in outcome.content
+    assert outcome.payload["woke_early"] is True
+
+
+def test_a_command_does_not_claim_files_another_conversation_wrote_meanwhile(tmp_path: Path) -> None:
+    write_claims.reset()
+    root = tmp_path / "shared"
+    root.mkdir()
+    mine = AgentToolset(ConversationWorkspace.at_root(str(root)), code_mode_active=True, conversation_id="chat-stock")
+    other = AgentToolset(ConversationWorkspace.at_root(str(root)), code_mode_active=True, conversation_id="chat-videos")
+    # While this chat's command runs, the other chat writes a file in the same folder.
+    script = (
+        "import pathlib,time; time.sleep(2.5); pathlib.Path('mine.txt').write_text('a')"
+    )
+    import threading
+
+    def other_writes() -> None:
+        time.sleep(0.8)
+        written = other.invoke("write_file", {"path": "docs/brief.md", "content": "brief"})
+        assert written.status == "succeeded", written.content
+
+    writer = threading.Thread(target=other_writes)
+    writer.start()
+    outcome = mine.invoke("run_command", {"command": f'{PY} -c "{script}"', "timeout_seconds": 60})
+    writer.join()
+    assert outcome.status == "succeeded", outcome.content
+    paths = {item["path"] for item in outcome.payload.get("artifacts") or []}
+    assert "mine.txt" in paths
+    assert "docs/brief.md" not in paths
+    write_claims.reset()
+
+
 def test_a_long_sleep_with_nothing_to_wait_for_stops_at_its_timeout(tmp_path: Path) -> None:
     toolset = _toolset(tmp_path)
     began = time.monotonic()
     outcome = toolset.invoke("run_command", {"command": "sleep 90", "timeout_seconds": 1})
     assert 0.8 <= time.monotonic() - began < 5
     assert outcome.status == "succeeded" and "Waited 1s of 90s" in outcome.content and "block=true" in outcome.content
+
+
+def _fast_auto_background(monkeypatch) -> None:
+    from agentos.agentic.tools.shell import bash as bash_module
+
+    monkeypatch.setattr(bash_module, "FOREGROUND_AUTO_BACKGROUND_SECONDS", 1)
+
+
+def test_a_slow_foreground_command_moves_to_the_background_and_is_announced_when_it_ends(tmp_path: Path, monkeypatch) -> None:
+    _fast_auto_background(monkeypatch)
+    toolset = _toolset(tmp_path)
+    code = "import sys,time; print('step 1', flush=True); time.sleep(2.5); print('done 2', flush=True); sys.exit(3)"
+    began = time.monotonic()
+    outcome = toolset.invoke("run_command", {"command": f'{PY} -c "{code}"', "timeout_seconds": 60, "description": "slow job"})
+    assert time.monotonic() - began < 6
+    assert outcome.status == "succeeded", outcome.content
+    pid = outcome.payload["pid"]
+    assert outcome.payload["backgrounded_by_time"] is True
+    assert "Your command is taking a while" in outcome.content
+    assert "now running in the background" in outcome.content
+    assert f"Its id is pid {pid}" in outcome.content
+    assert "You will be notified when it finishes" in outcome.content
+    assert [row["pid"] for row in toolset.awaited_background_processes()] == [pid]  # the turn waits for it
+    deadline = time.monotonic() + 15
+    while toolset.awaited_background_processes() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    notice = toolset.take_finished_process_notices()
+    assert f"Background process {pid} (slow job) failed (exit 3)" in notice and "done 2" in notice
+
+
+def test_a_backgrounded_command_is_stopped_at_its_timeout_and_the_model_is_told(tmp_path: Path, monkeypatch) -> None:
+    _fast_auto_background(monkeypatch)
+    toolset = _toolset(tmp_path)
+    code = "import time; print('hung', flush=True); time.sleep(60)"
+    outcome = toolset.invoke("run_command", {"command": f'{PY} -c "{code}"', "timeout_seconds": 3, "description": "hung"})
+    assert outcome.status == "succeeded" and outcome.payload["backgrounded_by_time"] is True, outcome.content
+    pid = outcome.payload["pid"]
+    deadline = time.monotonic() + 20
+    while toolset.awaited_background_processes() and time.monotonic() < deadline:
+        time.sleep(0.2)
+    assert not toolset.awaited_background_processes()
+    notice = toolset.take_finished_process_notices()
+    assert f"Background process {pid} (hung) was stopped at its 3s timeout" in notice
+
+
+def test_a_quick_command_and_an_opted_out_one_stay_in_the_foreground(tmp_path: Path, monkeypatch) -> None:
+    _fast_auto_background(monkeypatch)
+    toolset = _toolset(tmp_path)
+    quick = toolset.invoke("run_command", {"command": f'{PY} -c "print(1)"'})
+    assert quick.status == "succeeded" and not quick.payload.get("background")
+    slow = toolset.run_command(f'{PY} -c "import time; time.sleep(2); print(42)"', timeout_seconds=30, auto_background=False)
+    assert not slow.get("background") and "42" in str(slow.get("content"))

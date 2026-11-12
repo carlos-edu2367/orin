@@ -21,6 +21,7 @@ from agentos.agentic.workspace import WorkspaceError
 from agentos.host_python import posix_path_hint
 from agentos.host_shell import _is_windows, current_host_shell, posix_to_windows_path, shell_argv
 from agentos.process_identity import process_created
+from agentos.agentic import write_claims
 from agentos.agentic.reminders import system_reminder
 from agentos.agentic.tools._shared import (
     AgentToolError,
@@ -78,9 +79,44 @@ def _release_job(job: Any) -> None:
             pass
 
 
+def _start_timeout_watchdog(
+    process: Any, job: Any, entry: dict[str, Any], *, timeout: float, elapsed: float,
+    log_ref: list[Any], lock: threading.Lock,
+) -> None:
+    """Stop a job that went to the background at the timeout it had in the foreground.
+
+    The end-of-turn wait lasts up to the turn's deadline (hours in Code), so a hung script left unbounded
+    would hold its turn for that long. The stop is written to the job's log, which the exit notice shows.
+    """
+    remaining = max(0.1, float(timeout) - float(elapsed))
+
+    def watch() -> None:
+        try:
+            process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            entry["timed_out"] = True
+            _terminate_process_tree(process, job=job)
+            with lock:
+                log_f = log_ref[0]
+                if log_f is not None:
+                    try:
+                        log_f.write(f"\n[Orin stopped this command: still running at its {int(timeout)}s timeout]\n".encode())
+                        log_f.flush()
+                    except Exception:  # noqa: BLE001
+                        pass
+        except Exception:  # noqa: BLE001 - a watchdog never raises into the worker
+            pass
+        finally:
+            _release_job(job)
+
+    threading.Thread(target=watch, name=f"orin-timeout-{getattr(process, 'pid', '?')}", daemon=True).start()
+
+
 SESSION_CWD_PATH = ".orin/state/cwd.json"
 MAX_OUTPUT_FIELD_CHARS = 30_000
 TOOL_CAP_HEADROOM_SECONDS = 25
+# A foreground command still running after this long moves to the background and the model is told when it ends.
+FOREGROUND_AUTO_BACKGROUND_SECONDS = 60
 # A bare `sleep N` this long is a wait for something, not work: it becomes a wait that ends early when a
 # background job or subagent finishes, instead of a blind timer.
 LONG_SLEEP_SECONDS = 60
@@ -99,6 +135,27 @@ def _pure_sleep_seconds(command: str) -> int | None:
     if match.group("posix") is not None:
         return int(match.group("posix")) * {"": 1, "s": 1, "m": 60, "h": 3600}[match.group("unit").lower()]
     return int(match.group("ps") or match.group("cmd"))
+
+
+# `sleep 420; ls out/` is the same blind wait with a check after it.
+_LEADING_SLEEP_RE = {
+    "posix": re.compile(
+        r"^\s*sleep\s+(?P<n>\d+)(?P<unit>[smh]?)\s*(?:;|&&|\r?\n)\s*(?P<rest>\S.*)$", re.IGNORECASE | re.DOTALL,
+    ),
+    "powershell": re.compile(
+        r"^\s*Start-Sleep\s+(?:-s(?:econds)?\s+)?(?P<n>\d+)\s*(?:;|\r?\n)\s*(?P<rest>\S.*)$", re.IGNORECASE | re.DOTALL,
+    ),
+}
+
+
+def _leading_sleep(command: str, dialect: str) -> tuple[int, str] | None:
+    """``(seconds, rest)`` when the command starts with a sleep followed by more work."""
+    pattern = _LEADING_SLEEP_RE.get(dialect)
+    match = pattern.match(command or "") if pattern is not None else None
+    if match is None:
+        return None
+    unit = (match.groupdict().get("unit") or "").lower()
+    return int(match.group("n")) * {"": 1, "s": 1, "m": 60, "h": 3600}[unit], match.group("rest").strip()
 
 # Exit codes that are an answer, not a failure, for common read-only programs.
 _RETURN_CODE_MEANINGS = {
@@ -252,8 +309,18 @@ class BashTools:
         timeout_seconds: int | None = None,
         cwd: str = "",
         description: str = "",
+        *,
+        auto_background: bool = True,
     ) -> dict[str, Any]:
         shell = current_host_shell()
+        leading = None if background else _leading_sleep(command, shell.dialect) if isinstance(command, str) else None
+        if leading is not None and leading[0] >= LONG_SLEEP_SECONDS:
+            return self._sleep_then_run(
+                command, leading[0], timeout_seconds, description, "run_command",
+                lambda rest=leading[1]: self.run_command(
+                    rest, False, timeout_seconds, cwd, description, auto_background=auto_background,
+                ),
+            )
         argv = shell_argv(command, shell) if isinstance(command, str) and command.strip() else None
         return self._run_shell(
             command,
@@ -263,6 +330,7 @@ class BashTools:
             description,
             argv=argv,
             dialect=shell.dialect,
+            auto_background=auto_background,
         )
 
     def _run_shell(
@@ -277,6 +345,7 @@ class BashTools:
         tool_name: str = "run_command",
         stderr_filter: Callable[[str], str] | None = None,
         dialect: str | None = None,
+        auto_background: bool = True,
     ) -> dict[str, Any]:
         if not isinstance(command, str) or not command.strip():
             raise AgentToolError("command must be a non-blank string")
@@ -304,6 +373,7 @@ class BashTools:
             "powershell" if tool_name == "powershell" else ("cmd" if os.name == "nt" else "posix")
         )
         self._resolve_cwd_after_command(command, working_directory, precheck=True, dialect=effective_dialect)
+        tracking_since = time.monotonic()
         change_baseline = self.workspace.begin_change_tracking()
         environment = {
             **os.environ,
@@ -400,7 +470,7 @@ class BashTools:
                     "status": "running",
                 }
                 self._turn_background_pids.add(process.pid)
-                artifacts = self.workspace.end_change_tracking(change_baseline)
+                artifacts = self._command_artifacts(change_baseline, tracking_since)
                 self._queue_reindex(artifacts)
                 return {
                     "ok": True,
@@ -483,8 +553,19 @@ class BashTools:
                         if float(tool_cap_s) > float(TOOL_CAP_HEADROOM_SECONDS)
                         else max(0.1, float(tool_cap_s))
                     )
-                    if timeout_seconds is None and cap_auto_bg_after >= timeout:
-                        timeout = int(cap_auto_bg_after) + int(TOOL_CAP_HEADROOM_SECONDS)
+                    if cap_auto_bg_after >= timeout:
+                        # The command's own timeout ends it before the client gives up, so there is nothing
+                        # to move to the background. The cap never stretches the timeout: with agy it is the
+                        # turn's remaining time (~24 h), and a hung script then held its turn for hours.
+                        cap_auto_bg_after = None
+                # A foreground command still running after a minute goes to the background on its own: the model
+                # keeps working and is told how it ended, instead of sitting on one tool call. A command whose own
+                # timeout comes first just ends there. Callers that need the result in hand opt out.
+                time_auto_bg_after: float | None = (
+                    float(FOREGROUND_AUTO_BACKGROUND_SECONDS)
+                    if auto_background and timeout > FOREGROUND_AUTO_BACKGROUND_SECONDS
+                    else None
+                )
 
                 while process.poll() is None or t_out.is_alive() or t_err.is_alive():
                     now = time.monotonic()
@@ -538,13 +619,23 @@ class BashTools:
                         and cap_auto_bg_after is not None
                         and elapsed >= cap_auto_bg_after
                     )
+                    backgrounded_by_time = (
+                        not backgrounded_by_tool_cap
+                        and process.poll() is None
+                        and time_auto_bg_after is not None
+                        and elapsed >= time_auto_bg_after
+                    )
                     should_auto_bg = process.poll() is None and (
                         (ready_match_at is not None and (now - ready_match_at) >= 0.35)
                         or (is_dev_server_cmd and elapsed >= 2.0)
                         or backgrounded_by_tool_cap
+                        or backgrounded_by_time
                     )
                     if should_auto_bg:
-                        _release_job(process_job)
+                        # A job meant to finish keeps its Job Object for the timeout watchdog; a server is let go.
+                        meant_to_finish = bool(backgrounded_by_tool_cap or backgrounded_by_time)
+                        if not meant_to_finish:
+                            _release_job(process_job)
                         _restore_stashed_orin()
                         auto_log_rel = f"{_PROCESS_LOG_DIR}/{uuid4().hex[:12]}.log"
                         try:
@@ -583,7 +674,7 @@ class BashTools:
                             **({"conversation_id": str(self.conversation_id)} if getattr(self, "conversation_id", None) else {}),
                         }
                         self._save_process_manifest(manifest)
-                        self._background_shells[shell_id] = {
+                        shell_entry: dict[str, Any] = {
                             "shell_id": shell_id,
                             "pid": process.pid,
                             "command": command[:400],
@@ -593,18 +684,31 @@ class BashTools:
                             "status": "running",
                             "auto_backgrounded": True,
                             "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
+                            "backgrounded_by_time": bool(backgrounded_by_time),
+                            "timeout_seconds": timeout,
                             "detected_url": detected_url,
                         }
+                        self._background_shells[shell_id] = shell_entry
                         self._turn_background_pids.add(process.pid)
-                        artifacts = self.workspace.end_change_tracking(change_baseline)
+                        if meant_to_finish:
+                            _start_timeout_watchdog(
+                                process, process_job, shell_entry, timeout=timeout, elapsed=elapsed,
+                                log_ref=bg_log_file_ref, lock=stream_lock,
+                            )
+                        artifacts = self._command_artifacts(change_baseline, tracking_since)
                         self._queue_reindex(artifacts)
-                        if backgrounded_by_tool_cap:
-                            after_s = max(1, int(round(cap_auto_bg_after or elapsed)))
+                        if meant_to_finish:
+                            after_s = max(1, int(round(
+                                cap_auto_bg_after if backgrounded_by_tool_cap and cap_auto_bg_after else elapsed
+                            )))
                             msg = (
-                                f"Still running after {after_s}s; moved to background "
-                                f"(pid {process.pid}, log: {auto_log_rel}). "
-                                f"Wait for it with read_process_output(pid={process.pid}, block=true); do not start it again. "
-                                "If you end your answer while it runs, the turn waits for it and tells you how it ended."
+                                f"Your command is taking a while (still running after {after_s}s), so it is now running "
+                                f"in the background. Its id is pid {process.pid}: check on it with "
+                                f"read_process_output(pid={process.pid}) (log: {auto_log_rel}). You will be notified when "
+                                "it finishes, whether it succeeds or fails, with its exit code and last output. Keep "
+                                "working on what does not depend on it and do not start it again. To wait for it now, "
+                                f"call read_process_output(pid={process.pid}, block=true). If it is still running at its "
+                                f"{timeout}s timeout, Orin stops it and tells you."
                             )
                             content_parts = [msg]
                             summary_text = (
@@ -632,6 +736,7 @@ class BashTools:
                             "auto_backgrounded": True,
                             "backgrounded_by_readiness": bool(ready_match_at is not None),
                             "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
+                            "backgrounded_by_time": bool(backgrounded_by_time),
                             "shell_id": shell_id,
                             "pid": process.pid,
                             "process_id": process.pid,
@@ -654,6 +759,7 @@ class BashTools:
                             "auto_backgrounded": True,
                             "backgrounded_by_readiness": bool(ready_match_at is not None),
                             "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
+                            "backgrounded_by_time": bool(backgrounded_by_time),
                             "shell_id": shell_id,
                             "pid": process.pid,
                             "process_id": process.pid,
@@ -763,7 +869,7 @@ class BashTools:
             if next_cwd.is_dir():
                 self._current_cwd = next_cwd
                 self._remember_session_cwd()
-        artifacts = self.workspace.end_change_tracking(change_baseline)
+        artifacts = self._command_artifacts(change_baseline, tracking_since)
         for artifact in artifacts:
             artifact_path = str(artifact.get("path") or "") if isinstance(artifact, Mapping) else ""
             if artifact_path and (change_baseline is None or artifact_path not in change_baseline or artifact_path not in self._read_file_state):
@@ -817,6 +923,50 @@ class BashTools:
                 size=len(full_body.encode("utf-8")) if persisted_path else None,
             ),
         }
+
+    def _sleep_then_run(
+        self, command: str, seconds: int, timeout_seconds: int | None, description: str, tool_name: str,
+        run_rest: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """`sleep N; check` waits like a bare long sleep (waking when background work ends), then runs the check."""
+        timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else int(timeout_seconds)
+        if not 1 <= timeout <= MAX_COMMAND_TIMEOUT_SECONDS:
+            raise AgentToolError(f"timeout_seconds must be between 1 and {MAX_COMMAND_TIMEOUT_SECONDS}.")
+        clean_description = str(description or "").strip()[:240]
+        waited = self._interruptible_sleep(command, seconds, timeout, clean_description, tool_name)
+        wait_payload = waited.get("payload") or {}
+        note = str(waited.get("content") or "").removeprefix("exit=0\n").strip()
+        prefix = (
+            f"[Orin turned the leading sleep {seconds} into a wait that ends when background work finishes. {note} "
+            "Next time run the long job with background=true: you are told when it ends, with its exit code.]\n"
+        )
+        try:
+            result = dict(run_rest())
+        except AgentToolError as error:
+            raise AgentToolError(prefix + str(error), error_code=error.error_code) from error
+        result["content"] = prefix + str(result.get("content") or "")
+        payload = dict(result.get("payload") or {})
+        payload["slept_seconds"] = wait_payload.get("slept_seconds")
+        payload["woke_early"] = bool(wait_payload.get("woke_early"))
+        result["payload"] = payload
+        return result
+
+    def _command_artifacts(self, baseline: dict[str, object] | None, since: float) -> list[dict[str, object]]:
+        """The files this command changed: the workspace diff, minus what another conversation wrote meanwhile."""
+        artifacts = self.workspace.end_change_tracking(baseline)
+        owner = str(getattr(self, "conversation_id", None) or "")
+        if not owner:
+            return artifacts
+        root = self.workspace.root
+        paths = [str(item.get("path") or "") for item in artifacts if isinstance(item, Mapping)]
+        others = write_claims.foreign(root, paths, owner, since=since)
+        if others:
+            artifacts = [
+                item for item in artifacts
+                if not (isinstance(item, Mapping) and str(item.get("path") or "") in others)
+            ]
+        write_claims.claim(root, [path for path in paths if path not in others], owner)
+        return artifacts
 
     def _interruptible_sleep(
         self, command: str, seconds: int, timeout: int, description: str, tool_name: str,
@@ -920,12 +1070,19 @@ class BashTools:
                     updated["exit_code"] = exit_code
                 manifest[pid_text] = updated
                 dirty = True
-                cmd = str(info.get("command") or "").strip()
+                cmd = str(info.get("description") or info.get("command") or "").strip()[:200]
                 log_path = str(info.get("log_path") or "").strip()
                 how = "has exited" if exit_code is None else f"has exited with code {exit_code}"
+                if exit_code is not None:
+                    how += " (success)" if exit_code == 0 else " (failed)"
+                live = self._background_entry(row_pid) or {}
+                if live.get("timed_out"):
+                    how = f"was stopped by Orin at its {live.get('timeout_seconds')}s timeout"
+                tail = self._background_log_text(log_path)[-1_500:].strip() if log_path else ""
                 notices.append(
-                    f"Background process {row_pid} ({cmd}) {how}. "
-                    f"Use read_process_output(pid={row_pid}) to inspect {log_path or 'its output'}."
+                    f"Background process {row_pid} ({cmd}) {how}."
+                    + (f" Last output:\n{tail}\n" if tail else " ")
+                    + f"Use read_process_output(pid={row_pid}) to inspect {log_path or 'its output'}."
                 )
         if dirty:
             try:
@@ -1015,20 +1172,27 @@ class BashOutput(BaseModel):
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="run_command",
-        description="Run one shell command inside the conversation workspace and return its output. Set background=true only for a "
-        "long-lived process (e.g. a dev server); it returns immediately and you read its output later with read_process_output. "
-        "Raise timeout_seconds for a slow install or build instead of splitting it into smaller commands. "
-        "To wait for a background command, call read_process_output(pid, block=true) instead of sleep; "
-        "for a background subagent, check_subagent(wait_seconds=...). "
+        description="Run one shell command inside the conversation workspace and return its output. Set background=true for a "
+        "server, and for any job that may outlast a couple of minutes (render, long test suite, download, training); it "
+        "returns at once and you are told when the job ends, with its exit code and last output, in a later tool result "
+        "or before the turn ends. Keep working meanwhile. Never wait with sleep: to block on a background command, call "
+        "read_process_output(pid, block=true); for a background subagent, check_subagent(wait_seconds=...). "
+        f"A command still running after {FOREGROUND_AUTO_BACKGROUND_SECONDS}s moves to the background on its own: you get "
+        "its pid and are told the same way when it ends. For a slow install or build, raise timeout_seconds instead of "
+        "splitting it. "
         f"The command line is limited to {MAX_COMMAND_CHARS} characters: write a longer script to a file "
         "(e.g. .orin/tmp/<name>.mjs) with write_file and run that file.",
         legacy_schema=_schema({
             "command": {**_TEXT, "description": "A single command line, executed non-interactively (stdin is closed)."},
             "description": {**_TEXT, "description": "Short 5-10 word description of what this command does."},
-            "background": {"type": "boolean", "description": "Start without waiting; use only for persistent servers."},
+            "background": {
+                "type": "boolean",
+                "description": "Start without waiting: for servers and for jobs that may outlast a couple of minutes. "
+                "You are notified when it ends, with its exit code.",
+            },
             "timeout_seconds": {
                 "type": "integer", "minimum": 1, "maximum": MAX_COMMAND_TIMEOUT_SECONDS,
-                "description": f"How long to wait for the command to finish. Defaults to {DEFAULT_COMMAND_TIMEOUT_SECONDS}s. Ignored when background=true.",
+                "description": f"The most the command may run, also after it moves to the background on its own. Defaults to {DEFAULT_COMMAND_TIMEOUT_SECONDS}s. Ignored when background=true.",
             },
             "cwd": {**_TEXT, "description": "Workspace-relative directory to run the command from. Defaults to the workspace root."},
         }, ("command",)),
@@ -1036,7 +1200,10 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="terminal",
         input_model=BashInput,
         output_model=BashOutput,
-        public_description='Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and editing files. Give a short description. Use run_in_background for long-lived processes such as dev servers. '
+        public_description='Run a shell command in the workspace. Prefer the file tools over shell commands for reading, searching and editing files. Give a short description. '
+        'Use run_in_background for servers and for jobs that may take more than a couple of minutes (renders, long test suites, downloads): '
+        'you are notified when they finish, with the exit code, so never wait with sleep. '
+        f'A command still running after {FOREGROUND_AUTO_BACKGROUND_SECONDS}s moves to the background on its own and you are notified the same way. '
         f'The command is limited to {MAX_COMMAND_CHARS} characters: write a longer script to a file (e.g. .orin/tmp/<name>.mjs) with Write and run that file.',
         policy_tags=("mutates",),
         available=lambda self: (self._enable_terminal),
