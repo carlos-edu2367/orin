@@ -29,6 +29,7 @@ from agentos.providers.antigravity_cli.command import (
     redact_antigravity_argv,
     resolve_antigravity_binary,
     resolve_antigravity_home,
+    wire_antigravity_media_reader,
     wire_antigravity_tool_server,
 )
 from agentos.providers.antigravity_cli.errors import classify_antigravity_error
@@ -86,5 +87,6 @@ __all__ = [
     "resolve_antigravity_binary",
     "resolve_antigravity_home",
     "set_cached_antigravity_models",
+    "wire_antigravity_media_reader",
     "wire_antigravity_tool_server",
 ]

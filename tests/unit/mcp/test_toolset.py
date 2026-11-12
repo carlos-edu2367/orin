@@ -1,3 +1,4 @@
+from pathlib import Path
 import threading
 
 import pytest
@@ -695,3 +696,86 @@ def test_build_client_normalizes_token_with_bearer_prefix_and_header_authorizati
 
 
 
+
+
+def test_browser_server_starts_in_the_workspace_and_writes_its_files_under_it(tmp_path):
+    from agentos.agentic.agent_context import bind_agent_id
+
+    seen: list[McpServerConfig] = []
+
+    def factory(config: McpServerConfig, secrets):
+        seen.append(config)
+        return FakeClient()
+
+    tools = (McpToolDescriptor(name="browser_take_screenshot", description="Shot", input_schema={"type": "object"}),)
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    provider = McpToolProvider(
+        [(_browser_config(args=("-y", "@playwright/mcp@latest", "--isolated")), tools, {})],
+        client_factory=factory,
+        workspace_root=workspace,
+    )
+    handler = provider.definitions()[0].handler
+    assert handler().status == "succeeded"
+    with bind_agent_id("agent:sub-1"):
+        assert handler().status == "succeeded"
+
+    for config in seen:
+        assert config.cwd == str(workspace)
+        output_dir = config.args[config.args.index("--output-dir") + 1]
+        assert Path(output_dir) == workspace / ".orin" / "playwright"
+        assert Path(output_dir).is_relative_to(workspace)
+        assert config.args.count("--output-dir") == 1
+    assert seen[1].args.count("--isolated") == 1
+
+
+def test_browser_session_is_keyed_by_the_workspace_and_a_server_that_names_its_own_folder_keeps_it(tmp_path):
+    seen: list[McpServerConfig] = []
+
+    def factory(config: McpServerConfig, secrets):
+        seen.append(config)
+        return FakeClient()
+
+    tools = (McpToolDescriptor(name="browser_snapshot", description="Snap", input_schema={"type": "object"}),)
+    first, second = tmp_path / "a", tmp_path / "b"
+    first.mkdir()
+    second.mkdir()
+    provider = McpToolProvider([(_browser_config(), tools, {})], client_factory=factory)
+    handler = provider.definitions()[0].handler
+    provider.bind_workspace(first)
+    assert handler().status == "succeeded"
+    assert handler().status == "succeeded"
+    provider.bind_workspace(second)
+    assert handler().status == "succeeded"
+    # one session per workspace: the second project never reuses the first one's folder
+    assert provider.open_session_count == 2
+    assert [config.cwd for config in seen] == [str(first), str(second)]
+
+    custom: list[McpServerConfig] = []
+    pinned = McpToolProvider(
+        [(_browser_config(args=("-y", "@playwright/mcp@latest", "--output-dir", "/own/out")), tools, {})],
+        client_factory=lambda config, secrets: (custom.append(config), FakeClient())[1],
+        workspace_root=first,
+    )
+    assert pinned.definitions()[0].handler().status == "succeeded"
+    assert custom[0].args == ("-y", "@playwright/mcp@latest", "--output-dir", "/own/out")
+
+
+def test_without_a_workspace_and_for_other_servers_the_config_is_unchanged(tmp_path):
+    seen: list[McpServerConfig] = []
+
+    def factory(config: McpServerConfig, secrets):
+        seen.append(config)
+        return FakeClient()
+
+    tools = (McpToolDescriptor(name="browser_snapshot", description="Snap", input_schema={"type": "object"}),)
+    plain = McpToolProvider([(_browser_config(), tools, {})], client_factory=factory)
+    assert plain.definitions()[0].handler().status == "succeeded"
+    assert seen[0].cwd is None and seen[0].args == ("-y", "@playwright/mcp@latest")
+
+    other_tools = (McpToolDescriptor(name="read", description="Read", input_schema={"type": "object"}),)
+    other = McpToolProvider(
+        [(_stdio_non_browser_config(), other_tools, {})], client_factory=factory, workspace_root=tmp_path
+    )
+    assert other.definitions()[0].handler().status == "succeeded"
+    assert seen[1].cwd is None and "--output-dir" not in seen[1].args

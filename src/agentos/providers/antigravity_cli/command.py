@@ -915,6 +915,132 @@ def wire_antigravity_tool_server(
     )
 
 
+def wire_antigravity_media_reader(
+    directory: Path,
+    *,
+    media_dir: Path,
+    model: str,
+    instructions: str,
+) -> ToolServerWiring:
+    """Wire a short-lived agy process whose only tool is the native `read_file`, gated to ``media_dir``.
+
+    Orin starts it to have a Gemini model listen to or watch a file for a model that cannot (transcription),
+    using the subscription and the same media gate as a chat turn: `.agents/hooks.json` plus
+    `orin_media_gate.json` allow only audio/video files inside ``media_dir`` (absolute paths, no links).
+    """
+    _validate_path_arg(directory, "directory")
+    _validate_path_arg(media_dir, "media_dir")
+    extensions = antigravity_native_media_extensions(model) & (
+        ALLOWED_AUDIO_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
+    )
+    if not extensions:
+        raise ValueError(f"Model {model!r} does not take audio or video through the native read_file.")
+    workdir = Path(directory)
+    if _is_symlink_or_junction(workdir):
+        raise ValueError(f"Refusing symlinked working directory: {workdir}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    git_dir = workdir / ".git"
+    if _is_symlink_or_junction(git_dir):
+        raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
+    git_dir.mkdir(exist_ok=True)
+    agents_dir = workdir / ".agents"
+    agents_subdir = agents_dir / "agents"
+    for candidate in (agents_dir, agents_subdir):
+        if _is_symlink_or_junction(candidate):
+            raise ValueError(f"Refusing symlinked directory: {candidate}")
+    try:
+        resolved_media_dir = Path(media_dir).resolve()
+    except OSError:
+        resolved_media_dir = Path(media_dir).absolute()
+    agent_md_path = agents_subdir / "orin.md"
+    settings_file = agents_dir / "orin_settings.json"
+    hooks_file = agents_dir / "hooks.json"
+    gate_config_file = agents_dir / MEDIA_GATE_CONFIG_FILENAME
+    wiring_files = (agent_md_path, settings_file, hooks_file, gate_config_file)
+    try:
+        for fpath in wiring_files:
+            if _is_symlink_or_junction(fpath):
+                raise ValueError(f"Refusing to write to symlink: {fpath}")
+        _write_owner_only_file(
+            agent_md_path,
+            "---\n"
+            "name: orin\n"
+            "description: Orin media reader\n"
+            "mainAgent: true\n"
+            "excludeDefaultComponents: true\n"
+            "inheritMcp: false\n"
+            "tools: [read_file]\n"
+            "---\n\n"
+            "# Instructions\n\n"
+            f"{instructions.strip()}\n",
+        )
+        try:
+            resolved_workdir = str(workdir.resolve())
+        except OSError:
+            resolved_workdir = str(workdir.absolute())
+        settings_payload = {
+            "trustedWorkspaces": [resolved_workdir],
+            "allowNonWorkspaceAccess": False,
+            "enableTerminalSandbox": True,
+            "disableSlashCommands": True,
+            "permissions": {
+                "allow": [f"read_file({resolved_media_dir.as_posix()})"],
+                "deny": [
+                    "command(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "unsandboxed(*)",
+                ],
+            },
+        }
+        _write_owner_only_file(
+            settings_file, json.dumps(settings_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+        hooks_payload = {
+            "orin-media-gate": {
+                "PreToolUse": [
+                    {
+                        "matcher": "read_file",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": build_media_gate_hook_command(),
+                                "timeout": 10,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        _write_owner_only_file(
+            hooks_file, json.dumps(hooks_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+        gate_payload = {
+            "allowed_root": str(resolved_media_dir),
+            "allowed_roots": [str(resolved_media_dir)],
+            "unrestricted": False,
+            "allowed_extensions": sorted(extensions),
+            "max_bytes": DEFAULT_MAX_MEDIA_BYTES,
+        }
+        _write_owner_only_file(
+            gate_config_file, json.dumps(gate_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+    except Exception:
+        for fpath in wiring_files:
+            try:
+                if not _is_symlink_or_junction(fpath):
+                    fpath.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+    return ToolServerWiring(
+        argv=("--agent", "orin", "--settings", str(settings_file)),
+        env={},
+        files=wiring_files,
+    )
+
+
 def wire_antigravity_no_tools(
     directory: Path,
     *,
@@ -1449,5 +1575,6 @@ __all__ = [
     "resolve_antigravity_binary",
     "resolve_antigravity_home",
     "resolve_media_roots",
+    "wire_antigravity_media_reader",
     "wire_antigravity_tool_server",
 ]

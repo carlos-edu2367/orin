@@ -159,8 +159,16 @@ def internal_name(name: str) -> str:
 
 
 _UNDERSCORED_INTERNAL = tuple(sorted((name for name in PUBLIC_NAMES if "_" in name), key=len, reverse=True))
+# "native read_file" / "nativa `read_file`": the Antigravity CLI's own file reader, a different tool from Orin's
+# (whose public name is `Read`); it keeps its id. Fixed-width lookbehinds, one per spelling.
+_NATIVE_TOOL_PREFIXES = tuple(
+    f"{word} {quote}" for word in ("native", "nativa", "nativo") for quote in ("", "`")
+)
 _INTERNAL_WORD = re.compile(
-    r"(?<![\w./\\-])(" + "|".join(re.escape(name) for name in _UNDERSCORED_INTERNAL) + r")(?![\w-]|\.\w)"
+    "".join(f"(?<!{re.escape(prefix)})" for prefix in _NATIVE_TOOL_PREFIXES)
+    + r"(?<![\w./\\-])("
+    + "|".join(re.escape(name) for name in _UNDERSCORED_INTERNAL)
+    + r")(?![\w-]|\.\w)"
 )
 
 

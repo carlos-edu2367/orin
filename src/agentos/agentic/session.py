@@ -313,13 +313,13 @@ def environment_facts() -> dict[str, str]:
 
 
 def pre_read_attachments(history, attachments, toolset, *, max_files: int = MAX_PRE_READ_FILES):
-    """Read visual attachments before the turn starts.
+    """Read visual attachments (and audio/video, as a transcription) before the turn starts.
 
     A model that cannot call tools would otherwise never look at the file the
     person just attached. This is the only path that reads without the model
     asking, and it exists solely for that case.
     """
-    visual = [item for item in attachments if str(item.get("kind")) in {"image", "pdf"}][:max_files]
+    visual = [item for item in attachments if str(item.get("kind")) in {"image", "pdf", "audio", "video"}][:max_files]
     if not visual:
         return history
     readings: list[str] = []
@@ -1351,6 +1351,10 @@ class TurnSession:
         child_model_authorizer: Callable[[str], bool] | None = None,
         agent_model_authorizer: Callable[[str, str], bool] | None = None,
         subagent_context_limits: Callable[[str, str], tuple[int, int | None]] | None = None,
+        model_sees_images_for: Callable[[str, str | None], bool] | None = None,
+        model_hears_audio: bool = False,
+        model_hears_audio_for: Callable[[str, str | None], bool] | None = None,
+        media_transcriber_factory: Callable[[], object | None] | None = None,
         child_provider_factory: Callable[[str], object] | None = None,
         mcp_provider=None,
         mcp_service=None,
@@ -1472,6 +1476,12 @@ class TurnSession:
         # (model_id, provider) -> (max_context_tokens, context_window_tokens) of that model, so a subagent
         # compacts at its own window instead of inheriting the parent's.
         self._subagent_context_limits = subagent_context_limits
+        # Whether a given model (a subagent's, not the main agent's) takes images: the answer the catalog gives.
+        self._model_sees_images_for = model_sees_images_for
+        self.model_hears_audio = bool(model_hears_audio)
+        self._model_hears_audio_for = model_hears_audio_for
+        # Builds the audio/video transcriber (an agy process with Gemini) the first time a file needs it.
+        self._media_transcriber_factory = media_transcriber_factory
         # Best-effort: a store that does not expose attachments (most test
         # doubles) simply means this turn carries none for the pre-read path.
         attachments_reader = getattr(store, "attachments_for_turn", None)
@@ -1493,6 +1503,7 @@ class TurnSession:
             ensure_orin_excluded(self.workspace.root)
         except Exception:
             pass
+        self._bind_mcp_workspace()
         # Pre-acquired by the caller (typically from a RetrievalRegistry kept
         # for the whole worker process), the same way ``browser`` is: an index
         # is scoped to the project, and every turn about it should share the
@@ -3634,6 +3645,9 @@ class TurnSession:
             grants = self._inherited_code_grants(caller, sub_permission_mode, read_only=read_only_subagent)
             subagent_tools = self._toolset(
                 subagents=can_delegate,
+                # Its own model decides whether view_file hands it the picture, not the main agent's.
+                model_sees_images=self._sees_images_for(active_model_id, provider_name),
+                **self._native_media_for(active_model_id, provider_name),
                 caller=child_caller if can_delegate else None,
                 cancel_check=lambda: bool(sub_cancelled(subagent_turn)),
                 share_read_state=False,
@@ -4854,6 +4868,38 @@ class TurnSession:
         self._budget_meter.add(cost)
         return "".join(parts).strip() or None
 
+    def _bind_mcp_workspace(self) -> None:
+        """Browser MCP servers start in, and write under, this conversation's workspace."""
+        bind = getattr(getattr(self, "mcp_provider", None), "bind_workspace", None)
+        root = getattr(getattr(self, "workspace", None), "root", None)
+        if callable(bind) and root is not None:
+            try:
+                bind(root)
+            except Exception:  # noqa: BLE001 - the server then starts where it used to
+                pass
+
+    def _native_media_for(self, model_id: str | None, provider: str | None) -> dict[str, bool]:
+        """The agy-native media flags of a subagent's toolset, from its own provider and model."""
+        on_agy = str(provider or "") == "google-antigravity"
+        hears = False
+        resolver = getattr(self, "_model_hears_audio_for", None)
+        if on_agy and callable(resolver) and model_id:
+            try:
+                hears = bool(resolver(str(model_id), provider))
+            except Exception:  # noqa: BLE001 - unknown: transcribe rather than assume it hears
+                hears = False
+        return {"cli_native_media": on_agy, "native_media_hears": on_agy and hears}
+
+    def _sees_images_for(self, model_id: str | None, provider: str | None) -> bool:
+        """Whether ``model_id`` (a subagent's model) takes images; the main agent's answer when unknown."""
+        resolver = getattr(self, "_model_sees_images_for", None)
+        if callable(resolver) and model_id:
+            try:
+                return bool(resolver(str(model_id), provider))
+            except Exception:  # noqa: BLE001 - a catalog hiccup keeps the main agent's answer
+                pass
+        return getattr(self, "model_sees_images", False)
+
     def _toolset(
         self,
         *,
@@ -4876,6 +4922,9 @@ class TurnSession:
         share_read_state: bool | None = None,
         caller: SubagentCaller | None = None,
         cancel_check: Callable[[], bool] | None = None,
+        model_sees_images: bool | None = None,
+        cli_native_media: bool | None = None,
+        native_media_hears: bool | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -4922,8 +4971,19 @@ class TurnSession:
             browser=browser,
             browser_capability=self.browser_capability,
             policy=self.tool_policy,
-            model_sees_images=self.model_sees_images,
+            model_sees_images=getattr(self, "model_sees_images", False) if model_sees_images is None else bool(model_sees_images),
             visual_reader=self._visual_reader,
+            cli_native_media=(
+                str(self.turn.get("provider") or "") == "google-antigravity"
+                if cli_native_media is None
+                else bool(cli_native_media)
+            ),
+            native_media_hears=(
+                (str(self.turn.get("provider") or "") == "google-antigravity" and getattr(self, "model_hears_audio", False))
+                if native_media_hears is None
+                else bool(native_media_hears)
+            ),
+            media_transcriber_factory=getattr(self, "_media_transcriber_factory", None),
             mcp_provider=self.mcp_provider,
             mcp_service=self.mcp_service,
             mcp_user_id=str(self.turn.get("user_id") or "").strip() or None,
@@ -5568,6 +5628,7 @@ class TurnSession:
             if ready:
                 if provider is None:
                     self.mcp_provider = McpToolProvider(ready)
+                    self._bind_mcp_workspace()
                 else:
                     provider.add_bundles(ready)
             if found.pending:

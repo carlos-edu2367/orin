@@ -494,3 +494,31 @@ def test_native_turn_passes_additional_roots_and_unrestricted_to_the_wiring(tmp_
             f"look NATIVE_READ_DONE={far.as_posix()}",
             _Workspace(ws),
         )
+
+
+def test_encode_user_turn_treats_an_image_with_a_path_like_audio_and_video(tmp_path: Path) -> None:
+    from agentos.providers.antigravity_cli import encode_antigravity_user_turn
+    from agentos.providers.antigravity_cli.command import (
+        ANTIGRAVITY_OMITTED_MEDIA_NOTE,
+        format_antigravity_workspace_media_note,
+    )
+
+    ws = tmp_path / "ws"
+    shot = _write(ws / ".orin" / "uploads" / "tela.png")
+    clip = _write(ws / "clip.mp4", b"MP4")
+    raw = encode_antigravity_user_turn(
+        [
+            {"type": "image", "path": ".orin/uploads/tela.png"},
+            {"type": "video", "source": {"path": str(clip)}},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            {"type": "text", "text": "descreva"},
+        ],
+        workspace_root=ws,
+    )
+    texts = [block["text"] for block in json.loads(raw.decode("utf-8"))["message"]["content"]]
+    assert texts[0] == format_antigravity_workspace_media_note(shot)
+    assert shot.resolve().as_posix() in texts[0] and "Para ver a imagem" in texts[0]
+    assert "read_file" in texts[0]
+    assert clip.resolve().as_posix() in texts[1] and "view_file do Orin" in texts[1]
+    assert texts[2] == ANTIGRAVITY_OMITTED_MEDIA_NOTE and "caminho ABSOLUTO" in texts[2]
+    assert texts[3] == "descreva"
