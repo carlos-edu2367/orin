@@ -97,7 +97,8 @@ def test_history_after_a_boundary_starts_from_its_summary() -> None:
     recorded = store.record_compact_boundary(second, kind="compact", trigger="auto", pre_tokens=1000, post_tokens=200, summary="SUMMARY")
     assert recorded is not None and recorded["cumulative_dropped_tokens"] == 800
     history = store.history_for_turn(second)
-    assert history[0]["role"] == "system" and history[0]["content"] == f"{COMPACTION_HEADER}\nSUMMARY"
+    assert history[0]["role"] == "system" and str(history[0]["content"]).startswith(f"{COMPACTION_HEADER}\nSUMMARY")
+    assert "### Verbatim User Requests (authoritative)\n[ Turno #1 ]\none" in str(history[0]["content"])
     assert [item["content"] for item in history[1:]] == ["two"]
     store.finish(second)
     third = _turn(store, "three", "k3", conversation_id)

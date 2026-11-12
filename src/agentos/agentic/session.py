@@ -60,7 +60,7 @@ from .events import AgentActivityEventType
 from .lifecycle import HookEvent, LifecycleBus
 from .loop_settings import BudgetMeter, bypass_disabled, positive_int, restricted_minimum
 from .read_state import copy_read_state, prepare_carried_state
-from .reminders import ReminderQueue, system_reminder
+from .reminders import ReminderQueue, render_memory_prompt_lines, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
 from .runtime import CODE_MODE_CORE_TOOLS, AgenticLimits, AgenticTurnRuntime
@@ -421,7 +421,12 @@ def build_retrieval_for_turn(*, workspace_id: str, local_root: str | None, data_
     return RetrievalBundle(service=service, worker=worker)
 
 
-def memories_for_task(memory_store: object | None, task: str) -> list[dict[str, object]]:
+def memories_for_task(
+    memory_store: object | None,
+    task: str,
+    *,
+    conversation_id: str | None = None,
+) -> list[dict[str, object]]:
     """The memories worth putting in this turn's prompt.
 
     Relevance when the store can rank, recency when it cannot, and nothing at
@@ -433,20 +438,36 @@ def memories_for_task(memory_store: object | None, task: str) -> list[dict[str, 
     try:
         ranker = getattr(memory_store, "relevant", None)
         if callable(ranker):
+            if conversation_id is not None:
+                try:
+                    return list(ranker(task, limit=12, conversation_id=conversation_id))
+                except TypeError:
+                    return list(ranker(task, limit=12))
             return list(ranker(task, limit=12))
         return list(memory_store.recent(limit=12))
     except Exception:  # noqa: BLE001 - a prompt enrichment never breaks a turn
         return []
 
 
-def memories_for_friend_task(memory_store: object | None, task: str) -> list[dict[str, object]]:
+def memories_for_friend_task(
+    memory_store: object | None,
+    task: str,
+    *,
+    conversation_id: str | None = None,
+) -> list[dict[str, object]]:
     """Dual-layer affective and relational memories for Orin Friend."""
     if memory_store is None:
         return []
     try:
         friend_ranker = getattr(memory_store, "relevant_for_friend", None)
         if callable(friend_ranker):
-            items = list(friend_ranker(task, limit=18))
+            if conversation_id is not None:
+                try:
+                    items = list(friend_ranker(task, limit=18, conversation_id=conversation_id))
+                except TypeError:
+                    items = list(friend_ranker(task, limit=18))
+            else:
+                items = list(friend_ranker(task, limit=18))
             affective = [item for item in items if str(item.get("scope_type") or "") == "friend"]
             return affective if affective else items
         lister = getattr(memory_store, "list_friend_memories", None)
@@ -644,6 +665,10 @@ def build_system_prompt(
     if agents:
         roster = "; ".join(f"{item['name']} ({item['role']})" for item in agents[:8])
         volatile += [f"- Subagents that already exist in this conversation: {roster}."]
+    if memories:
+        mem_lines = render_memory_prompt_lines(memories, recall_label=label("recall"))
+        if mem_lines:
+            volatile += ["", "## What you remember about this user", *mem_lines]
     volatile += ["", "## Workspace contents"]
     if workspace_tree:
         volatile += [f"  {item}" for item in workspace_tree]
@@ -665,9 +690,6 @@ def build_system_prompt(
             f"- {item['tool_name']}({item['arguments'][:120]}) → {item['status']}: {item['summary'][:120]}"
             for item in tool_ledger
         ]
-    if memories:
-        volatile += ["", "## What you remember about this user"]
-        volatile += [f"- {item['fact']}" for item in list(memories)[:12] if item.get("fact")]
     if friend_mood and str(friend_mood).strip():
         volatile += [
             "",
@@ -702,7 +724,12 @@ def build_system_prompt(
         volatile += [
             "",
             "## Other sessions in this project",
-            f"You can read recent messages from any of these sibling sessions with `{label('read_project_conversation')}(conversation_id=\"...\")` when the user refers to prior work in the project:",
+            (
+                f"You can read recent messages from any of these sibling sessions with "
+                f"`{label('read_project_conversation')}(conversation_id=\"...\", around_sequence=...)` "
+                f"or search across older discussions beyond these 12 recent sessions with "
+                f"`{label('search_conversations')}(query=\"...\")` when the user refers to prior work in the project:"
+            ),
         ]
         volatile += [
             f"- `{item['conversation_id']}` ({item.get('mode', 'chat')}): {item['title']}"
@@ -1352,6 +1379,7 @@ class TurnSession:
         read_file_state: dict[str, object] | None = None,
     ) -> None:
         self.turn = turn
+        self.conversation_id = str(turn.get("conversation_id") or "")
         self.friend_persona_store = friend_persona_store
         raw_conv_mode = str(
             conversation_mode
@@ -6045,7 +6073,11 @@ class TurnSession:
 
     def _after_completed_turn(self) -> None:
         """Opt-in consolidation (``autoDreamEnabled``), at most once a day per user, in the background."""
-        from agentos.memory.consolidation import ConsolidationState, MemoryConsolidator
+        from agentos.memory.consolidation import (
+            ConsolidationState,
+            MemoryConsolidator,
+            _has_untrusted_external_input,
+        )
 
         from .loop_settings import operator_value
 
@@ -6062,14 +6094,96 @@ class TurnSession:
             history = list(self.store.history_for_turn(self.turn))
         except Exception:  # noqa: BLE001
             return
+        reader = getattr(self.store, "tool_ledger", None)
+        if callable(reader):
+            try:
+                tool_ledger = tuple(reader(self.turn, limit=200))
+            except TypeError:
+                try:
+                    tool_ledger = tuple(reader(self.turn))
+                except Exception:  # noqa: BLE001
+                    tool_ledger = ()
+            except Exception:  # noqa: BLE001
+                tool_ledger = ()
+        else:
+            tool_ledger = ()
+        conversation_id = str(getattr(self, "conversation_id", None) or self.turn.get("conversation_id") or "") or None
+        checker = getattr(self.store, "has_external_tool_calls", None)
+        if callable(checker) and conversation_id:
+            try:
+                external_taint = bool(checker(conversation_id))
+            except Exception:  # noqa: BLE001
+                external_taint = _has_untrusted_external_input(history, tool_ledger)
+        else:
+            external_taint = _has_untrusted_external_input(history, tool_ledger)
+        if not external_taint and _has_untrusted_external_input(history, tool_ledger):
+            external_taint = True
         provider_factory, memory = self.provider_factory, self.memory
         provider_name, model_id = str(self.turn.get("provider") or ""), str(self.turn.get("model_id") or "")
+        project_id = str(self.turn.get("project_id") or "") or None
+        skill_library = self.skill_library
+        toolset = getattr(self, "toolset", None)
+        available_tools = (
+            toolset._available_tool_names()
+            if toolset is not None and callable(getattr(toolset, "_available_tool_names", None))
+            else None
+        )
+
+        def _on_learned(receipt: Mapping[str, Any], info: Mapping[str, Any]) -> None:
+            fact_text = str(info.get("fact") or "")
+            self._record(
+                AgentActivityEventType.MEMORY_LEARNED,
+                f"Aprendi: {fact_text[:120]}",
+                {
+                    "memory_id": receipt["memory_id"],
+                    "fact": fact_text,
+                    "kind": str(info.get("kind") or "fact"),
+                    "scope": str(info.get("scope") or ("project" if project_id else "user")),
+                    "project_id": info.get("project_id", project_id),
+                    "source": "consolidation",
+                },
+            )
+
+        def _on_skill_proposed(proposal: Mapping[str, Any]) -> None:
+            prop_name = str(proposal.get("name") or "")
+            msg = f"Skill proposta para revisão: {prop_name}"[:180]
+            try:
+                self._record(
+                    AgentActivityEventType.NOTIFICATION_PUSHED,
+                    msg,
+                    {
+                        "message": msg,
+                        "proposal_id": proposal.get("proposal_id"),
+                        "name": prop_name,
+                        "action": str(proposal.get("action") or "create"),
+                        "status": str(proposal.get("status") or "pending"),
+                        "source": "consolidation",
+                    },
+                )
+            except Exception:  # noqa: BLE001 - notice never breaks a turn
+                pass
 
         def job() -> None:
             provider = None
             try:
                 provider = provider_factory()
-                MemoryConsolidator(provider, provider_name=provider_name, model_id=model_id, memory_store=memory).run(history)
+                MemoryConsolidator(
+                    provider,
+                    provider_name=provider_name,
+                    model_id=model_id,
+                    memory_store=memory,
+                    skill_library=skill_library,
+                    user_id=user_id,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
+                    on_memory_learned=_on_learned,
+                    on_skill_proposed=_on_skill_proposed,
+                    available_tools=available_tools,
+                ).run(
+                    history,
+                    tool_ledger=tool_ledger,
+                    had_untrusted_external_input=True if external_taint else None,
+                )
             except Exception:  # noqa: BLE001 - consolidation is best effort
                 logger.exception("memory consolidation failed")
             finally:
@@ -6313,7 +6427,7 @@ class TurnSession:
                 expand_file_mentions(task, self.workspace, self._read_file_state)
             except Exception:
                 pass
-        memories = [] if prompt_blocked else memories_for_task(self.memory, task)
+        memories = [] if prompt_blocked else memories_for_task(self.memory, task, conversation_id=str(self.turn.get("conversation_id") or "") or None)
         memory_prompt_tokens = (len(workspace_guidance) + sum(len(str(item.get("fact") or "")) for item in memories[:12])) // 4
         code_mode_context = ""
         code_turn_context = ""
@@ -6374,7 +6488,7 @@ class TurnSession:
                     friend_mood = str(getattr(persona_state, "current_mood", "") or "")
                 except Exception:
                     logger.debug("friend persona could not be loaded for turn", exc_info=True)
-            friend_memories = memories_for_friend_task(self.memory, task)
+            friend_memories = memories_for_friend_task(self.memory, task, conversation_id=active_conv_id or None)
         prompt, volatile_prompt = build_system_prompt(
             tool_names=prompt_tool_names,
             memories=memories,

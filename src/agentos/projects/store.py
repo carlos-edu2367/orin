@@ -8,6 +8,8 @@ from uuid import uuid4
 from sqlalchemy import delete, insert, or_, select, update
 from sqlalchemy.engine import Engine
 
+from agentos.memory.security import validate_memory_content
+from agentos.persistence.postgres.agent_memory import _PROMPT_INJECTION_RE
 from agentos.persistence.postgres.schema import agent_memories, conversations, projects
 
 
@@ -201,9 +203,12 @@ class PostgresProjectStore:
             raise ValueError("unsupported memory scope")
         if scope == "project" and (not project_id or self.get(project_id, user_id) is None):
             return None
-        normalized = " ".join(str(fact).split())[:2000]
+        normalized = " ".join(str(fact).split())[:4000]
         if not normalized:
             raise ValueError("fact must be a non-blank string")
+        validate_memory_content(normalized)
+        if _PROMPT_INJECTION_RE.search(normalized):
+            raise ValueError("content violates the memory data policy")
         predicates = [
             agent_memories.c.memory_id == memory_id,
             agent_memories.c.user_id == user_id,

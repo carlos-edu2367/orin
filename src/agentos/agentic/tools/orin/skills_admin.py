@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import field
 from typing import Any, Mapping, Literal
 
@@ -29,6 +30,62 @@ def neutral_skill_text(text: str) -> str:
     return str(text).replace("</agentos-skill-instructions", "&lt;/agentos-skill-instructions").replace(
         "<agentos-skill-instructions", "&lt;agentos-skill-instructions",
     )
+
+
+def build_validated_skill_command(
+    values: Mapping[str, Any],
+    *,
+    user_id: str,
+    available_tools: Collection[str],
+    require_complete: bool = True,
+) -> dict[str, object]:
+    """Build and dry-run validate a skill authoring command without accepting authority from the model."""
+    command: dict[str, object] = {"user_id": user_id}
+    fields = (
+        "name",
+        "description",
+        "instructions",
+        "version",
+        "tags",
+        "capabilities",
+        "when_to_use",
+        "when_not_to_use",
+        "requires_tools",
+        "dependencies",
+    )
+    for field_name in fields:
+        if field_name in values and values[field_name] is not None:
+            command[field_name] = values[field_name]
+    required = ("name", "description", "instructions", "when_to_use", "when_not_to_use")
+    if require_complete:
+        missing = [
+            field_name
+            for field_name in required
+            if field_name not in command
+            or not command[field_name]
+            or (isinstance(command[field_name], str) and not command[field_name].strip())
+            or (
+                isinstance(command[field_name], (list, tuple))
+                and not [str(item).strip() for item in command[field_name] if str(item).strip()]
+            )
+        ]
+        if missing:
+            raise AgentToolError("A high-quality Skill requires " + ", ".join(missing) + ".")
+    instructions = command.get("instructions")
+    if isinstance(instructions, str):
+        lowered = instructions.lower()
+        if "workflow" not in lowered or "validation" not in lowered:
+            raise AgentToolError("Skill instructions must include explicit Workflow and Validation sections.")
+    required_tools = command.get("requires_tools", ())
+    dependencies = command.get("dependencies")
+    dependency_tools = dependencies.get("tools", ()) if isinstance(dependencies, Mapping) else ()
+    declared_tools = tuple(required_tools if isinstance(required_tools, (list, tuple)) else ()) + tuple(
+        dependency_tools if isinstance(dependency_tools, (list, tuple)) else ()
+    )
+    unavailable = sorted({str(tool) for tool in declared_tools} - set(available_tools))
+    if unavailable:
+        raise AgentToolError(f"Skill requires unavailable tool '{unavailable[0]}'.")
+    return command
 
 
 class SkillTools:
@@ -132,29 +189,12 @@ class SkillTools:
         """Build an authoring command without accepting authority from the model."""
         if self._skill_library is None or not self._skill_user_id:
             raise AgentToolError("Skill publishing is not available.")
-        command: dict[str, object] = {"user_id": self._skill_user_id}
-        fields = ("name", "description", "instructions", "version", "tags", "capabilities", "when_to_use", "when_not_to_use", "requires_tools", "dependencies")
-        for field in fields:
-            if field in values and values[field] is not None:
-                command[field] = values[field]
-        required = ("name", "description", "instructions", "when_to_use", "when_not_to_use")
-        if require_complete:
-            missing = [field for field in required if field not in command or not command[field]]
-            if missing:
-                raise AgentToolError("A high-quality Skill requires " + ", ".join(missing) + ".")
-        instructions = command.get("instructions")
-        if isinstance(instructions, str):
-            lowered = instructions.lower()
-            if "workflow" not in lowered or "validation" not in lowered:
-                raise AgentToolError("Skill instructions must include explicit Workflow and Validation sections.")
-        required_tools = command.get("requires_tools", ())
-        dependencies = command.get("dependencies")
-        dependency_tools = dependencies.get("tools", ()) if isinstance(dependencies, Mapping) else ()
-        declared_tools = tuple(required_tools if isinstance(required_tools, list) else ()) + tuple(dependency_tools if isinstance(dependency_tools, list) else ())
-        unavailable = sorted({str(tool) for tool in declared_tools} - set(self._available_tool_names()))
-        if unavailable:
-            raise AgentToolError(f"Skill requires unavailable tool '{unavailable[0]}'.")
-        return command
+        return build_validated_skill_command(
+            values,
+            user_id=self._skill_user_id,
+            available_tools=self._available_tool_names(),
+            require_complete=require_complete,
+        )
 
     def _refresh_skill_registry(self) -> None:
         registry_for = getattr(self._skill_library, "registry_for", None)

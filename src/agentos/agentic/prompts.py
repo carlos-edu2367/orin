@@ -23,7 +23,8 @@ PROJECT_TOOLS_GUIDANCE = (
     "- When the user asks to list their projects, call `list_projects`.\n"
     "- When the user asks to turn the current session/workspace into a new project, call `create_project_from_session(name=..., description=..., workspace_path=...)`.\n"
     "- When the user asks to move or attach this session into an existing project, call `move_session_to_project(project_id=...)` (calling `list_projects` first if you need to look up the `project_id`).\n"
-    "- When the user asks to continue work from or inspect another chat or Orin Code session in the project, call `read_project_conversation(conversation_id=..., limit=...)`."
+    "- When you need to search past discussions, architectural decisions, or earlier sessions beyond the recent sidebar list, call `search_conversations(query=..., scope=..., mode=..., limit=...)`.\n"
+    "- When the user asks to continue work from or inspect another chat or Orin Code session in the project, call `read_project_conversation(conversation_id=..., limit=..., around_sequence=...)` (pass `around_sequence=matched_sequence` from `search_conversations` to read the exact relevant window)."
 )
 
 FRIEND_SYSTEM_PROMPT_SECTION = (
@@ -55,7 +56,7 @@ def extension_guidance_lines(tool_names: Sequence[str]) -> list[str]:
         out.extend(["", EXTENSION_TOOLS_GUIDANCE])
     if "propose_code_session" in names:
         out.extend(["", PROPOSE_CODE_SESSION_GUIDANCE])
-    if {"list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation"} & names:
+    if {"list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation", "search_conversations"} & names:
         out.extend(["", PROJECT_TOOLS_GUIDANCE])
     return out
 

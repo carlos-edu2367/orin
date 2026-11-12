@@ -17,7 +17,7 @@ CODE_MODE_CORE_TOOLS: frozenset[str] = frozenset({
     "search_mcp_tools", "inspect_mcp_server", "call_mcp_tool",
     "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
-    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
+    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation", "search_conversations",
     "generate_image", "generate_audio", "generate_video",
     "cron_create", "cron_delete", "cron_list", "schedule_wakeup", "monitor", "push_notification", "send_message",
 })
@@ -46,7 +46,10 @@ FOLLOW_UP_TOOLS: Mapping[str, tuple[str, ...]] = {
     "run_subagent": ("check_subagent",),
     "enter_plan_mode": ("exit_plan_mode",),
     "preview_start": ("preview_logs", "preview_open"),
+    "search_conversations": ("read_project_conversation",),
 }
+
+DEFERRED_TOOLS: frozenset[str] = CODE_MODE_CORE_TOOLS - ALWAYS_LOADED_CODE_TOOLS
 
 TOOL_SEARCH_ENV = "ORIN_CODE_TOOL_SEARCH"
 _DISABLED_VALUES = frozenset({"off", "0", "false", "no"})

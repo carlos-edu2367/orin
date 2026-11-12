@@ -10,13 +10,17 @@ from __future__ import annotations
 import re
 from typing import Collection, Mapping
 
+from agentos.agentic.tools.public_names import PUBLIC_NAMES
+
 from .builtins import load_builtin_skills
 from .models import Skill, SkillDependencies, SkillScope, SkillSource, semver_key
 from .registry import SkillNotFound, SkillRegistry
 from .retrieval import RetrievalQuery
 
 
-SKILL_RUNTIME_TOOLS = ("read_file", "write_file", "list_files", "run_command", "fetch_url")
+SKILL_RUNTIME_TOOLS = tuple(
+    dict.fromkeys(("read_file", "write_file", "list_files", "run_command", "fetch_url", *PUBLIC_NAMES.keys()))
+)
 
 
 class SkillValidationError(ValueError):

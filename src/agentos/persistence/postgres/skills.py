@@ -104,7 +104,7 @@ class PostgresSkillLibraryService:
     def list(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, text = str(query["user_id"]), str(query.get("query") or "")
         registry = self.registry_for(user_id)
-        available = ("read_file", "write_file", "list_files", "run_command", "fetch_url")
+        available = SKILL_RUNTIME_TOOLS
         items = registry.retrieve(__import__("agentos.skills.retrieval", fromlist=["RetrievalQuery"]).RetrievalQuery(text=text, available_tools=available, limit=100)).items if text else registry.list(limit=100, available_tools=available)
         source = str(query.get("source") or "")
         metadata = [item.metadata if hasattr(item, "metadata") else item for item in items]

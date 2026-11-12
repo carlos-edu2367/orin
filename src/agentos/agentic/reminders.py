@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 REMINDER_OPEN = "<system-reminder>"
 REMINDER_CLOSE = "</system-reminder>"
 MAX_REMINDER_CHARS = 10_000
 VOLATILE_REMINDER_CHARS = 40_000
+MAX_MEMORY_SECTION_CHARS = 4_500
+CORE_MEMORY_MAX_CHARS = 300
+ARCHIVAL_PREVIEW_MAX_CHARS = 260
 MAX_PENDING_REMINDERS = 32
 # W4-R9: monitor reminders may take at most half the queue and a fixed character budget per request.
 MONITOR_KIND = "monitor"
@@ -109,7 +112,59 @@ def render_reminders(items: Iterable[Reminder]) -> str:
     )
 
 
+def archival_memory_preview(fact: str, *, max_chars: int = ARCHIVAL_PREVIEW_MAX_CHARS) -> str:
+    """Clean preview up to the end of the first sentence or ``max_chars`` without splitting a word."""
+    clean = " ".join(str(fact or "").split())
+    if len(clean) <= max_chars:
+        return clean
+    window = clean[:max_chars]
+    sent_match = re.search(r"[.!?](?=\s|$)", window)
+    if sent_match is not None and sent_match.end() >= 40:
+        return window[: sent_match.end()].rstrip(".!? \t\r\n")
+    if not clean[max_chars].isspace():
+        last_space = window.rfind(" ")
+        if last_space > 0:
+            window = window[:last_space]
+    return window.rstrip(".,;:!? \t\r\n")
+
+
+def render_memory_prompt_lines(
+    memories: Sequence[Mapping[str, object]],
+    *,
+    recall_label: str = "recall",
+    max_chars: int = MAX_MEMORY_SECTION_CHARS,
+) -> list[str]:
+    """Render Core memories in full and Archival (>300 chars, non-preference) as pointers within ``max_chars``."""
+    rendered: list[str] = []
+    used_chars = 0
+    for item in list(memories)[:12]:
+        fact = str(item.get("fact") or "").strip()
+        if not fact:
+            continue
+        mem_id = str(item.get("memory_id") or "").strip()
+        kind = str(item.get("kind") or "fact").strip().lower() or "fact"
+        is_core = (kind == "preference") or (len(fact) <= CORE_MEMORY_MAX_CHARS)
+        if is_core:
+            line = f"- [{mem_id}] {fact}" if mem_id else f"- {fact}"
+        else:
+            preview = archival_memory_preview(fact, max_chars=ARCHIVAL_PREVIEW_MAX_CHARS)
+            if mem_id:
+                line = (
+                    f'- [{mem_id} · {kind}] {preview}... '
+                    f'(memória completa de {len(fact)} chars disponível via {recall_label}(memory_id="{mem_id}"))'
+                )
+            else:
+                line = f"- [{kind}] {preview}... (memória completa de {len(fact)} chars disponível via {recall_label})"
+        if rendered and used_chars + len(line) + 1 > max_chars:
+            break
+        rendered.append(line)
+        used_chars += len(line) + 1
+    return rendered
+
+
 __all__ = [
+    "ARCHIVAL_PREVIEW_MAX_CHARS", "CORE_MEMORY_MAX_CHARS", "MAX_MEMORY_SECTION_CHARS",
     "MAX_MONITOR_REMINDERS", "MAX_REMINDER_CHARS", "MONITOR_CHAR_BUDGET", "MONITOR_KIND", "REMINDER_CLOSE", "REMINDER_OPEN",
-    "VOLATILE_REMINDER_CHARS", "Reminder", "ReminderQueue", "render_reminders", "system_reminder",
+    "VOLATILE_REMINDER_CHARS", "Reminder", "ReminderQueue", "archival_memory_preview", "render_memory_prompt_lines",
+    "render_reminders", "system_reminder",
 ]

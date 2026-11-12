@@ -911,7 +911,7 @@ agent_memories = Table(
     Column("project_id", String(255), nullable=True),
     Column("source_message_id", String(255), nullable=True),
     Column("source_execution_id", String(255), nullable=True),
-    Column("fact", String(2000), nullable=False),
+    Column("fact", String(4000), nullable=False),
     Column("tags", JSON, nullable=False, default=list),
     # What the fact is, which decides how it enters the prompt and what it can
     # contradict. A preference outranks an operational note for prompt space.

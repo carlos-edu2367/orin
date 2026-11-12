@@ -8,12 +8,14 @@ import {
   type SkillAgent,
   type SkillDetail,
   type SkillList,
+  type SkillProposal,
   type SkillSummary,
   type SkillsClient,
 } from '../../api/skills'
 import { Brand } from '../../components/Brand'
 import { CommandPalette } from '../../components/CommandPalette'
 import { Disclosure } from '../../components/ui/Disclosure'
+import { SkillProposalsSection } from './SkillProposalsSection'
 
 type SkillsPageProps = { client?: SkillsClient; embedded?: boolean }
 
@@ -89,6 +91,7 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
   const [instructionsOpenSkillId, setInstructionsOpenSkillId] = useState<string | null>(null)
   const [availabilityBySkill, setAvailabilityBySkill] = useState<Record<string, AvailabilityOption>>({})
   const [confirmBySkill, setConfirmBySkill] = useState<Record<string, boolean>>({})
+  const [proposals, setProposals] = useState<SkillProposal[]>([])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -102,6 +105,22 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
       })
     return () => controller.abort()
   }, [client, query, reload, source])
+
+  useEffect(() => {
+    if (!client.listProposals) return
+    const controller = new AbortController()
+    client
+      .listProposals({ status: 'pending' }, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) {
+          setProposals(result.items.filter((item) => item.status === 'pending'))
+        }
+      })
+      .catch(() => {
+        // Falha silenciosa para não quebrar a listagem principal de skills
+      })
+    return () => controller.abort()
+  }, [client])
 
   const sources =
     list.status === 'loaded' ? [...new Set(list.value.items.map((item) => item.source))].sort() : []
@@ -178,6 +197,24 @@ export function SkillsLibrary({ client, embedded = false }: { client: SkillsClie
           </p>
         </div>
       </header>
+
+      <SkillProposalsSection
+        client={client}
+        proposals={proposals}
+        onProposalUpdated={(updated) => {
+          setProposals((prev) =>
+            prev.map((item) => (item.proposal_id === updated.proposal_id ? updated : item)),
+          )
+        }}
+        onProposalApproved={(proposalId) => {
+          setProposals((prev) => prev.filter((item) => item.proposal_id !== proposalId))
+          clearPaginationForBaseRefresh()
+          setReload((value) => value + 1)
+        }}
+        onProposalDismissed={(proposalId) => {
+          setProposals((prev) => prev.filter((item) => item.proposal_id !== proposalId))
+        }}
+      />
 
       <div className="skills-ref12__tabs" role="tablist" aria-label="Categorias de habilidades">
         <button

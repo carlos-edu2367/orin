@@ -4,8 +4,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import threading
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -30,7 +32,11 @@ from agentos.persistence.postgres.agentic_activity import (
 )
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.agentic import transcript as turn_transcript
-from agentos.agentic.compaction import compaction_message
+from agentos.agentic.compaction import (
+    COMPACT_RETAINED_USER_TOKENS,
+    attach_retained_user_requests,
+    compaction_message,
+)
 from agentos.conversations.resume import (
     append_resumed_turn_history,
     recent_interrupted_paused_turns as _recent_interrupted_paused_turns,
@@ -69,6 +75,42 @@ MAX_QUEUED_INPUTS = 20
 # A queued instruction replays in later turns outside the rehydration budget, so it is bounded on its own.
 MAX_QUEUED_REPLAY_CHARS = 16_000
 MAX_QUEUED_REPLAY_PER_TURN = 20
+
+_EXTERNAL_UNTRUSTED_TOOL_NAMES: frozenset[str] = frozenset(
+    name.lower()
+    for name in (
+        "web_fetch",
+        "fetch_url",
+        "web_search",
+        "search_web",
+        "browser_navigate",
+        "browser_open",
+        "browser_click",
+        "browser_extract",
+        "browse_page",
+        "call_mcp_tool",
+        "read_mcp_resource",
+        "read_mcp_resource_dir",
+        "inspect_mcp_server",
+        "inspect_plugin",
+        "search_plugin",
+        "run_subagent",
+        "agent",
+        "ask_agent",
+        "ask_agents",
+        "MCP",
+        "WebFetch",
+        "WebSearch",
+    )
+)
+
+
+def _chunked_ids(items: Sequence[str], size: int = 450) -> list[tuple[str, ...]]:
+    seq = tuple(items)
+    if not seq:
+        return []
+    step = max(1, int(size))
+    return [seq[i : i + step] for i in range(0, len(seq), step)]
 
 
 def _attachment_label(record: Mapping[str, object]) -> str:
@@ -683,6 +725,32 @@ class PostgresChatStore:
             {"tool_name": str(row["tool_name"]), "arguments": str(row["arguments"]), "status": str(row["status"]), "summary": str(row["summary"])}
             for row in reversed(rows)
         ]
+
+    def has_external_tool_calls(self, conversation_id: str) -> bool:
+        """Return True if any tool record in the conversation invoked an external or untrusted tool."""
+        cid = (
+            str(conversation_id.get("conversation_id") or "").strip()
+            if isinstance(conversation_id, Mapping)
+            else str(conversation_id or "").strip()
+        )
+        if not cid:
+            return False
+        lowered_name = func.lower(conversation_tool_records.c.tool_name)
+        stmt = (
+            select(conversation_tool_records.c.record_id)
+            .where(
+                conversation_tool_records.c.conversation_id == cid,
+                (
+                    lowered_name.in_(tuple(_EXTERNAL_UNTRUSTED_TOOL_NAMES))
+                    | (func.substr(lowered_name, 1, 5) == "mcp__")
+                    | (func.substr(lowered_name, 1, 7) == "browser")
+                ),
+            )
+            .limit(1)
+        )
+        with self._engine.connect() as connection:
+            row = connection.execute(stmt).first()
+        return row is not None
 
     def record_step(
         self,
@@ -1353,12 +1421,58 @@ class PostgresChatStore:
             "migrated_files": migrated_files,
         }
 
+    @staticmethod
+    def _blocked_message_ids(c, conversation_ids: Sequence[str]) -> set[str]:
+        if not conversation_ids:
+            return set()
+        conv_tuple = tuple(dict.fromkeys(str(cid) for cid in conversation_ids if cid))
+        if not conv_tuple:
+            return set()
+        conv_set = set(conv_tuple)
+        blocked_user_ids: set[str] = set()
+        for conv_chunk in _chunked_ids(conv_tuple, size=450):
+            blocked_user_ids.update(
+                str(msg_id)
+                for msg_id in c.execute(
+                    select(conversation_messages.c.message_id).where(
+                        conversation_messages.c.conversation_id.in_(conv_chunk),
+                        (
+                            conversation_messages.c.status.in_((BLOCKED_BY_HOOK_STATUS, COMMAND_STATUS, "blocked"))
+                            | (conversation_messages.c.content == BLOCKED_PROMPT_PLACEHOLDER)
+                        ),
+                    )
+                ).scalars()
+            )
+        skipped: set[str] = set(blocked_user_ids)
+        if blocked_user_ids:
+            for msg_chunk in _chunked_ids(tuple(blocked_user_ids), size=450):
+                turn_rows = (
+                    c.execute(
+                        select(
+                            conversation_turns.c.conversation_id,
+                            conversation_turns.c.user_message_id,
+                            conversation_turns.c.assistant_message_id,
+                        ).where(
+                            conversation_turns.c.user_message_id.in_(msg_chunk),
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                skipped.update(
+                    str(r["assistant_message_id"])
+                    for r in turn_rows
+                    if r.get("assistant_message_id") and str(r.get("conversation_id") or "") in conv_set
+                )
+        return skipped
+
     def read_project_conversation(
         self,
         conversation_id: str,
         user_id: str,
         *,
         limit: int = 20,
+        around_sequence: int | None = None,
     ) -> dict[str, object]:
         bounded = min(max(int(limit), 1), 50)
         with self._engine.connect() as c:
@@ -1370,20 +1484,45 @@ class PostgresChatStore:
             ).mappings().first()
             if row is None:
                 raise ApplicationNotFoundError(conversation_id)
-            recent_messages = c.execute(
-                select(
-                    conversation_messages.c.role,
-                    conversation_messages.c.content,
-                    conversation_messages.c.status,
-                    conversation_messages.c.created_at,
+            skipped = self._blocked_message_ids(c, (conversation_id,))
+            all_messages = (
+                c.execute(
+                    select(
+                        conversation_messages.c.message_id,
+                        conversation_messages.c.sequence,
+                        conversation_messages.c.role,
+                        conversation_messages.c.content,
+                        conversation_messages.c.status,
+                        conversation_messages.c.created_at,
+                    )
+                    .where(
+                        conversation_messages.c.conversation_id == conversation_id,
+                        conversation_messages.c.user_id == user_id,
+                    )
+                    .order_by(conversation_messages.c.sequence.asc())
                 )
-                .where(
-                    conversation_messages.c.conversation_id == conversation_id,
-                    conversation_messages.c.user_id == user_id,
+                .mappings()
+                .all()
+            )
+        non_blocked = [m for m in all_messages if str(m["message_id"]) not in skipped]
+        if around_sequence is None:
+            selected = non_blocked[-bounded:]
+        else:
+            target_seq = max(0, int(around_sequence))
+            if non_blocked:
+                center_idx = next(
+                    (idx for idx, m in enumerate(non_blocked) if int(m["sequence"]) >= target_seq),
+                    len(non_blocked) - 1,
                 )
-                .order_by(conversation_messages.c.sequence.desc())
-                .limit(bounded)
-            ).mappings().all()
+                half_before = bounded // 2
+                start_idx = max(0, center_idx - half_before)
+                end_idx = start_idx + bounded
+                if end_idx > len(non_blocked):
+                    end_idx = len(non_blocked)
+                    start_idx = max(0, end_idx - bounded)
+                selected = non_blocked[start_idx:end_idx]
+            else:
+                selected = []
         return {
             "conversation_id": conversation_id,
             "title": str(row["title"]),
@@ -1391,14 +1530,243 @@ class PostgresChatStore:
             "project_id": str(row["project_id"]) if row.get("project_id") else None,
             "messages": [
                 {
+                    "sequence": int(m["sequence"]),
                     "role": str(m["role"]),
                     "content": str(m["content"]),
                     "status": str(m["status"]),
                     "created_at": m["created_at"].isoformat() if isinstance(m.get("created_at"), datetime) else str(m.get("created_at") or ""),
                 }
-                for m in reversed(recent_messages)
+                for m in selected
             ],
         }
+
+    def search_conversations(
+        self,
+        user_id: str,
+        *,
+        query: str,
+        project_id: str | None = None,
+        scope: str = "project",
+        mode: str | None = None,
+        exclude_conversation_id: str | None = None,
+        limit: int = 8,
+        include_friend: bool = False,
+    ) -> list[dict[str, object]]:
+        clean_user_id = str(user_id or "").strip()
+        if not clean_user_id:
+            return []
+        clean_scope = str(scope or "project").strip().lower()
+        if clean_scope not in {"project", "all"}:
+            raise ValueError("scope must be 'project' or 'all'")
+        clean_project_id = str(project_id).strip() if isinstance(project_id, str) and project_id.strip() else None
+        if clean_scope == "project" and clean_project_id is None:
+            return []
+        raw_query = _SEARCH_SYSTEM_REMINDER_RE.sub(" ", str(query or "")).strip()
+        if not raw_query:
+            return []
+        query_terms, folded_terms, normalized_phrase, folded_phrase = _tokenize_search_query(raw_query)
+        if not query_terms and not normalized_phrase:
+            return []
+        bounded_limit = max(1, min(int(limit), 25))
+        clean_mode = str(mode).strip().lower() if isinstance(mode, str) and mode.strip() else None
+        clean_exclude = (
+            str(exclude_conversation_id).strip()
+            if isinstance(exclude_conversation_id, str) and exclude_conversation_id.strip()
+            else None
+        )
+
+        with self._engine.connect() as c:
+            effective_include_friend = bool(include_friend)
+            if not effective_include_friend and clean_mode is None and clean_exclude is not None:
+                caller_mode = c.execute(
+                    select(conversations.c.mode).where(
+                        conversations.c.conversation_id == clean_exclude,
+                        conversations.c.user_id == clean_user_id,
+                    )
+                ).scalar_one_or_none()
+                if str(caller_mode or "").strip().lower() == "friend":
+                    effective_include_friend = True
+
+            stmt = select(conversations).where(conversations.c.user_id == clean_user_id)
+            if clean_scope == "project":
+                stmt = stmt.where(conversations.c.project_id == clean_project_id)
+            if clean_mode is not None:
+                stmt = stmt.where(conversations.c.mode == clean_mode)
+            elif not effective_include_friend:
+                stmt = stmt.where(conversations.c.mode.is_(None) | (conversations.c.mode != "friend"))
+            if clean_exclude is not None:
+                stmt = stmt.where(conversations.c.conversation_id != clean_exclude)
+            stmt = stmt.order_by(conversations.c.updated_at.desc()).limit(500)
+
+            conv_rows = c.execute(stmt).mappings().all()
+            if not conv_rows:
+                return []
+            candidate_ids = [str(r["conversation_id"]) for r in conv_rows]
+            skipped_msg_ids = self._blocked_message_ids(c, candidate_ids)
+            msg_rows: list[Mapping[str, object]] = []
+            for id_chunk in _chunked_ids(candidate_ids, size=450):
+                msg_rows.extend(
+                    c.execute(
+                        select(
+                            conversation_messages.c.message_id,
+                            conversation_messages.c.conversation_id,
+                            conversation_messages.c.sequence,
+                            conversation_messages.c.content,
+                            conversation_messages.c.status,
+                        )
+                        .where(
+                            conversation_messages.c.conversation_id.in_(id_chunk),
+                            conversation_messages.c.user_id == clean_user_id,
+                        )
+                        .order_by(
+                            conversation_messages.c.conversation_id.asc(),
+                            conversation_messages.c.sequence.asc(),
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+            boundary_rows: list[Mapping[str, object]] = []
+            for id_chunk in _chunked_ids(candidate_ids, size=450):
+                boundary_rows.extend(
+                    c.execute(
+                        select(
+                            conversation_compact_boundaries.c.conversation_id,
+                            conversation_compact_boundaries.c.summary,
+                            conversation_compact_boundaries.c.through_sequence,
+                        )
+                        .where(
+                            conversation_compact_boundaries.c.conversation_id.in_(id_chunk),
+                            conversation_compact_boundaries.c.user_id == clean_user_id,
+                            conversation_compact_boundaries.c.summary.is_not(None),
+                        )
+                        .order_by(conversation_compact_boundaries.c.id.desc())
+                    )
+                    .mappings()
+                    .all()
+                )
+
+        msgs_by_conv: dict[str, list[Mapping[str, object]]] = {}
+        for m in msg_rows:
+            if str(m["message_id"]) in skipped_msg_ids:
+                continue
+            msgs_by_conv.setdefault(str(m["conversation_id"]), []).append(m)
+
+        summaries_by_conv: dict[str, list[Mapping[str, object]]] = {}
+        for b in boundary_rows:
+            summaries_by_conv.setdefault(str(b["conversation_id"]), []).append(b)
+
+        now = datetime.now(UTC)
+        scored_results: list[tuple[float, float, dict[str, object]]] = []
+        term_count = max(1, len(query_terms))
+
+        for conv in conv_rows:
+            cid = str(conv["conversation_id"])
+            raw_title = str(conv.get("title") or "").strip()
+            clean_title = (
+                ""
+                if raw_title in {BLOCKED_PROMPT_PLACEHOLDER, "Mensagem bloqueada"}
+                else _sanitize_searchable_text(raw_title)
+            )
+
+            conv_matched_indices: set[int] = set()
+            has_any_phrase = False
+            title_matched_count, title_phrase, title_occ = _match_stats(
+                clean_title, query_terms, folded_terms, normalized_phrase, folded_phrase, conv_matched_indices
+            )
+            if title_phrase:
+                has_any_phrase = True
+
+            # Candidate segments: (seg_score, source_priority, seq_order, matched_source, matched_sequence, clean_text)
+            best_segment: tuple[float, int, int, str, int | None, str] | None = None
+            if clean_title and (title_matched_count > 0 or title_phrase):
+                t_score = (title_matched_count / term_count) * 100.0 + (25.0 if title_phrase else 0.0) + min(title_occ, 20) * 0.15
+                best_segment = (t_score, 0, -1, "title", None, clean_title)
+
+            for b in summaries_by_conv.get(cid, ()):
+                clean_sum = _sanitize_searchable_text(str(b.get("summary") or ""))
+                if not clean_sum:
+                    continue
+                s_hits, s_phrase, s_occ = _match_stats(
+                    clean_sum, query_terms, folded_terms, normalized_phrase, folded_phrase, conv_matched_indices
+                )
+                if s_hits == 0 and not s_phrase:
+                    continue
+                if s_phrase:
+                    has_any_phrase = True
+                through_seq = int(b["through_sequence"]) if b.get("through_sequence") is not None else None
+                s_score = (s_hits / term_count) * 100.0 + (25.0 if s_phrase else 0.0) + min(s_occ, 20) * 0.15
+                candidate_seg = (s_score, 1, through_seq or 0, "summary", through_seq, clean_sum)
+                if best_segment is None or candidate_seg[:3] > best_segment[:3]:
+                    best_segment = candidate_seg
+
+            for m in msgs_by_conv.get(cid, ()):
+                clean_msg = _sanitize_searchable_text(str(m.get("content") or ""))
+                if not clean_msg:
+                    continue
+                m_hits, m_phrase, m_occ = _match_stats(
+                    clean_msg, query_terms, folded_terms, normalized_phrase, folded_phrase, conv_matched_indices
+                )
+                if m_hits == 0 and not m_phrase:
+                    continue
+                if m_phrase:
+                    has_any_phrase = True
+                seq_num = int(m["sequence"])
+                m_score = (m_hits / term_count) * 100.0 + (25.0 if m_phrase else 0.0) + min(m_occ, 20) * 0.15
+                candidate_seg = (m_score, 2, seq_num, "message", seq_num, clean_msg)
+                if best_segment is None or candidate_seg[:3] > best_segment[:3]:
+                    best_segment = candidate_seg
+
+            if not conv_matched_indices and not has_any_phrase or best_segment is None:
+                continue
+
+            conv_coverage = len(conv_matched_indices) / term_count
+            title_bonus = (title_matched_count / term_count) * 15.0 + (5.0 if title_phrase else 0.0)
+            updated_raw = conv.get("updated_at")
+            if isinstance(updated_raw, datetime):
+                updated_dt = updated_raw if updated_raw.tzinfo is not None else updated_raw.replace(tzinfo=UTC)
+                updated_iso = updated_raw.isoformat()
+            else:
+                updated_dt = now
+                updated_iso = str(updated_raw or "")
+            age_days = max(0.0, (now - updated_dt).total_seconds() / 86400.0)
+            recency_bonus = 5.0 / (1.0 + age_days / 7.0)
+
+            total_score = (
+                conv_coverage * 120.0
+                + (30.0 if has_any_phrase else 0.0)
+                + best_segment[0] * 0.4
+                + title_bonus
+                + recency_bonus
+            )
+            _, _, _, matched_source, matched_sequence, winning_text = best_segment
+            snippet = _build_search_snippet(
+                winning_text,
+                query_terms,
+                folded_terms,
+                normalized_phrase,
+                folded_phrase,
+                max_chars=360,
+            )
+            scored_results.append(
+                (
+                    round(total_score, 6),
+                    updated_dt.timestamp(),
+                    {
+                        "conversation_id": cid,
+                        "title": raw_title,
+                        "mode": str(conv.get("mode") or "chat"),
+                        "project_id": str(conv["project_id"]) if conv.get("project_id") else None,
+                        "updated_at": updated_iso,
+                        "matched_sequence": matched_sequence,
+                        "matched_source": matched_source,
+                        "snippet": snippet,
+                    },
+                )
+            )
+
+        scored_results.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [item[2] for item in scored_results[:bounded_limit]]
 
     def ensure_friend_conversation(
         self,
@@ -2546,13 +2914,22 @@ class PostgresChatStore:
         current_sequence = max((int(row["sequence"]) for row in rows), default=0)
         through = int(boundary["through_sequence"]) if boundary is not None else None
         compacted = through is not None and through < current_sequence
-        if compacted:
+        expansions = {str(row["message_id"]): str(row["expanded_body"]) for row in command_rows}
+        compacted_user_messages: list[str] = []
+        if compacted and through is not None:
+            compacted_user_messages = [
+                str(row["content"])
+                for row in rows
+                if int(row["sequence"]) <= through
+                and str(row["role"]) == "user"
+                and str(row["message_id"]) not in expansions
+                and str(row["content"] or "").strip()
+            ]
             # Everything up to the boundary is represented by its summary.
             rows = [row for row in rows if int(row["sequence"]) > through]
         grouped: dict[str, list[dict[str, object]]] = {}
         for row in attachment_rows:
             grouped.setdefault(str(row["message_id"]), []).append(dict(row))
-        expansions = {str(row["message_id"]): str(row["expanded_body"]) for row in command_rows}
         earlier_turns: dict[str, str] = {
             str(row["assistant_message_id"]): str(row["turn_id"])
             for row in turn_rows if str(row["turn_id"]) != str(turn.get("turn_id"))
@@ -2605,7 +2982,12 @@ class PostgresChatStore:
             history.append({"role": str(row["role"]), "content": content, "_sequence": int(row["sequence"])})
         append_resumed_turn_history(self, turn, history, rehydration_budget_tokens=rehydration_budget_tokens)
         if compacted:
-            history.insert(0, compaction_message(str(boundary["summary"])))
+            summary_body = attach_retained_user_requests(
+                str(boundary["summary"]),
+                compacted_user_messages,
+                max_tokens=COMPACT_RETAINED_USER_TOKENS,
+            )
+            history.insert(0, compaction_message(summary_body))
         return history
 
     @staticmethod
@@ -3300,8 +3682,46 @@ class ChatApplication:
         return self.send(user_id, conversation_id, f"!{text}", idempotency_key, code_mode="code", turn_kind="shell")
     def set_project(self, conversation_id: str, user_id: str, project_id: str | None, *, managed_root: Path | None = None):
         return self.store.set_project(conversation_id, user_id, project_id, managed_root=managed_root)
-    def read_project_conversation(self, conversation_id: str, user_id: str, *, limit: int = 20):
-        return self.store.read_project_conversation(conversation_id, user_id, limit=limit)
+    def read_project_conversation(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        limit: int = 20,
+        around_sequence: int | None = None,
+    ):
+        return self.store.read_project_conversation(
+            conversation_id,
+            user_id,
+            limit=limit,
+            around_sequence=around_sequence,
+        )
+
+    def search_conversations(
+        self,
+        user_id: str,
+        *,
+        query: str,
+        project_id: str | None = None,
+        scope: str = "project",
+        mode: str | None = None,
+        exclude_conversation_id: str | None = None,
+        limit: int = 8,
+        include_friend: bool = False,
+    ):
+        return self.store.search_conversations(
+            user_id,
+            query=query,
+            project_id=project_id,
+            scope=scope,
+            mode=mode,
+            exclude_conversation_id=exclude_conversation_id,
+            limit=limit,
+            include_friend=include_friend,
+        )
+
+    def has_external_tool_calls(self, conversation_id: str) -> bool:
+        return self.store.has_external_tool_calls(conversation_id)
     def ensure_friend_conversation(self, user_id: str, **kwargs):
         return self.store.ensure_friend_conversation(user_id, **kwargs)
     def list(self, user_id: str, *, mode: str | None = None):
@@ -3432,4 +3852,131 @@ class ChatApplication:
 
     def overview(self, conversation_id: str, user_id: str): return self.store.overview(conversation_id, user_id)
 
-__all__ = ["ChatApplication", "ChatReceipt", "PostgresChatStore", "migrate_managed_workspace_files"]
+
+_SEARCH_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.IGNORECASE | re.DOTALL)
+_SEARCH_DATA_URI_RE = re.compile(r"data:[a-zA-Z0-9.+/-]+;base64,[A-Za-z0-9+/=\s]+")
+_SEARCH_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
+    re.IGNORECASE | re.DOTALL,
+)
+_SEARCH_BEARER_SECRET_RE = re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._\-]{8,}")
+_SEARCH_TOKEN_PREFIX_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b"
+)
+_SEARCH_KEY_VALUE_SECRET_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password)\b\s*[:=]\s*[\"']?)[^\s\"',;]+"
+)
+_SEARCH_TOKEN_RE = re.compile(r"[\w]+(?:[._/-][\w]+)*", re.UNICODE)
+
+
+def _fold_search_text(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _sanitize_searchable_text(raw: str) -> str:
+    if not raw:
+        return ""
+    cleaned = _SEARCH_SYSTEM_REMINDER_RE.sub(" ", raw)
+    cleaned = _SEARCH_DATA_URI_RE.sub("[binary-attachment]", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _redact_snippet_secrets(text: str) -> str:
+    redacted = _SEARCH_PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
+    redacted = _SEARCH_BEARER_SECRET_RE.sub(r"\1[REDACTED]", redacted)
+    redacted = _SEARCH_TOKEN_PREFIX_RE.sub("[REDACTED]", redacted)
+    return _SEARCH_KEY_VALUE_SECRET_RE.sub(r"\1[REDACTED]", redacted)
+
+
+def _tokenize_search_query(query: str) -> tuple[list[str], list[str], str, str]:
+    normalized_phrase = " ".join(query.lower().split())
+    folded_phrase = _fold_search_text(normalized_phrase)
+    raw_tokens = [m.group(0).lower() for m in _SEARCH_TOKEN_RE.finditer(query)]
+    filtered = [tok for tok in raw_tokens if len(tok) >= 2] or raw_tokens
+    seen: set[str] = set()
+    unique_terms: list[str] = []
+    for tok in filtered:
+        if tok not in seen:
+            seen.add(tok)
+            unique_terms.append(tok)
+    folded_terms = [_fold_search_text(tok) for tok in unique_terms]
+    return unique_terms, folded_terms, normalized_phrase, folded_phrase
+
+
+def _match_stats(
+    text: str,
+    query_terms: Sequence[str],
+    folded_terms: Sequence[str],
+    normalized_phrase: str,
+    folded_phrase: str,
+    conv_matched_indices: set[int],
+) -> tuple[int, bool, int]:
+    if not text:
+        return 0, False, 0
+    text_lower = text.lower()
+    text_folded = _fold_search_text(text)
+    matched_count = 0
+    occurrences = 0
+    for idx, (term, f_term) in enumerate(zip(query_terms, folded_terms)):
+        if term in text_lower or (f_term and f_term in text_folded):
+            matched_count += 1
+            conv_matched_indices.add(idx)
+            occurrences += max(
+                text_lower.count(term),
+                text_folded.count(f_term) if f_term else 0,
+            )
+    phrase_hit = bool(
+        len(normalized_phrase) >= 3
+        and (normalized_phrase in text_lower or (folded_phrase and folded_phrase in text_folded))
+    )
+    return matched_count, phrase_hit, occurrences
+
+
+def _build_search_snippet(
+    clean_text: str,
+    query_terms: Sequence[str],
+    folded_terms: Sequence[str],
+    normalized_phrase: str,
+    folded_phrase: str,
+    *,
+    max_chars: int = 360,
+) -> str:
+    sanitized = " ".join(_redact_snippet_secrets(clean_text).split())
+    if len(sanitized) <= max_chars:
+        return sanitized
+    lower = sanitized.lower()
+    folded = _fold_search_text(sanitized)
+    match_pos = -1
+    if normalized_phrase:
+        match_pos = lower.find(normalized_phrase)
+        if match_pos < 0 and folded_phrase:
+            match_pos = folded.find(folded_phrase)
+    if match_pos < 0:
+        positions: list[int] = []
+        for term, f_term in zip(query_terms, folded_terms):
+            pos = lower.find(term)
+            if pos < 0 and f_term:
+                pos = folded.find(f_term)
+            if pos >= 0:
+                positions.append(pos)
+        match_pos = min(positions) if positions else 0
+
+    budget = max(40, max_chars - 6)
+    half = min(180, budget // 2)
+    start = max(0, match_pos - half)
+    end = min(len(sanitized), start + budget)
+    if end - start < budget:
+        start = max(0, end - budget)
+    excerpt = sanitized[start:end].strip()
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(sanitized) else ""
+    result = f"{prefix}{excerpt}{suffix}"
+    if len(result) > max_chars:
+        result = result[: max_chars - 3].rstrip() + "..."
+    return result
+
+
+ChatStore = PostgresChatStore
+
+__all__ = ["ChatApplication", "ChatReceipt", "ChatStore", "PostgresChatStore", "migrate_managed_workspace_files"]

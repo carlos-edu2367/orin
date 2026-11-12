@@ -6,7 +6,9 @@ deleting the file has to be a safe and complete operation.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -15,9 +17,10 @@ from threading import RLock
 import numpy as np
 
 from .models import Chunk, EmbedderIdentity, IndexStatus
+from .pagerank import symbol_edge_multiplier
 
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 MAX_QUERY_TOKENS = 32
 
 _TOKEN = re.compile(r"[A-Za-z0-9_]+")
@@ -54,6 +57,13 @@ CREATE TABLE IF NOT EXISTS imports (
     PRIMARY KEY (path, target)
 );
 CREATE INDEX IF NOT EXISTS imports_by_target ON imports(target);
+CREATE TABLE IF NOT EXISTS symbol_refs (
+    path TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (path, symbol)
+);
+CREATE INDEX IF NOT EXISTS symbol_refs_by_symbol ON symbol_refs(symbol);
 CREATE TABLE IF NOT EXISTS index_meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -112,8 +122,18 @@ class SqliteChunkStore:
                 "model": self._identity.model,
                 "dim": str(self._identity.dim),
             }
-            if stored and any(stored.get(key) != value for key, value in current.items()):
-                self._connection.execute("DELETE FROM vectors")
+            if stored and stored.get("schema_version") != SCHEMA_VERSION:
+                with self._connection:
+                    self._connection.execute("DELETE FROM vectors")
+                    self._connection.execute("DELETE FROM chunks_fts")
+                    self._connection.execute("DELETE FROM chunks")
+                    self._connection.execute("DELETE FROM imports")
+                    self._connection.execute("DELETE FROM symbol_refs")
+                    self._connection.execute("DELETE FROM files")
+                    self._connection.execute("DELETE FROM index_meta WHERE key = 'last_scan_at'")
+            elif stored and any(stored.get(key) != value for key, value in current.items()):
+                with self._connection:
+                    self._connection.execute("DELETE FROM vectors")
             with self._connection:
                 for key, value in current.items():
                     self._connection.execute("INSERT INTO index_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
@@ -149,6 +169,7 @@ class SqliteChunkStore:
                 self._delete_chunks_of(path)
                 self._connection.execute("DELETE FROM files WHERE path = ?", (path,))
                 self._connection.execute("DELETE FROM imports WHERE path = ?", (path,))
+                self._connection.execute("DELETE FROM symbol_refs WHERE path = ?", (path,))
             self._matrix_cache = None
 
     def _delete_chunks_of(self, path: str) -> None:
@@ -158,6 +179,7 @@ class SqliteChunkStore:
             self._connection.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (chunk_id,))
             self._connection.execute("DELETE FROM vectors WHERE chunk_id = ?", (chunk_id,))
         self._connection.execute("DELETE FROM chunks WHERE path = ?", (path,))
+        self._connection.execute("DELETE FROM symbol_refs WHERE path = ?", (path,))
 
     def mark_scanned(self, moment: datetime) -> None:
         with self._lock, self._connection:
@@ -243,6 +265,118 @@ class SqliteChunkStore:
             for target in targets:
                 self._connection.execute("INSERT OR IGNORE INTO imports(path, target) VALUES(?, ?)", (path, target))
 
+    def replace_symbol_refs(self, path: str, refs: Mapping[str, int] | Iterable[tuple[str, int]]) -> None:
+        items = refs.items() if isinstance(refs, Mapping) else refs
+        rows = [(path, str(symbol), int(count)) for symbol, count in items if symbol and int(count) > 0]
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM symbol_refs WHERE path = ?", (path,))
+            if rows:
+                self._connection.executemany(
+                    "INSERT OR REPLACE INTO symbol_refs(path, symbol, count) VALUES(?, ?, ?)",
+                    rows,
+                )
+
+    def defined_symbols(self) -> set[str]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT DISTINCT symbol FROM chunks WHERE symbol IS NOT NULL AND symbol != ''"
+            )
+            return {str(row["symbol"]) for row in rows}
+
+    def paths_mentioning_tokens(self, symbols: Iterable[str]) -> set[str]:
+        """Return indexed file paths whose chunks mention at least one token from ``symbols`` via FTS5."""
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for sym in symbols:
+            for tok in _TOKEN.findall(str(sym)):
+                if tok and tok not in seen:
+                    seen.add(tok)
+                    tokens.append(tok)
+        if not tokens:
+            return set()
+        matched_paths: set[str] = set()
+        with self._lock:
+            for idx in range(0, len(tokens), MAX_QUERY_TOKENS):
+                batch = tokens[idx : idx + MAX_QUERY_TOKENS]
+                expression = " OR ".join(f'"{token}"' for token in batch)
+                if not expression:
+                    continue
+                rows = self._connection.execute(
+                    "SELECT DISTINCT path FROM chunks WHERE chunk_id IN ("
+                    "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH ?"
+                    ")",
+                    (expression,),
+                )
+                matched_paths.update(str(row["path"]) for row in rows)
+        return matched_paths
+
+    def symbols_by_file(self) -> dict[str, tuple[str, ...]]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT path, symbol, MIN(start_line) AS first_line "
+                "FROM chunks WHERE symbol IS NOT NULL AND symbol != '' "
+                "GROUP BY path, symbol ORDER BY path ASC, first_line ASC, symbol ASC"
+            )
+            grouped: dict[str, list[str]] = {}
+            for row in rows:
+                grouped.setdefault(str(row["path"]), []).append(str(row["symbol"]))
+            return {path: tuple(syms) for path, syms in grouped.items()}
+
+    def imported_by_counts(self) -> dict[str, int]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT target, COUNT(*) AS total FROM imports GROUP BY target"
+            )
+            return {str(row["target"]): int(row["total"]) for row in rows}
+
+    def dependency_edges(self) -> list[tuple[str, str, float, tuple[str, ...]]]:
+        """Weighted dependency edges ``(src_path, dst_path, base_weight, matched_symbols)``."""
+        with self._lock:
+            explicit_imports = {
+                (str(row["path"]), str(row["target"]))
+                for row in self._connection.execute("SELECT path, target FROM imports WHERE path != target")
+            }
+            definers_by_symbol: dict[str, list[str]] = {}
+            for row in self._connection.execute(
+                "SELECT DISTINCT path, symbol FROM chunks WHERE symbol IS NOT NULL AND symbol != '' ORDER BY path"
+            ):
+                definers_by_symbol.setdefault(str(row["symbol"]), []).append(str(row["path"]))
+
+            edge_weights: dict[tuple[str, str], float] = {}
+            edge_symbols: dict[tuple[str, str], set[str]] = {}
+
+            for row in self._connection.execute(
+                "SELECT path, symbol, count FROM symbol_refs WHERE count > 0"
+            ):
+                src_path = str(row["path"])
+                symbol = str(row["symbol"])
+                count = int(row["count"])
+                definers = definers_by_symbol.get(symbol)
+                if not definers:
+                    continue
+                num_definers = len(definers)
+                candidates = [dst for dst in definers if dst != src_path]
+                if not candidates:
+                    continue
+                imported_candidates = [dst for dst in candidates if (src_path, dst) in explicit_imports]
+                targets = imported_candidates if imported_candidates else candidates
+                sym_weight = math.sqrt(max(1, count)) * symbol_edge_multiplier(symbol, num_definers=num_definers)
+                for dst_path in targets:
+                    pair = (src_path, dst_path)
+                    edge_weights[pair] = edge_weights.get(pair, 0.0) + sym_weight
+                    edge_symbols.setdefault(pair, set()).add(symbol)
+
+            for src_path, dst_path in explicit_imports:
+                pair = (src_path, dst_path)
+                if pair not in edge_weights:
+                    edge_weights[pair] = 1.0
+                    edge_symbols.setdefault(pair, set())
+
+            return [
+                (src_path, dst_path, float(edge_weights[(src_path, dst_path)]), tuple(sorted(edge_symbols.get((src_path, dst_path), ()))))
+                for src_path, dst_path in sorted(edge_weights)
+            ]
+
     def neighbours_of(self, paths: list[str]) -> set[str]:
         """Files this set imports, plus files that import this set."""
         if not paths:
@@ -262,13 +396,18 @@ class SqliteChunkStore:
             )
             return [(row["target"], int(row["total"])) for row in rows]
 
-    def symbols_of(self, path: str, *, limit: int) -> list[str]:
+    def symbols_with_lines_of(self, path: str, *, limit: int) -> list[tuple[str, int]]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT DISTINCT symbol FROM chunks WHERE path = ? AND symbol IS NOT NULL ORDER BY start_line LIMIT ?",
+                "SELECT symbol, MIN(start_line) AS first_line "
+                "FROM chunks WHERE path = ? AND symbol IS NOT NULL AND symbol != '' "
+                "GROUP BY symbol ORDER BY first_line ASC, symbol ASC LIMIT ?",
                 (path, int(limit)),
             )
-            return [row["symbol"] for row in rows]
+            return [(str(row["symbol"]), int(row["first_line"])) for row in rows]
+
+    def symbols_of(self, path: str, *, limit: int) -> list[str]:
+        return [symbol for symbol, _ in self.symbols_with_lines_of(path, limit=limit)]
 
     # -- reads ----------------------------------------------------------
 

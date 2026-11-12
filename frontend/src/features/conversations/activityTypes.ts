@@ -430,7 +430,14 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   // ARTIFACT_CREATED emission), so there is no "in progress" state for it to
   // pass through.
   if (type === 'artifact.created') return 'completed'
-  if (type === 'memory.learned' || type === 'todo.updated' || type === 'TODO_UPDATED') return 'completed'
+  if (
+    type === 'memory.learned' ||
+    type === 'notification.pushed' ||
+    type === 'todo.updated' ||
+    type === 'TODO_UPDATED'
+  ) {
+    return 'completed'
+  }
   if (type === 'process.exited') {
     return status === 'failed' || Boolean(errorCode) ? 'failed' : 'completed'
   }

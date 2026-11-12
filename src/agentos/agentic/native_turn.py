@@ -2159,6 +2159,7 @@ class NativeTurnRunner:
 
         # Near the threshold (or agy's message cap), prior turns' tool results shrink and, if that is not
         # enough, the history is summarized; below it they reach the CLI whole.
+        self.runtime._dedupe_stale_reads(self.messages)
         self._compact_prior_history(tool_schemas)
         window = self.runtime._request_messages(self.messages)
         if self.runtime._names is not None:

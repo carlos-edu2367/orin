@@ -7,9 +7,12 @@ embedder outage costs vectors but never costs the lexical index.
 """
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from hashlib import blake2b
 from pathlib import Path
+import re
 
 from agentos.pathsafety import resolve_contained
 
@@ -22,6 +25,7 @@ from .symbols import extract_imports, language_for, resolve_import
 MAX_FILE_BYTES = 2_000_000
 MAX_CHUNKS = 50_000
 EMBED_BATCH = 64
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class ProjectIndexer:
@@ -37,6 +41,7 @@ class ProjectIndexer:
         """Reconcile the index with the disk, optionally for a subset of paths."""
         index_filter = IndexFilter(GitignoreFilter.from_root(self.root))
         known = self._store.known_files()
+        prior_symbols = self._store.defined_symbols() if known else set()
         present: set[str] = set()
         pending_imports: dict[str, tuple[str | None, str]] = {}
         for path in self._candidates(index_filter, only):
@@ -47,13 +52,35 @@ class ProjectIndexer:
         removed = (set(known) - present) if only is None else {path for path in only if path not in present and path in known}
         for path in removed:
             self._store.forget_file(path)
-        # Imports are resolved only after every file in this scan has been
-        # written, so a file that imports one indexed later in the same walk
-        # still resolves correctly.
+        # Imports and symbol references are resolved only after every file in
+        # this scan has been written, so a file that references one indexed
+        # later in the same walk still resolves against the full symbol set.
         if pending_imports:
             known_paths = tuple(self._store.known_files())
+            known_symbols = self._store.defined_symbols()
+            defs_by_file = self._store.symbols_by_file()
             for path, (language, text) in pending_imports.items():
                 self._record_imports(path, language, text, known_paths)
+                self._record_symbol_refs(path, text, known_symbols, defs_by_file.get(path, ()))
+            added_symbols = known_symbols - prior_symbols
+            if added_symbols and len(pending_imports) < len(known_paths):
+                candidate_other_paths = (
+                    self._store.paths_mentioning_tokens(added_symbols)
+                    if hasattr(self._store, "paths_mentioning_tokens")
+                    else set(known_paths)
+                )
+                for other_path in known_paths:
+                    if other_path in pending_imports or other_path not in candidate_other_paths:
+                        continue
+                    resolved = self._resolve(other_path)
+                    if resolved is None:
+                        continue
+                    try:
+                        other_text = resolved.read_bytes().decode("utf-8")
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                    if any(sym in other_text for sym in added_symbols):
+                        self._record_symbol_refs(other_path, other_text, known_symbols, defs_by_file.get(other_path, ()))
         if embed:
             self._embed_pending()
         self._store.mark_scanned(datetime.now(UTC))
@@ -132,6 +159,27 @@ class ProjectIndexer:
             if target is not None and target != relative_path
         )
         self._store.replace_imports(relative_path, resolved)
+
+    def _record_symbol_refs(
+        self,
+        relative_path: str,
+        text: str,
+        known_symbols: set[str],
+        own_symbols: Sequence[str],
+    ) -> None:
+        if not known_symbols or not text:
+            self._store.replace_symbol_refs(relative_path, {})
+            return
+        counts = Counter(_IDENTIFIER_RE.findall(text))
+        for own_sym in own_symbols:
+            if own_sym in counts:
+                counts[own_sym] -= 1
+        refs = {
+            sym: count
+            for sym, count in counts.items()
+            if sym in known_symbols and count > 0
+        }
+        self._store.replace_symbol_refs(relative_path, refs)
 
     # -- embedding ------------------------------------------------------
 

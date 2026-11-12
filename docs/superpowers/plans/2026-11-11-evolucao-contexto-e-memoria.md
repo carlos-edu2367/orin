@@ -1,6 +1,6 @@
 # Evolução de Contexto da Conversa e Memória Geral do Orin
 
-Data: 2026-11-11 · Status: **Planejado (aguardando início da implementação)**
+Data: 2026-11-11 · Status: **Implementado e validado**
 Escopo aprovado: **Pacotes 1, 2, 3 e 4** · Política de consolidação: **Automático + Undo para memórias; aprovação explícita para `SKILL.md`**.
 
 ---

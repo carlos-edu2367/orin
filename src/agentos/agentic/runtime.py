@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
+import hashlib
 import inspect
 import json
 import os
@@ -32,23 +33,28 @@ from .tools.public_names import public_name as _public_tool_name
 from .reminders import VOLATILE_REMINDER_CHARS, ReminderQueue, render_reminders, system_reminder
 from .retry import backoff_delay, is_retryable, retry_after_of, status_code_of
 from .compaction import (
+    COMPACT_RETAINED_USER_TOKENS,
     COMPACTION_HEADER,
     COMPACTION_HEADING,
     COMPACTION_INSTRUCTION,
     COMPACTION_SECTIONS,
     MICROCOMPACT_MARKER,
+    RETAINED_USER_REQUESTS_HEADING,
+    attach_retained_user_requests,
+    build_compact_source_partitioned,
     compaction_message,
+    compress_tool_output_head_tail,
+    dedupe_stale_reads_in_messages,
+    shrink_compaction_source_for_retry,
+    strip_retained_user_requests_section,
 )
 
-# Kept for callers written when Code mode had its own headings: there is one set now.
 CODE_COMPACTION_SECTIONS = COMPACTION_SECTIONS
 CODE_COMPACTION_INSTRUCTION = COMPACTION_INSTRUCTION
 
-# Refusals that wait on a person, not failures of the tool: they never count toward REPEATED_TOOL_FAILURE.
 POLICY_REFUSAL_CODES = frozenset({
     "CODE_DEPLOY_CONFIRMATION_REQUIRED", "CODE_PUSH_CONFIRMATION_REQUIRED", "CODE_PERMISSION_DENIED",
     "CODE_PLAN_MODE_READONLY", "CODE_PLAN_APPROVAL_REQUIRED",
-    # The person stopped that subagent from the Cena; asking for it again later is legitimate, not a retry loop.
     "STOPPED_BY_USER",
 })
 
@@ -60,25 +66,13 @@ MAX_STREAM_KEEPALIVE_STALL_SECONDS = 180.0
 MICROCOMPACT_TOOL_RESULT_CHARS = 3_000
 MICROCOMPACT_THRESHOLD = 0.65
 MICROCOMPACT_KEEP_RECENT = 16
-# Results shorter than this cost less than the marker that would replace them.
 MICROCOMPACT_MIN_CHARS = 200
-# Autocompact fires at the window minus room for one full reply and a fixed margin.
 AUTOCOMPACT_OUTPUT_RESERVE_TOKENS = 20_000
 AUTOCOMPACT_MARGIN_TOKENS = 13_000
-# ... and never past 90% of the window nor 400k tokens, so a 1M window compacts at 400k
-# (approved 2026-11-10: threshold = min(90% of window, window - reserve - 13k, 400k)).
 AUTOCOMPACT_WINDOW_FRACTION = 0.90
 AUTOCOMPACT_MAX_TOKENS = 400_000
 
-# Providers whose prompt cache this runtime can actually address. For these the
-# message list is append-only, because prompt caching keys on an exact prefix:
-# editing a message already sent invalidates every entry written at or after
-# it. A cached token costs about a tenth of an ordinary input token, so keeping
-# an old tool result whole and cached is cheaper than shrinking it and paying
-# full price for the prefix the edit invalidated.
 #
-# For every other provider there is no cache to protect, shrinking is pure
-# gain, and the previous per-iteration behaviour is kept.
 PREFIX_CACHING_PROVIDERS = frozenset({"anthropic"})
 CONTEXT_COMPACTION_THRESHOLD = 0.82
 CONTEXT_COMPACTION_KEEP_UNITS = 6
@@ -97,15 +91,8 @@ PLAN_MODE_REMINDER = (
 BROWSER_TOOL_NAMES: frozenset[str] = frozenset()
 from .tool_deferral import ALWAYS_LOADED_CODE_TOOLS, CODE_MODE_CORE_TOOLS, tool_search_enabled
 
-# Sentinel distinguishing "no pin resolved yet" from "resolved, and there is
-# no user message to pin." Used only as the default for the ``_pinned_index``
-# instance attribute, which ``run`` sets once per turn.
 _PIN_UNSET = object()
 
-# A compacted summary has one job: let the model keep working without going
-# back to the tools. Free prose loses exactly the parts that make that
-# possible -- the paths, the numbers, the decisions already taken -- so the
-# summary is requested and rendered under fixed headings instead. The definitions live in compaction.py.
 
 
 def strip_analysis_block(text: str) -> str:
@@ -113,6 +100,19 @@ def strip_analysis_block(text: str) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"<analysis>[\s\S]*?</analysis>", "", text, flags=re.IGNORECASE)
+    open_match = re.search(r"<analysis\b[^>]*>", cleaned, flags=re.IGNORECASE)
+    if open_match is not None:
+        after_open = cleaned[open_match.end() :]
+        heading_match = re.search(
+            r"(?:^|\n)(###\s+Primary Request and Intent\b|###\s+\S)",
+            after_open,
+            flags=re.IGNORECASE,
+        )
+        if heading_match is not None:
+            heading_start = open_match.end() + heading_match.start(1)
+            cleaned = (cleaned[: open_match.start()] + cleaned[heading_start:]).strip()
+        else:
+            return ""
     return cleaned.strip()
 
 CLOSING_INSTRUCTION = (
@@ -121,17 +121,9 @@ CLOSING_INSTRUCTION = (
     "and say what the next step would be."
 )
 
-# How many times a failed ``report_verification`` sends the agent back to
-# EXECUTE before the turn gives up and answers with caveats instead. Without
-# a ceiling, a task whose acceptance criteria the model keeps failing to
-# satisfy would loop until the turn's outer deadline, which is a worse
-# failure mode than an honest "still broken" answer.
 MAX_VERIFY_REPAIR_ROUNDS = 3
-# How many times a Stop hook may send the model back to work in one turn.
 MAX_STOP_CONTINUATIONS = 5
 MAX_BACKGROUND_CONTINUATIONS = 12
-# A reply cut by the output limit is continued (text) or retried with a larger cap (a cut tool call),
-# at most this many times per turn.
 MAX_OUTPUT_RECOVERIES = 3
 MAX_ESCALATED_OUTPUT_TOKENS = 32_000
 MAX_STREAM_RESUMES = 2
@@ -200,19 +192,11 @@ class AgenticLimits:
     max_provider_retries: int = 1
     max_provider_tokens: int | None = None
     max_cost: Decimal | None = None
-    # None means the turn asks for no output cap at all, so the model may use
-    # whatever its own maximum is. Any cap here is a hard ceiling on a single
-    # reply: a tool call that does not fit under it is cut off mid-call, which
-    # the model cannot recover from beyond splitting the payload.
     max_output_tokens: int | None = None
     max_context_tokens: int = 60_000
-    # The actual provider window, when the catalog knows it. The trim budget
-    # above deliberately leaves room for system/tool overhead; this value is
-    # what the UI should present as the model's full context window.
     context_window_tokens: int | None = None
     subagent_max_iterations: int | None = None
     subagent_max_actions: int | None = None
-    # W3 (Code mode). None means no ceiling. ``retry_base_delay_seconds`` 0.0 keeps the old immediate retry.
     max_turns: int | None = None
     max_budget_usd: Decimal | None = None
     safety_max_tool_rounds: int | None = None
@@ -241,11 +225,7 @@ class AgenticRunResult:
     iterations: int = 0
     actions: int = 0
     error_code: str | None = None
-    # True only when the run completed because it hit its final allowed
-    # iteration (the tool_choice="none" closing turn), never on an ordinary
-    # completion that finished with budget to spare.
     budget_exhausted: bool = False
-    # How many queued messages from the person reached the model during this turn.
     queued_turn_count: int = 0
     verification: str | None = None
     end_reason: str | None = None
@@ -348,8 +328,6 @@ def _accepts_call_id(invoke: Callable[..., object]) -> bool:
 
 
 class AgenticTurnRuntime:
-    # W6, set by the session for an `orin code` turn: the core tools offered (None: all) and those withheld (--tools,
-    # --disallowedTools).
     offered_tools: frozenset[str] | None = None
     withheld_tools: frozenset[str] = frozenset()
     provider_timeout_seconds: float | None = None
@@ -398,41 +376,25 @@ class AgenticTurnRuntime:
         self.store, self.provider = store, provider
         if provider_timeout_seconds is not None:
             self.provider_timeout_seconds = float(provider_timeout_seconds)
-        # Set for a /compact turn: the turn only summarizes the conversation (instructions may be empty).
         self.compact_request = compact_request
-        # W7 `!command`: the person's own shell command, run as one tool call; the model is not called.
         self.shell_command = shell_command
-        # Reasoning effort for this turn (already checked against the model); None sends nothing.
         self.effort = effort
-        # Whether a model accepts the reasoning effort. A fallback that does not loses the effort (it would be rejected).
         self._effort_supported = effort_supported
-        # Told which model a fallback switch moved to, so the cost of later calls is priced at that model.
         self._model_switched = model_switched
-        # Called once after a turn that completed (not failed or cancelled); its errors never change the turn.
         self._on_completed = on_completed
         self.lifecycle = lifecycle
-        # Set when a UserPromptSubmit hook refused the prompt: the turn ends before any model call.
         self.prompt_block_reason = prompt_block_reason
-        # Set when a ConfigChange hook refused a settings change: the turn does not run until a hook accepts it.
         self.config_block_reason = config_block_reason
-        # Releases what the turn owns outside the loop (its hook dispatcher); called once from close().
         self._on_close = on_close
-        # Notes that reach the model as one <system-reminder> user message before the next request.
         self.reminders = reminders if reminders is not None else ReminderQueue()
-        # Prices a model call when the provider reports no cost (most do not); feeds max_budget_usd.
         self._cost_estimator = cost_estimator
-        # The turn's money, shared with its subagents: max_budget_usd is checked against this total when it is set.
         self._budget_meter = budget_meter
-        # What the summarizer's calls cost when there is no meter (the summary is billed like any other call).
         self._summary_spent = Decimal("0")
         self._sleep = sleep or time.sleep
-        # Models tried, in order, when the current one keeps failing; consumed as they are tried.
         self._fallback_models: list[str] = [str(model).strip() for model in fallback_models if str(model or "").strip()]
         self._fallback_provider_factory = fallback_provider_factory
-        # Per-machine context kept out of the system prompt (excludeDynamicSystemPromptSections); see _request_messages.
         self.first_user_context = str(first_user_context or "")
         self.autocompact = autocompact
-        # Renders the stable system prompt again after a compaction (Code mode); None keeps the current one.
         self._prompt_renderer = prompt_renderer
         self._stop_hook_active = False
         self._stop_continuations = 0
@@ -448,15 +410,10 @@ class AgenticTurnRuntime:
         self._unknown_tool_effects: dict[str, str] = {}
         self._local_effect_seq = 0
         self._reminder_requests = 0
-        # Raised for the rest of the turn after a tool call was cut by the output limit.
         self._output_cap: int | None = None
         self._queued_turn_count = 0
         self.hook_engine = hook_engine
-        # ``toolset`` is the agent-facing path: its results are returned to the
-        # model verbatim. ``actions`` remains the policy-projected path used by
-        # the tool-runtime contract tests, where results are summaries only.
         self.toolset = toolset
-        # Present when the toolset speaks Claude Code tool names to the model.
         self._names = getattr(toolset, "name_translator", None)
         self.actions = actions or ActionLoop(None, None)
         self.limits = limits or AgenticLimits()
@@ -464,10 +421,6 @@ class AgenticTurnRuntime:
         self.cancelled = cancelled or (lambda _turn: False)
         self.reconciliation_required = reconciliation_required or (lambda _turn: False)
         self.system_prompt = system_prompt
-        # The half of the prompt that changes as the conversation moves. It
-        # rides as its own system block so it stays out of the cached prefix;
-        # a caller that passes only ``system_prompt`` gets the previous
-        # behaviour, with the whole thing treated as stable.
         self.volatile_prompt = volatile_prompt or ""
         self.tool_kinds = dict(tool_kinds or {})
         self.skill_prompt_tokens = max(0, int(skill_prompt_tokens))
@@ -483,19 +436,12 @@ class AgenticTurnRuntime:
         self._learning_committed = False
         self._started_at: datetime | None = None
         self._quality_recorded = False
-        # The task the agent committed to. Held here rather than in the
-        # message list so trimming and compaction cannot reach it: the one
-        # thing that must never vanish mid-task is the definition of the task.
         self.contract: TaskContract | None = None
         self._rejected_contracts = 0
-        # None keeps the previous single-stage behaviour, which every caller
-        # that has not opted in (and every contract test) relies on.
         self.phases = phase_controller
         self.phase_controller = phase_controller
         self._phase_transition_note: str | None = None
         self._first_request_text = ""
-        # Per-turn tool bookkeeping. ``run`` resets these; they are also
-        # initialised here so ``_run_toolset`` can be exercised on its own.
         self._failed_signatures: dict[str, str] = {}
         self._consecutive_tool_failures: dict[str, int] = {}
         self._succeeded_reads: dict[str, tuple[str, int]] = {}
@@ -848,7 +794,6 @@ class AgenticTurnRuntime:
         try:
             result = self._run(turn_id, turn=turn)
         except BaseException:
-            # An exception that escapes the loop is still a failed turn: exactly one StopFailure.
             self._emit(HookEvent.STOP_FAILURE, error_code="RUNTIME_EXCEPTION")
             raise
         if self._queued_turn_count:
@@ -857,17 +802,8 @@ class AgenticTurnRuntime:
 
     def _run(self, turn_id: str, *, turn: dict[str, object] | None = None) -> AgenticRunResult:
         turn = turn or self._load(turn_id)
-        # A successful read, and how many writes had happened when it ran. A
-        # later identical read is only safe to serve from here if that count
-        # has not moved: re-reading a file after editing it is necessary, not
-        # redundant.
         self._succeeded_reads: dict[str, tuple[str, int]] = {}
         self._writes = 0
-        # How many of the toolset's recorded change events have already been
-        # covered by a completed verification pass, and how many repair
-        # rounds a failed one has already spent. Both reset per turn: a new
-        # turn's own changes are what it must account for, not a previous
-        # turn's already-settled work.
         self._verified_at_change_events = 0
         self._verify_repair_rounds = 0
         self._pending_verification: Mapping[str, object] | None = None
@@ -887,8 +823,6 @@ class AgenticTurnRuntime:
         self._queued_turn_count = 0
         if self.prompt_block_reason:
             self.store.delta(turn, f"⚠️ Mensagem bloqueada por um hook: {self.prompt_block_reason}")
-            # W2-R6: erase the refused prompt before the turn finishes; if this fails the turn fails loudly
-            # rather than letting the prompt reach the model on the next turn.
             excluder = getattr(self.store, "exclude_from_context", None)
             if callable(excluder):
                 excluder(turn)
@@ -914,16 +848,7 @@ class AgenticTurnRuntime:
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
         self._consecutive_tool_failures: dict[str, int] = {}
-        # ``history_for_turn`` returns the whole conversation up to and
-        # including this turn's request, so the current request is always the
-        # last user message in this pre-loop snapshot. Resolving it once here
-        # -- instead of re-deriving "the last user message" from the growing
-        # ``messages`` list on every iteration -- keeps the pin from drifting
-        # onto a later tool-result message (Anthropic emits those with
-        # ``role: "user"`` too) as the loop appends to ``messages`` below.
         self._pinned_index = self._last_user_index(messages)
-        # Kept for contract synthesis: if the model never manages to write a
-        # contract, the person's own request becomes the objective.
         pinned_message = messages[self._pinned_index] if self._pinned_index is not None else None
         self._first_request_text = str((pinned_message or {}).get("content") or "")[:2_000]
         provider_retries = 0
@@ -954,7 +879,6 @@ class AgenticTurnRuntime:
             ).run()
             if outcome is not None:
                 return outcome
-            # indisponível antes de qualquer saída: o laço clássico abaixo usa provider.stream (texto)
 
         iterations = range(1, self.limits.max_iterations + 1) if self.limits.max_iterations is not None else count(1)
         for iteration in iterations:
@@ -979,6 +903,7 @@ class AgenticTurnRuntime:
             tool_schemas = self._tool_schemas(turn)
             if self._names is not None:
                 tool_schemas = self._names.schemas_out(tool_schemas)
+            self._dedupe_stale_reads(messages)
             self._maybe_compact(messages, turn, tool_schemas)
             if self.cancelled(turn):
                 return self._cancel(turn, iteration, action_count)
@@ -986,13 +911,6 @@ class AgenticTurnRuntime:
             if self._names is not None:
                 window = self._names.messages_out(window)
             if self.phases is not None:
-                # Last, so the stage the agent is in is the nearest thing to
-                # the conversation rather than something it read paragraphs ago.
-                # The tool list is named here, from the schemas actually being
-                # sent this call, rather than as a static line in the cached
-                # system prompt: a cached line cannot track a set that changes
-                # every time the phase does within the same turn, and a wrong
-                # one is worse than none -- it tells the model a tool is
                 # callable when the request does not offer it.
                 published = ", ".join(sorted(str(item.get("function", {}).get("name", "")) for item in tool_schemas)) or "nenhuma"
                 phase_note = f"{phases.PHASE_INSTRUCTIONS[self.phases.current]}\nFerramentas disponíveis agora: {published}."
@@ -1910,6 +1828,21 @@ class AgenticTurnRuntime:
                     cleared += 1
         return cleared
 
+    def _dedupe_stale_reads(self, messages: list[dict[str, object]]) -> int:
+        """Elide duplicate or post-mutation stale read_file results in the active window."""
+        pinned = getattr(self, "_pinned_index", _PIN_UNSET)
+        protected = {pinned} if isinstance(pinned, int) else set()
+        last_call = max((i for i, m in enumerate(messages) if self._is_tool_call_message(m)), default=-1)
+        elided = dedupe_stale_reads_in_messages(
+            messages,
+            protected_indices=protected,
+            last_call=last_call,
+            min_chars=MICROCOMPACT_MIN_CHARS,
+        )
+        if elided > 0:
+            self._release_read_stubs(messages)
+        return elided
+
     def _force_compact(
         self,
         messages: list[dict[str, object]],
@@ -1917,17 +1850,19 @@ class AgenticTurnRuntime:
         tool_schemas: list[dict[str, object]],
     ) -> bool:
         """Level 3 reactive compaction: force immediate microcompaction + summary compaction on context overflow."""
+        deduped = self._dedupe_stale_reads(messages)
         shrunk = self._microcompact(messages, keep_recent_units=1, max_chars=AGED_TOOL_RESULT_CHARS)
         before_len = len(messages)
         self._run_compaction(messages, turn, keep_units=min(2, CONTEXT_COMPACTION_KEEP_UNITS), allow_block=False)
         self._age_tool_results(messages, keep_recent=1)
         self._release_read_stubs(messages)
-        return shrunk > 0 or len(messages) < before_len
+        return deduped > 0 or shrunk > 0 or len(messages) < before_len
 
     def _maybe_compact(self, messages: list[dict[str, object]], turn: Mapping[str, object], tool_schemas: list[dict[str, object]]) -> None:
         """Clear old tool results first; summarize only when that is not enough."""
         if self._compaction_count >= 8 or len(messages) < 2:
             return
+        self._dedupe_stale_reads(messages)
         # Measured as the request is sent: the system prompt, the per-turn reminders and the contract ride
         # with every call, so leaving them out let the meter read ~100% while autocompact never fired.
         overhead = self._prompt_overhead_tokens()
@@ -2056,9 +1991,24 @@ class AgenticTurnRuntime:
                 enrichment = str(enricher() or "").strip()
             except Exception:
                 enrichment = ""
-        body = summary[:8_000]
+        body = strip_retained_user_requests_section(summary)[:24_000]
         if enrichment:
             body = f"{body}\n\n{enrichment[:20_000]}"
+        folded_messages = [messages[idx] for idx in sorted(compact_indices) if 0 <= idx < len(messages)]
+        retained_budget = COMPACT_RETAINED_USER_TOKENS
+        max_single = 8_000
+        if not any(m.get("role") in {"assistant", "tool"} for m in folded_messages):
+            folded_tokens = sum(self._estimated_tokens(m) for m in folded_messages)
+            summary_base_tokens = self._estimated_tokens(compaction_message(body))
+            room = max(64, folded_tokens - summary_base_tokens - 64)
+            retained_budget = min(COMPACT_RETAINED_USER_TOKENS, room)
+            max_single = min(8_000, max(120, room * 2))
+        body = attach_retained_user_requests(
+            body,
+            folded_messages,
+            max_tokens=retained_budget,
+            max_single_chars=max_single,
+        )
         insert_at = min(compact_indices)
         pinned_item = messages[pinned] if isinstance(pinned, int) and 0 <= pinned < len(messages) else None
         replacement = compaction_message(body)
@@ -2128,65 +2078,68 @@ class AgenticTurnRuntime:
                 self.reminders.add("session_start", item)
 
     def _compact_source(self, messages: list[dict[str, object]], indices: set[int]) -> str:
-        parts: list[str] = []
-        # Keep the summarizer request below even a small model's window. The
-        # normal turn budget is not the provider's full window, so this is a
-        # deliberately conservative fraction rather than another full-sized
-        # prompt.
-        remaining = min(48_000, max(4_000, 2 * self.limits.max_context_tokens))
-        valid_indices = [idx for idx in reversed(sorted(indices)) if 0 <= idx < len(messages)]
-        for pos, index in enumerate(valid_indices):
-            msg = messages[index]
-            if self._is_tool_result(msg):
-                msg = self._compress_tool_message(msg)
-            try:
-                encoded = json.dumps(msg, ensure_ascii=False, default=str)
-            except (TypeError, ValueError):
-                encoded = str(msg)
-            if remaining <= 0:
-                break
-            has_earlier = pos + 1 < len(valid_indices)
-            max_piece = max(4_000, remaining - 2_000) if has_earlier and remaining > 6_000 else remaining
-            if len(encoded) > max_piece:
-                if max_piece > 400:
-                    half = (max_piece - 32) // 2
-                    chunk = f"{encoded[:half]}\n...[trecho truncado]...\n{encoded[-half:]}"
-                else:
-                    chunk = encoded[:max_piece]
-            else:
-                chunk = encoded
-            parts.append(chunk)
-            remaining -= len(chunk)
-        parts.reverse()
-        return "\n".join(parts)
+        window_tokens = self.limits.context_window_tokens or self.limits.max_context_tokens
+        budget_chars = min(240_000, max(32_000, int(window_tokens * 1.6)))
+        return build_compact_source_partitioned(
+            messages,
+            indices,
+            budget_chars=budget_chars,
+            is_tool_result=self._is_tool_result,
+            compress_tool_message=self._compress_tool_message,
+        )
 
     def _request_compaction_summary(self, source: str, turn: Mapping[str, object], *, code_mode: bool = False) -> str:
         instruction = COMPACTION_INSTRUCTION
         reported: Decimal | None = None
         input_tokens: int | None = None
         output_tokens: int | None = None
+        max_out = min(6_000, max(2_048, (getattr(self.limits, "max_output_tokens", None) or 8_192) // 2))
+        current_source = source
         try:
-            events = self.provider.stream({
-                "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
-                "provider": str(turn.get("provider") or ""),
-                "model": str(turn.get("model_id") or ""),
-                "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": source}],
-                "tools": [],
-                "max_output_tokens": min(1_600, max(256, self.limits.max_context_tokens // 4)),
-            })
-            parts: list[str] = []
-            for raw in events:
-                event = self._coerce(raw)
-                if event.kind is StreamKind.TEXT and event.text:
-                    parts.append(event.text)
-                elif event.kind is StreamKind.USAGE:
-                    if event.cost:
-                        reported = (reported or Decimal("0")) + Decimal(str(event.cost))
-                    if event.usage is not None:
-                        input_tokens = event.usage.input_tokens if event.usage.input_tokens is not None else input_tokens
-                        output_tokens = event.usage.output_tokens if event.usage.output_tokens is not None else output_tokens
-            return "".join(parts).strip()
-        except Exception:
+            for attempt in range(2):
+                parts: list[str] = []
+                attempt_in: int | None = None
+                attempt_out: int | None = None
+                overflow_err = False
+                try:
+                    events = self.provider.stream({
+                        "turn_id": str(turn.get("turn_id") or "") + ":context-compaction",
+                        "provider": str(turn.get("provider") or ""),
+                        "model": str(turn.get("model_id") or ""),
+                        "messages": [{"role": "system", "content": instruction}, {"role": "user", "content": current_source}],
+                        "tools": [],
+                        "max_output_tokens": max_out,
+                    })
+                    for raw in events:
+                        event = self._coerce(raw)
+                        if event.kind is StreamKind.TEXT and event.text:
+                            parts.append(event.text)
+                        elif event.kind is StreamKind.USAGE:
+                            if event.cost:
+                                reported = (reported or Decimal("0")) + Decimal(str(event.cost))
+                            if event.usage is not None:
+                                if event.usage.input_tokens is not None:
+                                    attempt_in = event.usage.input_tokens
+                                if event.usage.output_tokens is not None:
+                                    attempt_out = event.usage.output_tokens
+                        elif event.kind is StreamKind.ERROR and event.error is not None:
+                            if self._is_context_length_error(event.error):
+                                overflow_err = True
+                except Exception as exc:
+                    if attempt == 0 and self._is_context_length_error(exc):
+                        overflow_err = True
+                    else:
+                        return ""
+                finally:
+                    if attempt_in is not None:
+                        input_tokens = (input_tokens or 0) + attempt_in
+                    if attempt_out is not None:
+                        output_tokens = (output_tokens or 0) + attempt_out
+                result_text = "".join(parts).strip()
+                if overflow_err and not result_text and attempt == 0:
+                    current_source = shrink_compaction_source_for_retry(current_source)
+                    continue
+                return result_text
             return ""
         finally:
             self._charge_summary(reported, input_tokens, output_tokens)
@@ -2194,7 +2147,12 @@ class AgenticTurnRuntime:
     @staticmethod
     def _has_sections(summary: str) -> bool:
         """Whether a provider reply is usable as a structured summary (all nine headings)."""
-        return bool(summary) and all(section in summary for section in COMPACTION_SECTIONS)
+        if not summary:
+            return False
+        return all(
+            re.search(rf"(?:^|\n)#{{2,4}}\s+{re.escape(section)}\b", summary, flags=re.IGNORECASE) is not None
+            for section in COMPACTION_SECTIONS
+        )
 
     _has_code_sections = _has_sections
 
@@ -2212,7 +2170,7 @@ class AgenticTurnRuntime:
                 raw = item.get("content")
                 if isinstance(raw, list):
                     raw = "\n".join(str(block.get("text") or "") for block in raw if isinstance(block, Mapping))
-                text = str(raw or "").replace(COMPACTION_HEADER, "").strip()
+                text = strip_retained_user_requests_section(str(raw or "").replace(COMPACTION_HEADER, "").strip())
                 earlier.extend(f"- {line.strip()}" if not line.lstrip().startswith(("-", "#")) else line.rstrip() for line in text.splitlines() if line.strip())
                 continue
             for call in item.get("tool_calls") or ():
@@ -2496,11 +2454,7 @@ class AgenticTurnRuntime:
 
     @classmethod
     def _compress(cls, text: str) -> str:
-        if "\n[compressed: " in text and text.endswith(" characters total; re-run the tool if you need the rest]"):
-            return text
-        if len(text) <= AGED_TOOL_RESULT_CHARS:
-            return text
-        return f"{text[:AGED_TOOL_RESULT_CHARS]}\n[compressed: {len(text)} characters total; re-run the tool if you need the rest]"
+        return compress_tool_output_head_tail(text, max_chars=AGED_TOOL_RESULT_CHARS)
 
     @classmethod
     def _compress_tool_message(cls, message: Mapping[str, object]) -> dict[str, object]:
@@ -3000,13 +2954,76 @@ class AgenticTurnRuntime:
                 and outcome_data.get("path")
                 else None
             )
-            results.append({
+            read_key_meta: tuple[object, object, object] | None = None
+            read_full_meta: bool | None = None
+            read_sha_meta: str | None = None
+            mutated_path_meta: str | None = None
+            if name == "read_file" and outcome.status == "succeeded":
+                raw_r_path = str(
+                    read_path
+                    or (outcome_data.get("path") if isinstance(outcome_data, Mapping) else None)
+                    or outcome.payload.get("path")
+                    or arguments.get("path")
+                    or arguments.get("file_path")
+                    or ""
+                )
+                norm_fn = getattr(self.toolset, "read_key", None)
+                norm_r_path = (norm_fn(raw_r_path) if callable(norm_fn) and raw_r_path else None) or raw_r_path
+                norm_r_path = str(norm_r_path).replace("\\", "/")
+                if norm_r_path:
+                    if not read_path and not (isinstance(outcome_data, Mapping) and outcome_data.get("unchanged")):
+                        read_path = norm_r_path
+                    arg_off = arguments.get("offset")
+                    arg_lim = arguments.get("limit")
+                    eff_off = (
+                        int(arg_off)
+                        if isinstance(arg_off, int) and not isinstance(arg_off, bool)
+                        else int(outcome.payload.get("first_line") or 1)
+                    )
+                    eff_lim = (
+                        int(arg_lim)
+                        if isinstance(arg_lim, int) and not isinstance(arg_lim, bool)
+                        else (int(outcome.payload.get("returned_lines") or outcome.payload.get("lines_read") or 0) or None)
+                    )
+                    read_key_meta = (norm_r_path, eff_off, eff_lim)
+                    first_ln = int(outcome.payload.get("first_line") or outcome.payload.get("start_line") or eff_off or 1)
+                    last_ln = int(outcome.payload.get("end_line") or outcome.payload.get("last_line") or 0)
+                    total_ln = int(outcome.payload.get("total_lines") or outcome.payload.get("line_count") or 0)
+                    trunc = bool(outcome.payload.get("truncated") or outcome.payload.get("truncated_by_chars"))
+                    if not trunc and first_ln <= 1 and (total_ln <= 0 or last_ln >= total_ln) and arg_lim is None:
+                        read_full_meta = True
+                    elif not trunc and first_ln <= 1 and total_ln > 0 and last_ln >= total_ln and isinstance(arg_lim, int) and arg_lim >= total_ln:
+                        read_full_meta = True
+                    else:
+                        read_full_meta = False
+                    read_sha_meta = hashlib.sha256(str(outcome.content or "").encode("utf-8")).hexdigest()
+            elif name in {"edit_file", "write_file", "notebook_edit"} and outcome.status == "succeeded":
+                raw_m_path = str(
+                    outcome.payload.get("path")
+                    or arguments.get("path")
+                    or arguments.get("file_path")
+                    or arguments.get("notebook_path")
+                    or ""
+                )
+                norm_fn = getattr(self.toolset, "read_key", None)
+                norm_m_path = (norm_fn(raw_m_path) if callable(norm_fn) and raw_m_path else None) or raw_m_path
+                norm_m_path = str(norm_m_path).replace("\\", "/")
+                if norm_m_path:
+                    mutated_path_meta = norm_m_path
+            res_entry: dict[str, object] = {
                 "id": call_id, "name": name, "status": outcome.status,
                 "content": outcome.content, "images": list(outcome.images or []),
                 "wait_for_user": bool(outcome.payload.get("wait_for_user")),
                 "error_code": outcome.error_code,
                 "read_path": read_path,
-            })
+            }
+            if read_key_meta is not None:
+                res_entry["read_key"] = read_key_meta
+                res_entry["read_full"] = bool(read_full_meta)
+                res_entry["read_sha"] = read_sha_meta
+            if mutated_path_meta is not None:
+                res_entry["mutated_path"] = mutated_path_meta
+            results.append(res_entry)
         self._emit(
             HookEvent.POST_TOOL_BATCH,
             tool_calls=[
@@ -3692,6 +3709,14 @@ class AgenticTurnRuntime:
             messages = [{"role": "tool", "tool_call_id": str(result.get("id", "")), "content": content}]
         if result.get("read_path"):
             messages[0]["_read_path"] = str(result["read_path"])
+        if result.get("read_key") is not None:
+            messages[0]["_read_key"] = result["read_key"]
+        if "read_full" in result and result.get("read_full") is not None:
+            messages[0]["_read_full"] = bool(result["read_full"])
+        if result.get("read_sha"):
+            messages[0]["_read_sha"] = str(result["read_sha"])
+        if result.get("mutated_path"):
+            messages[0]["_mutated_path"] = str(result["mutated_path"])
         images = [dict(item) for item in (result.get("images") or ()) if isinstance(item, Mapping)]
         if images:
             messages.append({"role": "user", "_tool_image_result": True, "content": [{"type": "text", "text": cls._image_caption(result, content)}, *images]})

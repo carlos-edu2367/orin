@@ -21,7 +21,11 @@ def test_save_records_the_kind_confidence_and_source():
 def test_a_contradicting_fact_supersedes_the_older_one_instead_of_deleting_it():
     store = _store()
     first = store.save("o gerenciador de pacotes é npm", kind="operational")
-    second = store.save("o gerenciador de pacotes é pnpm", kind="operational")
+    second = store.save(
+        "o gerenciador de pacotes é pnpm",
+        kind="operational",
+        supersedes_id=str(first["memory_id"]),
+    )
 
     assert second["superseded"] == [first["memory_id"]]
     assert [row["fact"] for row in store.relevant("gerenciador de pacotes")] == [

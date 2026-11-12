@@ -592,6 +592,7 @@ class ProjectTools:
         conversation_id: str,
         limit: int = 20,
         max_messages: int | None = None,
+        around_sequence: int | None = None,
     ) -> dict[str, Any]:
         if self._chat_store is None or not self._project_user_id:
             raise AgentToolError("Chat store is not available.")
@@ -602,11 +603,24 @@ class ProjectTools:
             effective_limit = min(max(int(max_messages if max_messages is not None else limit), 1), 50)
         except (TypeError, ValueError) as error:
             raise AgentToolError("limit must be an integer between 1 and 50.") from error
+        effective_around: int | None = None
+        if around_sequence is not None:
+            if isinstance(around_sequence, bool):
+                raise AgentToolError("around_sequence must be a non-negative integer.")
+            try:
+                effective_around = int(around_sequence)
+            except (TypeError, ValueError) as error:
+                raise AgentToolError("around_sequence must be a non-negative integer.") from error
+            if effective_around < 0:
+                raise AgentToolError("around_sequence must be a non-negative integer.")
         try:
+            call_kwargs: dict[str, Any] = {"limit": effective_limit}
+            if effective_around is not None:
+                call_kwargs["around_sequence"] = effective_around
             result = self._chat_store.read_project_conversation(
                 clean_cid,
                 self._project_user_id,
-                limit=effective_limit,
+                **call_kwargs,
             )
         except Exception as error:
             raise AgentToolError(f"Conversation '{clean_cid}' not found or not accessible.") from error
@@ -616,8 +630,116 @@ class ProjectTools:
             "payload": {
                 "conversation_id": clean_cid,
                 "title": result.get("title"),
+                "around_sequence": effective_around,
                 "tool_kind": "project",
                 "project_action": "read_conversation",
+            },
+        }
+
+    def search_conversations(
+        self,
+        query: str,
+        scope: str | None = None,
+        mode: str | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        if self._chat_store is None or not self._project_user_id:
+            raise AgentToolError("Chat store is not available.")
+        clean_query = str(query or "").strip() if isinstance(query, str) else ""
+        if not clean_query:
+            raise AgentToolError("query must be a non-blank string.")
+        current_conversation_id = (
+            str(self._conversation_id).strip()
+            if getattr(self, "_conversation_id", None) and str(self._conversation_id).strip()
+            else None
+        )
+        active_project_id = (
+            str(self._project_id).strip()
+            if getattr(self, "_project_id", None) and str(self._project_id).strip()
+            else None
+        )
+        caller_is_friend = bool(getattr(self, "_friend_mode_active", False))
+        if current_conversation_id and hasattr(self._chat_store, "get") and (not active_project_id or not caller_is_friend):
+            try:
+                current_conv = self._chat_store.get(current_conversation_id, self._project_user_id)
+                if isinstance(current_conv, dict):
+                    if not active_project_id and current_conv.get("project_id"):
+                        active_project_id = str(current_conv["project_id"]).strip() or None
+                    if str(current_conv.get("mode") or "").strip().lower() == "friend":
+                        caller_is_friend = True
+            except Exception:
+                pass
+        clean_scope = str(scope or "").strip().lower() if scope is not None else ""
+        if clean_scope and clean_scope not in {"project", "all"}:
+            raise AgentToolError("scope must be 'project' or 'all'.")
+        effective_scope = clean_scope or ("project" if active_project_id else "all")
+        clean_mode = str(mode or "").strip().lower() if mode is not None else None
+        if clean_mode == "":
+            clean_mode = None
+        if clean_mode is not None and clean_mode not in {"chat", "code", "friend"}:
+            raise AgentToolError("mode must be 'chat', 'code', or 'friend'.")
+        if isinstance(limit, bool):
+            raise AgentToolError("limit must be an integer between 1 and 25.")
+        try:
+            effective_limit = min(max(int(limit), 1), 25)
+        except (TypeError, ValueError) as error:
+            raise AgentToolError("limit must be an integer between 1 and 25.") from error
+        try:
+            search_kwargs: dict[str, Any] = {
+                "query": clean_query,
+                "project_id": active_project_id if effective_scope != "project" or active_project_id else None,
+                "scope": effective_scope,
+                "mode": clean_mode,
+                "exclude_conversation_id": current_conversation_id,
+                "limit": effective_limit,
+            }
+            if caller_is_friend:
+                search_kwargs["include_friend"] = True
+            try:
+                results = self._chat_store.search_conversations(
+                    self._project_user_id,
+                    **search_kwargs,
+                )
+            except TypeError:
+                search_kwargs.pop("include_friend", None)
+                results = self._chat_store.search_conversations(
+                    self._project_user_id,
+                    **search_kwargs,
+                )
+        except Exception as error:
+            raise AgentToolError(f"Failed to search conversations: {error}") from error
+        if results:
+            hint = (
+                "Use ReadProjectConversation(conversation_id=..., around_sequence=...) "
+                "to inspect the messages centered around matched_sequence."
+            )
+        elif effective_scope == "project":
+            hint = (
+                "No conversations matched in the current project. "
+                "Call SearchConversations(query=..., scope='all') to search across all your conversations."
+            )
+        else:
+            hint = "No matching conversations found."
+        body = {
+            "query": clean_query,
+            "scope": effective_scope,
+            "project_id": active_project_id if effective_scope == "project" else None,
+            "mode": clean_mode,
+            "count": len(results),
+            "results": results,
+            "hint": hint,
+        }
+        return {
+            "summary": f"{len(results)} conversa(s) encontrada(s) para '{clean_query}'",
+            "content": json.dumps(body, ensure_ascii=False),
+            "payload": {
+                "query": clean_query,
+                "scope": effective_scope,
+                "mode": clean_mode,
+                "project_id": active_project_id,
+                "results": results,
+                "tool_kind": "project",
+                "project_action": "search_conversations",
             },
         }
 
@@ -746,6 +868,11 @@ SPECS: tuple[ToolSpec, ...] = (
                     "maximum": 50,
                     "description": "Alias for limit.",
                 },
+                "around_sequence": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional message sequence number (e.g. matched_sequence from SearchConversations) to read messages centered around that point instead of only the end of the conversation.",
+                },
             },
             ("conversation_id",),
         ),
@@ -754,5 +881,39 @@ SPECS: tuple[ToolSpec, ...] = (
         read_only=True,
         available=lambda self: (self._chat_store is not None and self._project_user_id),
         order=590,
+    ),
+    ToolSpec(
+        key="search_conversations",
+        description="Search past conversations of this user (within the current project or across all conversations) by keywords in titles, messages, and compacted summaries.",
+        legacy_schema=_schema(
+            {
+                "query": {
+                    **_TEXT,
+                    "description": "Keywords or phrase to search for across conversation titles, messages, and summaries.",
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "all"],
+                    "description": "Search scope: 'project' (default when in a project) or 'all' (all conversations of this user).",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["chat", "code", "friend"],
+                    "description": "Optional conversation mode filter ('chat', 'code', or 'friend').",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 25,
+                    "description": "Maximum number of matching conversations to return (default 8, max 25).",
+                },
+            },
+            ("query",),
+        ),
+        handler="search_conversations",
+        kind="project",
+        read_only=True,
+        available=lambda self: (self._chat_store is not None and bool(self._project_user_id)),
+        order=595,
     ),
 )

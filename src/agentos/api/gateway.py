@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -64,6 +65,7 @@ from agentos.uploads.promotion import discard_promoted, promote_uploads
 from agentos.mcp.catalog import search_catalog
 from agentos.mcp.auth import McpOAuthCallbackError, McpOAuthUnreachable, McpOAuthUnsupported
 from agentos.mcp.service import McpAuthorizationRequired, McpConnectionFailed, McpServerNotFound, McpServiceError
+from agentos.skills.proposals import SkillProposalStore
 from agentos.skills.registry import SkillNotFound
 from agentos.mcp.toolset import connector_for
 from agentos.plugins.service import PluginServiceError
@@ -278,7 +280,7 @@ class UpdateProjectRequest(_RequestModel):
 
 
 class UpdateMemoryRequest(_RequestModel):
-    fact: str = Field(min_length=1, max_length=2000)
+    fact: str = Field(min_length=1, max_length=4000)
 
 
 class QueueConversationInputRequest(_RequestModel):
@@ -332,6 +334,16 @@ class UpdateSkillRequest(_RequestModel):
     when_not_to_use: list[str] | None = Field(default=None, max_length=24)
     requires_tools: list[str] | None = Field(default=None, max_length=24)
     dependencies: SkillDependenciesRequest | None = None
+    instructions: str | None = Field(default=None, min_length=1, max_length=32000)
+
+
+class UpdateSkillProposalRequest(_RequestModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, min_length=1, max_length=2000)
+    when_to_use: list[str] | None = Field(default=None, max_length=24)
+    when_not_to_use: list[str] | None = Field(default=None, max_length=24)
+    requires_tools: list[str] | None = Field(default=None, max_length=24)
+    tags: list[str] | None = Field(default=None, max_length=24)
     instructions: str | None = Field(default=None, min_length=1, max_length=32000)
 
 
@@ -459,6 +471,7 @@ class ApiServices:
         conversation_directories: object | None = None,
         friend_persona: object | None = None,
         friend_memory_factory: object | None = None,
+        skill_proposals: SkillProposalStore | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -481,6 +494,12 @@ class ApiServices:
         self.agentic_runtime = agentic_runtime
         self.events = events or InMemoryClientEventStream()
         self.workspace_root = Path(workspace_root) if workspace_root is not None else None
+        if skill_proposals is not None:
+            self.skill_proposals = skill_proposals
+        elif self.workspace_root is not None and not os.getenv("ORIN_DATA_DIR"):
+            self.skill_proposals = SkillProposalStore(base_dir=self.workspace_root / ".orin-skill-proposals")
+        else:
+            self.skill_proposals = SkillProposalStore()
         self.uploads = uploads
         self.vision_model_settings = vision_model_settings
         self.media_model_settings = media_model_settings
@@ -1107,7 +1126,10 @@ def create_app(services: ApiServices) -> FastAPI:
         if scope not in {"user", "project"} or (scope == "project" and not project_id):
             raise ApplicationValidationError("invalid memory scope")
         principal = principal_for(request, mutable=True)
-        updated = _require_port(services.projects).update_memory(project_id, principal.user_id, memory_id, payload.fact, scope=scope)
+        try:
+            updated = _require_port(services.projects).update_memory(project_id, principal.user_id, memory_id, payload.fact, scope=scope)
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
         if updated is None:
             raise ApplicationNotFoundError(memory_id)
         return JSONResponse(_jsonable(updated))
@@ -2039,6 +2061,67 @@ def create_app(services: ApiServices) -> FastAPI:
         services.security.check_rate_limit(principal, action="skills.agents", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.get", resource_id=skill_id, purpose="skills.read")
         return JSONResponse(_jsonable(_require_port(services.skills).agents_for_skill({"user_id": principal.user_id, "skill_id": skill_id})))
+
+    @app.get("/v1/skill-proposals")
+    async def list_skill_proposals(request: Request, status: str = "pending") -> JSONResponse:
+        principal = principal_for(request)
+        services.security.check_rate_limit(principal, action="skills.list", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="skills.list", resource_id=None, purpose="skills.read")
+        store = services.skill_proposals or SkillProposalStore()
+        items = store.list_proposals(principal.user_id, status=status)
+        return JSONResponse(_jsonable({"items": items}))
+
+    @app.patch("/v1/skill-proposals/{proposal_id}")
+    async def update_skill_proposal(proposal_id: str, payload: UpdateSkillProposalRequest, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="skills.update", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="skills.update", resource_id=proposal_id, purpose="skills.update")
+        store = services.skill_proposals or SkillProposalStore()
+        fields = payload.model_dump(exclude_none=True)
+        skill_lib = services.skills if services.skills is not None and not services.skills.__class__.__name__.startswith("_Unavailable") else None
+        try:
+            updated = store.update_proposal(
+                principal.user_id,
+                proposal_id,
+                fields,
+                skill_library=skill_lib,
+            )
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
+        return JSONResponse(_jsonable(updated))
+
+    @app.post("/v1/skill-proposals/{proposal_id}/approve")
+    async def approve_skill_proposal(
+        proposal_id: str,
+        request: Request,
+        payload: UpdateSkillProposalRequest | None = None,
+    ) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="skills.create", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="skills.create", resource_id=proposal_id, purpose="skills.create")
+        skill_lib = _require_port(services.skills)
+        store = services.skill_proposals or SkillProposalStore()
+        fields = payload.model_dump(exclude_none=True) if payload is not None else None
+        try:
+            result = store.approve_proposal(
+                principal.user_id,
+                proposal_id,
+                patch=fields,
+                skill_library=skill_lib,
+                idempotency_key=_idempotency(request),
+            )
+        except ValueError as error:
+            raise ApplicationValidationError(str(error)) from error
+        return JSONResponse(_jsonable(result))
+
+    @app.delete("/v1/skill-proposals/{proposal_id}")
+    async def dismiss_skill_proposal(proposal_id: str, request: Request) -> JSONResponse:
+        principal = principal_for(request, mutable=True)
+        services.security.check_rate_limit(principal, action="skills.update", origin=request.headers.get("origin"))
+        services.security.authorize(principal, action="skills.update", resource_id=proposal_id, purpose="skills.update")
+        store = services.skill_proposals or SkillProposalStore()
+        result = store.dismiss_proposal(principal.user_id, proposal_id)
+        return JSONResponse(_jsonable(result))
 
     @app.get("/v1/agents/{agent_id}/skills")
     async def get_agent_skills(agent_id: str, request: Request) -> JSONResponse:

@@ -62,11 +62,11 @@ _EXTENSION_TOOLS = (
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
 )
 _PROJECT_TOOLS = (
-    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation",
+    "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation", "search_conversations",
 )
 PHASE_TOOLS: Mapping[Phase, tuple[str, ...]] = {
     Phase.ORIENT: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
-    Phase.PLAN: (*_ALWAYS, *_SKILL_TOOLS, "search_mcp_tools", "inspect_mcp_server", "propose_code_session", "list_projects", "read_project_conversation", "recall", "list_files", "read_file", "todo_write"),
+    Phase.PLAN: (*_ALWAYS, *_SKILL_TOOLS, "search_mcp_tools", "inspect_mcp_server", "propose_code_session", "list_projects", "read_project_conversation", "search_conversations", "recall", "list_files", "read_file", "todo_write"),
     Phase.EXECUTE: (*_ALWAYS, *_READ_TOOLS, *_WRITE_TOOLS, *_SKILL_TOOLS, *_EXTENSION_TOOLS, *_PROJECT_TOOLS, "propose_code_session", "recall", "remember"),
     # Verification may look and may run a check; it may not change anything.
     # ``verify_project``/``verify_frontend`` mutate nothing themselves but can

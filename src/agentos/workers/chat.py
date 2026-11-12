@@ -55,6 +55,7 @@ from agentos.agentic.session import (
     resolve_effective_workspace_id,
 )
 from agentos.agentic.web_search import search_client_from_environment
+from agentos.retrieval.factory import build_embedder
 from agentos.retrieval.registry import RetrievalRegistry
 from agentos.accounts.store import UserStore
 from agentos.configuration.capabilities import InstanceCapabilities
@@ -298,6 +299,19 @@ class _RuntimeStore:
 
     def main_agent_id(self, turn) -> str:
         return self._store.main_agent_id(turn)
+
+    def tool_ledger(self, turn: dict[str, object], limit: int = 200):
+        reader = getattr(self._store, "tool_ledger", None)
+        if not callable(reader):
+            return ()
+        try:
+            return reader(turn, limit=limit)
+        except TypeError:
+            return reader(turn)
+
+    def has_external_tool_calls(self, conversation_id: str) -> bool:
+        checker = getattr(self._store, "has_external_tool_calls", None)
+        return bool(checker(conversation_id)) if callable(checker) else False
 
 
 class _ConversationContextManager:
@@ -1731,6 +1745,11 @@ class ChatWorker:
             _LOGGER.exception("could not load the MCP servers for %s", turn["user_id"])
             mcp_bundles = []
         mcp_provider = McpToolProvider(mcp_bundles, oauth=McpOAuth(engine)) if mcp_bundles else None
+        try:
+            memory_embedder = build_embedder()
+        except Exception:
+            _LOGGER.exception("could not build memory embedder for %s", turn.get("user_id"))
+            memory_embedder = None
         session = TurnSession(
             turn=turn,
             store=_RuntimeStore(self, turn),
@@ -1739,6 +1758,7 @@ class ChatWorker:
                 engine, str(turn["user_id"]), conversation_id=str(turn["conversation_id"]),
                 project_id=str(turn["project_id"]) if turn.get("project_id") else None,
                 execution_id=str(turn["execution_id"]),
+                embedder=memory_embedder,
             ),
             friend_persona_store=FriendPersonaStore(engine),
             conversation_mode=str(turn.get("conversation_mode") or "chat"),

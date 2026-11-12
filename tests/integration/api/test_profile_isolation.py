@@ -76,6 +76,9 @@ OWNED = {
     ("GET", "/v1/conversations/{conversation_id}/events"),
     ("GET", "/v1/skills/{skill_id}"), ("PUT", "/v1/skills/{skill_id}"),
     ("DELETE", "/v1/skills/{skill_id}/versions/{version}"), ("GET", "/v1/skills/{skill_id}/agents"),
+    ("PATCH", "/v1/skill-proposals/{proposal_id}"),
+    ("POST", "/v1/skill-proposals/{proposal_id}/approve"),
+    ("DELETE", "/v1/skill-proposals/{proposal_id}"),
     ("GET", "/v1/mcp/servers/{server_id}"), ("POST", "/v1/mcp/servers/{server_id}/approve"),
     ("POST", "/v1/mcp/servers/{server_id}/test"), ("POST", "/v1/mcp/servers/{server_id}/oauth/start"),
     ("POST", "/v1/mcp/servers/{server_id}/oauth/cancel"), ("PUT", "/v1/mcp/servers/{server_id}/enabled"),
@@ -92,7 +95,7 @@ OWNED = {
 }
 LISTING = {
     ("GET", "/v1/conversations"), ("GET", "/v1/schedules"), ("GET", "/v1/projects"), ("GET", "/v1/projects/sidebar"),
-    ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/skills"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
+    ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/skills"), ("GET", "/v1/skill-proposals"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
     ("GET", "/v1/plugins/marketplaces"), ("GET", "/v1/mcp/servers"), ("GET", "/v1/executions"),
     ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"), ("GET", "/v1/custom-agents"),
     ("GET", "/v1/scene/characters"),
@@ -214,12 +217,29 @@ def _seed(world, a):
         headers=a.headers(),
     )
     assert character.status_code == 201, character.text
+    from agentos.skills.proposals import SkillProposalStore
+
+    proposal = SkillProposalStore().propose(
+        a.user_id,
+        {
+            "action": "create",
+            "name": f"{SECRET} proposta skill",
+            "description": f"{SECRET} procedimento técnico",
+            "when_to_use": ["quando precisar diagnosticar falha"],
+            "when_not_to_use": ["quando for revisão simples"],
+            "requires_tools": ["read_file"],
+            "tags": ["diagnostico"],
+            "instructions": "## Workflow\n1. Inspecione o arquivo.\n\n## Validation\n1. Rode o teste.",
+        },
+        conversation_id=conversation.conversation_id,
+    )
     return {
         "project_id": project.project_id,
         "conversation_id": conversation.conversation_id,
         "memory_id": "mem_a",
         "schedule_id": schedule["schedule_id"],
         "skill_id": skill.json()["id"],
+        "proposal_id": proposal["proposal_id"],
         "version": "1.0.0",
         "server_id": server.json()["server_id"],
         "tool_name": "anything",
@@ -231,7 +251,7 @@ def _seed(world, a):
     }
 
 
-SEEDED_PARAMS = {"project_id", "conversation_id", "memory_id", "schedule_id", "skill_id", "version", "server_id", "tool_name", "upload_id", "path", "name", "character_id", "pose"}
+SEEDED_PARAMS = {"project_id", "conversation_id", "memory_id", "schedule_id", "skill_id", "proposal_id", "version", "server_id", "tool_name", "upload_id", "path", "name", "character_id", "pose"}
 
 
 def _fill(path: str, seeds: dict[str, str]) -> tuple[str, bool]:
@@ -248,7 +268,7 @@ def _fill(path: str, seeds: dict[str, str]) -> tuple[str, bool]:
 
 def _snapshot(a, seeds):
     paths = [f"/v1/projects/{seeds['project_id']}", f"/v1/conversations/{seeds['conversation_id']}",
-             f"/v1/skills/{seeds['skill_id']}", f"/v1/mcp/servers/{seeds['server_id']}", "/v1/memories", "/v1/schedules",
+             f"/v1/skills/{seeds['skill_id']}", "/v1/skill-proposals", f"/v1/mcp/servers/{seeds['server_id']}", "/v1/memories", "/v1/schedules",
              "/v1/custom-agents"]
     snapshot = {}
     for path in paths:
@@ -293,7 +313,7 @@ def test_profile_b_cannot_reach_profile_a(world):
 
     for method, template in sorted(LISTING):
         response = b.api.request(method, template, params={"path": ""} if template == "/v1/files" else None)
-        if SECRET in response.text or any(str(value) in response.text for key, value in seeds.items() if key in {"project_id", "conversation_id", "skill_id", "server_id", "schedule_id"}):
+        if SECRET in response.text or any(str(value) in response.text for key, value in seeds.items() if key in {"project_id", "conversation_id", "skill_id", "proposal_id", "server_id", "schedule_id"}):
             leaks.append(f"{method} {template} lists A's data")
         if template == "/v1/files" and "segredo-a" in response.text:
             leaks.append("B sees A's file area")

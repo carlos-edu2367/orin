@@ -254,8 +254,16 @@ def render_code_turn_context(
     if today:
         lines.append(f"- Today's date: {today}")
 
-    if git_status.strip():
-        lines += ["", "# Git status", "```", git_status.strip(), "```"]
+    clean_git_status = git_status.strip()
+    if clean_git_status:
+        if len(clean_git_status) > 8_000:
+            omitted = len(clean_git_status) - 6_000
+            clean_git_status = (
+                f"{clean_git_status[:4_000]}\n"
+                f"...[git status truncated ({omitted} chars omitted)]...\n"
+                f"{clean_git_status[-2_000:]}"
+            )
+        lines += ["", "# Git status", "```", clean_git_status, "```"]
     return "\n".join(lines)
 
 

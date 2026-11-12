@@ -95,6 +95,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "create_project_from_session": "CreateProjectFromSession",
     "move_session_to_project": "MoveSessionToProject",
     "read_project_conversation": "ReadProjectConversation",
+    "search_conversations": "SearchConversations",
     "generate_image": "GenerateImage",
     "generate_audio": "GenerateAudio",
     "generate_video": "GenerateVideo",
