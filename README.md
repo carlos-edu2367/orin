@@ -3,14 +3,14 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme/banner-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/images/readme/banner-light.svg">
-  <img alt="Orin v0.12.23 — Local-First AI Workspace & Companion" src="docs/images/readme/banner-dark.svg" width="100%">
+  <img alt="Orin v0.12.24 — Local-First AI Workspace & Companion" src="docs/images/readme/banner-dark.svg" width="100%">
 </picture>
 
 <br/>
 
 <img src="docs/images/readme/orin-mascot.svg" alt="Mascote Orin" width="76" height="76" />
 
-# Orin `v0.12.23`
+# Orin `v0.12.24`
 
 **Companheiro de voz, equipe de agentes especialistas e bancada de engenharia de software — rodando no seu computador, com as assinaturas que você já tem.**
 
@@ -271,7 +271,7 @@ Baixe e abra o **[OrinSetup.exe](https://github.com/carlos-edu2367/orin/releases
 irm https://github.com/carlos-edu2367/orin/releases/latest/download/install.ps1 | iex
 
 # Silencioso / automação
-OrinSetup.exe --silent [--dir C:\Orin] [--to 0.12.23] [--no-shortcut] [--no-path]
+OrinSetup.exe --silent [--dir C:\Orin] [--to 0.12.24] [--no-shortcut] [--no-path]
 ```
 
 ### Linux (Debian / Ubuntu x64)
