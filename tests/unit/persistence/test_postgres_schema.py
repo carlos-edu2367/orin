@@ -77,6 +77,9 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "conversation_directories",
             "agent_mailbox",
             "plugin_settings",
+            "discord_bot_configs",
+            "discord_interaction_bindings",
+            "friend_session_watches",
         }
 
 

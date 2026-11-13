@@ -22,6 +22,7 @@ from agentos.bootstrap.production import ProductionSettings, activity_cursor_fal
 from agentos.agentic.provider_stream import HTTPProviderStreamTransport
 from agentos.agentic.provider_key_fallback import MultiKeyProviderStreamTransport
 from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
+from agentos.persistence.postgres.provider_models import PostgresProviderCatalogRepository
 from agentos.provider_catalog.models import PROVIDERS_WITH_BASE_URL
 from agentos.provider_catalog.claude_code import (
     DEFAULT_CLAUDE_CLI_BRIDGE_URL,
