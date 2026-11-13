@@ -33,7 +33,7 @@ function isValidProviderName(value: unknown): value is ProviderName {
 }
 
 function resolveTabFromPath(pathname: string): IntegrationsTab | null {
-  if (pathname.includes('/mcp') || pathname.includes('/connections')) return 'mcp'
+  if (pathname.includes('/mcp') || pathname.includes('/connections') || pathname.includes('/discord')) return 'mcp'
   if (pathname.includes('/providers') || pathname.includes('/vision')) return 'providers'
   return null
 }

@@ -472,6 +472,8 @@ class ApiServices:
         friend_persona: object | None = None,
         friend_memory_factory: object | None = None,
         skill_proposals: SkillProposalStore | None = None,
+        discord_store: object | None = None,
+        discord_bridge: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -509,6 +511,8 @@ class ApiServices:
         self.conversation_directories = conversation_directories
         self.friend_persona = friend_persona
         self.friend_memory_factory = friend_memory_factory
+        self.discord_store = discord_store
+        self.discord_bridge = discord_bridge
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
@@ -2989,12 +2993,34 @@ def create_app(services: ApiServices) -> FastAPI:
     register_conversation_routes(app, services, principal_for, conversation_root)
     from .friend_routes import register_friend_routes
     register_friend_routes(app, services, principal_for)
+    from .discord_routes import register_discord_routes
+    register_discord_routes(app, services, principal_for)
     from .custom_agent_routes import register_custom_agent_routes
     register_custom_agent_routes(app, services, principal_for)
     from .scene_character_routes import register_scene_character_routes
     register_scene_character_routes(app, services, principal_for)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
+
+    @app.on_event("startup")
+    async def _start_discord_bridge() -> None:
+        bridge = getattr(services, "discord_bridge", None)
+        if bridge is None or bridge.__class__.__name__.startswith("_Unavailable"):
+            return
+        try:
+            await bridge.start()
+        except Exception:
+            return
+
+    @app.on_event("shutdown")
+    async def _stop_discord_bridge() -> None:
+        bridge = getattr(services, "discord_bridge", None)
+        if bridge is None or bridge.__class__.__name__.startswith("_Unavailable"):
+            return
+        try:
+            await bridge.stop()
+        except Exception:
+            return
 
     return app
 

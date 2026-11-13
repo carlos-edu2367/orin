@@ -91,6 +91,8 @@ PUBLIC_NAMES: dict[str, str] = {
     "write_contract": "WriteContract",
     "report_verification": "ReportVerification",
     "propose_code_session": "ProposeCodeSession",
+    "manage_session": "ManageSession",
+    "list_models": "ListModels",
     "list_projects": "ListProjects",
     "create_project_from_session": "CreateProjectFromSession",
     "move_session_to_project": "MoveSessionToProject",

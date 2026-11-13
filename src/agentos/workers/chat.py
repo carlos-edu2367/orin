@@ -1862,6 +1862,8 @@ class ChatWorker:
             project_store=PostgresProjectStore(engine),
             chat_store=self.store,
             local_workspaces=PostgresLocalWorkspaceStore(engine),
+            provider_catalog=PostgresProviderCatalogRepository(engine),
+            on_session_watch=self._record_session_watch,
             media_policy=self._media_policy_for_turn(turn),
             media_client=self._media_client_for_turn(turn),
             catalog_pricing=self._catalog_pricing_for(turn),
@@ -1870,6 +1872,35 @@ class ChatWorker:
             read_file_state=self._read_states.state_for(str(turn["user_id"]), str(turn["conversation_id"])),
         )
         return session.build_runtime()
+
+    def _record_session_watch(
+        self,
+        *,
+        user_id: str,
+        target_conversation_id: str,
+        target_turn_id: str,
+        friend_conversation_id: str | None = None,
+        origin: str = "friend",
+    ) -> None:
+        try:
+            discord_store = getattr(self, "_discord_store", None)
+            if discord_store is None or getattr(discord_store, "_engine", None) is not self.store._engine:
+                from agentos.discord.store import PostgresDiscordStore
+
+                discord_store = PostgresDiscordStore(self.store._engine)
+                self._discord_store = discord_store
+            cfg = discord_store.get_config(user_id)
+            notify_channel = cfg.default_notify_channel_id if cfg is not None else None
+            discord_store.upsert_watch(
+                user_id,
+                target_conversation_id,
+                target_turn_id,
+                friend_conversation_id=friend_conversation_id,
+                origin=origin,
+                discord_channel_id=notify_channel,
+            )
+        except Exception:
+            _LOGGER.debug("could not record session watch for %s", target_conversation_id, exc_info=True)
 
     def _hydrate_code_mode(self, turn: dict[str, object]) -> dict[str, object]:
         """Attach durable Code run policy to the otherwise generic chat turn."""

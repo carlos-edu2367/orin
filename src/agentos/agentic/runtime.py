@@ -863,6 +863,7 @@ class AgenticTurnRuntime:
         continuing_text = False
         is_live_or_friend = self._is_live_or_friend(turn)
         self._active_turn_live_or_friend = is_live_or_friend
+        self._active_turn_live_voice = self._is_live_voice(turn)
         speak_state = _SpeakState()
 
         native = self._native_provider(turn)
@@ -2322,7 +2323,9 @@ class AgenticTurnRuntime:
         window: list[dict[str, object]] = []
         previous = -1
         marker_inserted = False
-        rehydrate_speak = bool(getattr(self, "_active_turn_live_or_friend", False))
+        rehydrate_speak = bool(
+            getattr(self, "_active_turn_live_voice", getattr(self, "_active_turn_live_or_friend", False))
+        )
         for index in ordered_kept:
             if marker is not None and not marker_inserted and index != previous + 1:
                 window.append(marker)
@@ -3042,6 +3045,15 @@ class AgenticTurnRuntime:
 
     @staticmethod
     def _is_live_or_friend(turn: Mapping[str, object]) -> bool:
+        if bool(turn.get("live_mode")):
+            return True
+        mode = str(turn.get("conversation_mode") or turn.get("mode") or "").strip().lower()
+        return mode == "friend"
+
+    @staticmethod
+    def _is_live_voice(turn: Mapping[str, object]) -> bool:
+        if turn.get("live_mode") is False:
+            return False
         if bool(turn.get("live_mode")):
             return True
         mode = str(turn.get("conversation_mode") or turn.get("mode") or "").strip().lower()
@@ -3774,3 +3786,30 @@ class AgenticTurnRuntime:
 
 
 __all__ = ["AgenticLimits", "AgenticRunResult", "AgenticTurnRuntime"]
+
+
+_orig_emit_speak_events = AgenticTurnRuntime._emit_speak_events
+
+
+def _emit_speak_events_guarded(
+    self: AgenticTurnRuntime,
+    turn: dict[str, object],
+    parser: SpeakStreamParser | None,
+    result: SpeakParseResult,
+    *,
+    iteration: int,
+    state: _SpeakState,
+) -> str:
+    if not self._is_live_voice(turn):
+        return result.visual_delta
+    return _orig_emit_speak_events(
+        self,
+        turn,
+        parser,
+        result,
+        iteration=iteration,
+        state=state,
+    )
+
+
+AgenticTurnRuntime._emit_speak_events = _emit_speak_events_guarded  # type: ignore[method-assign]

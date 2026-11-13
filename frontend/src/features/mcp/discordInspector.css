@@ -1,0 +1,134 @@
+/* Discord (Orin Friend) Connection Card & Inspector Styles */
+
+.connection-row-card__icon.is-discord {
+  background: rgba(88, 101, 242, 0.16);
+  color: #8ea1e1;
+  border-color: rgba(88, 101, 242, 0.38);
+}
+
+[data-theme="light"] .connection-row-card__icon.is-discord {
+  background: rgba(88, 101, 242, 0.12);
+  color: #4752c4;
+  border-color: rgba(88, 101, 242, 0.32);
+}
+
+.connections-inspector__disconnect-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.discord-inspector__status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.discord-inspector__latency {
+  font-size: 11.5px;
+  font-family: var(--orin-font-mono);
+  color: var(--orin-text-secondary);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--orin-surface-3);
+  border: 1px solid var(--orin-border-subtle);
+}
+
+.discord-inspector__input {
+  width: 100%;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--orin-border);
+  background: var(--orin-surface-1);
+  color: var(--orin-text-primary);
+  font-size: 13px;
+  box-sizing: border-box;
+  transition: border-color 0.16s var(--ease);
+}
+
+.discord-inspector__input:focus {
+  outline: none;
+  border-color: var(--orin-accent);
+}
+
+.discord-inspector__hint {
+  font-size: 11.5px;
+  font-weight: 450;
+  line-height: 1.4;
+  color: var(--orin-text-secondary);
+}
+
+.discord-inspector__error-banner {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--orin-danger-border);
+  background: var(--orin-danger-bg);
+  color: var(--orin-danger);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.discord-inspector__feedback {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.discord-inspector__feedback.is-success {
+  border: 1px solid var(--orin-success-border);
+  background: var(--orin-success-bg);
+  color: var(--orin-success);
+}
+
+.discord-inspector__feedback.is-warning {
+  border: 1px solid var(--orin-warn-border);
+  background: var(--orin-warn-bg);
+  color: var(--orin-warn);
+}
+
+.discord-inspector__feedback.is-error {
+  border: 1px solid var(--orin-danger-border);
+  background: var(--orin-danger-bg);
+  color: var(--orin-danger);
+}
+
+.discord-inspector__guide {
+  border: 1px solid var(--orin-border-subtle);
+  border-radius: 10px;
+  background: var(--orin-surface-1);
+  padding: 10px 12px;
+}
+
+.discord-inspector__guide-summary {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--orin-text-primary);
+  cursor: pointer;
+}
+
+.discord-inspector__guide-steps {
+  margin: 10px 0 2px;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--orin-text-secondary);
+}
+
+.discord-inspector__actions {
+  display: grid;
+  gap: 10px;
+}
+
+.discord-inspector__primary-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}

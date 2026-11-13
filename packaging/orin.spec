@@ -14,7 +14,12 @@ import importlib.util
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, copy_metadata
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+    copy_metadata,
+)
 
 ROOT = Path(SPECPATH).parent
 WEB = ROOT / "frontend" / "dist"
@@ -48,6 +53,8 @@ a = Analysis(
     datas=datas,
     hiddenimports=[
         "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
+        "websockets", "websockets.asyncio", "websockets.asyncio.client",
+        *collect_submodules("websockets"),
         # Child services are imported from their string entrypoints only after
         # the frozen launcher re-executes itself.
         "agentos.api.asgi", "agentos.workers.publisher", "agentos.workers.scheduler",

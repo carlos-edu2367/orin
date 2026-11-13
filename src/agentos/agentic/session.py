@@ -538,7 +538,7 @@ def build_system_prompt(
     stable_override: str = "",
     public_names: bool = False,
     conversation_mode: str = "chat",
-    live_mode: bool = False,
+    live_mode: bool | None = None,
     friend_rubric: str = "",
     friend_mood: str = "",
     friend_memories: Sequence[Mapping[str, object]] = (),
@@ -562,7 +562,9 @@ def build_system_prompt(
         "- When you create a useful workspace file, link it in your final answer as [filename](workspace://relative/path). Prioritize final deliverables and include generator scripts when useful.",
         "- To start a local server, or a job that may take more than a couple of minutes (render, long test suite, download), call run_command with background=true; on Windows do not use nohup or Unix '&' syntax. You are told when a background job ends, with its exit code: keep working meanwhile and never wait with sleep. A command still running after 60 seconds moves to the background on its own and you are told the same way. To block on one, use read_process_output(pid=..., block=true).",
     ]
-    is_live_or_friend_prompt = bool(live_mode) or str(conversation_mode or "chat").strip().lower() == "friend"
+    norm_conv_mode_early = str(conversation_mode or "chat").strip().lower()
+    effective_live_mode = (norm_conv_mode_early == "friend") if live_mode is None else bool(live_mode)
+    is_live_or_friend_prompt = effective_live_mode or norm_conv_mode_early == "friend"
     if not code_mode_context and not is_live_or_friend_prompt:
         # The reference material below describes every tool the workspace can
         # offer, but a request publishes only the ones the current stage needs.
@@ -608,7 +610,7 @@ def build_system_prompt(
         lines += ["", FRIEND_SYSTEM_PROMPT_SECTION]
         if friend_rubric and str(friend_rubric).strip():
             lines += ["", str(friend_rubric).strip()]
-    if live_mode or norm_conv_mode == "friend":
+    if effective_live_mode:
         lines += ["", LIVE_MODE_SPEAK_GUIDANCE]
     lines += [
         "",
@@ -1366,6 +1368,8 @@ class TurnSession:
         project_store=None,
         chat_store=None,
         local_workspaces=None,
+        provider_catalog=None,
+        on_session_watch: Callable[..., object] | None = None,
         media_policy=None,
         media_client=None,
         max_subagents_per_turn: int | None = MAX_SUBAGENTS_PER_TURN,
@@ -1393,7 +1397,7 @@ class TurnSession:
         ).strip().lower()
         self.conversation_mode = raw_conv_mode if raw_conv_mode in {"chat", "code", "friend"} else "chat"
         self.turn["conversation_mode"] = self.conversation_mode
-        if self.conversation_mode == "friend" and "live_mode" not in self.turn:
+        if self.conversation_mode == "friend" and self.turn.get("live_mode") is None:
             self.turn["live_mode"] = True
         self._built_system_prompt: str | None = None
         self._built_volatile_prompt: str | None = None
@@ -1461,6 +1465,8 @@ class TurnSession:
         self.project_store = project_store
         self.chat_store = chat_store
         self.local_workspaces = local_workspaces
+        self.provider_catalog = provider_catalog
+        self.on_session_watch = on_session_watch
         self.media_policy = media_policy
         self.media_client = media_client
         self.tool_policy = tool_policy
@@ -5020,6 +5026,8 @@ class TurnSession:
             chat_store=self.chat_store,
             local_workspaces=self.local_workspaces,
             project_user_id=str(self.turn.get("user_id") or "").strip() or None,
+            provider_catalog=self.provider_catalog,
+            on_session_watch=self.on_session_watch,
             media_policy=self.media_policy,
             media_client=self.media_client,
             scheduler=self._turn_scheduler() if code_mode_active and not read_only_mode else None,
@@ -6576,7 +6584,7 @@ class TurnSession:
             project_sessions=project_sessions,
             mcp_servers=toolset.mcp_server_summaries(),
             conversation_mode=self.conversation_mode,
-            live_mode=bool(self.turn.get("live_mode")) or self.conversation_mode == "friend",
+            live_mode=bool(self.turn.get("live_mode")),
             friend_rubric=friend_rubric,
             friend_mood=friend_mood,
             friend_memories=friend_memories,

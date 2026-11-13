@@ -115,6 +115,8 @@ SCOPED = {
     ("GET", "/v1/settings/media-models"), ("PUT", "/v1/settings/media-models/{modality}"),
     ("GET", "/v1/friend/persona"), ("PUT", "/v1/friend/persona"), ("POST", "/v1/friend/soul/sync"),
     ("POST", "/v1/conversations/friend/ensure"),
+    ("GET", "/v1/integrations/discord"), ("PUT", "/v1/integrations/discord"),
+    ("POST", "/v1/integrations/discord/test"), ("DELETE", "/v1/integrations/discord"),
     ("GET", "/v1/live-voice/capabilities"),
     ("POST", "/v1/live-voice/wake-check"),
     ("GET", "/v1/files/download"),
@@ -362,3 +364,37 @@ def test_per_profile_settings_do_not_cross(world):
     media_store = PostgresMediaModelSettingsStore(world.engine)
     media_store.set(a.user_id, "stt", "local", "faster-whisper-large-v3-turbo")
     assert media_store.get(b.user_id, "stt") is None
+
+    # Discord integration config must stay strictly isolated per profile.
+    discord_put_a = a.api.put(
+        "/v1/integrations/discord",
+        json={
+            "enabled": False,
+            "bot_token": f"MTIzNDU2Nzg5MDEyMzQ1Njc4.{SECRET}.tokA9Xz",
+            "allowed_discord_user_ids": ["123456789012345678"],
+            "allowed_channel_ids": ["987654321098765432"],
+        },
+        headers=a.headers(),
+    )
+    assert discord_put_a.status_code == 200, discord_put_a.text
+    assert SECRET not in discord_put_a.text
+
+    discord_get_b = b.api.get("/v1/integrations/discord")
+    assert discord_get_b.status_code == 200, discord_get_b.text
+    b_discord = discord_get_b.json()
+    assert b_discord["has_bot_token"] is False
+    assert b_discord["masked_token_hint"] is None
+    assert b_discord["allowed_discord_user_ids"] == []
+    assert b_discord["allowed_channel_ids"] == []
+    assert "123456789012345678" not in discord_get_b.text
+
+    # Profile B cannot test using Profile A's stored token or delete Profile A's config.
+    discord_test_b = b.api.post("/v1/integrations/discord/test", json={}, headers=b.headers())
+    assert discord_test_b.status_code == 400
+    discord_del_b = b.api.delete("/v1/integrations/discord", headers=b.headers())
+    assert discord_del_b.status_code == 200
+
+    discord_get_a = a.api.get("/v1/integrations/discord").json()
+    assert discord_get_a["has_bot_token"] is True
+    assert discord_get_a["masked_token_hint"] == "...A9Xz"
+    assert discord_get_a["allowed_discord_user_ids"] == ["123456789012345678"]

@@ -90,6 +90,7 @@ from agentos.agentic.tools.orin.disk_skills import DiskSkillTools
 from agentos.agentic.tools.mcp.admin import McpTools
 from agentos.agentic.tools.orin.plugins_admin import PluginTools
 from agentos.agentic.tools.orin.projects import ProjectTools
+from agentos.agentic.tools.orin.models_catalog import ModelCatalogTools
 from agentos.agentic.tools.planning.todo import TodoTools
 from agentos.agentic.tools.planning.tasks import TaskTools
 from agentos.agentic.tools.planning.plan_mode import PlanModeTools
@@ -149,40 +150,11 @@ def _tool_response(outcome: ToolOutcome) -> dict[str, Any]:
 
 
 class AgentToolset(
-    ActiveInvocation,
-    ReadTools,
-    WriteTools,
-    EditTools,
-    NotebookTools,
-    GlobTools,
-    GrepTools,
-    CodeSearchTools,
-    BashTools,
-    PowerShellTools,
-    ShellTaskTools,
-    WorkingStateTools,
-    VerifyTools,
-    FetchTools,
-    WebSearchTools,
-    MemoryTools,
-    SkillTools,
-    DiskSkillTools,
-    McpTools,
-    PluginTools,
-    ProjectTools,
-    TodoTools,
-    TaskTools,
-    PlanModeTools,
-    AskUserTools,
-    AgentTools,
-    TeamTools,
-    WorktreeTools,
-    PreviewTools,
-    MediaTools,
-    CronTools,
-    WakeupTools,
-    MonitorTools,
-    NotifyTools,
+    ActiveInvocation, ReadTools, WriteTools, EditTools, NotebookTools, GlobTools, GrepTools, CodeSearchTools,
+    BashTools, PowerShellTools, ShellTaskTools, WorkingStateTools, VerifyTools, FetchTools, WebSearchTools,
+    MemoryTools, SkillTools, DiskSkillTools, McpTools, PluginTools, ProjectTools, ModelCatalogTools, TodoTools,
+    TaskTools, PlanModeTools, AskUserTools, AgentTools, TeamTools, WorktreeTools, PreviewTools, MediaTools,
+    CronTools, WakeupTools, MonitorTools, NotifyTools,
 ):
     """Builds the tool schemas and executes the model's calls.
 
@@ -250,6 +222,8 @@ class AgentToolset(
         chat_store: object | None = None,
         local_workspaces: object | None = None,
         project_user_id: str | None = None,
+        provider_catalog: object | None = None,
+        on_session_watch: Callable[..., Any] | None = None,
         media_policy: object | None = None,
         media_client: object | None = None,
         public_tool_names: bool = False,
@@ -307,6 +281,8 @@ class AgentToolset(
         self._chat_store = chat_store
         self._local_workspaces = local_workspaces
         self._project_user_id = str(project_user_id).strip() or None if project_user_id is not None else None
+        self._provider_catalog = provider_catalog
+        self._on_session_watch = on_session_watch
         self._media_policy = media_policy
         self._media_client = media_client
         self.memory = memory

@@ -18,6 +18,7 @@ CODE_MODE_CORE_TOOLS: frozenset[str] = frozenset({
     "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir", "refresh_mcp_tools",
     "search_plugin", "inspect_plugin", "install_plugin", "list_plugins", "uninstall_plugin",
     "list_projects", "create_project_from_session", "move_session_to_project", "read_project_conversation", "search_conversations",
+    "list_models",
     "generate_image", "generate_audio", "generate_video",
     "cron_create", "cron_delete", "cron_list", "schedule_wakeup", "monitor", "push_notification", "send_message",
 })

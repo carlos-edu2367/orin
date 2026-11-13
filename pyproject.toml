@@ -32,6 +32,7 @@ dependencies = [
     # application package so schedules behave the same on every supported host.
     "tzdata>=2025.2,<2027",
     "uvicorn[standard]>=0.32,<1",
+    "websockets>=13,<16",
 ]
 
 [project.scripts]

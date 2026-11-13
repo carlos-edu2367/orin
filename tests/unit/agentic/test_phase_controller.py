@@ -180,7 +180,7 @@ def test_execute_publishes_project_verification_without_exceeding_the_tool_cap()
     names = tools_for(Phase.EXECUTE, frozenset({"files", "terminal"}))
 
     assert "verify_project" in names
-    assert len(names) <= 37
+    assert len(names) <= 39
 
 
 def test_a_declared_toolkit_does_not_reopen_writing_during_verification() -> None:
@@ -210,7 +210,7 @@ def test_orient_and_execute_open_mcp_kind_by_default() -> None:
 
 def test_every_phase_publishes_a_set_a_small_model_can_navigate() -> None:
     for phase in Phase:
-        assert len(tools_for(phase, frozenset({"files", "terminal"}))) <= 37
+        assert len(tools_for(phase, frozenset({"files", "terminal"}))) <= 39
 
 
 

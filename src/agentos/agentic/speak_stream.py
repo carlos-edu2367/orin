@@ -1030,6 +1030,7 @@ class SpeakStreamParser:
 
         visual_chars: list[str] = []
         speak_chars: list[str] = []
+        removed_inline_marker = False
 
         def _flush_speak_chars() -> None:
             if speak_chars:
@@ -1081,9 +1082,10 @@ class SpeakStreamParser:
                                 marker_val = VocalMarker(f"[{lower_inner}]")
                                 result.inline_markers.append(marker_val)
                                 self.chunker.add_inline_marker(marker_val)
+                                removed_inline_marker = True
                             elif _is_stage_direction(raw_inner):
                                 # Rubrica de direção de cena (ex.: [sorrindo], [em tom amigável]) -> removida da fala e do visual
-                                pass
+                                removed_inline_marker = True
                             else:
                                 # Colchete de ênfase em letra/palavra (ex.: [E]i!, [alô]?) -> remove apenas '[' e ']'
                                 visual_chars.append(raw_inner)
@@ -1169,7 +1171,8 @@ class SpeakStreamParser:
         if visual_chars:
             v_delta = "".join(visual_chars)
             # Evita espaço duplo deixado por remoção de marcador inline como "[hmm] "
-            v_delta = re.sub(r"  +", " ", v_delta)
+            if removed_inline_marker:
+                v_delta = re.sub(r"  +", " ", v_delta)
             result.visual_delta = v_delta
             self._accumulated_visual_text.append(v_delta)
 

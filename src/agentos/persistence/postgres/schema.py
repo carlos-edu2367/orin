@@ -1206,6 +1206,86 @@ plugin_marketplaces = Table(
     Column("clone_path", String(1024), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+discord_bot_configs = Table(
+    "discord_bot_configs",
+    metadata,
+    Column("user_id", String(255), primary_key=True),
+    Column("enabled", Boolean, nullable=False, server_default="false"),
+    Column("bot_token_ciphertext", Text, nullable=True),
+    Column("bot_token_hint", String(32), nullable=True),
+    Column("allowed_discord_user_ids_json", Text, nullable=False, server_default="[]"),
+    Column("allowed_channel_ids_json", Text, nullable=False, server_default="[]"),
+    Column("default_notify_channel_id", String(64), nullable=True),
+    Column("bot_application_id", String(64), nullable=True),
+    Column("bot_user_id", String(64), nullable=True),
+    Column("bot_username", String(120), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+friend_session_watches = Table(
+    "friend_session_watches",
+    metadata,
+    Column("watch_id", String(64), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("friend_conversation_id", String(255), nullable=True),
+    Column("target_conversation_id", String(255), nullable=False),
+    Column("target_turn_id", String(255), nullable=False),
+    Column("origin", String(32), nullable=False, server_default="friend"),
+    Column("discord_channel_id", String(64), nullable=True),
+    Column("discord_progress_message_id", String(64), nullable=True),
+    Column("discord_prompt_message_id", String(64), nullable=True),
+    Column("status", String(32), nullable=False, server_default="watching"),
+    Column("last_activity_seq", Integer, nullable=False, server_default="0"),
+    Column("last_digest_hash", String(64), nullable=True),
+    Column("last_prompt_fingerprint", String(64), nullable=True),
+    Column("last_patched_at", DateTime(timezone=True), nullable=True),
+    Column("notified_terminal", Boolean, nullable=False, server_default="false"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("user_id", "target_conversation_id", "target_turn_id", name="uq_friend_session_watches_turn"),
+    CheckConstraint(
+        "status IN ('watching', 'waiting_user', 'completed', 'failed', 'cancelled')",
+        name="ck_friend_session_watches_status",
+    ),
+)
+Index("ix_friend_session_watches_user_status", friend_session_watches.c.user_id, friend_session_watches.c.status)
+Index("ix_friend_session_watches_target_conv", friend_session_watches.c.target_conversation_id)
+
+discord_interaction_bindings = Table(
+    "discord_interaction_bindings",
+    metadata,
+    Column("binding_id", String(32), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("discord_channel_id", String(64), nullable=True),
+    Column("discord_message_id", String(64), nullable=True),
+    Column("target_conversation_id", String(255), nullable=False),
+    Column("target_turn_id", String(255), nullable=False),
+    Column("action_kind", String(32), nullable=False),
+    Column("payload_json", Text, nullable=False),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "action_kind IN ('ask_user', 'plan_decision', 'tool_permission', 'stop_session')",
+        name="ck_discord_interaction_bindings_action_kind",
+    ),
+)
+Index(
+    "ix_discord_interaction_bindings_user_expires",
+    discord_interaction_bindings.c.user_id,
+    discord_interaction_bindings.c.expires_at,
+)
+Index(
+    "ix_discord_interaction_bindings_target_turn",
+    discord_interaction_bindings.c.target_conversation_id,
+    discord_interaction_bindings.c.target_turn_id,
+)
+Index(
+    "ix_discord_interaction_bindings_expires_at",
+    discord_interaction_bindings.c.expires_at,
+)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -1259,5 +1339,8 @@ __all__ = [
     "oauth_tokens",
     "mcp_oauth_clients",
     "oauth_pending_authorizations",
+    "discord_bot_configs",
+    "friend_session_watches",
+    "discord_interaction_bindings",
     "create_engine_for_tests",
 ]

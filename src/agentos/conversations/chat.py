@@ -4057,3 +4057,330 @@ def _build_search_snippet(
 ChatStore = PostgresChatStore
 
 __all__ = ["ChatApplication", "ChatReceipt", "ChatStore", "PostgresChatStore", "migrate_managed_workspace_files"]
+
+
+def _claim_with_latest_queued_event(self: PostgresChatStore, turn_id: str) -> dict[str, object] | None:
+    now = datetime.now(UTC)
+    with self._claim_lock:
+        with self._engine.begin() as c:
+            target_conv_id = c.execute(
+                select(conversation_turns.c.conversation_id).where(
+                    conversation_turns.c.turn_id == turn_id,
+                    conversation_turns.c.state.in_(("queued", "starting")),
+                )
+            ).scalar_one_or_none()
+            if target_conv_id is None:
+                return None
+            already_active = c.execute(
+                select(conversation_turns.c.turn_id)
+                .outerjoin(
+                    conversation_dispatches,
+                    conversation_dispatches.c.turn_id == conversation_turns.c.turn_id,
+                )
+                .where(
+                    conversation_turns.c.conversation_id == target_conv_id,
+                    conversation_turns.c.turn_id != turn_id,
+                    (conversation_turns.c.state.in_(("running", "starting")))
+                    | (
+                        (conversation_dispatches.c.state == "active")
+                        & conversation_turns.c.state.in_(("queued", "starting", "running"))
+                    ),
+                )
+            ).first()
+            if already_active is not None:
+                return None
+            result = c.execute(
+                update(conversation_dispatches)
+                .where(
+                    conversation_dispatches.c.turn_id == turn_id,
+                    conversation_dispatches.c.state.in_(("pending", "enqueued")),
+                )
+                .values(
+                    state="active",
+                    attempts=conversation_dispatches.c.attempts + 1,
+                    acquired_at=now,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+            effective_workspace_id = func.coalesce(projects.c.workspace_id, conversation_turns.c.conversation_id)
+            turn = (
+                c.execute(
+                    select(
+                        conversation_turns,
+                        conversation_dispatches.c.attempts.label("dispatch_attempts"),
+                        conversations.c.project_id,
+                        conversations.c.mode.label("conversation_mode"),
+                        conversations.c.permission_mode.label("permission_mode"),
+                        projects.c.workspace_id.label("project_workspace_id"),
+                        workspace_roots.c.root_path.label("workspace_root_path"),
+                    )
+                    .join(conversation_dispatches, conversation_dispatches.c.turn_id == conversation_turns.c.turn_id)
+                    .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
+                    .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
+                    .outerjoin(workspace_roots, workspace_roots.c.workspace_id == effective_workspace_id)
+                    .where(conversation_turns.c.turn_id == turn_id)
+                )
+                .mappings()
+                .one()
+            )
+            queued_evt_payload = (
+                c.execute(
+                    select(conversation_events.c.payload)
+                    .where(
+                        conversation_events.c.conversation_id == turn["conversation_id"],
+                        conversation_events.c.message_id == turn["assistant_message_id"],
+                        conversation_events.c.event_type == "turn.queued",
+                    )
+                    .order_by(conversation_events.c.id.desc())
+                )
+                .scalars()
+                .first()
+            )
+            if turn_id in self._live_mode_turns:
+                is_live_mode = bool(self._live_mode_turns[turn_id])
+            elif (
+                isinstance(queued_evt_payload, Mapping)
+                and "live_mode" in queued_evt_payload
+                and queued_evt_payload.get("live_mode") is not None
+            ):
+                is_live_mode = bool(queued_evt_payload.get("live_mode"))
+            else:
+                is_live_mode = str(turn.get("conversation_mode") or "").strip().lower() == "friend"
+            c.execute(
+                update(conversation_turns)
+                .where(conversation_turns.c.turn_id == turn_id)
+                .values(state="running", started_at=now, updated_at=now)
+            )
+            c.execute(
+                update(conversation_messages)
+                .where(conversation_messages.c.message_id == turn["assistant_message_id"])
+                .values(status="streaming", updated_at=now)
+            )
+            c.execute(
+                update(conversations)
+                .where(conversations.c.conversation_id == turn["conversation_id"])
+                .values(state="running", updated_at=now)
+            )
+            c.execute(
+                insert(conversation_events).values(
+                    conversation_id=turn["conversation_id"],
+                    user_id=turn["user_id"],
+                    event_type="turn.running",
+                    message_id=turn["assistant_message_id"],
+                    payload={"state": "running"},
+                    created_at=now,
+                )
+            )
+    claimed = {**dict(turn), "state": "running", "started_at": now, "live_mode": is_live_mode}
+    self._activity(claimed, AgentActivityEventType.TURN_STARTED, "Turn started")
+    return claimed
+
+
+PostgresChatStore.claim = _claim_with_latest_queued_event  # type: ignore[method-assign]
+
+
+_orig_store_create = PostgresChatStore.create
+
+
+def _store_create_with_optional_live_mode(
+    self: PostgresChatStore,
+    *,
+    user_id: str,
+    message: str,
+    provider: str,
+    model_id: str,
+    idempotency_key: str,
+    conversation_id: str | None = None,
+    project_id: str | None = None,
+    workspace_id: str | None = None,
+    attachments: Sequence[Mapping[str, object]] = (),
+    new_conversation_id: str | None = None,
+    scheduled_by_schedule_id: str | None = None,
+    code_mode: str = "chat",
+    permission_mode: str | None = None,
+    turn_kind: str | None = None,
+    cli_options: str | None = None,
+    live_mode: bool | None = None,
+) -> ChatReceipt:
+    receipt = _orig_store_create(
+        self,
+        user_id=user_id,
+        message=message,
+        provider=provider,
+        model_id=model_id,
+        idempotency_key=idempotency_key,
+        conversation_id=conversation_id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        attachments=attachments,
+        new_conversation_id=new_conversation_id,
+        scheduled_by_schedule_id=scheduled_by_schedule_id,
+        code_mode=code_mode,
+        permission_mode=permission_mode,
+        turn_kind=turn_kind,
+        cli_options=cli_options,
+        live_mode=bool(live_mode) if live_mode is not None else False,
+    )
+    if live_mode is False:
+        self._live_mode_turns[receipt.turn_id] = False
+        with self._engine.begin() as c:
+            c.execute(
+                update(conversation_events)
+                .where(
+                    conversation_events.c.conversation_id == receipt.conversation_id,
+                    conversation_events.c.message_id == receipt.assistant_message_id,
+                    conversation_events.c.event_type == "turn.queued",
+                )
+                .values(payload={"state": "queued", "live_mode": False})
+            )
+    return receipt
+
+
+def _app_create_with_optional_live_mode(
+    self: ChatApplication,
+    context=None,
+    *,
+    user_id: str | None = None,
+    message: str,
+    provider: str,
+    model_id: str,
+    workspace_id: str | None = None,
+    idempotency_key: str,
+    project_id: str | None = None,
+    attachments=(),
+    new_conversation_id: str | None = None,
+    code_mode: str = "chat",
+    permission_mode: str | None = None,
+    cli_options: str | None = None,
+    live_mode: bool | None = None,
+):
+    resolved_user_id = str(user_id or getattr(context, "user_id", "") or "")
+    store_kwargs: dict[str, object] = {}
+    if live_mode is not None:
+        store_kwargs["live_mode"] = bool(live_mode)
+    return self.store.create(
+        user_id=resolved_user_id,
+        message=message,
+        provider=provider,
+        model_id=model_id,
+        idempotency_key=idempotency_key,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        attachments=attachments,
+        new_conversation_id=new_conversation_id,
+        code_mode=code_mode,
+        permission_mode=permission_mode,
+        cli_options=cli_options,
+        **store_kwargs,
+    )
+
+
+def _app_send_with_optional_live_mode(
+    self: ChatApplication,
+    user_id: str,
+    conversation_id: str,
+    message: str,
+    idempotency_key: str,
+    attachments=(),
+    provider: str = "",
+    model_id: str = "",
+    code_mode: str = "chat",
+    permission_mode: str | None = None,
+    turn_kind: str | None = None,
+    cli_options: str | None = None,
+    live_mode: bool | None = None,
+):
+    waiting = self.store.waiting_execution_ids(conversation_id, user_id)
+    store_kwargs: dict[str, object] = {}
+    if live_mode is not None:
+        store_kwargs["live_mode"] = bool(live_mode)
+    receipt = self.store.create(
+        user_id=user_id,
+        message=message,
+        provider=provider,
+        model_id=model_id,
+        idempotency_key=idempotency_key,
+        conversation_id=conversation_id,
+        attachments=attachments,
+        code_mode=code_mode,
+        permission_mode=permission_mode,
+        turn_kind=turn_kind,
+        cli_options=cli_options,
+        **store_kwargs,
+    )
+    queries = ExecutionQueryAdapter(self.store._engine)
+    controls = ExecutionApplicationAdapter(self.store._engine)
+    for execution_id in waiting:
+        view = queries.get({"resource_id": execution_id, "user_id": user_id, "purpose": "execution.read"})
+        if view["state"] == "WAITING_USER":
+            controls.provide_input({
+                "context": {"execution_id": execution_id, "user_id": user_id},
+                "expected_state_version": view["state_version"],
+                "idempotency_key": f"chat-follow-up:{receipt.turn_id}:{execution_id}",
+                "requested_at": datetime.now(UTC),
+                "input_ref": f"conversation-turn:{receipt.turn_id}:input",
+            })
+    return receipt
+
+
+PostgresChatStore.create = _store_create_with_optional_live_mode  # type: ignore[method-assign]
+ChatApplication.create = _app_create_with_optional_live_mode  # type: ignore[method-assign]
+ChatApplication.send = _app_send_with_optional_live_mode  # type: ignore[method-assign]
+
+
+def _store_create_with_optional_live_mode_v2(
+    self: PostgresChatStore,
+    user_id: str,
+    message: str,
+    provider: str,
+    model_id: str,
+    idempotency_key: str,
+    conversation_id: str | None = None,
+    project_id: str | None = None,
+    workspace_id: str | None = None,
+    attachments: Sequence[Mapping[str, object]] = (),
+    new_conversation_id: str | None = None,
+    scheduled_by_schedule_id: str | None = None,
+    code_mode: str = "chat",
+    permission_mode: str | None = None,
+    turn_kind: str | None = None,
+    cli_options: str | None = None,
+    live_mode: bool | None = None,
+) -> ChatReceipt:
+    receipt = _orig_store_create(
+        self,
+        user_id=user_id,
+        message=message,
+        provider=provider,
+        model_id=model_id,
+        idempotency_key=idempotency_key,
+        conversation_id=conversation_id,
+        project_id=project_id,
+        workspace_id=workspace_id,
+        attachments=attachments,
+        new_conversation_id=new_conversation_id,
+        scheduled_by_schedule_id=scheduled_by_schedule_id,
+        code_mode=code_mode,
+        permission_mode=permission_mode,
+        turn_kind=turn_kind,
+        cli_options=cli_options,
+        live_mode=bool(live_mode) if live_mode is not None else False,
+    )
+    if live_mode is False:
+        self._live_mode_turns[receipt.turn_id] = False
+        with self._engine.begin() as c:
+            c.execute(
+                update(conversation_events)
+                .where(
+                    conversation_events.c.conversation_id == receipt.conversation_id,
+                    conversation_events.c.message_id == receipt.message_id,
+                    conversation_events.c.event_type == "turn.queued",
+                )
+                .values(payload={"state": "queued", "live_mode": False})
+            )
+    return receipt
+
+
+PostgresChatStore.create = _store_create_with_optional_live_mode_v2  # type: ignore[method-assign]

@@ -73,6 +73,7 @@ from agentos.plugins.github_search import GithubRepositorySearchClient
 from agentos.plugins.manifest_probe import GithubManifestProbe
 from agentos.plugins.service import PluginService
 from agentos.omniroute import OmniRouteProcessManager, OmniRouteRuntimeSettingsStore
+from agentos.discord import DiscordBridgeService, PostgresDiscordStore
 from agentos.agentic.settings import AgentRuntimeSettingsStore
 from agentos.filesystem.models import FilesystemOperationContext, WorkspacePath
 from agentos.uploads.staging import UploadStaging
@@ -333,6 +334,28 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     plugin_service = PluginService(engine, plugin_root=orin_paths().data / "plugins", fetcher=PluginFetcher(orin_paths().data / "plugins", remote_only=not capabilities.host_folders), skill_library=skill_library, mcp_service=mcp_service, search_client=GithubRepositorySearchClient(), manifest_probe=GithubManifestProbe(), command_library=command_library, hook_engine=hook_engine)
     # W5: plugin commands survive a restart: each person's index is rebuilt from the installed plugins on first use.
     command_library.set_rehydrator(lambda user_id: rehydrate_commands(plugin_service, command_library, user_id=user_id))
+    chat_store = PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library, skill_library=skill_library)
+    chat_application = ChatApplication(chat_store, ExecutionApplicationAdapter(engine))
+    project_store = PostgresProjectStore(engine)
+    local_workspaces = PostgresLocalWorkspaceStore(engine)
+    provider_catalog_service = ProviderModelCatalogService(provider_repository, {
+        "anthropic": AnthropicModelCatalogClient(),
+        "nvidia": NvidiaModelCatalogClient(),
+        "ollama": OllamaCatalogClient(),
+        "omniroute": OmniRouteCatalogClient(),
+        "openai": OpenAIModelCatalogClient(),
+        "opencode": OpenCodeModelCatalogClient(),
+        "openrouter": OpenRouterModelCatalogClient(),
+    }, context_reference=OpenRouterContextReference())
+    discord_store = PostgresDiscordStore(engine, provider_cipher)
+    discord_bridge = DiscordBridgeService(
+        discord_store=discord_store,
+        chat_application=chat_application,
+        uploads=staging,
+        local_workspaces=local_workspaces,
+        project_store=project_store,
+        provider_catalog=provider_catalog_service,
+    )
     return ApiServices(
         security=security,
         accounts=accounts,
@@ -347,26 +370,20 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         plugins=plugin_service,
         provider_configuration=PostgresProviderConfigurationAdapter(engine, cipher=provider_cipher),
         provider_api_keys=PostgresProviderApiKeyAdapter(engine, cipher=provider_cipher),
-        provider_catalog=ProviderModelCatalogService(provider_repository, {
-            "anthropic": AnthropicModelCatalogClient(),
-            "nvidia": NvidiaModelCatalogClient(),
-            "ollama": OllamaCatalogClient(),
-            "omniroute": OmniRouteCatalogClient(),
-            "openai": OpenAIModelCatalogClient(),
-            "opencode": OpenCodeModelCatalogClient(),
-            "openrouter": OpenRouterModelCatalogClient(),
-        }, context_reference=OpenRouterContextReference()),
-        conversation_application=ChatApplication(PostgresChatStore(engine, PostgresAgenticActivityStore(engine, cursor_secret), command_library=command_library, skill_library=skill_library), ExecutionApplicationAdapter(engine)),
-        projects=PostgresProjectStore(engine),
+        provider_catalog=provider_catalog_service,
+        conversation_application=chat_application,
+        projects=project_store,
         omniroute_runtime=omniroute_runtime,
         agentic_runtime=AgentRuntimeSettingsStore(),
         events=PostgresClientEventStream(engine),  # type: ignore[arg-type]
-        local_workspaces=PostgresLocalWorkspaceStore(engine),
+        local_workspaces=local_workspaces,
         uploads=staging,
         vision_model_settings=PostgresVisionModelSettingsStore(engine),
         media_model_settings=PostgresMediaModelSettingsStore(engine),
         scheduled_chats=ScheduledChatService(engine),
         conversation_directories=ConversationDirectoryStore(engine),
+        discord_store=discord_store,
+        discord_bridge=discord_bridge,
     )
 
 
