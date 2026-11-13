@@ -223,6 +223,30 @@ def test_view_file_on_audio_says_clearly_when_there_is_no_transcriber_or_it_fail
     assert "Gemini" in broken.view_file("neutro.wav")["content"]
 
 
+@pytest.mark.parametrize("name", ["App.ts", "App.tsx", "worker.mts", "config.cts"])
+def test_typescript_is_read_as_text_even_when_the_windows_registry_calls_ts_a_video(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    import mimetypes
+
+    real_guess = mimetypes.guess_type
+
+    def windows_registry_guess(url: Any, strict: bool = True) -> tuple[str | None, str | None]:
+        if str(url).lower().endswith((".ts", ".mts")):
+            return ("video/vnd.dlna.mpeg-tts", None)
+        return real_guess(url, strict)
+
+    monkeypatch.setattr(mimetypes, "guess_type", windows_registry_guess)
+    transcriber = _FakeTranscriber()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    (workspace.root / name).write_text("export const answer: number = 42\n", encoding="utf-8")
+    toolset = AgentToolset(workspace, enable_terminal=False, media_transcriber_factory=lambda: transcriber)
+
+    assert "export const answer: number = 42" in toolset.read_file(name)["content"]
+    assert "export const answer: number = 42" in toolset.view_file(name)["content"]
+    assert transcriber.calls == []
+
+
 # --- subagents: the vision of its own model ----------------------------------------------------------
 
 
