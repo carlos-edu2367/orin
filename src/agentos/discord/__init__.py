@@ -1,12 +1,22 @@
 """Discord Gateway/REST bridge and session watch persistence for Orin Friend."""
 from __future__ import annotations
 
+from .audio_transcriber import (
+    AUDIO_EXTENSIONS,
+    DISCORD_VOICE_MESSAGE_FLAG,
+    DiscordAudioTranscriber,
+    DiscordAudioTranscriptionError,
+    is_discord_audio_attachment,
+    is_discord_voice_message,
+    normalize_discord_attachment_filename,
+)
 from .bridge_service import (
     DEFAULT_ATTACHMENT_ONLY_PROMPT,
     DiscordBridgeService,
     SessionWatchCoordinator,
 )
 from .formatter import (
+    AGENT_ANSWERS_HEADER,
     BUTTON_MAX_LABEL_CHARS,
     COLOR_CANCELLED,
     COLOR_COMPLETED,
@@ -28,6 +38,7 @@ from .formatter import (
     build_progress_components,
     build_resolved_decision_components,
     compute_progress_digest_hash,
+    format_agent_question_answers,
     split_discord_markdown,
     strip_residual_speak_tags,
 )
@@ -70,9 +81,11 @@ from .store import (
 )
 
 __all__ = [
+    "AGENT_ANSWERS_HEADER",
     "ALLOWED_BINDING_ACTION_KINDS",
     "ALLOWED_DISCORD_ATTACHMENT_HOSTS",
     "ALLOWED_WATCH_STATUSES",
+    "AUDIO_EXTENSIONS",
     "BUTTON_MAX_LABEL_CHARS",
     "COLOR_CANCELLED",
     "COLOR_COMPLETED",
@@ -85,8 +98,11 @@ __all__ = [
     "DEFAULT_GATEWAY_URL",
     "DISCORD_API_BASE_URL",
     "DISCORD_MESSAGE_MAX_CHARS",
+    "DISCORD_VOICE_MESSAGE_FLAG",
     "DiscordApiError",
     "DiscordAttachmentError",
+    "DiscordAudioTranscriber",
+    "DiscordAudioTranscriptionError",
     "DiscordBotConfig",
     "DiscordBridgeService",
     "DiscordFileAttachment",
@@ -120,7 +136,11 @@ __all__ = [
     "build_progress_components",
     "build_resolved_decision_components",
     "compute_progress_digest_hash",
+    "format_agent_question_answers",
+    "is_discord_audio_attachment",
+    "is_discord_voice_message",
     "mask_bot_token_hint",
+    "normalize_discord_attachment_filename",
     "normalize_gateway_url",
     "normalize_optional_snowflake_id",
     "normalize_snowflake_ids",

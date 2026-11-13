@@ -90,7 +90,7 @@ def _classify_audio_video(extension: str, data: bytes) -> tuple[str, str] | None
         return ("video/x-matroska" if extension == ".mkv" else "video/webm"), "video"
     # Bare frames carry no signature: they count only when the extension says what they are.
     if len(head) >= 2 and head[0] == 0xFF:
-        if extension == ".mp3" and head[1] & 0xE0 == 0xE0:
+        if extension in {".mp3", ".mpga", ".mpeg"} and head[1] & 0xE0 == 0xE0:
             return "audio/mpeg", "audio"
         if extension == ".aac" and head[1] & 0xF6 == 0xF0:
             return "audio/aac", "audio"

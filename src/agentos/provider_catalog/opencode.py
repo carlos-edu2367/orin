@@ -798,26 +798,125 @@ class _ParsedToolCall(tuple):  # type: ignore[type-arg]
 
 
 _HALLUCINATED_TOOL_RESULT_RE = re.compile(
-    r"(?:^|\n+)\[Tool Result\b[^\n]*\][\s\S]*$",
+    r"(?:^|\n+)(?:\[|&#91;|&#x5b;)\s*Tool Result\b[^\n\]]*\][\s\S]*$",
+    re.IGNORECASE,
+)
+_BRACKET_TOOL_USE_BLOCK_RE = re.compile(
+    r"(?:\[|&#91;|&#x5b;)\s*Tool Use(?:\b|(?=:))(?P<attrs>[^\]]*)\]"
+    r"(?P<body>[\s\S]*?)"
+    r"(?:(?:\[|&#91;|&#x5b;)\s*/Tool Use\s*\]|\Z)",
+    re.IGNORECASE,
+)
+_BRACKET_TOOL_NAME_ATTR_RE = re.compile(
+    r"""\bname=(?:"([^"]*)"|'([^']*)'|([^\s\]]+))""",
+    re.IGNORECASE,
+)
+_BRACKET_TOOL_ID_ATTR_RE = re.compile(
+    r"""\bid=(?:"([^"]*)"|'([^']*)'|([^\s\]]+))""",
+    re.IGNORECASE,
+)
+_RESIDUAL_TOOL_RESULT_SPAN_RE = re.compile(
+    r"(?:\[|&#91;|&#x5b;)\s*Tool Result\b[^\]]*\][\s\S]*?"
+    r"(?:(?:\[|&#91;|&#x5b;)\s*/Tool Result\s*\]"
+    r"(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)?|\Z)",
+    re.IGNORECASE,
 )
 
 
 def _strip_hallucinated_tool_results(text: str) -> str:
-    if "[Tool Result" not in text:
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "tool result" not in lowered and "tool use" not in lowered:
         return text
-    return _HALLUCINATED_TOOL_RESULT_RE.sub("", text).rstrip()
+    cleaned = _RESIDUAL_TOOL_RESULT_SPAN_RE.sub("", text)
+    cleaned = _HALLUCINATED_TOOL_RESULT_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _parse_orin_tool_calls(
     text: str,
     allowed_names: set[str],
 ) -> tuple[str, list[tuple[str, str, str]]]:
-    """Extract validated `<orin_tool_call>` blocks and strip all `<orin_tool_call>` tags from visible text."""
+    """Extract validated `<orin_tool_call>` or `[Tool Use ...]` blocks and strip residual tool tags from visible text."""
     calls: list[tuple[str, str, str]] = []
     open_tag = "<orin_tool_call>"
     close_tag = "</orin_tool_call>"
-    if open_tag not in text:
+    has_xml = open_tag in text
+    has_bracket = "tool use" in text.lower()
+    if not has_xml and not has_bracket:
         return _strip_hallucinated_tool_results(text), calls
+
+    working_text = text
+    if has_bracket:
+        def _extract_bracket_call(match: re.Match[str]) -> str:
+            if not allowed_names:
+                return ""
+            attrs = match.group("attrs") or ""
+            body = (match.group("body") or "").strip()
+            if body.startswith("```"):
+                body = re.sub(r"^```(?:json)?\s*", "", body, flags=re.IGNORECASE)
+                body = re.sub(r"\s*```$", "", body).strip()
+            name_m = _BRACKET_TOOL_NAME_ATTR_RE.search(attrs)
+            id_m = _BRACKET_TOOL_ID_ATTR_RE.search(attrs)
+            fallback_name = (
+                (name_m.group(1) or name_m.group(2) or name_m.group(3) or "").strip()
+                if name_m is not None
+                else ""
+            )
+            attr_id = (
+                (id_m.group(1) or id_m.group(2) or id_m.group(3) or "").strip()
+                if id_m is not None
+                else ""
+            )
+            parsed_obj: Mapping[str, Any] = {}
+            if body:
+                try:
+                    loaded = json.loads(body)
+                    if isinstance(loaded, Mapping):
+                        parsed_obj = loaded
+                    else:
+                        return ""
+                except json.JSONDecodeError:
+                    return ""
+            raw_name = str(parsed_obj.get("name") or fallback_name or "").strip()
+            resolved_name = _resolve_tool_name(raw_name, allowed_names)
+            if not resolved_name:
+                return ""
+            has_env = any(k in parsed_obj for k in ("name", "arguments", "input", "parameters"))
+            arguments = (
+                parsed_obj.get("arguments")
+                if "arguments" in parsed_obj
+                else parsed_obj.get("input", parsed_obj.get("parameters", {}))
+            ) if has_env else parsed_obj
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            if not isinstance(arguments, Mapping):
+                arguments = {}
+            raw_args_dict = dict(arguments)
+            raw_args_json = json.dumps(raw_args_dict, ensure_ascii=False)
+            norm_args_dict = _normalize_bridge_tool_arguments(resolved_name, raw_args_dict)
+            norm_args_json = json.dumps(norm_args_dict, ensure_ascii=False)
+            call_id = str(parsed_obj.get("id") or attr_id or f"call_{uuid4().hex[:12]}")
+            calls.append(
+                _ParsedToolCall(
+                    call_id,
+                    resolved_name,
+                    norm_args_json,
+                    args_dict=norm_args_dict,
+                    raw_args_json=raw_args_json,
+                )
+            )
+            return ""
+
+        working_text = _BRACKET_TOOL_USE_BLOCK_RE.sub(_extract_bracket_call, working_text)
+        if not has_xml:
+            return _strip_hallucinated_tool_results(working_text), calls
+
+    text = working_text
 
     cleaned_parts: list[str] = []
     cursor = 0

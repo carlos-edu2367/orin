@@ -4,8 +4,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import hashlib
 import json
+from pathlib import PurePosixPath
 import re
 from typing import Any
+
+from agentos.providers.claude_cli.text_protocol import strip_residual_tool_protocol_blocks
 
 DISCORD_MESSAGE_MAX_CHARS = 2000
 DEFAULT_SPLIT_LIMIT = 1950
@@ -21,6 +24,8 @@ BUTTON_MAX_LABEL_CHARS = 80
 CUSTOM_ID_MAX_CHARS = 100
 SELECT_OPTION_MAX_CHARS = 100
 SELECT_MAX_OPTIONS = 25
+
+AGENT_ANSWERS_HEADER = "Respostas às perguntas do agente:"
 
 # Embed colors by state
 COLOR_RUNNING = 0x3B82F6       # Blue
@@ -48,16 +53,92 @@ _STATUS_BADGES: dict[str, tuple[str, int]] = {
 }
 
 
+_MD_IMAGE_LINK_RE = re.compile(
+    r"!\[(?P<alt>[^\]]*)\]\(\s*<?(?P<target>[^)\n>]+?)>?\s*\)"
+)
+_MD_FILE_LINK_RE = re.compile(
+    r"(?<!!)\[(?P<label>[^\]]+)\]\(\s*<?(?P<target>(?:workspace|file)://[^)\n>]+?)>?\s*\)"
+)
+
+
 def strip_residual_speak_tags(text: str) -> str:
-    """Remove any residual `<speak>` and `</speak>` tags emitted by voice-tuned prompts."""
+    """Remove residual tool protocol blocks (`[Tool Use]`, `[Tool Result]`, `&#91;...]`) and `<speak>` tags."""
     if not isinstance(text, str) or not text:
         return ""
-    cleaned = _SPEAK_TAG_RE.sub("", text)
+    cleaned = strip_residual_tool_protocol_blocks(text)
+    cleaned = _SPEAK_TAG_RE.sub("", cleaned)
     cleaned = _EXCESS_NEWLINES_RE.sub("\n\n", cleaned)
     return cleaned.strip()
 
 
 strip_Residual_speak_tags = strip_residual_speak_tags
+
+
+def strip_attached_workspace_links(
+    text: str,
+    attached_targets: Sequence[str],
+) -> str:
+    """Clean `![alt](workspace://...)` and raw `workspace://...` tokens for files attached natively to Discord."""
+    if not isinstance(text, str) or not text or not attached_targets:
+        return strip_residual_speak_tags(text)
+
+    normalized_targets = {
+        str(t or "").strip()
+        for t in attached_targets
+        if str(t or "").strip()
+    }
+    if not normalized_targets:
+        return strip_residual_speak_tags(text)
+
+    def _matches_attached(raw_target: str) -> bool:
+        cand = str(raw_target or "").strip()
+        if not cand:
+            return False
+        if cand in normalized_targets:
+            return True
+        if cand.startswith("workspace://"):
+            stripped = cand[len("workspace://") :].lstrip("/")
+            if stripped in normalized_targets or f"workspace://{stripped}" in normalized_targets:
+                return True
+        return False
+
+    def _replace_md_image(match: re.Match[str]) -> str:
+        target = (match.group("target") or "").strip()
+        if _matches_attached(target):
+            return ""
+        return match.group(0)
+
+    def _replace_md_link(match: re.Match[str]) -> str:
+        target = (match.group("target") or "").strip()
+        label = (match.group("label") or "").strip()
+        if not _matches_attached(target):
+            return match.group(0)
+        raw_name = PurePosixPath(target.replace("\\", "/")).name
+        if not label or label == target or label.startswith("workspace://"):
+            return f"`{raw_name}`" if raw_name else ""
+        return f"`{label}`" if not label.startswith("`") else label
+
+    parts = re.split(r"(```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z))", text)
+    cleaned_parts: list[str] = []
+    for idx, part in enumerate(parts):
+        if idx % 2 == 1:
+            cleaned_parts.append(part)
+            continue
+        seg = _MD_IMAGE_LINK_RE.sub(_replace_md_image, part)
+        seg = _MD_FILE_LINK_RE.sub(_replace_md_link, seg)
+        for tok in sorted(normalized_targets, key=len, reverse=True):
+            if tok.startswith(("workspace://", "file://")) and tok in seg:
+                fname = PurePosixPath(tok.replace("\\", "/")).name
+                # Remove standalone URI lines cleanly; inline URIs become `filename`
+                seg = re.sub(rf"(?m)^[ \t]*{re.escape(tok)}[ \t]*\n?", "", seg)
+                if tok in seg:
+                    seg = seg.replace(tok, f"`{fname}`" if fname else "")
+        cleaned_parts.append(seg)
+
+    merged = "".join(cleaned_parts)
+    merged = re.sub(r"[ \t]+\n", "\n", merged)
+    merged = _EXCESS_NEWLINES_RE.sub("\n\n", merged)
+    return merged.strip()
 
 
 def _truncate_str(value: object, max_chars: int, *, suffix: str = "…") -> str:
@@ -413,6 +494,7 @@ def _extract_binding_info(item: Any) -> dict[str, Any]:
         label = str(item.get("label") or payload.get("label") or "").strip()
         style = item.get("style") or payload.get("style")
         description = str(item.get("description") or payload.get("description") or "").strip()
+        is_consumed = bool(item.get("is_consumed") or item.get("consumed_at") is not None)
     else:
         binding_id = str(getattr(item, "binding_id", "") or "").strip()
         action_kind = str(getattr(item, "action_kind", "") or "").strip()
@@ -421,6 +503,7 @@ def _extract_binding_info(item: Any) -> dict[str, Any]:
         label = str(payload.get("label") or "").strip()
         style = payload.get("style")
         description = str(payload.get("description") or "").strip()
+        is_consumed = bool(getattr(item, "is_consumed", False))
 
     custom_id = sanitize_custom_id(binding_id) if binding_id else ""
     return {
@@ -431,7 +514,58 @@ def _extract_binding_info(item: Any) -> dict[str, Any]:
         "label": label,
         "style": int(style) if isinstance(style, int) and 1 <= style <= 4 else None,
         "description": description,
+        "is_consumed": is_consumed,
     }
+
+
+def format_agent_question_answers(qa_pairs: Sequence[tuple[str, str]]) -> str:
+    """Format `(question, selected_answer)` pairs using Orin's canonical `AGENT_ANSWERS_HEADER`."""
+    blocks: list[str] = []
+    for question_text, selected_text in qa_pairs:
+        q_clean = str(question_text or "Pergunta").strip() or "Pergunta"
+        a_clean = str(selected_text or "").strip()
+        if not a_clean:
+            continue
+        blocks.append(f"{q_clean}\nSeleção: {a_clean}")
+    if not blocks:
+        return AGENT_ANSWERS_HEADER
+    return f"{AGENT_ANSWERS_HEADER}\n\n" + "\n\n".join(blocks)
+
+
+def _is_multi_select_question(question_obj: Mapping[str, Any]) -> bool:
+    mode = str(question_obj.get("mode") or "").strip().lower()
+    return mode == "checkbox" or bool(question_obj.get("multiSelect") or question_obj.get("multi_select"))
+
+
+def _build_select_options_list(raw_options: Sequence[Any]) -> list[dict[str, Any]]:
+    select_options: list[dict[str, Any]] = []
+    used_values: set[str] = set()
+    for idx, opt in enumerate(raw_options[:SELECT_MAX_OPTIONS]):
+        if isinstance(opt, Mapping):
+            lbl = str(opt.get("label") or opt.get("value") or opt.get("id") or f"Opção {idx + 1}").strip()
+            raw_val = str(opt.get("value") or lbl).strip()
+            fallback_id = str(opt.get("id") or f"opt_{idx + 1}").strip()
+            desc = str(opt.get("description") or "").strip()
+        else:
+            lbl = str(opt).strip() or f"Opção {idx + 1}"
+            raw_val = lbl
+            fallback_id = f"opt_{idx + 1}"
+            desc = ""
+
+        val = _truncate_str(raw_val or fallback_id, SELECT_OPTION_MAX_CHARS)
+        if val in used_values or not val:
+            candidate = _truncate_str(fallback_id, SELECT_OPTION_MAX_CHARS)
+            val = candidate if candidate and candidate not in used_values else f"opt_{idx + 1}"
+        used_values.add(val)
+
+        opt_entry: dict[str, Any] = {
+            "label": _truncate_str(lbl or val, SELECT_OPTION_MAX_CHARS),
+            "value": val,
+        }
+        if desc:
+            opt_entry["description"] = _truncate_str(desc, SELECT_OPTION_MAX_CHARS)
+        select_options.append(opt_entry)
+    return select_options
 
 
 def _default_button_label_and_style(info: Mapping[str, Any], index: int) -> tuple[str, int]:
@@ -518,33 +652,59 @@ def build_decision_card(
     else:
         # ask_user / AskUserQuestion
         questions = prompt_data.get("questions")
-        first_q: Mapping[str, Any] = {}
-        if isinstance(questions, Sequence) and not isinstance(questions, (str, bytes)) and questions:
-            if isinstance(questions[0], Mapping):
-                first_q = questions[0]
-        header = str(first_q.get("header") or prompt_data.get("header") or "Pergunta").strip()
-        question_text = str(
-            first_q.get("question")
-            or prompt_data.get("question")
-            or prompt_data.get("summary")
-            or "Escolha uma opção ou responda por mensagem para continuar:"
-        ).strip()
-        embed_title = _truncate_str(f"❓ {header} · {session_title}", EMBED_MAX_TITLE_CHARS)
+        valid_questions: list[Mapping[str, Any]] = (
+            [q for q in questions if isinstance(q, Mapping)]
+            if isinstance(questions, Sequence) and not isinstance(questions, (str, bytes))
+            else []
+        )
+        if len(valid_questions) >= 2:
+            embed_title = _truncate_str(
+                f"❓ Perguntas ({len(valid_questions)}) · {session_title}",
+                EMBED_MAX_TITLE_CHARS,
+            )
+            desc_sections: list[str] = []
+            for q_idx, q_item in enumerate(valid_questions[:5]):
+                q_header = str(q_item.get("header") or f"Pergunta {q_idx + 1}").strip()
+                q_text = str(q_item.get("question") or "").strip()
+                multi_tag = " *(múltipla escolha)*" if _is_multi_select_question(q_item) else ""
+                sec_lines = [f"**{q_idx + 1}. {q_header}**{multi_tag}\n{q_text}".strip()]
+                q_opts = q_item.get("options")
+                if isinstance(q_opts, Sequence) and not isinstance(q_opts, (str, bytes)) and q_opts:
+                    for o_idx, opt in enumerate(q_opts[:SELECT_MAX_OPTIONS]):
+                        if isinstance(opt, Mapping):
+                            lbl = str(opt.get("label") or opt.get("value") or f"Opção {o_idx + 1}").strip()
+                            opt_desc = str(opt.get("description") or "").strip()
+                            sec_lines.append(f"• **{lbl}**" + (f" — {opt_desc}" if opt_desc else ""))
+                        else:
+                            sec_lines.append(f"• **{str(opt).strip()}**")
+                desc_sections.append("\n".join(sec_lines))
+            description = _truncate_str("\n\n".join(desc_sections), EMBED_MAX_DESCRIPTION_CHARS)
+        else:
+            first_q: Mapping[str, Any] = valid_questions[0] if valid_questions else {}
+            header = str(first_q.get("header") or prompt_data.get("header") or "Pergunta").strip()
+            question_text = str(
+                first_q.get("question")
+                or prompt_data.get("question")
+                or prompt_data.get("summary")
+                or "Escolha uma opção ou responda por mensagem para continuar:"
+            ).strip()
+            embed_title = _truncate_str(f"❓ {header} · {session_title}", EMBED_MAX_TITLE_CHARS)
 
-        desc_parts = [question_text]
-        raw_options = first_q.get("options") if isinstance(first_q.get("options"), Sequence) else prompt_data.get("options")
-        if isinstance(raw_options, Sequence) and not isinstance(raw_options, (str, bytes)) and raw_options:
-            opt_lines: list[str] = []
-            for idx, opt in enumerate(raw_options[:SELECT_MAX_OPTIONS]):
-                if isinstance(opt, Mapping):
-                    lbl = str(opt.get("label") or opt.get("value") or f"Opção {idx + 1}").strip()
-                    opt_desc = str(opt.get("description") or "").strip()
-                    opt_lines.append(f"• **{lbl}**" + (f" — {opt_desc}" if opt_desc else ""))
-                else:
-                    opt_lines.append(f"• **{str(opt).strip()}**")
-            if opt_lines:
-                desc_parts.append("\n".join(opt_lines))
-        description = _truncate_str("\n\n".join(desc_parts), EMBED_MAX_DESCRIPTION_CHARS)
+            is_multi = _is_multi_select_question(first_q) or _is_multi_select_question(prompt_data)
+            desc_parts = [question_text + ("\n*(Selecione uma ou mais opções no menu abaixo)*" if is_multi else "")]
+            raw_options = first_q.get("options") if isinstance(first_q.get("options"), Sequence) else prompt_data.get("options")
+            if isinstance(raw_options, Sequence) and not isinstance(raw_options, (str, bytes)) and raw_options:
+                opt_lines: list[str] = []
+                for idx, opt in enumerate(raw_options[:SELECT_MAX_OPTIONS]):
+                    if isinstance(opt, Mapping):
+                        lbl = str(opt.get("label") or opt.get("value") or f"Opção {idx + 1}").strip()
+                        opt_desc = str(opt.get("description") or "").strip()
+                        opt_lines.append(f"• **{lbl}**" + (f" — {opt_desc}" if opt_desc else ""))
+                    else:
+                        opt_lines.append(f"• **{str(opt).strip()}**")
+                if opt_lines:
+                    desc_parts.append("\n".join(opt_lines))
+            description = _truncate_str("\n\n".join(desc_parts), EMBED_MAX_DESCRIPTION_CHARS)
 
     embed: dict[str, Any] = {
         "title": embed_title,
@@ -556,7 +716,7 @@ def build_decision_card(
     if conv_id:
         embed["footer"] = {"text": _truncate_str(f"Sessão: {conv_id}", EMBED_MAX_FOOTER_CHARS)}
 
-    # Build interactive components (Buttons for <= 5 options, StringSelect for 6..25 options)
+    # Build interactive components (Buttons for <= 5 single-choice options, StringSelect for 6..25, multi-select, or multi-question)
     components: list[dict[str, Any]] = []
     if not normalized_bindings:
         return embed, components
@@ -564,9 +724,44 @@ def build_decision_card(
     first_payload = normalized_bindings[0]["payload"]
     payload_options = first_payload.get("options") if isinstance(first_payload.get("options"), Sequence) else None
 
-    if len(normalized_bindings) >= 6:
+    if len(normalized_bindings) >= 2 and any(
+        bool(b["payload"].get("question_select")) for b in normalized_bindings
+    ):
+        # Multi-question batch: 1 StringSelect ActionRow per question (up to 5 rows per Discord message)
+        for q_row_idx, b_info in enumerate(normalized_bindings[:5]):
+            b_payload = b_info["payload"]
+            q_opts_raw = b_payload.get("options")
+            if not isinstance(q_opts_raw, Sequence) or isinstance(q_opts_raw, (str, bytes)) or not q_opts_raw:
+                continue
+            select_options = _build_select_options_list(q_opts_raw)
+            if not select_options:
+                continue
+            q_header = str(b_payload.get("header") or b_info.get("label") or f"Pergunta {q_row_idx + 1}").strip()
+            selected_display = str(b_payload.get("selected_display") or "").strip()
+            is_answered = bool(b_info.get("is_consumed") or selected_display)
+            is_multi = bool(b_payload.get("multi_select"))
+            placeholder = (
+                _truncate_str(f"✔ {q_header}: {selected_display or 'Respondido'}", SELECT_OPTION_MAX_CHARS)
+                if is_answered
+                else _truncate_str(
+                    f"{q_header}: selecione {'opções' if is_multi else 'uma opção'}…",
+                    SELECT_OPTION_MAX_CHARS,
+                )
+            )
+            select_comp: dict[str, Any] = {
+                "type": 3,
+                "custom_id": b_info["custom_id"],
+                "placeholder": placeholder,
+                "min_values": 1,
+                "max_values": min(len(select_options), SELECT_MAX_OPTIONS) if is_multi else 1,
+                "options": select_options,
+            }
+            if is_answered:
+                select_comp["disabled"] = True
+            components.append({"type": 1, "components": [select_comp]})
+    elif len(normalized_bindings) >= 6:
         # 6..25 bindings -> render a StringSelect (type=3) where each option's value is the binding_id
-        select_options: list[dict[str, Any]] = []
+        select_options = []
         for idx, b_info in enumerate(normalized_bindings[:SELECT_MAX_OPTIONS]):
             lbl, _ = _default_button_label_and_style(b_info, idx)
             opt_entry: dict[str, Any] = {
@@ -597,27 +792,15 @@ def build_decision_card(
         len(normalized_bindings) == 1
         and isinstance(payload_options, Sequence)
         and not isinstance(payload_options, (str, bytes))
-        and len(payload_options) >= 6
+        and (
+            len(payload_options) >= 6
+            or bool(first_payload.get("multi_select"))
+            or bool(first_payload.get("question_select"))
+        )
     ):
-        # Single binding carrying 6..25 options in its payload
-        select_options = []
-        for idx, opt in enumerate(payload_options[:SELECT_MAX_OPTIONS]):
-            if isinstance(opt, Mapping):
-                lbl = str(opt.get("label") or opt.get("value") or f"Opção {idx + 1}").strip()
-                val = str(opt.get("value") or lbl).strip()
-                desc = str(opt.get("description") or "").strip()
-            else:
-                lbl = str(opt).strip() or f"Opção {idx + 1}"
-                val = lbl
-                desc = ""
-            opt_entry = {
-                "label": _truncate_str(lbl, SELECT_OPTION_MAX_CHARS),
-                "value": _truncate_str(val, SELECT_OPTION_MAX_CHARS),
-            }
-            if desc:
-                opt_entry["description"] = _truncate_str(desc, SELECT_OPTION_MAX_CHARS)
-            select_options.append(opt_entry)
-
+        # Single binding carrying 6..25 options OR multi-select checkbox options in its payload
+        select_options = _build_select_options_list(payload_options)
+        is_multi = bool(first_payload.get("multi_select"))
         components.append(
             {
                 "type": 1,
@@ -625,9 +808,9 @@ def build_decision_card(
                     {
                         "type": 3,
                         "custom_id": normalized_bindings[0]["custom_id"],
-                        "placeholder": "Selecione uma opção…",
+                        "placeholder": "Selecione uma ou mais opções…" if is_multi else "Selecione uma opção…",
                         "min_values": 1,
-                        "max_values": 1,
+                        "max_values": min(len(select_options), SELECT_MAX_OPTIONS) if is_multi else 1,
                         "options": select_options,
                     }
                 ],
@@ -688,6 +871,7 @@ def build_resolved_decision_components(
 
 
 __all__ = [
+    "AGENT_ANSWERS_HEADER",
     "BUTTON_MAX_LABEL_CHARS",
     "COLOR_CANCELLED",
     "COLOR_COMPLETED",
@@ -710,8 +894,10 @@ __all__ = [
     "build_progress_components",
     "build_resolved_decision_components",
     "compute_progress_digest_hash",
+    "format_agent_question_answers",
     "sanitize_custom_id",
     "split_discord_markdown",
     "strip_Residual_speak_tags",
+    "strip_attached_workspace_links",
     "strip_residual_speak_tags",
 ]

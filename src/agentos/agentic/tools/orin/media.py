@@ -1,12 +1,21 @@
 """Media tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
+from urllib.parse import unquote
 from uuid import uuid4
 
-from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
+from agentos.agentic.media_client import (
+    MAX_REFERENCE_IMAGE_BYTES,
+    MediaGenerationError,
+    ReferenceImageInput,
+    detect_reference_image_mime,
+)
+from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, WorkspaceError, _TEXT, _schema
 from agentos.agentic.tools.spec import ToolSpec
+from agentos.pathsafety import absolute_inside, is_drive_path
 
 
 class MediaTools:
@@ -43,15 +52,166 @@ class MediaTools:
         target = self.workspace.resolve(raw_rel)
         return self.workspace.relative(target)
 
+    def _clean_and_resolve_reference_target(self, raw_value: str) -> Path:
+        cleaned = str(raw_value or "").strip()
+        had_workspace_scheme = cleaned.lower().startswith("workspace://")
+        if had_workspace_scheme:
+            cleaned = cleaned[len("workspace://") :]
+        cleaned = unquote(cleaned).strip().replace("\\", "/")
+        if not cleaned:
+            raise AgentToolError(
+                "Caminho de imagem de referência inválido.",
+                error_code="INVALID_ARGUMENTS",
+            )
+        if cleaned.startswith("/") and not is_drive_path(cleaned):
+            in_root = absolute_inside(cleaned, self.workspace.root) is not None
+            in_extra = any(
+                absolute_inside(cleaned, extra) is not None
+                for extra in getattr(self.workspace, "additional_roots", ())
+            )
+            if had_workspace_scheme or (not in_root and not in_extra):
+                cleaned = cleaned.lstrip("/")
+
+        segments = [seg for seg in cleaned.split("/") if seg not in ("", ".")]
+        if not segments or any(seg == ".." for seg in segments):
+            raise AgentToolError(
+                "Caminho de imagem de referência inválido (travessia de diretório não permitida).",
+                error_code="INVALID_ARGUMENTS",
+            )
+
+        is_rel_input = had_workspace_scheme or (
+            not is_drive_path(cleaned) and not cleaned.startswith("/")
+        )
+        if is_rel_input:
+            raw_candidate = self.workspace.root.joinpath(*segments)
+            if raw_candidate.is_symlink():
+                try:
+                    raw_candidate.resolve().relative_to(self.workspace.root.resolve())
+                except (OSError, ValueError) as error:
+                    raise AgentToolError(
+                        "Caminho de imagem de referência aponta para fora do workspace.",
+                        error_code="INVALID_ARGUMENTS",
+                    ) from error
+
+        try:
+            resolved = self.workspace.resolve(cleaned)
+        except WorkspaceError as error:
+            raise AgentToolError(str(error), error_code="INVALID_ARGUMENTS") from error
+
+        if is_rel_input:
+            try:
+                resolved.relative_to(self.workspace.root.resolve())
+            except ValueError as error:
+                raise AgentToolError(
+                    "Caminho de imagem de referência deve permanecer dentro do workspace.",
+                    error_code="INVALID_ARGUMENTS",
+                ) from error
+
+        return resolved
+
+    def _resolve_reference_image(
+        self,
+        reference_image_path: str | None = None,
+        reference_image_uri: str | None = None,
+    ) -> tuple[ReferenceImageInput, str] | None:
+        raw_path = str(reference_image_path or "").strip()
+        raw_uri = str(reference_image_uri or "").strip()
+        if not raw_path and not raw_uri:
+            return None
+
+        resolved_path = self._clean_and_resolve_reference_target(raw_path) if raw_path else None
+        resolved_uri = self._clean_and_resolve_reference_target(raw_uri) if raw_uri else None
+        if resolved_path is not None and resolved_uri is not None and resolved_path != resolved_uri:
+            raise AgentToolError(
+                "Os argumentos 'reference_image_path' e 'reference_image_uri' apontam para arquivos diferentes.",
+                error_code="INVALID_ARGUMENTS",
+            )
+        resolved = resolved_path if resolved_path is not None else resolved_uri
+        assert resolved is not None
+
+        try:
+            exists_and_file = resolved.exists() and resolved.is_file()
+        except OSError as error:
+            raise AgentToolError(
+                f"Não foi possível acessar a imagem de referência: {error}",
+                error_code="INVALID_ARGUMENTS",
+            ) from error
+        if not exists_and_file:
+            raise AgentToolError(
+                f"Imagem de referência não encontrada no workspace: {raw_path or raw_uri}",
+                error_code="INVALID_ARGUMENTS",
+            )
+
+        try:
+            stat = resolved.stat()
+        except OSError as error:
+            raise AgentToolError(
+                f"Não foi possível inspecionar a imagem de referência: {error}",
+                error_code="INVALID_ARGUMENTS",
+            ) from error
+
+        if stat.st_size <= 0:
+            raise AgentToolError(
+                "O arquivo de imagem de referência está vazio.",
+                error_code="INVALID_ARGUMENTS",
+            )
+        if stat.st_size > MAX_REFERENCE_IMAGE_BYTES:
+            raise AgentToolError(
+                "A imagem de referência excede o limite máximo de 25 MB.",
+                error_code="INVALID_ARGUMENTS",
+            )
+
+        try:
+            raw_bytes = resolved.read_bytes()
+        except OSError as error:
+            raise AgentToolError(
+                f"Não foi possível ler a imagem de referência: {error}",
+                error_code="INVALID_ARGUMENTS",
+            ) from error
+
+        if not raw_bytes:
+            raise AgentToolError(
+                "O arquivo de imagem de referência está vazio.",
+                error_code="INVALID_ARGUMENTS",
+            )
+        if len(raw_bytes) > MAX_REFERENCE_IMAGE_BYTES:
+            raise AgentToolError(
+                "A imagem de referência excede o limite máximo de 25 MB.",
+                error_code="INVALID_ARGUMENTS",
+            )
+
+        try:
+            mime_type, _ext = detect_reference_image_mime(raw_bytes)
+        except MediaGenerationError as error:
+            raise AgentToolError(
+                "O arquivo de referência deve ser uma imagem válida (PNG, JPG, WEBP ou GIF).",
+                error_code="INVALID_ARGUMENTS",
+            ) from error
+
+        try:
+            ref_key = self.workspace.key(resolved)
+        except WorkspaceError as error:
+            raise AgentToolError(str(error), error_code="INVALID_ARGUMENTS") from error
+
+        return (
+            ReferenceImageInput(
+                data=raw_bytes,
+                mime_type=mime_type,
+                filename=resolved.name,
+                path=str(resolved),
+            ),
+            ref_key,
+        )
+
     def generate_image(
         self,
         prompt: str,
         model: str | None = None,
         size: str = "1024x1024",
         output_path: str | None = None,
+        reference_image_path: str | None = None,
+        reference_image_uri: str | None = None,
     ) -> ToolOutcome:
-        from agentos.agentic.media_client import MediaGenerationError
-
         clean_prompt = str(prompt or "").strip()
         if not clean_prompt:
             raise AgentToolError("O argumento 'prompt' não pode ser vazio.", error_code="INVALID_ARGUMENTS")
@@ -69,13 +229,38 @@ class MediaTools:
             )
         if output_path is not None and str(output_path).strip():
             self.workspace.resolve(str(output_path))
+        resolved_ref = self._resolve_reference_image(
+            reference_image_path=reference_image_path,
+            reference_image_uri=reference_image_uri,
+        )
         client = self._resolve_media_client(resolved_provider)
         try:
-            data, ext = client.generate_image(
-                model=resolved_model,
-                prompt=clean_prompt,
-                size=str(size or "1024x1024"),
-            )
+            if resolved_ref is None:
+                data, ext = client.generate_image(
+                    model=resolved_model,
+                    prompt=clean_prompt,
+                    size=str(size or "1024x1024"),
+                )
+            else:
+                ref_image, _ref_key = resolved_ref
+                try:
+                    sig = inspect.signature(client.generate_image)
+                    accepts_ref = "reference_image" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                    )
+                except (TypeError, ValueError):
+                    accepts_ref = True
+                if not accepts_ref:
+                    raise AgentToolError(
+                        "O cliente de geração de imagem do provedor ativo não suporta imagem de referência.",
+                        error_code="MEDIA_GENERATION_FAILED",
+                    )
+                data, ext = client.generate_image(
+                    model=resolved_model,
+                    prompt=clean_prompt,
+                    size=str(size or "1024x1024"),
+                    reference_image=ref_image,
+                )
         except MediaGenerationError as error:
             raise AgentToolError(str(error), error_code="MEDIA_GENERATION_FAILED") from error
         rel_path = self._resolve_media_output_path(output_path, default_prefix="image", ext=ext)
@@ -93,6 +278,8 @@ class MediaTools:
             "provider": resolved_provider or self._media_policy.turn_provider,
             "bytes": written,
         }
+        if resolved_ref is not None:
+            payload["reference_image"] = resolved_ref[1]
         return ToolOutcome(
             "succeeded",
             summary[:240],
@@ -219,7 +406,7 @@ class MediaTools:
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="generate_image",
-        description="Generate an image using a favorited image model from the active provider and save it into the conversation workspace. Link the returned workspace:// URI in your final response so the user can view it inline.",
+        description="Generate an image using a favorited image model from the active provider and save it into the conversation workspace. Supports optional visual reference images (e.g. from '.orin/uploads/...' or 'workspace://...') via reference_image_path or reference_image_uri to preserve character identity, style, or composition. Link the returned workspace:// URI in your final response so the user can view it inline.",
         legacy_schema=lambda self: (
             _schema(
                 {
@@ -235,6 +422,14 @@ SPECS: tuple[ToolSpec, ...] = (
                     "output_path": {
                         **_TEXT,
                         "description": "Optional workspace-relative path to save the generated image (e.g. 'generated/banner.png').",
+                    },
+                    "reference_image_path": {
+                        **_TEXT,
+                        "description": "Optional workspace path or workspace:// URI of a reference image (e.g. '.orin/uploads/ref.png' or 'workspace://generated/char.png') to guide style, character, or composition.",
+                    },
+                    "reference_image_uri": {
+                        **_TEXT,
+                        "description": "Optional workspace path or workspace:// URI of a reference image (e.g. 'workspace://.orin/uploads/ref.png' or 'workspace://generated/char.png') to guide style, character, or composition.",
                     },
                 },
                 ("prompt",),

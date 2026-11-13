@@ -2,6 +2,8 @@ import { isValidElement, useEffect, useRef, useState, type ReactNode } from 'rea
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ApiClient } from '../../api/client'
+import { ActivityCard } from './ActivityCard'
+import { hasResidualToolMarkers, parseResidualToolBlocks } from './residualToolBlocks'
 import {
   InlineWorkspaceFilePill,
   parseWorkspaceReference,
@@ -98,65 +100,128 @@ function MarkdownCodeBlock({ children }: { children?: ReactNode }) {
   )
 }
 
-export function MarkdownMessage({
+function MarkdownSegmentView({
   content,
   conversationId,
   onPreview,
   onPreviewWorkspaceFile,
+}: {
+  content: string
+  conversationId?: string
+  onPreview?: WorkspaceFilePreviewHandler
+  onPreviewWorkspaceFile?: (path: string, label?: string) => void
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => (url.startsWith('workspace://') ? url : defaultUrlTransform(url))}
+      components={{
+        pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
+        img: ({ src, alt }) => {
+          const reference = src ? parseWorkspaceReference(src, conversationId ?? '') : null
+          if (!reference) {
+            return <img src={src} alt={alt ?? ''} />
+          }
+          const inlineUrl = workspaceFileUrl(reference, 'inline')
+          const kind = previewKindFor(reference.path)
+          if (kind === 'audio') {
+            return <audio className="workspace-file-card__media workspace-file-card__audio" controls preload="metadata" src={inlineUrl} aria-label={alt || reference.name || reference.path} />
+          }
+          if (kind === 'video') {
+            return <video className="workspace-file-card__media workspace-file-card__video" controls preload="metadata" src={inlineUrl} aria-label={alt || reference.name || reference.path} />
+          }
+          return <img className="workspace-file-card__media workspace-file-card__image" src={inlineUrl} alt={alt || reference.name || reference.path} loading="lazy" />
+        },
+        a: ({ href, children }) => {
+          const reference = href ? parseWorkspaceReference(href, conversationId ?? '') : null
+          if (!reference) {
+            return <a href={href}>{children}</a>
+          }
+          const workspacePath = reference.path
+          const labelText = extractTextContent(children).trim() || reference.name || workspacePath
+          const handlePreview = (path: string, label?: string) => {
+            if (onPreviewWorkspaceFile) {
+              onPreviewWorkspaceFile(path, label)
+            } else if (onPreview) {
+              onPreview({
+                conversationId: conversationId ?? '',
+                path,
+                name: label || reference.name,
+              })
+            }
+          }
+          return (
+            <InlineWorkspaceFilePill
+              path={workspacePath}
+              label={labelText}
+              conversationId={conversationId}
+              onPreview={onPreviewWorkspaceFile || onPreview ? handlePreview : undefined}
+            />
+          )
+        },
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  )
+}
+
+export function MarkdownMessage({
+  content,
+  conversationId,
+  client,
+  onPreview,
+  onPreviewWorkspaceFile,
 }: MarkdownMessageProps) {
+  if (!hasResidualToolMarkers(content)) {
+    return (
+      <div className="markdown-message">
+        <MarkdownSegmentView
+          content={content}
+          conversationId={conversationId}
+          onPreview={onPreview}
+          onPreviewWorkspaceFile={onPreviewWorkspaceFile}
+        />
+      </div>
+    )
+  }
+
+  const segments = parseResidualToolBlocks(content)
+  const effectivePreview: WorkspaceFilePreviewHandler | undefined =
+    onPreview ??
+    (onPreviewWorkspaceFile
+      ? ({ path, name }) => {
+          onPreviewWorkspaceFile(path, name)
+        }
+      : undefined)
+
   return (
     <div className="markdown-message">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        urlTransform={(url) => (url.startsWith('workspace://') ? url : defaultUrlTransform(url))}
-        components={{
-          pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
-          img: ({ src, alt }) => {
-            const reference = src ? parseWorkspaceReference(src, conversationId ?? '') : null
-            if (!reference) {
-              return <img src={src} alt={alt ?? ''} />
-            }
-            const inlineUrl = workspaceFileUrl(reference, 'inline')
-            const kind = previewKindFor(reference.path)
-            if (kind === 'audio') {
-              return <audio className="workspace-file-card__media workspace-file-card__audio" controls preload="metadata" src={inlineUrl} aria-label={alt || reference.name || reference.path} />
-            }
-            if (kind === 'video') {
-              return <video className="workspace-file-card__media workspace-file-card__video" controls preload="metadata" src={inlineUrl} aria-label={alt || reference.name || reference.path} />
-            }
-            return <img className="workspace-file-card__media workspace-file-card__image" src={inlineUrl} alt={alt || reference.name || reference.path} loading="lazy" />
-          },
-          a: ({ href, children }) => {
-            const reference = href ? parseWorkspaceReference(href, conversationId ?? '') : null
-            if (!reference) {
-              return <a href={href}>{children}</a>
-            }
-            const workspacePath = reference.path
-            const labelText = extractTextContent(children).trim() || reference.name || workspacePath
-            const handlePreview = (path: string, label?: string) => {
-              if (onPreviewWorkspaceFile) {
-                onPreviewWorkspaceFile(path, label)
-              } else if (onPreview) {
-                onPreview({
-                  conversationId: conversationId ?? '',
-                  path,
-                  name: label || reference.name,
-                })
-              }
-            }
-            return (
-              <InlineWorkspaceFilePill
-                path={workspacePath}
-                label={labelText}
-                conversationId={conversationId}
-                onPreview={onPreviewWorkspaceFile || onPreview ? handlePreview : undefined}
-              />
-            )
-          },
-        }}
-      >
-        {content}
-      </ReactMarkdown>
+      {segments.map((segment, index) => {
+        if (segment.kind === 'activity') {
+          return (
+            <ActivityCard
+              key={segment.group.id || `activity-${index}`}
+              group={segment.group}
+              conversationId={conversationId}
+              client={client}
+              onPreview={effectivePreview}
+            />
+          )
+        }
+        if (!segment.content.trim()) {
+          return null
+        }
+        return (
+          <MarkdownSegmentView
+            key={`markdown-${index}`}
+            content={segment.content}
+            conversationId={conversationId}
+            onPreview={onPreview}
+            onPreviewWorkspaceFile={onPreviewWorkspaceFile}
+          />
+        )
+      })}
     </div>
   )
 }

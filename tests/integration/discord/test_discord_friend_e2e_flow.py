@@ -1102,3 +1102,258 @@ async def test_scenario_3_on_demand_inspect_and_cancel_via_stop_session_button(
         assert wakeup_called is False
     finally:
         await bridge.stop()
+
+
+@pytest.mark.anyio
+async def test_scenario_4_real_runtime_tool_executor_ask_user_and_voice_message_e2e(
+    e2e_env: dict[str, Any],
+) -> None:
+    """Scenario 4:
+    - User sends a Discord voice message (`voice-message.ogg`, `flags=8192`) -> transcribed via
+      `DiscordAudioTranscriber` and delivered to Orin Friend, which starts a Code session.
+    - The Code session runs a real `TurnSession` + `RuntimeToolExecutor` calling `AskUserQuestion`
+      in a background thread, blocking live in `_wait_for_answer()` while `turn.state == "running"`.
+    - `SessionWatchCoordinator.tick()` publishes the interactive Discord Decision Card with Buttons;
+      clicking a button on Discord (`INTERACTION_CREATE`) unblocks `RuntimeToolExecutor` with the
+      chosen option without spawning a second turn.
+    """
+    import asyncio
+    import threading
+    import time
+
+    from agentos.agentic.native_turn import RuntimeToolExecutor
+    from agentos.agentic.session import TurnSession
+    from agentos.discord import DiscordAudioTranscriber
+    from agentos.providers.cli_tools_mcp import ToolCallRequest
+
+    user_id = e2e_env["user_id"]
+    allowed_uid = e2e_env["allowed_discord_uid"]
+    dm_channel_id = e2e_env["dm_channel_id"]
+    project = e2e_env["project"]
+    chat_store: PostgresChatStore = e2e_env["chat_store"]
+    discord_store: PostgresDiscordStore = e2e_env["discord_store"]
+    mock_rest: _MockDiscordRestClient = e2e_env["mock_rest"]
+    build_friend_toolset = e2e_env["build_friend_toolset"]
+
+    voice_url = "https://cdn.discordapp.com/attachments/111222333/444555668/voice-message.ogg"
+    mock_rest.attachments_by_url[voice_url] = (
+        b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04"
+        b"\x00\x00\x00\x00\x11\x22\x33\x44\x01\x13OpusHead\x01\x01\x38\x01"
+        b"\x80\xbb\x00\x00\x00\x00\x00"
+    )
+
+    class _LocalWhisperStub:
+        def is_installed(self) -> bool:
+            return True
+
+        def transcribe_file(self, _path: str | Path, *, language: str | None = None) -> str:
+            _ = language
+            return "Orin, abre uma sessão Code no Educly e pergunta qual banco usar."
+
+    transcriber = DiscordAudioTranscriber(
+        engine=e2e_env["engine"],
+        whisper_engine=_LocalWhisperStub(),  # type: ignore[arg-type]
+        agy_transcriber_factory=lambda: None,  # type: ignore[return-value]
+    )
+
+    started_code_session: dict[str, str] = {}
+    seen_friend_user_prompt: list[str] = []
+
+    async def turn_executor(conversation_id: str, turn_id: str) -> None:
+        conv = chat_store.get(conversation_id, user_id)
+        if conv.get("mode") == "friend":
+            claimed_friend = chat_store.claim(turn_id)
+            assert claimed_friend is not None
+            user_msgs = [m for m in conv["messages"] if m["role"] == "user"]
+            seen_friend_user_prompt.append(str(user_msgs[-1]["content"]))
+
+            friend_toolset: AgentToolset = build_friend_toolset(conversation_id)
+            started = friend_toolset.manage_session(
+                action="start",
+                mode="code",
+                project_id=project.project_id,
+                title="Escolha de Banco Educly",
+                prompt="Configure o banco do módulo conforme escolha do usuário.",
+                provider="anthropic",
+                model_id="claude-sonnet-4-5",
+                permission_mode="full_autonomy",
+            ).payload
+            started_code_session["conversation_id"] = str(started["conversation_id"])
+            started_code_session["turn_id"] = str(started["turn_id"])
+
+            chat_store.delta(
+                claimed_friend,
+                "Ouvi seu áudio! Iniciei a sessão Code no Educly; assim que ela perguntar, mando os botões aqui.",
+            )
+            chat_store.finish(claimed_friend)
+
+    bridge = DiscordBridgeService(
+        discord_store=discord_store,
+        chat_application=e2e_env["chat_app"],
+        uploads=e2e_env["uploads"],
+        workspace_root=e2e_env["workspaces_root"],
+        local_workspaces=e2e_env["local_workspaces"],
+        project_store=e2e_env["project_store"],
+        provider_catalog=e2e_env["provider_catalog"],
+        rest_client_factory=lambda _token: mock_rest,
+        gateway_client_factory=_MockDiscordGatewayClient,
+        turn_executor=turn_executor,
+        audio_transcriber=transcriber,
+    )
+
+    await bridge.reload_user(user_id)
+    try:
+        # Step 1: User sends a Discord Voice Message -> transcribed & starts Code session
+        voice_res = await bridge.handle_message_create(
+            user_id,
+            {
+                "id": "msg_voice_e2e_1",
+                "channel_id": dm_channel_id,
+                "author": {"id": allowed_uid},
+                "flags": 8192,
+                "content": "",
+                "attachments": [
+                    {
+                        "id": "att_voice_e2e_1",
+                        "filename": "voice-message.ogg",
+                        "content_type": "audio/ogg",
+                        "url": voice_url,
+                        "size": len(mock_rest.attachments_by_url[voice_url]),
+                        "duration_secs": 3.8,
+                        "waveform": "AAECAwQF",
+                    }
+                ],
+            },
+        )
+        assert voice_res is not None
+        assert len(seen_friend_user_prompt) == 1
+        assert "Orin, abre uma sessão Code no Educly" in seen_friend_user_prompt[0]
+        assert "Ouvi seu áudio!" in (mock_rest.sent_messages[-1]["content"] or "")
+        assert "conversation_id" in started_code_session
+
+        code_cid = started_code_session["conversation_id"]
+        code_tid = started_code_session["turn_id"]
+        claimed_code = chat_store.claim(code_tid)
+        assert claimed_code is not None
+
+        # Step 2: Run real TurnSession + RuntimeToolExecutor calling AskUserQuestion in worker thread
+        class _ChatStoreRuntimeProxy:
+            def __init__(self, inner: PostgresChatStore) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._inner, name)
+
+            def lifecycle(self, _turn: dict[str, object], _state: str, **_payload: object) -> None:
+                return None
+
+            def effect_started(self, _turn: dict[str, object], *, invocation_ref: str, **_kw: object) -> str:
+                return f"eff-{invocation_ref}"
+
+            def effect_finished(self, _turn: dict[str, object], **_kw: object) -> None:
+                return None
+
+        session = TurnSession(
+            turn=claimed_code,
+            store=_ChatStoreRuntimeProxy(chat_store),
+            workspace_root=e2e_env["workspaces_root"],
+            enable_subagents=False,
+        )
+        runtime = session.build_runtime()
+        executor = RuntimeToolExecutor(
+            runtime=runtime,
+            turn=claimed_code,
+            messages=[],
+            deadline=time.monotonic() + 15.0,
+        )
+
+        question_text = "Qual banco usar no módulo?"
+        tool_result_holder: dict[str, Any] = {}
+
+        def _run_blocking_ask_user() -> None:
+            try:
+                search_res = executor.call_tool(
+                    ToolCallRequest(
+                        "ToolSearch",
+                        {"query": "select:AskUserQuestion"},
+                        {},
+                    )
+                )
+                assert search_res.is_error is False
+                res = executor.call_tool(
+                    ToolCallRequest(
+                        "AskUserQuestion",
+                        {
+                            "questions": [
+                                {
+                                    "header": "Banco",
+                                    "question": question_text,
+                                    "multiSelect": False,
+                                    "options": [
+                                        {"label": "SQLite", "description": "Arquivo local"},
+                                        {"label": "PostgreSQL", "description": "Servidor relacional"},
+                                    ],
+                                }
+                            ]
+                        },
+                        {},
+                    )
+                )
+                tool_result_holder["result"] = res
+            except Exception as exc:  # pragma: no cover
+                tool_result_holder["error"] = exc
+
+        worker_thread = threading.Thread(target=_run_blocking_ask_user, daemon=True)
+        worker_thread.start()
+
+        # Wait until TurnSession records waiting_user_in_turn and WatchCoordinator publishes Buttons
+        decision_card: dict[str, Any] | None = None
+        for _ in range(40):
+            await bridge.watch_coordinator.tick()
+            for msg in mock_rest.sent_messages:
+                embeds = msg.get("embeds") or []
+                if embeds and "❓" in str(embeds[0].get("title") or ""):
+                    decision_card = msg
+                    break
+            if decision_card is not None:
+                break
+            await asyncio.sleep(0.05)
+
+        assert decision_card is not None, "Decision Card com botões não foi publicado no Discord"
+        buttons = decision_card["components"][0]["components"]
+        assert [b["label"] for b in buttons] == ["SQLite", "PostgreSQL"]
+
+        # Worker thread is still blocked waiting for user answer
+        assert worker_thread.is_alive()
+
+        # Step 3: Click "PostgreSQL" on Discord -> unblocks RuntimeToolExecutor in real time!
+        inter_res = await bridge.handle_interaction_create(
+            user_id,
+            {
+                "id": "inter_e2e_real_exec_1",
+                "token": "tok_e2e_real_exec_1",
+                "channel_id": dm_channel_id,
+                "user": {"id": allowed_uid},
+                "message": {"id": decision_card["id"], "embeds": decision_card["embeds"]},
+                "data": {"component_type": 2, "custom_id": buttons[1]["custom_id"]},
+            },
+        )
+        assert inter_res is not None
+        assert inter_res["status"] == "executed"
+
+        await asyncio.to_thread(worker_thread.join, 5.0)
+        assert not worker_thread.is_alive(), "RuntimeToolExecutor permaneceu bloqueado após clique no Discord"
+        assert "error" not in tool_result_holder
+
+        mcp_result = tool_result_holder["result"]
+        assert mcp_result.is_error is False
+        assert "Respostas às perguntas do agente:" in mcp_result.text
+        assert question_text in mcp_result.text
+        assert "Seleção: PostgreSQL" in mcp_result.text
+
+        # Confirm conversation still has only the single Code turn
+        code_conv_after = chat_store.get(code_cid, user_id)
+        assert len(code_conv_after["turns"]) == 1
+    finally:
+        await bridge.stop()
+

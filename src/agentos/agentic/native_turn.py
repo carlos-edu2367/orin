@@ -36,8 +36,10 @@ from agentos.providers.claude_cli.native_loop import (
 )
 from agentos.providers.claude_cli.stream import CliInit, CliUsage
 from agentos.providers.claude_cli.text_protocol import (
+    ResidualToolTextStreamFilter,
     TranscriptState,
     _extract_content_text_and_images,
+    strip_residual_tool_protocol_blocks,
 )
 from agentos.agentic.tool_media import save_tool_images, tool_media_note
 from agentos.agentic.tools.public_names import public_name as _public_tool_name
@@ -1358,6 +1360,7 @@ class _RunnerSink:
             self._is_live_or_friend and runner.turn.get("live_mode") is not False
         )
         self.speak_state = _SpeakState()
+        self._residual_tool_filter = ResidualToolTextStreamFilter()
         self._speak_parser: SpeakStreamParser | None = (
             SpeakStreamParser(live_voice_enabled=self._live_fallback_enabled)
             if self._is_live_or_friend
@@ -1455,7 +1458,30 @@ class _RunnerSink:
         self._emitted_text_in_turn = True
         self._last_text_ended_with_newline = chunk_text.endswith("\n")
 
+    def _flush_residual_tool_filter(self) -> None:
+        tail = self._residual_tool_filter.finish()
+        if not tail:
+            return
+        self._round_text_parts.append(tail)
+        chunk_text = tail
+        if self._speak_parser is not None:
+            chunk_text = self._runner.runtime._emit_speak_events(
+                self._runner.turn,
+                self._speak_parser,
+                self._speak_parser.feed(chunk_text),
+                iteration=self._runner.iteration,
+                state=self.speak_state,
+            )
+        if chunk_text:
+            self._emit_visual_delta(chunk_text)
+
+    def settled_assistant_text(self) -> str:
+        self._flush_residual_tool_filter()
+        return strip_residual_tool_protocol_blocks("".join(self.text_parts)).strip()
+
     def _on_tool_batch_finished(self, results: list[dict[str, object]]) -> None:
+        self._flush_residual_tool_filter()
+        self._residual_tool_filter = ResidualToolTextStreamFilter()
         if self._speak_parser is not None:
             fin_res = self._speak_parser.finish(live_voice_enabled=False)
             fin_tail = self._runner.runtime._emit_speak_events(
@@ -1484,6 +1510,7 @@ class _RunnerSink:
         self._reset_model_heartbeat()
 
     def finish_speak(self) -> None:
+        self._flush_residual_tool_filter()
         if self._speak_parser is None:
             return
         allow_fallback = (
@@ -1504,6 +1531,7 @@ class _RunnerSink:
     def reset_for_new_message(self) -> None:
         self._message_wrote_text = False
         self._current_sink_message_id = None
+        self._residual_tool_filter = ResidualToolTextStreamFilter()
         self._reset_model_heartbeat()
         if self._is_live_or_friend:
             self.speak_state.iteration_had_speak = False
@@ -1550,11 +1578,14 @@ class _RunnerSink:
         self._note_cli_event()
         if not text:
             return
+        filtered = self._residual_tool_filter.feed(text)
+        if not filtered:
+            return
         self.had_visible_output = True
         self._note_cli_event()
-        self._round_text_parts.append(text)
+        self._round_text_parts.append(filtered)
         self.flush_thinking_buffer()
-        chunk_text = text
+        chunk_text = filtered
         if self._speak_parser is not None:
             chunk_text = self._runner.runtime._emit_speak_events(
                 self._runner.turn,
@@ -1943,7 +1974,8 @@ class NativeTurnRunner:
             )
             if total_prior_chars > prior_char_budget:
                 tool_use_span_re = re.compile(
-                    r"\n?\[Tool Use:[^\]]*\]\n.*?\n\[/Tool Use\]", re.DOTALL
+                    r"\n?(?:\[|&#91;)\s*Tool Use(?::|\b)[^\]]*\]\n.*?\n(?:\[|&#91;)\s*/Tool Use\s*\]",
+                    re.DOTALL | re.IGNORECASE,
                 )
                 kept_prior_blocks: list[dict[str, Any]] = []
                 omitted_tool_blocks = 0
@@ -1953,24 +1985,29 @@ class NativeTurnRunner:
                     b = prior_blocks[idx_p]
                     b_text = str(b.get("text") or "")
                     if total_prior_chars > prior_char_budget:
-                        if b_text.startswith("[Tool Result"):
+                        if b_text.startswith(("[Tool Result", "&#91;Tool Result")):
                             total_prior_chars -= len(b_text)
                             omitted_tool_blocks += 1
                             idx_p += 1
                             continue
-                        if "[Tool Use:" in b_text and "[/Tool Use]" in b_text:
+                        if (
+                            ("[Tool Use" in b_text or "&#91;Tool Use" in b_text)
+                            and ("[/Tool Use]" in b_text or "&#91;/Tool Use]" in b_text)
+                        ):
                             stripped = tool_use_span_re.sub("", b_text).strip()
                             removed_chars = len(b_text) - len(stripped)
                             total_prior_chars -= removed_chars
                             omitted_tool_blocks += 1
-                            if stripped and stripped != "[Assistant]":
+                            if stripped and stripped not in {"[Assistant]", "&#91;Assistant]"}:
                                 kept_prior_blocks.append({**b, "text": stripped})
                             else:
                                 total_prior_chars -= len(stripped)
                             # Always evict immediately following [Tool Result] blocks paired with this tool use
                             while (
                                 idx_p + 1 < len(prior_blocks)
-                                and str(prior_blocks[idx_p + 1].get("text") or "").startswith("[Tool Result")
+                                and str(prior_blocks[idx_p + 1].get("text") or "").startswith(
+                                    ("[Tool Result", "&#91;Tool Result")
+                                )
                             ):
                                 idx_p += 1
                                 tr_text = str(prior_blocks[idx_p].get("text") or "")
@@ -2523,7 +2560,7 @@ class NativeTurnRunner:
                         if supports_session_resume and resume_session_id:
                             user_content = [{"type": "text", "text": VERIFY_REQUIRED_MESSAGE}]
                         else:
-                            assistant_text = "".join(sink.text_parts).strip()
+                            assistant_text = sink.settled_assistant_text()
                             if assistant_text:
                                 self.messages.append({"role": "assistant", "content": assistant_text})
                             self.messages.append({"role": "user", "content": VERIFY_REQUIRED_MESSAGE})
@@ -2564,7 +2601,7 @@ class NativeTurnRunner:
                         if supports_session_resume and resume_session_id:
                             user_content = [{"type": "text", "text": hook_msg}]
                         else:
-                            assistant_text = "".join(sink.text_parts).strip()
+                            assistant_text = sink.settled_assistant_text()
                             if assistant_text:
                                 self.messages.append({"role": "assistant", "content": assistant_text})
                             self.messages.append({"role": "user", "content": hook_msg})
@@ -2657,7 +2694,7 @@ class NativeTurnRunner:
                             if supports_session_resume and resume_session_id:
                                 user_content = [{"type": "text", "text": bg_msg}]
                             else:
-                                assistant_text = "".join(sink.text_parts).strip()
+                                assistant_text = sink.settled_assistant_text()
                                 if assistant_text:
                                     self.messages.append(
                                         {
@@ -2902,7 +2939,7 @@ class NativeTurnRunner:
             if not available or internal in available
         ]
         prefix = "mcp_orin_" if str(getattr(adapter, "name", "")) == "antigravity" else "mcp__orin__"
-        assistant_text = "".join(sink.text_parts).strip()
+        assistant_text = sink.settled_assistant_text()
         if assistant_text:
             self.messages.append({"role": "assistant", "content": assistant_text})
         self.messages.append(
@@ -2983,7 +3020,7 @@ class NativeTurnRunner:
                 return False, self.runtime._cancel(
                     self.turn, process_count, executor.action_count
                 )
-            assistant_text = "".join(sink.text_parts).strip()
+            assistant_text = sink.settled_assistant_text()
             if assistant_text:
                 self.messages.append(
                     {"role": "assistant", "content": assistant_text}

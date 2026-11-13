@@ -993,6 +993,73 @@ class PostgresDiscordStore:
             )
         return int(result.rowcount or 0)
 
+    def list_bindings_for_message(
+        self,
+        user_id: str,
+        discord_message_id: str,
+    ) -> list[DiscordInteractionBinding]:
+        clean_uid = _require_non_empty_str(user_id, "user_id")
+        clean_msg_id = normalize_optional_snowflake_id(
+            discord_message_id, field_name="discord_message_id"
+        )
+        if clean_msg_id is None:
+            return []
+        with self._engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(discord_interaction_bindings)
+                    .where(
+                        discord_interaction_bindings.c.user_id == clean_uid,
+                        discord_interaction_bindings.c.discord_message_id == clean_msg_id,
+                    )
+                    .order_by(
+                        discord_interaction_bindings.c.created_at.asc(),
+                        discord_interaction_bindings.c.binding_id.asc(),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [self._row_to_binding(row) for row in rows]
+
+    def update_binding_payload(
+        self,
+        binding_id: str,
+        *,
+        user_id: str,
+        payload: Mapping[str, Any],
+    ) -> DiscordInteractionBinding | None:
+        if not isinstance(binding_id, str) or not binding_id.strip():
+            return None
+        clean_id = binding_id.strip()
+        if len(clean_id) > 32:
+            return None
+        clean_uid = _require_non_empty_str(user_id, "user_id")
+        if not isinstance(payload, Mapping):
+            raise ValueError("payload must be a mapping")
+        payload_json = json.dumps(dict(payload), ensure_ascii=False, sort_keys=True)
+        with self._engine.begin() as conn:
+            result = conn.execute(
+                update(discord_interaction_bindings)
+                .where(
+                    discord_interaction_bindings.c.binding_id == clean_id,
+                    discord_interaction_bindings.c.user_id == clean_uid,
+                )
+                .values(payload_json=payload_json)
+            )
+            if result.rowcount != 1:
+                return None
+            row = (
+                conn.execute(
+                    select(discord_interaction_bindings).where(
+                        discord_interaction_bindings.c.binding_id == clean_id
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return self._row_to_binding(row) if row is not None else None
+
     def purge_expired_bindings(self, now: datetime | None = None) -> int:
         effective_now = _as_aware(now) or _now()
         with self._engine.begin() as conn:

@@ -286,6 +286,69 @@ class LocalWhisperEngine:
                 "O Whisper local falhou ao transcrever o áudio. Veja os logs do backend.",
             ) from exc
 
+    def transcribe_file(
+        self,
+        audio_path: str | Any,
+        *,
+        language: str | None = None,
+        model_id: str = "",
+        prompt_hint: str | None = None,
+    ) -> str:
+        """Transcribe an audio container file (`.ogg`, `.opus`, `.mp3`, `.m4a`, `.wav`, `.flac`, `.aac`, `.webm`)."""
+        from pathlib import Path as _Path
+        from agentos.live_voice.local_runtime import LocalEngineError
+
+        resolved = str(_Path(str(audio_path)).resolve())
+        lang_clean = str(language or "").strip()
+        lang_code = None if not lang_clean or lang_clean.lower() == "auto" else lang_clean.split("-")[0]
+
+        runtime = self._rt()
+        if runtime.is_installed("whisper"):
+            try:
+                response = runtime.call(
+                    "whisper",
+                    {
+                        "op": "transcribe",
+                        "model": model_id,
+                        "language": lang_clean or "auto",
+                        "audio_path": resolved,
+                        "prompt_hint": prompt_hint or "",
+                    },
+                )
+            except LocalEngineError as exc:
+                raise VoiceEngineError("local_stt_failed", exc.message) from exc
+            return str(response.get("text") or "").strip()
+        if not self.importable():
+            raise VoiceEngineError(
+                "local_stt_unavailable",
+                "O Whisper local ainda não está instalado nesta máquina.",
+                hint="install:whisper",
+            )
+        try:
+            model = self._load_in_process(model_id)
+            segments, _info = model.transcribe(
+                resolved,
+                language=lang_code,
+                beam_size=1,
+                vad_filter=True,
+                condition_on_previous_text=False,
+                initial_prompt=prompt_hint or None,
+            )
+            valid_segments = [
+                segment.text.strip()
+                for segment in segments
+                if (getattr(segment, "no_speech_prob", None) or 0.0) <= 0.6
+                and (getattr(segment, "avg_logprob", None) or 0.0) >= -1.0
+                and getattr(segment, "text", "").strip()
+            ]
+            return " ".join(valid_segments).strip()
+        except Exception as exc:
+            _LOGGER.warning("local whisper file transcription failed", exc_info=True)
+            raise VoiceEngineError(
+                "local_stt_failed",
+                "O Whisper local falhou ao transcrever o arquivo de áudio.",
+            ) from exc
+
 
 def synthesize_local(
     runtime: Any,
@@ -359,6 +422,62 @@ def transcribe_openai_compatible(
         raise VoiceEngineError("cloud_stt_failed", f"Não consegui falar com {credential.provider}: {exc.__class__.__name__}.") from exc
     if response.status_code >= 400:
         raise VoiceEngineError("cloud_stt_failed", f"{credential.provider} recusou a transcrição: {_cloud_error_message(response)}")
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip()
+    return str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
+
+
+def transcribe_audio_file_openai_compatible(
+    credential: CloudCredential,
+    audio_bytes: bytes,
+    *,
+    filename: str = "audio.ogg",
+    content_type: str = "audio/ogg",
+    language: str | None = None,
+    model_id: str = "gpt-4o-mini-transcribe",
+    prompt_hint: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    """Transcribe a raw audio container file via an OpenAI-compatible `/audio/transcriptions` endpoint."""
+    data: dict[str, str] = {
+        "model": model_id,
+        "response_format": "json",
+    }
+    lang_clean = str(language or "").strip()
+    if lang_clean and lang_clean.lower() != "auto":
+        data["language"] = lang_clean.split("-")[0]
+    if prompt_hint:
+        data["prompt"] = prompt_hint[:400]
+
+    # OpenAI/Groq multipart validators accept `.ogg` for Ogg/Opus voice messages
+    safe_name = str(filename or "audio.ogg").strip() or "audio.ogg"
+    lower_name = safe_name.lower()
+    if lower_name.endswith((".opus", ".oga")):
+        safe_name = safe_name.rsplit(".", 1)[0] + ".ogg"
+        content_type = "audio/ogg"
+
+    url = f"{credential.base_url.rstrip('/')}/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {credential.api_key}"}
+    files = {"file": (safe_name, audio_bytes, content_type or "application/octet-stream")}
+    try:
+        if transport is not None:
+            with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
+                response = client.post(url, headers=headers, data=data, files=files)
+        else:
+            client = _get_http_client(CLOUD_TIMEOUT_SECONDS)
+            response = client.post(url, headers=headers, data=data, files=files)
+    except httpx.HTTPError as exc:
+        raise VoiceEngineError(
+            "cloud_stt_failed",
+            f"Não consegui falar com {credential.provider}: {exc.__class__.__name__}.",
+        ) from exc
+    if response.status_code >= 400:
+        raise VoiceEngineError(
+            "cloud_stt_failed",
+            f"{credential.provider} recusou a transcrição: {_cloud_error_message(response)}",
+        )
     try:
         payload = response.json()
     except ValueError:
@@ -665,6 +784,59 @@ def transcribe_openrouter(
     return str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
 
 
+def transcribe_audio_file_openrouter(
+    credential: CloudCredential,
+    audio_bytes: bytes,
+    *,
+    audio_format: str = "ogg",
+    language: str | None = None,
+    model_id: str = "openai/whisper-large-v3-turbo",
+    prompt_hint: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> str:
+    fmt = str(audio_format or "ogg").strip().lower().lstrip(".")
+    if fmt in {"opus", "oga"}:
+        fmt = "ogg"
+    elif fmt in {"mpga", "mpeg"}:
+        fmt = "mp3"
+    body: dict[str, Any] = {
+        "model": model_id,
+        "input_audio": {
+            "data": base64.b64encode(audio_bytes).decode("ascii"),
+            "format": fmt or "ogg",
+        },
+    }
+    lang_clean = str(language or "").strip()
+    if lang_clean and lang_clean.lower() != "auto":
+        body["language"] = lang_clean.split("-")[0]
+    if prompt_hint:
+        body["prompt"] = prompt_hint[:400]
+    url = f"{credential.base_url.rstrip('/')}/audio/transcriptions"
+    headers = _openrouter_headers(credential)
+    try:
+        if transport is not None:
+            with httpx.Client(timeout=CLOUD_TIMEOUT_SECONDS, transport=transport) as client:
+                response = client.post(url, headers=headers, json=body)
+        else:
+            client = _get_http_client(CLOUD_TIMEOUT_SECONDS)
+            response = client.post(url, headers=headers, json=body)
+    except httpx.HTTPError as exc:
+        raise VoiceEngineError(
+            "cloud_stt_failed",
+            f"Não consegui falar com o OpenRouter: {exc.__class__.__name__}.",
+        ) from exc
+    if response.status_code >= 400:
+        raise VoiceEngineError(
+            "cloud_stt_failed",
+            f"O OpenRouter recusou a transcrição: {_cloud_error_message(response)}",
+        )
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    return str(payload.get("text") or "").strip() if isinstance(payload, dict) else ""
+
+
 __all__ = [
     "CLOUD_TIMEOUT_SECONDS",
     "CloudCredential",
@@ -685,6 +857,8 @@ __all__ = [
     "synthesize_local",
     "synthesize_openai_speech",
     "synthesize_openrouter_speech",
+    "transcribe_audio_file_openai_compatible",
+    "transcribe_audio_file_openrouter",
     "transcribe_openrouter",
     "transcribe_openai_compatible",
 ]

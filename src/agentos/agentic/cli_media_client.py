@@ -15,7 +15,11 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
-from agentos.agentic.media_client import MAX_MEDIA_DOWNLOAD_BYTES, MediaGenerationError
+from agentos.agentic.media_client import (
+    MAX_MEDIA_DOWNLOAD_BYTES,
+    MediaGenerationError,
+    normalize_reference_image,
+)
 from agentos.providers.antigravity_cli.command import (
     _is_symlink_or_junction,
     _write_owner_only_file,
@@ -68,20 +72,38 @@ _AGY_IMAGE_AGENT_MD: str = (
     "Do not call any other tool.\n"
 )
 
+_AGY_IMAGE_WITH_REF_AGENT_MD: str = (
+    "---\n"
+    "name: orin\n"
+    "description: Orin image generator with visual reference\n"
+    "mainAgent: true\n"
+    "excludeDefaultComponents: true\n"
+    "inheritMcp: false\n"
+    "tools: [read_file, generate_image]\n"
+    "---\n"
+    "# Instructions\n"
+    "First call `read_file` on the reference image path provided in the prompt to inspect the visual reference. "
+    "Then call `generate_image` once to generate the requested image following the visual reference closely "
+    "(preserving character identity, style, colors, and composition as requested), and reply briefly. "
+    "Do not call any other tool.\n"
+)
+
 
 def detect_image_extension(data: bytes, *, fallback_suffix: str = "") -> str:
-    """Detect real image extension (png, jpg, webp) from magic bytes."""
+    """Detect real image extension (png, jpg, webp, gif) from magic bytes."""
     if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
         return "png"
     if len(data) >= 3 and data.startswith(b"\xff\xd8\xff"):
         return "jpg"
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "webp"
+    if len(data) >= 6 and data.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
 
     norm_suffix = fallback_suffix.strip().lower().lstrip(".")
     if norm_suffix == "jpeg":
         norm_suffix = "jpg"
-    if norm_suffix in {"png", "jpg", "webp"} and data:
+    if norm_suffix in {"png", "jpg", "webp", "gif"} and data:
         return norm_suffix
     raise MediaGenerationError(
         "Formato de imagem gerado inválido ou não reconhecido (esperado PNG, JPG ou WEBP)."
@@ -95,7 +117,46 @@ def _has_image_magic(data: bytes) -> bool:
         return True
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return True
+    if len(data) >= 6 and data.startswith((b"GIF87a", b"GIF89a")):
+        return True
     return False
+
+
+def _write_owner_only_bytes(path: Path, data: bytes) -> Path:
+    if _is_symlink_or_junction(path):
+        raise MediaGenerationError(f"Recusando escrita em symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_TRUNC
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        try:
+            os.chmod(path, 0o600)
+        except Exception:
+            pass
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _stage_reference_image(workdir: Path, reference_image: Any | None) -> Path | None:
+    ref = normalize_reference_image(reference_image)
+    if ref is None:
+        return None
+    ext = detect_image_extension(ref.data)
+    staged_path = workdir / f"reference.{ext}"
+    return _write_owner_only_bytes(staged_path, ref.data)
 
 
 def _format_size_aspect_hint(size: str) -> str:
@@ -114,7 +175,13 @@ def _format_size_aspect_hint(size: str) -> str:
     return f"{width}x{height} (proporção retrato / portrait aspect ratio)"
 
 
-def _build_cli_image_prompt(prompt: str, size: str) -> str:
+def _build_cli_image_prompt(
+    prompt: str,
+    size: str,
+    *,
+    has_reference_image: bool = False,
+    reference_image_path: str | None = None,
+) -> str:
     size_hint = _format_size_aspect_hint(size)
     sanitized_prompt = (
         str(prompt or "")
@@ -124,6 +191,19 @@ def _build_cli_image_prompt(prompt: str, size: str) -> str:
         .replace("\n", " ")
         .strip()
     )
+    if reference_image_path:
+        return (
+            f"First call `read_file` on the reference image at `{reference_image_path}` to inspect it. "
+            f"Use that reference image to preserve visual style, character identity, colors, and composition as requested, "
+            f"and generate one image with your image generation tool "
+            f"(size / aspect ratio: {size_hint}): {sanitized_prompt}"
+        )
+    if has_reference_image:
+        return (
+            f"Use the attached reference image to preserve visual style, character identity, colors, and composition "
+            f"as requested, and generate one image with your image generation tool "
+            f"(size / aspect ratio: {size_hint}): {sanitized_prompt}"
+        )
     return (
         f"Generate one image with your image generation tool "
         f"(size / aspect ratio: {size_hint}): {sanitized_prompt}"
@@ -325,6 +405,7 @@ class CliImageGenerationClient:
         model: str = "",
         prompt: str,
         size: str = "1024x1024",
+        reference_image: Any | None = None,
     ) -> tuple[bytes, str]:
         _ = model  # Real CLI model comes from configuration, not the virtual catalog id.
         clean_prompt = str(prompt or "").strip()
@@ -335,16 +416,19 @@ class CliImageGenerationClient:
         prefix = "orin-codex-img-" if self.provider == "openai-codex" else "orin-agy-img-"
         temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
         try:
+            staged_ref_path = _stage_reference_image(temp_dir, reference_image)
             if self.provider == "openai-codex":
                 return self._generate_with_codex(
                     workdir=temp_dir,
                     prompt=clean_prompt,
                     size=clean_size,
+                    staged_ref_path=staged_ref_path,
                 )
             return self._generate_with_antigravity(
                 workdir=temp_dir,
                 prompt=clean_prompt,
                 size=clean_size,
+                staged_ref_path=staged_ref_path,
             )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -502,6 +586,7 @@ class CliImageGenerationClient:
         workdir: Path,
         prompt: str,
         size: str,
+        staged_ref_path: Path | None = None,
     ) -> tuple[bytes, str]:
         binary = self._binary or resolve_codex_binary(self._env)
         if not binary:
@@ -545,10 +630,16 @@ class CliImageGenerationClient:
             'sandbox_mode="read-only"',
             "-c",
             'approval_policy="never"',
-            "-",
         ]
+        if staged_ref_path is not None:
+            cmd.extend(["-i", str(staged_ref_path)])
+        cmd.append("-")
 
-        full_prompt = _build_cli_image_prompt(prompt, size)
+        full_prompt = _build_cli_image_prompt(
+            prompt,
+            size,
+            has_reference_image=staged_ref_path is not None,
+        )
         stdin_bytes = encode_codex_user_turn(full_prompt)
 
         thread_id: str | None = None
@@ -632,6 +723,7 @@ class CliImageGenerationClient:
         workdir: Path,
         prompt: str,
         size: str,
+        staged_ref_path: Path | None = None,
     ) -> tuple[bytes, str]:
         binary = self._binary or resolve_antigravity_binary(self._env)
         if not binary:
@@ -652,12 +744,35 @@ class CliImageGenerationClient:
         agent_md_path = agents_subdir / "orin.md"
         settings_file = agents_dir / "orin_settings.json"
 
-        _write_owner_only_file(agent_md_path, _AGY_IMAGE_AGENT_MD)
+        _write_owner_only_file(
+            agent_md_path,
+            _AGY_IMAGE_WITH_REF_AGENT_MD if staged_ref_path is not None else _AGY_IMAGE_AGENT_MD,
+        )
 
         try:
             resolved_workdir = str(workdir.resolve())
         except OSError:
             resolved_workdir = str(workdir.absolute())
+
+        if staged_ref_path is not None:
+            allow_rules = ["read_file(*)"]
+            deny_rules = [
+                "command(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "unsandboxed(*)",
+            ]
+        else:
+            allow_rules = []
+            deny_rules = [
+                "command(*)",
+                "read_file(*)",
+                "write_file(*)",
+                "read_url(*)",
+                "execute_url(*)",
+                "unsandboxed(*)",
+            ]
 
         settings_payload = {
             "trustedWorkspaces": [resolved_workdir],
@@ -665,15 +780,8 @@ class CliImageGenerationClient:
             "enableTerminalSandbox": True,
             "disableSlashCommands": True,
             "permissions": {
-                "allow": [],
-                "deny": [
-                    "command(*)",
-                    "read_file(*)",
-                    "write_file(*)",
-                    "read_url(*)",
-                    "execute_url(*)",
-                    "unsandboxed(*)",
-                ],
+                "allow": allow_rules,
+                "deny": deny_rules,
             },
         }
         _write_owner_only_file(
@@ -688,7 +796,19 @@ class CliImageGenerationClient:
                 if sys_key not in isolated_env and sys_key in os.environ:
                     isolated_env[sys_key] = os.environ[sys_key]
 
-        full_prompt = _build_cli_image_prompt(prompt, size)
+        ref_posix: str | None = None
+        if staged_ref_path is not None:
+            try:
+                ref_posix = staged_ref_path.resolve().as_posix()
+            except OSError:
+                ref_posix = staged_ref_path.absolute().as_posix()
+
+        full_prompt = _build_cli_image_prompt(
+            prompt,
+            size,
+            has_reference_image=staged_ref_path is not None,
+            reference_image_path=ref_posix,
+        )
         cmd: list[str] = [
             str(binary),
             "--agent",
@@ -705,6 +825,11 @@ class CliImageGenerationClient:
 
         conversation_id: str | None = None
         stream_error: str | None = None
+        allowed_tools = (
+            {"generate_image", "read_file"}
+            if staged_ref_path is not None
+            else {"generate_image"}
+        )
 
         def _handle_line(raw_line: str, proc: Any) -> None:
             nonlocal conversation_id, stream_error
@@ -736,7 +861,7 @@ class CliImageGenerationClient:
                     has_tool_key = "tool_name" in step_obj and step_obj.get("tool_name") is not None
                     raw_tool = str(step_obj.get("tool_name") or "").strip()
                     if has_tool_key or step_type == "tool":
-                        if raw_tool != "generate_image":
+                        if raw_tool not in allowed_tools:
                             kill_process_tree(proc)
                             raise MediaGenerationError(
                                 f"Execução abortada no Antigravity CLI: ferramenta não permitida ({raw_tool or 'desconhecida'})."

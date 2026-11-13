@@ -830,13 +830,13 @@ class ProjectTools:
                                 conversation_activity_events.c.conversation_id == clean_cid,
                                 conversation_activity_events.c.user_id == self._project_user_id,
                             )
-                            .order_by(conversation_activity_events.c.id.asc())
-                            .limit(300)
+                            .order_by(conversation_activity_events.c.id.desc())
+                            .limit(400)
                         )
                         .mappings()
                         .all()
                     )
-                    activities = [dict(r) for r in rows]
+                    activities = [dict(r) for r in reversed(rows)]
             except Exception:
                 pass
 
@@ -844,6 +844,9 @@ class ProjectTools:
         files_modified: list[str] = []
         recent_events: list[dict[str, Any]] = []
         latest_questions: list[dict[str, Any]] | None = None
+        open_in_turn_questions: list[dict[str, Any]] | None = None
+        in_turn_waiting = False
+        in_turn_answered = False
         latest_plan_approval: dict[str, Any] | None = None
 
         last_turn_id = str(last_turn.get("turn_id") or "").strip() if last_turn else ""
@@ -852,8 +855,15 @@ class ProjectTools:
                 continue
             evt_type = str(act.get("event_type") or "")
             summary = str(act.get("summary") or "")
-            payload = act.get("payload") if isinstance(act.get("payload"), Mapping) else {}
+            raw_payload = act.get("payload")
+            if isinstance(raw_payload, str):
+                try:
+                    raw_payload = json.loads(raw_payload)
+                except Exception:
+                    raw_payload = {}
+            payload = raw_payload if isinstance(raw_payload, Mapping) else {}
             tool_name = str(payload.get("tool_name") or payload.get("name") or "")
+            is_subagent = bool(act.get("parent_agent_id") or payload.get("parent_agent_id"))
 
             raw_todos = payload.get("todos")
             if isinstance(raw_todos, list):
@@ -875,13 +885,46 @@ class ProjectTools:
             act_turn_id = str(act.get("turn_id") or "").strip()
             matches_last_turn = not last_turn_id or not act_turn_id or act_turn_id == last_turn_id
 
-            if matches_last_turn and isinstance(payload.get("questions"), list) and payload.get("questions"):
-                latest_questions = [dict(q) for q in payload["questions"] if isinstance(q, Mapping)]
+            if matches_last_turn and not is_subagent:
+                payload_state = str(payload.get("state") or "").strip().lower()
+                has_questions = isinstance(payload.get("questions"), list) and bool(payload.get("questions"))
+                if has_questions:
+                    qs = [dict(q) for q in payload["questions"] if isinstance(q, Mapping)]
+                    if qs:
+                        latest_questions = qs
+                        if (
+                            bool(payload.get("wait_for_user"))
+                            or tool_name in {"ask_user", "AskUserQuestion"}
+                            or str(payload.get("tool_kind") or "") == "user_input"
+                        ):
+                            open_in_turn_questions = qs
+                            in_turn_answered = False
 
-            if matches_last_turn and (
-                payload.get("plan_approval") or payload.get("code_approval") or payload.get("plan_ready")
-            ):
-                latest_plan_approval = {
+                if evt_type == "turn.waiting_user" and (
+                    bool(payload.get("in_turn")) or payload_state == "waiting_user_in_turn"
+                ):
+                    if not in_turn_answered:
+                        in_turn_waiting = True
+                        if open_in_turn_questions is None and latest_questions:
+                            open_in_turn_questions = latest_questions
+                elif payload_state == "queued_input" or evt_type == "turn.queued_input":
+                    in_turn_answered = True
+                    in_turn_waiting = False
+                    open_in_turn_questions = None
+                elif evt_type in {"turn.completed", "turn.failed", "turn.cancelled"} or (
+                    in_turn_waiting
+                    and not has_questions
+                    and (
+                        evt_type == "tool.started"
+                        or (evt_type == "tool.finished" and tool_name not in {"ask_user", "AskUserQuestion"})
+                        or payload_state in {"running", "completed", "failed", "cancelled"}
+                    )
+                ):
+                    in_turn_waiting = False
+                    open_in_turn_questions = None
+
+                if payload.get("plan_approval") or payload.get("code_approval") or payload.get("plan_ready"):
+                    latest_plan_approval = {
                     "plan_path": payload.get("plan_path"),
                     "plan_summary": payload.get("plan_summary"),
                     "plan_content": payload.get("plan_content"),
@@ -918,7 +961,9 @@ class ProjectTools:
 
         conv_state = str(conv.get("state") or (last_turn.get("state") if last_turn else "idle") or "idle")
         turn_state = str(last_turn.get("state") or conv_state) if last_turn else conv_state
+        is_turn_live = turn_state in {"running", "starting", "queued"}
         is_waiting = conv_state == "waiting_user" or turn_state == "waiting_user"
+        is_in_turn_ask = is_turn_live and (in_turn_waiting or open_in_turn_questions is not None)
 
         pending_block: dict[str, Any] | None = None
         if clean_permissions:
@@ -931,6 +976,12 @@ class ProjectTools:
             pending_block = {
                 "kind": "plan_approval",
                 **latest_plan_approval,
+            }
+        elif is_in_turn_ask and (open_in_turn_questions or latest_questions):
+            pending_block = {
+                "kind": "ask_user",
+                "questions": open_in_turn_questions or latest_questions,
+                "in_turn": True,
             }
         elif is_waiting and latest_questions:
             pending_block = {
@@ -1564,6 +1615,71 @@ class ProjectTools:
             effective_perm = str(
                 conv.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions")
             )
+            turns_list = [t for t in (conv.get("turns") or ()) if isinstance(t, Mapping)]
+            active_turn = turns_list[-1] if turns_list else None
+            active_turn_state = str(
+                (active_turn.get("state") if active_turn else conv.get("state")) or ""
+            ).strip().lower()
+            is_live = active_turn_state in {"running", "starting", "queued"}
+
+            if is_live and hasattr(self._chat_store, "enqueue_input"):
+                ans_header = "Respostas às perguntas do agente:"
+                if reply_text.lstrip().startswith(ans_header):
+                    live_reply = reply_text
+                else:
+                    q_label = "Pergunta"
+                    try:
+                        insp = self._extract_session_inspection(clean_cid, conv, message_limit=2)
+                        pb = insp.get("pending_block") if isinstance(insp, Mapping) else None
+                        if isinstance(pb, Mapping) and isinstance(pb.get("questions"), list) and pb["questions"]:
+                            first_q = pb["questions"][0]
+                            if isinstance(first_q, Mapping) and first_q.get("question"):
+                                q_label = str(first_q["question"]).strip()
+                    except Exception:
+                        pass
+                    live_reply = f"{ans_header}\n\n{q_label}\nSeleção: {reply_text}"
+
+                try:
+                    queued_item = self._chat_store.enqueue_input(
+                        user_id=self._project_user_id,
+                        conversation_id=clean_cid,
+                        content=live_reply,
+                        idempotency_key=f"sess_ans_{uuid4().hex[:16]}",
+                    )
+                except Exception as error:
+                    raise AgentToolError(f"Failed to enqueue answer to live session '{clean_cid}': {error}") from error
+
+                registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
+                watcher = registry.get(clean_cid, user_id=self._project_user_id)
+                if watcher is not None:
+                    watcher.pending_question = None
+
+                live_turn_id = str((active_turn or {}).get("turn_id") or "")
+                if live_turn_id:
+                    self._notify_session_watch(
+                        target_conversation_id=clean_cid,
+                        target_turn_id=live_turn_id,
+                        origin=origin,
+                    )
+                payload = {
+                    "action": "respond",
+                    "response_kind": "ask_user",
+                    "queued_in_turn": True,
+                    "queue_id": queued_item.get("queue_id") if isinstance(queued_item, Mapping) else None,
+                    "conversation_id": clean_cid,
+                    "code_conversation_id": clean_cid,
+                    "turn_id": live_turn_id,
+                    "state": active_turn_state,
+                    "wait_for_user": False,
+                    "tool_kind": "session_management",
+                }
+                return ToolOutcome(
+                    "succeeded",
+                    f"Resposta enfileirada para o turno ativo da sessão {clean_cid}",
+                    json.dumps(payload, ensure_ascii=False),
+                    payload,
+                )
+
             try:
                 created = self._chat_store.create(
                     user_id=self._project_user_id,

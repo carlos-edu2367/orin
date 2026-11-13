@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from ipaddress import ip_address
+from pathlib import Path
 import re
 import socket
 import time
@@ -13,6 +15,7 @@ import httpx
 
 
 MAX_MEDIA_DOWNLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+MAX_REFERENCE_IMAGE_BYTES = 25 * 1024 * 1024  # 25 MB
 IMAGE_AUDIO_TIMEOUT_SECONDS = 120.0
 VIDEO_TIMEOUT_SECONDS = 300.0
 
@@ -21,6 +24,87 @@ _DATA_URL_RE = re.compile(r"^data:(?P<mime>[a-zA-Z0-9.+/-]+);base64,(?P<data>.+)
 
 class MediaGenerationError(RuntimeError):
     """Sanitized error raised when a media generation request fails."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceImageInput:
+    """Validated reference image payload for image-to-image / visual reference generation."""
+
+    data: bytes
+    mime_type: str = "image/png"
+    filename: str = "reference.png"
+    path: str | None = None
+
+
+def detect_reference_image_mime(data: bytes) -> tuple[str, str]:
+    """Detect (mime_type, ext) from image magic bytes or raise MediaGenerationError."""
+    if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if len(data) >= 3 and data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    if len(data) >= 6 and data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif", "gif"
+    raise MediaGenerationError(
+        "O arquivo de referência deve ser uma imagem válida (PNG, JPG, WEBP ou GIF)."
+    )
+
+
+def normalize_reference_image(reference_image: Any | None) -> ReferenceImageInput | None:
+    """Coerce a ReferenceImageInput, mapping, or raw bytes into a validated ReferenceImageInput."""
+    if reference_image is None:
+        return None
+    raw_data: Any = None
+    raw_mime: str | None = None
+    raw_filename: str | None = None
+    raw_path: str | None = None
+
+    if isinstance(reference_image, ReferenceImageInput):
+        raw_data = reference_image.data
+        raw_mime = reference_image.mime_type
+        raw_filename = reference_image.filename
+        raw_path = reference_image.path
+    elif isinstance(reference_image, (bytes, bytearray)):
+        raw_data = bytes(reference_image)
+    elif isinstance(reference_image, Mapping):
+        raw_data = reference_image.get("data")
+        if raw_data is None:
+            raw_data = reference_image.get("bytes")
+        raw_mime = str(reference_image.get("mime_type") or "").strip() or None
+        raw_filename = str(reference_image.get("filename") or "").strip() or None
+        raw_path = str(reference_image.get("path") or "").strip() or None
+    elif hasattr(reference_image, "data"):
+        raw_data = getattr(reference_image, "data", None)
+        raw_mime = str(getattr(reference_image, "mime_type", "") or "").strip() or None
+        raw_filename = str(getattr(reference_image, "filename", "") or "").strip() or None
+        raw_path = str(getattr(reference_image, "path", "") or "").strip() or None
+    else:
+        raise MediaGenerationError("Formato de imagem de referência inválido.")
+
+    if raw_data is None and raw_path:
+        try:
+            raw_data = Path(raw_path).read_bytes()
+        except OSError as exc:
+            raise MediaGenerationError("Não foi possível ler a imagem de referência.") from exc
+
+    if not isinstance(raw_data, (bytes, bytearray)) or not raw_data:
+        raise MediaGenerationError("O arquivo de imagem de referência está vazio ou inválido.")
+    data_bytes = bytes(raw_data)
+    if len(data_bytes) > MAX_REFERENCE_IMAGE_BYTES:
+        raise MediaGenerationError("A imagem de referência excede o limite máximo de 25 MB.")
+
+    detected_mime, detected_ext = detect_reference_image_mime(data_bytes)
+    mime_type = raw_mime if (raw_mime and raw_mime.startswith("image/")) else detected_mime
+    filename = raw_filename or (Path(raw_path).name if raw_path else f"reference.{detected_ext}")
+    if "." not in filename:
+        filename = f"{filename}.{detected_ext}"
+    return ReferenceImageInput(
+        data=data_bytes,
+        mime_type=mime_type,
+        filename=filename,
+        path=raw_path,
+    )
 
 
 def _is_safe_public_url(url: str) -> bool:
@@ -160,8 +244,10 @@ class MediaGenerationClient:
                     raise
                 current_key = next_key
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+    def _headers(self, *, json_content: bool = True) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if json_content:
+            headers["Content-Type"] = "application/json"
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
@@ -254,9 +340,15 @@ class MediaGenerationClient:
         model: str,
         prompt: str,
         size: str = "1024x1024",
+        reference_image: Any | None = None,
     ) -> tuple[bytes, str]:
         return self._run_with_key_rotation(
-            lambda: self._generate_image_once(model=model, prompt=prompt, size=size)
+            lambda: self._generate_image_once(
+                model=model,
+                prompt=prompt,
+                size=size,
+                reference_image=reference_image,
+            )
         )
 
     def _generate_image_once(
@@ -265,19 +357,22 @@ class MediaGenerationClient:
         model: str,
         prompt: str,
         size: str = "1024x1024",
+        reference_image: Any | None = None,
     ) -> tuple[bytes, str]:
         clean_prompt = str(prompt or "").strip()
         if not clean_prompt:
             raise MediaGenerationError("Prompt is required for image generation.")
+        ref = normalize_reference_image(reference_image)
         with self._client(IMAGE_AUDIO_TIMEOUT_SECONDS) as client:
             if self.provider == "openrouter":
-                if self._is_chat_multimodal_image_model(model):
+                if ref is not None or self._is_chat_multimodal_image_model(model):
                     return self._generate_image_via_chat(
                         client,
                         model=model,
                         prompt=clean_prompt,
                         size=size,
                         allow_images_fallback=True,
+                        reference_image=ref,
                     )
                 return self._generate_image_via_openrouter_images(
                     client,
@@ -285,7 +380,42 @@ class MediaGenerationClient:
                     prompt=clean_prompt,
                     size=size,
                     allow_chat_fallback=True,
+                    reference_image=ref,
                 )
+
+            if ref is not None:
+                form_data: dict[str, str] = {"model": model, "prompt": clean_prompt, "n": "1"}
+                if size:
+                    form_data["size"] = str(size)
+                if not model.lower().startswith("gpt-image"):
+                    form_data["response_format"] = "b64_json"
+                files = {"image": (ref.filename, ref.data, ref.mime_type)}
+                resp = client.post(
+                    f"{self.base_url}/images/edits",
+                    headers=self._headers(json_content=False),
+                    data=form_data,
+                    files=files,
+                )
+                if resp.status_code == 400 and "response_format" in form_data:
+                    form_data.pop("response_format", None)
+                    resp = client.post(
+                        f"{self.base_url}/images/edits",
+                        headers=self._headers(json_content=False),
+                        data=form_data,
+                        files=files,
+                    )
+                if resp.status_code in {400, 404, 405}:
+                    return self._generate_image_via_chat(
+                        client,
+                        model=model,
+                        prompt=clean_prompt,
+                        size=size,
+                        reference_image=ref,
+                    )
+                if resp.status_code >= 400:
+                    raise MediaGenerationError(f"Image generation failed: {self._extract_error(resp)}")
+                payload = resp.json()
+                return self._extract_media_from_data_list(client, payload, default_ext="png")
 
             body: dict[str, Any] = {"model": model, "prompt": clean_prompt, "n": 1}
             if size:
@@ -330,8 +460,12 @@ class MediaGenerationClient:
         prompt: str,
         size: str = "1024x1024",
         allow_chat_fallback: bool = False,
+        reference_image: ReferenceImageInput | None = None,
     ) -> tuple[bytes, str]:
         body: dict[str, Any] = {"model": model, "prompt": prompt}
+        if reference_image is not None:
+            b64_data = base64.b64encode(reference_image.data).decode("ascii")
+            body["image"] = f"data:{reference_image.mime_type};base64,{b64_data}"
         aspect_ratio = self._size_to_aspect_ratio(size)
         if aspect_ratio:
             body["aspect_ratio"] = aspect_ratio
@@ -346,6 +480,7 @@ class MediaGenerationClient:
                 prompt=prompt,
                 size=size,
                 allow_images_fallback=False,
+                reference_image=reference_image,
             )
         if resp.status_code >= 400:
             raise MediaGenerationError(f"Image generation failed: {self._extract_error(resp)}")
@@ -360,13 +495,24 @@ class MediaGenerationClient:
         prompt: str,
         size: str = "1024x1024",
         allow_images_fallback: bool = False,
+        reference_image: ReferenceImageInput | None = None,
     ) -> tuple[bytes, str]:
+        if reference_image is not None:
+            b64_data = base64.b64encode(reference_image.data).decode("ascii")
+            data_url = f"data:{reference_image.mime_type};base64,{b64_data}"
+            user_content: Any = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]
+        else:
+            user_content = prompt
+
         resp = client.post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": user_content}],
                 "modalities": ["image", "text"],
             },
         )
@@ -377,6 +523,7 @@ class MediaGenerationClient:
                 prompt=prompt,
                 size=size,
                 allow_chat_fallback=False,
+                reference_image=reference_image,
             )
         if resp.status_code >= 400:
             raise MediaGenerationError(f"Image generation failed: {self._extract_error(resp)}")
@@ -637,4 +784,12 @@ class MediaGenerationClient:
         raise MediaGenerationError("Provider response did not include media data or download URL.")
 
 
-__all__ = ["MediaGenerationClient", "MediaGenerationError"]
+__all__ = [
+    "MAX_MEDIA_DOWNLOAD_BYTES",
+    "MAX_REFERENCE_IMAGE_BYTES",
+    "MediaGenerationClient",
+    "MediaGenerationError",
+    "ReferenceImageInput",
+    "detect_reference_image_mime",
+    "normalize_reference_image",
+]

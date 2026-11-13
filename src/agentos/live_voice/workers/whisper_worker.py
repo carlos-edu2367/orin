@@ -61,18 +61,27 @@ def load(request: dict[str, Any]) -> dict[str, Any]:
 
 def transcribe(request: dict[str, Any]) -> dict[str, Any]:
     model, device = _model(str(request.get("model") or ""))
-    audio = pcm16_from_base64(str(request.get("pcm_base64") or ""))
-    rate = int(request.get("sample_rate") or 16000)
-    if rate != 16000 and audio.size:
-        import numpy as np
+    audio_path = str(request.get("audio_path") or "").strip()
+    if audio_path:
+        audio_source: Any = audio_path
+        raw_lang = str(request.get("language") or "").strip()
+        lang_arg = None if not raw_lang or raw_lang.lower() == "auto" else raw_lang.split("-")[0]
+    else:
+        audio = pcm16_from_base64(str(request.get("pcm_base64") or ""))
+        rate = int(request.get("sample_rate") or 16000)
+        if rate != 16000 and audio.size:
+            import numpy as np
 
-        duration = audio.size / rate
-        target = np.linspace(0.0, duration, int(duration * 16000), endpoint=False)
-        audio = np.interp(target, np.linspace(0.0, duration, audio.size, endpoint=False), audio).astype(np.float32)
+            duration = audio.size / rate
+            target = np.linspace(0.0, duration, int(duration * 16000), endpoint=False)
+            audio = np.interp(target, np.linspace(0.0, duration, audio.size, endpoint=False), audio).astype(np.float32)
+        audio_source = audio
+        raw_lang = str(request.get("language") or "pt").strip()
+        lang_arg = None if raw_lang.lower() == "auto" else raw_lang.split("-")[0]
     prompt_hint = str(request.get("prompt_hint") or "").strip() or None
     segments, _info = model.transcribe(
-        audio,
-        language=str(request.get("language") or "pt").split("-")[0],
+        audio_source,
+        language=lang_arg,
         beam_size=1,
         vad_filter=True,
         condition_on_previous_text=False,
