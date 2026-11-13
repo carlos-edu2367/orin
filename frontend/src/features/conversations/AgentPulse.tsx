@@ -16,6 +16,7 @@ export type AgentActivityMode =
   | 'terminal'
   | 'browsing'
   | 'remembering'
+  | 'compacting'
   | 'waiting_agent'
   | 'completed'
   | 'failed'
@@ -132,7 +133,45 @@ export function formatWaitingSubagentsDetail(
   return minutes >= 1 ? `Aguardando ${names} (${minutes} min)` : `Aguardando ${names}`
 }
 
+type CompactionCandidate = {
+  type: string
+  parentAgentId?: string | null
+  compacting?: boolean
+  compactingMessages?: number
+}
+
+const CONTEXT_COMPACTED_TYPES = new Set(['context.compacted', 'CONTEXT_COMPACTED'])
+
+/**
+ * The context compaction still in flight, if any: the latest `context.updated`
+ * flagged `compacting` with no `context.compacted` and no root-agent work after
+ * it. Subagent events may interleave while the main agent summarizes, so they do
+ * not close it; any other root event means the turn already moved on.
+ */
+export function activeCompaction<T extends CompactionCandidate>(events: T[]): T | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (CONTEXT_COMPACTED_TYPES.has(event.type)) return null
+    if (event.type.startsWith('context.') || event.type.startsWith('CONTEXT_')) {
+      if (event.compacting === true) return event
+      continue
+    }
+    if (event.parentAgentId) continue
+    return null
+  }
+  return null
+}
+
+export function compactionLabel(event: CompactionCandidate): string {
+  const count = event.compactingMessages
+  return typeof count === 'number' && count > 0
+    ? `Compactando contexto · resumindo ${count} ${count === 1 ? 'mensagem' : 'mensagens'}`
+    : 'Compactando contexto'
+}
+
 export function pulseDetailFromEvents(events: ConversationActivityEvent[], turnStartedAt?: string | null, nowMs = Date.now()): string | undefined {
+  const compaction = activeCompaction(events)
+  if (compaction) return compactionLabel(compaction)
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event.type.startsWith('context.')) continue
@@ -210,7 +249,7 @@ export function AgentPulse({
       : mode
 
   const label = detail ?? modeLabel(effectiveMode, state as ActivityState)
-  const isShimmer = effectiveMode === 'thinking' || effectiveMode === 'planning'
+  const isShimmer = effectiveMode === 'thinking' || effectiveMode === 'planning' || effectiveMode === 'compacting'
   const labelClassName = isShimmer
     ? 'agent-pulse__label agent-pulse__label--shimmer'
     : 'agent-pulse__label'
@@ -277,6 +316,9 @@ function PulseFigure({ mode }: { mode: AgentActivityMode }) {
       </span>
     )
   }
+  if (mode === 'compacting') {
+    return <CompactingFigure />
+  }
   if (mode === 'waiting_agent') {
     return (
       <span className="agent-pulse__link">
@@ -309,6 +351,57 @@ function PulseFigure({ mode }: { mode: AgentActivityMode }) {
   )
 }
 
+const COMPACT_CYCLE_S = 1.8
+const COMPACT_TIMES = [0, 0.42, 0.72, 1]
+const COMPACT_LINES = [
+  { offset: -4.5, width: 1 },
+  { offset: -1.5, width: 0.7 },
+  { offset: 1.5, width: 0.9 },
+  { offset: 4.5, width: 0.55 },
+]
+
+/**
+ * Context compaction as a press: two jaws squeeze the stacked lines of history
+ * into one, a bright diamond spins out as the summary, and the stack opens again
+ * for the next pass.
+ */
+function CompactingFigure() {
+  const loop = { duration: COMPACT_CYCLE_S, repeat: Infinity, times: COMPACT_TIMES, ease: 'easeInOut' as const }
+  return (
+    <span className="agent-pulse__compress" data-testid="agent-pulse-compacting">
+      <motion.span
+        className="agent-pulse__jaw agent-pulse__jaw--top"
+        animate={{ y: [0, 5, 5, 0] }}
+        transition={loop}
+      />
+      {COMPACT_LINES.map((line, index) => (
+        <motion.span
+          key={index}
+          className="agent-pulse__compress-line"
+          initial={{ y: line.offset, scaleX: line.width }}
+          animate={{
+            y: [line.offset, 0, 0, line.offset],
+            scaleX: [line.width, 0.45, 0.1, line.width],
+            opacity: [0.85, 1, 0, 0.85],
+          }}
+          transition={{ ...loop, delay: index * 0.03 }}
+        />
+      ))}
+      <motion.span
+        className="agent-pulse__compress-core"
+        initial={{ scale: 0, opacity: 0, rotate: 45 }}
+        animate={{ scale: [0, 0.3, 1.25, 0], opacity: [0, 0.6, 1, 0], rotate: [45, 45, 135, 135] }}
+        transition={loop}
+      />
+      <motion.span
+        className="agent-pulse__jaw agent-pulse__jaw--bottom"
+        animate={{ y: [0, -5, -5, 0] }}
+        transition={loop}
+      />
+    </span>
+  )
+}
+
 function modeLabel(mode: AgentActivityMode, state: ActivityState): string {
   switch (mode) {
     case 'listening': return 'Ouvindo você'
@@ -322,6 +415,7 @@ function modeLabel(mode: AgentActivityMode, state: ActivityState): string {
     case 'terminal': return 'Executando comandos'
     case 'browsing': return 'Consultando a web'
     case 'remembering': return 'Atualizando memória'
+    case 'compacting': return 'Compactando contexto'
     case 'waiting_agent': return 'Aguardando outro agente'
     default: return activityStateLabel(state)
   }
@@ -339,6 +433,8 @@ export type PulseEventCandidate = {
   occurredAt?: string
   phase?: string
   payload?: Record<string, unknown>
+  compacting?: boolean
+  compactingMessages?: number
 }
 
 function resolveModeArgs(
@@ -398,6 +494,8 @@ export function modeFromEvents(
   const scopedEvents = activeTurnId
     ? events.filter((event) => event.turnId === activeTurnId)
     : events
+
+  if (activeCompaction(scopedEvents)) return 'compacting'
 
   for (let index = scopedEvents.length - 1; index >= 0; index -= 1) {
     const event = scopedEvents[index]

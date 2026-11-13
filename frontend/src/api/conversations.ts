@@ -695,6 +695,11 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   assign('codeStage', optionalText(payload.stage, 64))
   if (payload.verification === 'unverified') event.verification = 'unverified'
   if (payload.waiting_for_slot === true) event.waitingForSlot = true
+  if (payload.compacting === true && (type === 'context.updated' || type === 'CONTEXT_UPDATED')) {
+    event.compacting = true
+    const removed = payload.removed_messages
+    if (typeof removed === 'number' && Number.isFinite(removed) && removed > 0) event.compactingMessages = Math.floor(removed)
+  }
   if (payload.waiting_subagents === true || payload.state === 'waiting_subagents') {
     event.waitingSubagents = true
     event.state = 'waiting_agent'

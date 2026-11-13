@@ -221,6 +221,10 @@ export type ConversationActivityEvent = {
   codeStage?: string
   verification?: 'unverified'
   waitingForSlot?: boolean
+  /** Set on the `context.updated` that opens an automatic or manual context compaction. */
+  compacting?: boolean
+  /** How many messages that compaction is summarizing (`removed_messages`). */
+  compactingMessages?: number
   waitingSubagents?: boolean
   waitingAgents?: string[]
   queuePosition?: number

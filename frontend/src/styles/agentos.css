@@ -1628,6 +1628,12 @@ kbd {
 .agent-pulse__link { position: relative; display: flex; align-items: center; justify-content: space-between; width: 26px; }
 .agent-pulse__node { width: 5px; height: 5px; border-radius: 50%; background: var(--signal-dim); }
 .agent-pulse__travel { position: absolute; top: 50%; width: 4px; height: 4px; margin-top: -2px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 8px rgb(var(--orin-accent-rgb) / 0.7); }
+.agent-pulse__compress { position: relative; width: 24px; height: 18px; }
+.agent-pulse__jaw { position: absolute; left: 1px; right: 1px; height: 2px; border-radius: 2px; background: var(--signal-dim); box-shadow: 0 0 6px rgb(var(--orin-accent-rgb) / 0.35); }
+.agent-pulse__jaw--top { top: 0; }
+.agent-pulse__jaw--bottom { bottom: 0; }
+.agent-pulse__compress-line { position: absolute; top: 50%; left: 3px; width: 18px; height: 2px; margin-top: -1px; border-radius: 2px; background: var(--signal); transform-origin: center; }
+.agent-pulse__compress-core { position: absolute; top: 50%; left: 50%; width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px; border-radius: 2px; background: var(--signal); box-shadow: 0 0 12px rgb(var(--orin-accent-rgb) / 0.8); }
 
 /* ---------------------------------------------------------------- overview */
 
