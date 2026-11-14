@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import posixpath
+import re
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -25,7 +28,18 @@ def _public_permission_mode(value: str) -> str:
 
     return public_permission_mode(value)
 
-_ALLOWED_PERMISSION_MODES = {"accept_edits", "plan_mode", "ask_permissions"}
+def _normalized_path(value: str) -> str:
+    """Comparable form of a local folder path (slashes unified; case-insensitive for drive paths)."""
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    text = posixpath.normpath(text)
+    if re.match(r"^[A-Za-z]:", text) or os.name == "nt":
+        text = text.casefold()
+    return text
+
+
+_ALLOWED_PERMISSION_MODES = {"full_autonomy", "accept_edits", "plan_mode", "ask_permissions"}
 _MANAGE_SESSION_PERMISSION_MODES = {"full_autonomy", "accept_edits", "plan_mode", "ask_permissions"}
 _ALLOWED_CODE_SESSION_ACTIONS = {
     "propose",
@@ -79,17 +93,13 @@ class ProjectTools:
         default_permission_mode: str = "accept_edits",
     ) -> tuple[str | None, str | None, str | None, str]:
         raw_perm = str(permission_mode or default_permission_mode).strip()
-        clean_mode = _known_permission_mode(raw_perm) if allow_full_autonomy else raw_perm
-        if allow_full_autonomy:
-            if clean_mode not in _MANAGE_SESSION_PERMISSION_MODES:
-                raise AgentToolError(
-                    "permission_mode must be 'full_autonomy', 'accept_edits', 'plan_mode', or 'ask_permissions'."
-                )
-        else:
-            if clean_mode not in _ALLOWED_PERMISSION_MODES:
-                raise AgentToolError(
-                    "permission_mode must be 'accept_edits', 'plan_mode', or 'ask_permissions'. 'full_autonomy' cannot be proposed automatically."
-                )
+        # Claude Code aliases (bypassPermissions, acceptEdits, plan, default) map to internal ids.
+        clean_mode = _known_permission_mode(raw_perm)
+        allowed_modes = _MANAGE_SESSION_PERMISSION_MODES if allow_full_autonomy else _ALLOWED_PERMISSION_MODES
+        if clean_mode not in allowed_modes:
+            raise AgentToolError(
+                "permission_mode must be 'full_autonomy' (alias 'bypassPermissions'), 'accept_edits', 'plan_mode', or 'ask_permissions'."
+            )
 
         effective_path = (
             workspace_path.strip()
@@ -186,9 +196,76 @@ class ProjectTools:
             provider=provider,
             model_id=model_id,
             permission_mode=permission_mode,
-            allow_full_autonomy=False,
+            allow_full_autonomy=True,
             default_permission_mode="accept_edits",
         )
+
+    def _project_for_workspace_path(self, workspace_path: str | None) -> str | None:
+        """Project whose attached local folder holds ``workspace_path`` (most specific root wins)."""
+        clean_path = workspace_path.strip() if isinstance(workspace_path, str) else ""
+        if (
+            not clean_path
+            or self._project_store is None
+            or not self._project_user_id
+            or getattr(self, "_local_workspaces", None) is None
+        ):
+            return None
+        target = _normalized_path(clean_path)
+        if not target:
+            return None
+        lister = getattr(self._project_store, "list_active", None) or getattr(self._project_store, "sidebar", None)
+        if not callable(lister):
+            return None
+        try:
+            items = list(lister(self._project_user_id) or ())
+        except Exception:
+            return None
+        best_pid: str | None = None
+        best_len = -1
+        for item in items:
+            pid = str(getattr(item, "project_id", "") or "").strip()
+            if not pid:
+                continue
+            ws_id = getattr(item, "workspace_id", "") or f"workspace:{pid}"
+            try:
+                root = self._local_workspaces.root_for(ws_id, self._project_user_id)
+            except Exception:
+                root = None
+            clean_root = _normalized_path(root) if isinstance(root, str) else ""
+            if not clean_root:
+                continue
+            if (target == clean_root or target.startswith(clean_root.rstrip("/") + "/")) and len(clean_root) > best_len:
+                best_pid, best_len = pid, len(clean_root)
+        return best_pid
+
+    def _resolve_code_session_project(
+        self, *, project_id: str | None, workspace_path: str | None
+    ) -> tuple[str | None, str | None]:
+        """Return ``(effective_project_id, project_workspace_path)`` for a new Code session.
+
+        Order: explicit ``project_id`` (must exist), then the project owning
+        ``workspace_path``, then the current conversation's project.
+        """
+        explicit = project_id.strip() if isinstance(project_id, str) else ""
+        if explicit:
+            if self._project_store is None or not self._project_user_id:
+                raise AgentToolError("Project store is not available to validate project_id.")
+            resolved_pid, record = self._resolve_project_reference(explicit)
+            if record is None or not resolved_pid:
+                raise AgentToolError(f"Project '{explicit}' not found.")
+            project_ws_path: str | None = None
+            if getattr(self, "_local_workspaces", None) is not None:
+                ws_id = getattr(record, "workspace_id", None) or f"workspace:{resolved_pid}"
+                try:
+                    project_ws_path = self._local_workspaces.root_for(ws_id, self._project_user_id)
+                except Exception:
+                    project_ws_path = None
+            return resolved_pid, project_ws_path
+        by_path = self._project_for_workspace_path(workspace_path)
+        if by_path:
+            return by_path, None
+        fallback = str(self._project_id or "").strip() or None
+        return fallback, None
 
     def _require_owned_code_conversation(self, code_conversation_id: str | None) -> tuple[str, dict[str, Any]]:
         if self._chat_store is None or not self._project_user_id:
@@ -221,6 +298,7 @@ class ProjectTools:
         message: str | None = None,
         decision: str | None = None,
         feedback: str | None = None,
+        project_id: str | None = None,
     ) -> ToolOutcome:
         return self.propose_code_session(
             title=title,
@@ -234,6 +312,7 @@ class ProjectTools:
             message=message,
             decision=decision,
             feedback=feedback,
+            project_id=project_id,
         )
 
     def propose_code_session(
@@ -249,6 +328,7 @@ class ProjectTools:
         message: str | None = None,
         decision: str | None = None,
         feedback: str | None = None,
+        project_id: str | None = None,
     ) -> ToolOutcome:
         if action is None:
             if code_conversation_id:
@@ -273,9 +353,15 @@ class ProjectTools:
                 raise AgentToolError("title must be a non-blank string between 1 and 200 characters.")
             if not isinstance(prompt, str) or not (1 <= len(prompt.strip()) <= 16000):
                 raise AgentToolError("prompt must be a non-blank string between 1 and 16000 characters.")
+            explicit_ws = (
+                workspace_path.strip() if isinstance(workspace_path, str) and workspace_path.strip() else None
+            )
+            effective_project_id, project_ws_path = self._resolve_code_session_project(
+                project_id=project_id, workspace_path=explicit_ws
+            )
             effective_path, effective_provider, effective_model, clean_mode = (
                 self._resolve_code_session_defaults(
-                    workspace_path=workspace_path,
+                    workspace_path=explicit_ws or project_ws_path,
                     provider=provider,
                     model_id=model_id,
                     permission_mode=permission_mode,
@@ -290,7 +376,7 @@ class ProjectTools:
                     "provider": effective_provider,
                     "model_id": effective_model,
                     "permission_mode": clean_mode,
-                    "project_id": self._project_id,
+                    "project_id": effective_project_id,
                 }
                 return ToolOutcome(
                     "succeeded",
@@ -315,7 +401,7 @@ class ProjectTools:
                     provider=effective_provider,
                     model_id=effective_model,
                     idempotency_key=f"code_start_{uuid4().hex[:16]}",
-                    project_id=self._project_id,
+                    project_id=effective_project_id,
                     code_mode="code",
                     permission_mode=clean_mode,
                 )
@@ -369,7 +455,7 @@ class ProjectTools:
                 "provider": effective_provider,
                 "model_id": effective_model,
                 "permission_mode": clean_mode,
-                "project_id": self._project_id,
+                "project_id": effective_project_id,
                 "wait_for_user": False,
                 "tool_kind": "code_handoff",
             }
@@ -2078,8 +2164,12 @@ SPECS: tuple[ToolSpec, ...] = (
                 },
                 "permission_mode": {
                     "type": "string",
-                    "enum": ["accept_edits", "plan_mode", "ask_permissions"],
-                    "description": "Suggested permission mode (default 'accept_edits').",
+                    "enum": ["full_autonomy", "bypassPermissions", "accept_edits", "plan_mode", "ask_permissions"],
+                    "description": "Permission mode for the Code session (default 'accept_edits'). 'full_autonomy' (alias 'bypassPermissions') runs without permission prompts.",
+                },
+                "project_id": {
+                    **_TEXT,
+                    "description": "Project to attach the new Code session to. Defaults to the project owning workspace_path, then the current conversation's project.",
                 },
                 "code_conversation_id": {
                     **_TEXT,

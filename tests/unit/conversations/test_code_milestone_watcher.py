@@ -216,13 +216,22 @@ def test_control_code_session_red_team_security(
         with pytest.raises(AgentToolError):
             attacker_toolset.control_code_session(**bad_call)
 
-    # Attempting full_autonomy via tool must always fail
+    # full_autonomy is a supported mode now, but unknown modes are still rejected
     with pytest.raises(AgentToolError):
         attacker_toolset.control_code_session(
             action="start",
             title="Escalar privilégio",
             prompt="Rodar com autonomia irrestrita",
-            permission_mode="full_autonomy",
+            permission_mode="sudo_root",
+        )
+
+    # An explicit project_id cannot be attached without validating it exists for this user
+    with pytest.raises(AgentToolError):
+        attacker_toolset.control_code_session(
+            action="start",
+            title="Projeto alheio",
+            prompt="Anexar a um projeto de outro usuário",
+            project_id="project_of_user_1",
         )
 
     # Attempting to control a non-code (mode='chat') conversation even for the same user must fail

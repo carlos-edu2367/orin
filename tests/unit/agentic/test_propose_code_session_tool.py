@@ -103,8 +103,9 @@ def test_propose_code_session_allows_explicit_overrides(tmp_path: Path) -> None:
         {"title": "x" * 201, "prompt": "Valid prompt"},
         {"title": "Valid title", "prompt": "   "},
         {"title": "Valid title", "prompt": "x" * 16001},
-        {"title": "Valid title", "prompt": "Valid prompt", "permission_mode": "full_autonomy"},
         {"title": "Valid title", "prompt": "Valid prompt", "permission_mode": "sudo_root"},
+        {"title": "Valid title", "prompt": "Valid prompt", "permission_mode": "dont_ask"},
+        {"title": "Valid title", "prompt": "Valid prompt", "project_id": "project_missing"},
     ],
 )
 def test_propose_code_session_rejects_invalid_or_unsafe_inputs(
