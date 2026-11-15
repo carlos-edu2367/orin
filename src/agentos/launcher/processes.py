@@ -109,44 +109,49 @@ class ProcessGroup:
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
                 return None
-            information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-            flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            if allow_breakaway:
-                flags |= 0x0800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
-            information.BasicLimitInformation.LimitFlags = flags
-            if not kernel32.SetInformationJobObject(
-                job, 9, ctypes.byref(information), ctypes.sizeof(information)
-            ):
+            try:
+                information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+                flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                if allow_breakaway:
+                    flags |= 0x0800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                information.BasicLimitInformation.LimitFlags = flags
+                if not kernel32.SetInformationJobObject(
+                    job, 9, ctypes.byref(information), ctypes.sizeof(information)
+                ):
+                    kernel32.CloseHandle(job)
+                    return None
+                return int(job)
+            except Exception:
                 kernel32.CloseHandle(job)
-                return None
-            return int(job)
+                raise
         except Exception:
             # Losing the job object costs the guarantee, not the launcher. The
             # graceful path still terminates every child it knows about.
             return None
 
-    def adopt(self, pid: int) -> bool:
+    def adopt(self, pid: int, *, root_handle: int | None = None) -> bool:
         if self._job is None:
             return False
         try:
             kernel32 = _win32_kernel32()
+            assigned = False
             # PROCESS_SET_QUOTA | PROCESS_TERMINATE
             handle = kernel32.OpenProcess(0x0100 | 0x0001, False, pid)
-            if not handle:
-                return False
-            assigned = False
-            try:
-                assigned = bool(kernel32.AssignProcessToJobObject(self._job, handle))
-            finally:
-                kernel32.CloseHandle(handle)
-            if assigned:
+            if handle:
                 try:
-                    from agentos.hooks.processes import _assign_descendants_to_job
+                    assigned = bool(kernel32.AssignProcessToJobObject(self._job, handle))
+                finally:
+                    kernel32.CloseHandle(handle)
+            descendants_assigned = 0
+            try:
+                from agentos.hooks.processes import _assign_descendants_to_job
 
-                    _assign_descendants_to_job(kernel32, self._job, pid)
-                except Exception:
-                    pass
-            return assigned
+                descendants_assigned = _assign_descendants_to_job(
+                    kernel32, self._job, pid, root_handle=root_handle
+                )
+            except Exception:
+                descendants_assigned = 0
+            return bool(assigned or descendants_assigned > 0)
         except Exception:
             return False
 
@@ -218,7 +223,10 @@ class SupervisedProcess:
             start_new_session=not _WINDOWS,
             close_fds=True,
         )
-        group.adopt(self.process.pid)
+        try:
+            group.adopt(self.process.pid, root_handle=getattr(self.process, "_handle", None))
+        except TypeError:
+            group.adopt(self.process.pid)
 
     def exited(self) -> int | None:
         if self.process is None:

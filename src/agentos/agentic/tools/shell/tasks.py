@@ -28,7 +28,7 @@ from agentos.agentic.tools.spec import ToolSpec, ToolInput
 # A process that is meant to keep running (a server, a watcher) is never waited for at the end of a turn.
 _LONG_LIVED_CMD_RE = re.compile(r"(--watch\b|\s-w\b|\bwatch\b|\bnodemon\b|tail\s+-f\b|Get-Content\b.*-Wait\b|\bserve\b)", re.IGNORECASE)
 _EXPLICIT_BG_PYTHON_SERVER_RE = re.compile(
-    r"\b(?:python\d*(?:\.exe)?|py(?:\.exe)?)\s+(?:-\S+\s+)*(?:[\w./\\-]*?(?:server|app|main|manage|run|wsgi|asgi)\.py)\b",
+    r"\b(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?\s+(?:-\S++\s++)*+(?:[\w./\\-]*?(?:server|app|main|manage|run|wsgi|asgi)\.py)\b",
     re.IGNORECASE,
 )
 MAX_PROCESS_WAIT_SECONDS = 600
@@ -344,6 +344,8 @@ class ShellTaskTools:
             if isinstance(shell_entry, dict) and shell_entry.get("pid") == pid:
                 found_in_shells = True
                 shell_entry["status"] = "stopped"
+                if not isinstance(info, Mapping):
+                    info = shell_entry
         preview_stopped_name: str | None = None
         try:
             from agentos.code_mode.preview_server import PreviewServerManager
@@ -366,12 +368,15 @@ class ShellTaskTools:
             raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
         job_terminated = terminate_background_job(pid)
         created = info.get("created") if isinstance(info, Mapping) else None
-        if isinstance(created, int) and created > 0:
+        valid_created = (
+            isinstance(created, int) and not isinstance(created, bool) and created > 0
+        ) or (isinstance(created, str) and bool(created.strip()))
+        if valid_created:
             kill_verified(pid, created)
-        elif not job_terminated and _process_is_running(pid):
+        elif not job_terminated and preview_stopped_name is None and _process_is_running(pid):
             _terminate_pid(pid)
         self._notified_exited_pids.add(pid)
-        if isinstance(info, Mapping):
+        if isinstance(info, Mapping) and str(pid) in manifest:
             updated = dict(info)
             updated["notified_exit"] = True
             updated["exit_event_recorded"] = True

@@ -121,9 +121,13 @@ def test_python_server_detection_preserves_foreground_scripts_and_recognizes_exp
     # Explicit background (`auto_backgrounded=False`) treats `python run.py` as long-lived server
     assert dummy._is_long_lived({"command": "python run.py", "auto_backgrounded": False}) is True
     assert dummy._is_long_lived({"command": "python server.py", "auto_backgrounded": False}) is True
+    assert dummy._is_long_lived({"command": "python3.11 -u scripts/server.py", "auto_backgrounded": False}) is True
     # Auto-backgrounded timeout (`auto_backgrounded=True`) does NOT treat `python run.py` as a server without port output
     assert dummy._is_long_lived({"command": "python run.py", "auto_backgrounded": True}) is False
+    assert dummy._is_long_lived({"command": "python3.11 -u scripts/server.py", "auto_backgrounded": True}) is False
     assert dummy._is_long_lived({"command": "python -m uvicorn app.main:app --port 8000"}) is True
+    assert dummy._is_long_lived({"command": "python3.12 -u -m uvicorn app.main:app --port 8000"}) is True
+    assert dummy._is_long_lived({"command": "py.exe -u -m http.server 8000"}) is True
     assert dummy._is_long_lived({"command": "pytest tests/"}) is False
 
 
@@ -323,3 +327,200 @@ def test_workspace_lock_detects_pid_reuse_and_sweeps_only_turn_and_rewind_marker
     assert fresh_empty.exists()
     assert legacy_live.exists()
     assert unrelated_flock.exists()
+
+
+def test_stop_process_does_not_kill_reused_pid_on_preview_or_shell_created_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentos.agentic.tools.shell.tasks as tasks_mod
+
+    terminate_pid_calls: list[int] = []
+    monkeypatch.setattr(tasks_mod, "_terminate_pid", lambda p: terminate_pid_calls.append(p))
+
+    orin_dir = tmp_path / ".orin"
+    orin_dir.mkdir(parents=True, exist_ok=True)
+    my_pid = os.getpid()
+    real_ct = process_created(my_pid)
+    stale_ct = (real_ct - 36_000_000_000) if isinstance(real_ct, int) else f"{real_ct}-stale"
+    manifest_file = orin_dir / "preview_servers.json"
+    manifest_file.write_text(
+        json.dumps(
+            {
+                "web": {
+                    "name": "web",
+                    "pid": my_pid,
+                    "created": stale_ct,
+                    "port": 5173,
+                    "status": "running",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class DummyToolset(ShellTaskTools):
+        def __init__(self, root: Path) -> None:
+            self.workspace = SimpleNamespace(root=root)
+            self._browser = None
+            self._background_shells: dict[str, dict[str, object]] = {}
+            self._notified_exited_pids: set[int] = set()
+
+        def _load_process_manifest(self) -> dict[str, object]:
+            return {}
+
+        def _save_process_manifest(self, manifest: object) -> None:
+            pass
+
+    ts = DummyToolset(tmp_path)
+    res = ts.stop_process(my_pid)
+    assert res["status"] == "stopped"
+    assert res.get("preview_server") == "web"
+    assert terminate_pid_calls == [], "stop_process must NOT fall back to _terminate_pid when preview_server refused due to PID reuse!"
+
+    # Also test when manifest is empty and only _background_shells has the entry with mismatched created
+    manifest_file.unlink()
+    ts._background_shells[f"bash_{my_pid}"] = {
+        "shell_id": f"bash_{my_pid}",
+        "pid": my_pid,
+        "command": "python server.py",
+        "created": stale_ct,
+        "status": "running",
+    }
+    res2 = ts.stop_process(my_pid)
+    assert res2["status"] == "stopped"
+    assert terminate_pid_calls == [], "stop_process must use shell_entry['created'] and refuse to kill reused PID!"
+
+
+def test_multiword_string_created_in_workspace_lock_and_preview_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentos.code_mode.preview_server as preview_mod
+    import agentos.code_mode.workspace_lock as lock_mod
+
+    my_pid = os.getpid()
+    mac_ct = "Sun Nov 15 14:38:00 2026"
+    stale_mac_ct = "Sun Nov 15 10:00:00 2026"
+    monkeypatch.setattr(
+        lock_mod,
+        "same_process",
+        lambda pid, expected: pid == my_pid and expected == mac_ct,
+    )
+
+    digest = "macdigest123"
+    turn_marker = tmp_path / f"{digest}.turn.{my_pid}.1111"
+    turn_marker.write_text(f"{my_pid} {mac_ct}", encoding="utf-8")
+    old_mtime = time.time() - 30.0
+    os.utime(turn_marker, (old_mtime, old_mtime))
+
+    # Even after 30s (> _UNWRITTEN_SECONDS), multi-word string creation time is parsed via maxsplit=1 and kept alive!
+    assert _live_turn_marker(tmp_path, digest) is True
+    assert turn_marker.exists()
+
+    # Mismatched multi-word string creation time is detected as stale and removed
+    turn_marker.write_text(f"{my_pid} {stale_mac_ct}", encoding="utf-8")
+    os.utime(turn_marker, (old_mtime, old_mtime))
+    assert _live_turn_marker(tmp_path, digest) is False
+    assert not turn_marker.exists()
+
+    # Empty turn marker whose fallback_pid is dead is immediately treated as dead without waiting 5s
+    dead_empty_turn = tmp_path / f"{digest}.turn.99999999.2222"
+    dead_empty_turn.write_text("", encoding="utf-8")
+    assert _live_turn_marker(tmp_path, digest) is False
+    assert not dead_empty_turn.exists()
+
+    # PreviewServerManager.stop_server with string `created` uses kill_verified, never raw os.kill
+    kill_verified_calls: list[tuple[int, object]] = []
+    monkeypatch.setattr(
+        preview_mod,
+        "kill_verified",
+        lambda pid, created: (kill_verified_calls.append((pid, created)), False)[1],
+    )
+    orin_dir = tmp_path / ".orin"
+    orin_dir.mkdir(parents=True, exist_ok=True)
+    (orin_dir / "preview_servers.json").write_text(
+        json.dumps(
+            {
+                "web": {
+                    "name": "web",
+                    "pid": my_pid,
+                    "created": stale_mac_ct,
+                    "port": 3000,
+                    "status": "running",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    mgr = PreviewServerManager(tmp_path)
+    res = mgr.stop_server("web")
+    assert res["stopped"] is False
+    assert kill_verified_calls == [(my_pid, stale_mac_ct)]
+
+
+def test_timeout_watchdog_preserves_registered_job_handle_when_parent_exits_early() -> None:
+    import threading
+    from agentos.agentic.tools.shell.bash import _start_timeout_watchdog
+
+    fake_job = MagicMock()
+    fake_proc = MagicMock()
+    fake_proc.pid = 654321
+    fake_proc.wait.return_value = 0
+
+    register_background_job(654321, fake_job)
+    entry: dict[str, object] = {"pid": 654321, "status": "running"}
+    _start_timeout_watchdog(
+        fake_proc,
+        fake_job,
+        entry,
+        timeout=30.0,
+        elapsed=1.0,
+        log_ref=[None],
+        lock=threading.Lock(),
+    )
+    time.sleep(0.15)
+    # Parent process exited normally: watchdog must NOT have closed fake_job while _BACKGROUND_JOBS owns it!
+    fake_job.close.assert_not_called()
+    assert terminate_background_job(654321) is True
+    fake_job.terminate.assert_called_once()
+    fake_job.close.assert_called_once()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object descendant adoption test")
+def test_fast_exiting_parent_still_adopts_live_descendant_into_job(tmp_path: Path) -> None:
+    real_py = getattr(sys, "_base_executable", sys.executable)
+    child_pid_file = tmp_path / "fast_child_pid.txt"
+    parent_code = (
+        "import subprocess, sys, pathlib; "
+        f"c = subprocess.Popen([{real_py!r}, '-c', 'import time; time.sleep(60)']); "
+        f"pathlib.Path({str(child_pid_file)!r}).write_text(str(c.pid), encoding='utf-8'); "
+        "sys.exit(0)"
+    )
+    group = ProcessGroup(allow_breakaway=False)
+    parent: subprocess.Popen[bytes] | None = None
+    child_pid: int | None = None
+    try:
+        parent = subprocess.Popen([real_py, "-c", parent_code])
+        parent.wait(timeout=5.0)
+        assert child_pid_file.is_file()
+        child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+        assert process_is_alive(child_pid), "Descendant should be alive after fast parent exit"
+
+        # Parent has already exited, so AssignProcessToJobObject(parent) fails;
+        # adopt() must still snapshot and assign the live descendant using root_handle!
+        adopted = group.adopt(parent.pid, root_handle=getattr(parent, "_handle", None))
+        assert adopted is True
+
+        group.terminate_all()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and process_is_alive(child_pid):
+            time.sleep(0.05)
+        assert not process_is_alive(child_pid), "Descendant of fast-exiting parent must be killed by Job Object!"
+    finally:
+        group.close()
+        if parent is not None and parent.poll() is None:
+            parent.kill()
+        if child_pid is not None and process_is_alive(child_pid):
+            try:
+                os.kill(child_pid, 9)
+            except OSError:
+                pass

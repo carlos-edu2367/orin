@@ -36,6 +36,12 @@ _LIVE_PROCESSES: dict[tuple[str, str], subprocess.Popen[bytes]] = {}
 _LIVE_PROCESS_GROUPS: dict[tuple[str, str], ProcessGroup] = {}
 
 
+def _valid_created(created: Any) -> bool:
+    return (isinstance(created, int) and not isinstance(created, bool) and created > 0) or (
+        isinstance(created, str) and bool(created.strip())
+    )
+
+
 def _detect_port_from_log(log_path: Path | None, start_offset: int = 0) -> int | None:
     if log_path is None or not log_path.is_file():
         return None
@@ -329,11 +335,19 @@ class PreviewServerManager:
 
         initial_port_occupied = is_port_open(config.port)
         log_offset = 0
+        proc_created: int | str | None = None
         with _LIVE_PROCESSES_LOCK:
             existing_proc = _LIVE_PROCESSES.get(key)
             if existing_proc is not None and existing_proc.poll() is None:
                 proc = existing_proc
                 initial_port_occupied = False
+                existing_record = self._load_manifest().get(config.name) or {}
+                existing_created = existing_record.get("created")
+                proc_created = (
+                    existing_created
+                    if _valid_created(existing_created)
+                    else process_created(proc.pid)
+                )
             else:
                 try:
                     log_offset = abs_log_path.stat().st_size if abs_log_path.is_file() else 0
@@ -380,7 +394,8 @@ class PreviewServerManager:
                         log_handle.close()
                     except Exception:
                         pass
-                group.adopt(proc.pid)
+                proc_created = process_created(proc.pid)
+                group.adopt(proc.pid, root_handle=getattr(proc, "_handle", None))
                 _LIVE_PROCESSES[key] = proc
                 _LIVE_PROCESS_GROUPS[key] = group
 
@@ -420,7 +435,7 @@ class PreviewServerManager:
         record = {
             "name": config.name,
             "pid": proc.pid,
-            "created": process_created(proc.pid),
+            "created": proc_created if _valid_created(proc_created) else process_created(proc.pid),
             "port": effective_port,
             "url": url,
             "command": config.command_string(),
@@ -487,17 +502,38 @@ class PreviewServerManager:
         if proc is not None:
             pid = proc.pid
             if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                except OSError:
-                    pass
+                if os.name != "nt":
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    except OSError:
+                        try:
+                            proc.terminate()
+                        except OSError:
+                            pass
+                    try:
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError:
+                            try:
+                                proc.kill()
+                            except OSError:
+                                pass
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    except OSError:
+                        pass
             stopped = True
-        elif isinstance(pid, int) and pid > 0:
+        elif isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
             created = record.get("created")
-            if isinstance(created, int) and created > 0:
+            if _valid_created(created):
                 stopped = kill_verified(pid, created) or stopped
             elif not stopped:
                 try:

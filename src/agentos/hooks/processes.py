@@ -95,18 +95,20 @@ class _WindowsJob:
             self.handle = None
             raise OSError("SetInformationJobObject failed")
 
-    def assign(self, pid: int) -> bool:
-        process = self._kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
-        if not process:
+    def assign(self, pid: int, *, root_handle: int | None = None) -> bool:
+        if not self.handle:
             return False
         assigned = False
-        try:
-            assigned = bool(self._kernel32.AssignProcessToJobObject(self.handle, process))
-        finally:
-            self._kernel32.CloseHandle(process)
-        if assigned and self.handle:
-            _assign_descendants_to_job(self._kernel32, self.handle, pid)
-        return assigned
+        process = self._kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
+        if process:
+            try:
+                assigned = bool(self._kernel32.AssignProcessToJobObject(self.handle, process))
+            finally:
+                self._kernel32.CloseHandle(process)
+        descendants_assigned = _assign_descendants_to_job(
+            self._kernel32, self.handle, pid, root_handle=root_handle
+        )
+        return bool(assigned or descendants_assigned > 0)
 
     def terminate(self) -> None:
         if self.handle:
@@ -294,21 +296,29 @@ def _windows_descendants(
     return kept
 
 
-def _assign_descendants_to_job(kernel32, job_handle: int, root_pid: int) -> None:  # noqa: ANN001
+def _assign_descendants_to_job(
+    kernel32,
+    job_handle: int,
+    root_pid: int,
+    *,
+    root_handle: int | None = None,
+) -> int:  # noqa: ANN001
     """Assign any children spawned between ``Popen`` and ``AssignProcessToJobObject`` into ``job_handle``."""
     from types import SimpleNamespace
 
     try:
         descendants = _windows_descendants(
-            SimpleNamespace(pid=root_pid, _handle=None),
+            SimpleNamespace(pid=root_pid, _handle=root_handle),
             access=_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _SYNCHRONIZE,
         )
     except Exception:
-        return
+        return 0
+    assigned_count = 0
     try:
         for child_handle in descendants.values():
             try:
-                kernel32.AssignProcessToJobObject(job_handle, child_handle)
+                if kernel32.AssignProcessToJobObject(job_handle, child_handle):
+                    assigned_count += 1
             except Exception:
                 pass
     finally:
@@ -316,6 +326,7 @@ def _assign_descendants_to_job(kernel32, job_handle: int, root_pid: int) -> None
             _close_handles(descendants)
         except Exception:
             pass
+    return assigned_count
 
 
 def _terminate_handles(handles: Mapping[int, int]) -> None:

@@ -200,7 +200,7 @@ _DEV_SERVER_CMD_RE = re.compile(
     r"\b(npm\s+run\s+(dev|start|serve)|pnpm\s+(dev|start)|yarn\s+(dev|start)|"
     r"vite(\s|$)|next\s+dev|uvicorn\b|gunicorn\b|hypercorn\b|"
     r"fastapi\s+(?:dev|run)\b|flask\s+run|streamlit\s+run|gradio\b|"
-    r"python\d*(?:\.exe)?\s+-m\s+(?:uvicorn|gunicorn|hypercorn|fastapi|flask|streamlit|http\.server)\b|"
+    r"(?:python(?:\d+(?:\.\d+)?)?|py)(?:\.exe)?\s+(?:-(?!m\b)\S++\s++)*+-m\s+(?:uvicorn|gunicorn|hypercorn|fastapi|flask|streamlit|http\.server)\b|"
     r"django-admin\s+runserver|manage\.py\s+runserver)\b",
     re.IGNORECASE,
 )
@@ -853,6 +853,12 @@ def register_background_job(pid: int, job: Any) -> None:
                     evicted.close()
                 except Exception:  # noqa: BLE001
                     pass
+
+
+def has_background_job(pid: int) -> bool:
+    """Return True if ``pid`` currently has a registered Job Object in ``_BACKGROUND_JOBS``."""
+    with _BACKGROUND_POPENS_LOCK:
+        return pid in _BACKGROUND_JOBS
 
 
 def terminate_background_job(pid: int) -> bool:

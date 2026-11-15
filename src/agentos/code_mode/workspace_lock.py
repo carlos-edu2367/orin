@@ -108,21 +108,23 @@ def _marker_holder_alive(path: Path, *, fallback_pid: int | None = None) -> bool
         return False
     except OSError:
         return True  # cannot read it: fail closed
-    parts = text.split()
-    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-        pid, expected = int(parts[0]), int(parts[1])
-        return same_process(pid, expected)
-    if len(parts) == 1 and parts[0].isdigit():
-        return _pid_alive(int(parts[0]))
-    try:
-        age = time.time() - path.stat().st_mtime
-    except OSError:
+    parts = text.split(None, 1)
+    if not parts:
+        if fallback_pid is not None and not _pid_alive(fallback_pid):
+            return False
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return False
+        return age < _UNWRITTEN_SECONDS
+    if not parts[0].isdigit():
         return False
-    if age < _UNWRITTEN_SECONDS:
-        return True
-    if fallback_pid is not None and len(parts) == 0:
-        return False
-    return False
+    pid = int(parts[0])
+    if len(parts) == 1:
+        return _pid_alive(pid)
+    raw_ct = parts[1].strip()
+    expected: int | str = int(raw_ct) if raw_ct.lstrip("-").isdigit() else raw_ct
+    return same_process(pid, expected)
 
 
 _rewind_holder_alive = _marker_holder_alive

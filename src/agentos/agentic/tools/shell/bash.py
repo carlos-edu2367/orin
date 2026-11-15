@@ -42,9 +42,11 @@ from agentos.agentic.tools._shared import (
     _TEXT,
     _schema,
     logger,
+    has_background_job,
     poll_background_popen,
     register_background_job,
     register_background_popen,
+    terminate_background_job,
 )
 from agentos.agentic.tools.public_names import public_name
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
@@ -64,7 +66,7 @@ def _job_for(process: Any) -> Any:
     except Exception:  # noqa: BLE001 - without a job the taskkill fallback still runs
         return None
     try:
-        if job.assign(process.pid):
+        if job.assign(process.pid, root_handle=getattr(process, "_handle", None)):
             return job
     except Exception:  # noqa: BLE001
         pass
@@ -90,6 +92,7 @@ def _start_timeout_watchdog(
     would hold its turn for that long. The stop is written to the job's log, which the exit notice shows.
     """
     remaining = max(0.1, float(timeout) - float(elapsed))
+    pid = getattr(process, "pid", None)
 
     def watch() -> None:
         try:
@@ -97,6 +100,8 @@ def _start_timeout_watchdog(
         except subprocess.TimeoutExpired:
             entry["timed_out"] = True
             _terminate_process_tree(process, job=job)
+            if isinstance(pid, int) and pid > 0:
+                terminate_background_job(pid)
             with lock:
                 log_f = log_ref[0]
                 if log_f is not None:
@@ -108,7 +113,8 @@ def _start_timeout_watchdog(
         except Exception:  # noqa: BLE001 - a watchdog never raises into the worker
             pass
         finally:
-            _release_job(job)
+            if not (isinstance(pid, int) and pid > 0 and has_background_job(pid)):
+                _release_job(job)
 
     threading.Thread(target=watch, name=f"orin-timeout-{getattr(process, 'pid', '?')}", daemon=True).start()
 
@@ -449,6 +455,7 @@ class BashTools:
                     log_handle.close()
             if background:
                 shell_id = f"bash_{process.pid}"
+                created_ts = process_created(process.pid)
                 bg_job = _job_for(process)
                 register_background_popen(process.pid, process)
                 register_background_job(process.pid, bg_job)
@@ -458,7 +465,7 @@ class BashTools:
                     "description": clean_description,
                     "log_path": log_relative,
                     "started_at": datetime.now(UTC).isoformat(),
-                    "created": process_created(process.pid),  # W7: the tasks panel stops only this very process
+                    "created": created_ts,  # W7: the tasks panel stops only this very process
                     "notified_exit": False,
                     **({"conversation_id": str(self.conversation_id)} if getattr(self, "conversation_id", None) else {}),
                 }
@@ -470,6 +477,7 @@ class BashTools:
                     "description": clean_description,
                     "process": process,
                     "log_path": log_relative,
+                    "created": created_ts,
                     "status": "running",
                 }
                 self._turn_background_pids.add(process.pid)
@@ -663,6 +671,7 @@ class BashTools:
                             url_m = _URL_EXTRACT_RE.search(combined_live)
                             detected_url = url_m.group(0) if url_m else None
                         shell_id = f"bash_{process.pid}"
+                        created_ts = process_created(process.pid)
                         register_background_popen(process.pid, process)
                         manifest = self._load_process_manifest()
                         manifest[str(process.pid)] = {
@@ -670,7 +679,7 @@ class BashTools:
                             "description": clean_description,
                             "log_path": auto_log_rel,
                             "started_at": datetime.now(UTC).isoformat(),
-                            "created": process_created(process.pid),
+                            "created": created_ts,
                             "notified_exit": False,
                             "auto_backgrounded": True,
                             "detected_url": detected_url,
@@ -684,6 +693,7 @@ class BashTools:
                             "description": clean_description,
                             "process": process,
                             "log_path": auto_log_rel,
+                            "created": created_ts,
                             "status": "running",
                             "auto_backgrounded": True,
                             "backgrounded_by_tool_cap": bool(backgrounded_by_tool_cap),
