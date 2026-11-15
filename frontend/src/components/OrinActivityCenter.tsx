@@ -25,6 +25,7 @@ const ACTIVE_SESSION_STATES = new Set([
   'starting',
   'working',
   'in_progress',
+  'cancelling',
 ])
 
 const INSPECTABLE_SESSION_STATES = new Set([
@@ -35,6 +36,7 @@ const INSPECTABLE_SESSION_STATES = new Set([
   'starting',
   'working',
   'in_progress',
+  'cancelling',
 ])
 
 export interface OrinActivityCenterProps {
@@ -168,17 +170,32 @@ function isAbortError(err: unknown): boolean {
   return (err as { name?: unknown }).name === 'AbortError'
 }
 
+function withAbortSignal(apiClient: ApiClient, signal?: AbortSignal): ApiClient {
+  if (!signal) return apiClient
+  const proxyClient = Object.create(apiClient) as ApiClient
+  proxyClient.request = async <T,>(
+    options: Parameters<ApiClient['request']>[0],
+  ): Promise<T> => {
+    return apiClient.request<T>({
+      ...(options as Parameters<ApiClient['request']>[0] & { parse: (v: unknown) => T }),
+      signal: signal ?? options.signal,
+    })
+  }
+  return proxyClient
+}
+
 async function fetchConversationWithRawActivities(
   apiClient: ApiClient,
   conversationId: string,
   signal?: AbortSignal,
 ): Promise<{ snapshot: Conversation; rawActivities: Array<Record<string, unknown>> }> {
   let rawActivities: Array<Record<string, unknown>> = []
-  const proxyClient = Object.create(apiClient) as ApiClient
+  const baseClient = withAbortSignal(apiClient, signal)
+  const proxyClient = Object.create(baseClient) as ApiClient
   proxyClient.request = async <T,>(
     options: Parameters<ApiClient['request']>[0],
   ): Promise<T> => {
-    return apiClient.request<T>({
+    return baseClient.request<T>({
       ...(options as Parameters<ApiClient['request']>[0] & { parse: (v: unknown) => T }),
       signal: signal ?? options.signal,
       parse: (value: unknown): T => {
@@ -438,12 +455,17 @@ export function OrinActivityCenter({
     const controller = new AbortController()
     abortControllerRef.current = controller
     const { signal } = controller
+    const signaledClient = withAbortSignal(apiClient, signal)
     const seq = ++refreshSeqRef.current
+    let convListOk = true
     const [convResp, projectResp] = await Promise.all([
-      listConversations(apiClient).catch(() => ({ items: [] })),
-      listProjectSidebar(apiClient).catch((): { items: ProjectSidebarItem[] } => ({ items: [] })),
+      listConversations(signaledClient).catch(() => {
+        convListOk = false
+        return { items: [] }
+      }),
+      listProjectSidebar(signaledClient).catch((): { items: ProjectSidebarItem[] } => ({ items: [] })),
     ])
-    if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current) return
+    if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current || !convListOk) return
 
     const convList = Array.isArray(convResp?.items) ? convResp.items : []
     const projectList = Array.isArray(projectResp?.items) ? projectResp.items : []
@@ -769,6 +791,9 @@ export function OrinActivityCenter({
     setUnreadUpdates([])
   }
 
+  const refreshActivityCenterRef = useRef(refreshActivityCenter)
+  refreshActivityCenterRef.current = refreshActivityCenter
+
   async function runGuardedAction(actionKey: string, task: () => Promise<void>) {
     if (inFlightRef.current.has(actionKey)) return
     inFlightRef.current.add(actionKey)
@@ -778,6 +803,7 @@ export function OrinActivityCenter({
     try {
       await task()
       locallyResolvedRef.current.add(actionKey)
+      if (!mountedRef.current) return
       setApprovals((prev) => prev.filter((item) => item.key !== actionKey))
       suppressSelfRefreshEventRef.current = true
       try {
@@ -787,18 +813,24 @@ export function OrinActivityCenter({
         suppressSelfRefreshEventRef.current = false
       }
       onApprovalResolved?.()
-      await refreshActivityCenter()
+      if (mountedRef.current) {
+        await refreshActivityCenterRef.current()
+      }
     } catch (caught) {
-      setActionError(
-        caught instanceof Error ? caught.message : 'Não foi possível concluir a ação agora.',
-      )
+      if (mountedRef.current) {
+        setActionError(
+          caught instanceof Error ? caught.message : 'Não foi possível concluir a ação agora.',
+        )
+      }
     } finally {
       inFlightRef.current.delete(actionKey)
-      setInFlightKeys((prev) => {
-        const next = { ...prev }
-        delete next[actionKey]
-        return next
-      })
+      if (mountedRef.current) {
+        setInFlightKeys((prev) => {
+          const next = { ...prev }
+          delete next[actionKey]
+          return next
+        })
+      }
     }
   }
 

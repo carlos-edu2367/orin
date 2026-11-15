@@ -47,6 +47,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
   const lastStructuralIdRef = useRef<string | null>(null)
   const throttleTimerRef = useRef<number | null>(null)
   const loadGenRef = useRef(0)
+  const prevConversationIdRef = useRef(conversationId)
 
   const clearThrottleTimer = useCallback(() => {
     if (throttleTimerRef.current !== null) {
@@ -63,6 +64,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
     const gen = loadGenRef.current
     inFlightRef.current = true
     pendingStructuralRef.current = false
+    clearThrottleTimer()
     lastLoadAtRef.current = Date.now()
     getConversationOverview(client, conversationId)
       .then((value) => {
@@ -89,7 +91,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
           }
         }
       })
-  }, [client, conversationId])
+  }, [client, conversationId, clearThrottleTimer])
 
   const latestStructuralEventId = useMemo(() => {
     for (let i = liveEvents.length - 1; i >= 0; i -= 1) {
@@ -109,6 +111,12 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
     lastLoadAtRef.current = 0
     clearThrottleTimer()
     lastStructuralIdRef.current = latestStructuralEventId
+    if (prevConversationIdRef.current !== conversationId) {
+      prevConversationIdRef.current = conversationId
+      setOverview(null)
+      setFailed(false)
+      setSelected(null)
+    }
 
     load()
     // The overview is a projection of the same log the chat streams, so it is

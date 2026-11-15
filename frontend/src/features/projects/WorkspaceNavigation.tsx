@@ -266,20 +266,26 @@ export function WorkspaceNavigation({
   const mountedRef = useRef(true)
   const inFlightRef = useRef(false)
   const pendingReloadRef = useRef(false)
+  const reloadGenRef = useRef(0)
+  const onChatsChangeRef = useRef(onChatsChange)
+  onChatsChangeRef.current = onChatsChange
+  const latestReloadRef = useRef<() => Promise<void>>(() => Promise.resolve())
 
   const reload = useCallback(async () => {
     if (inFlightRef.current) {
       pendingReloadRef.current = true
       return
     }
+    const gen = reloadGenRef.current
     inFlightRef.current = true
+    pendingReloadRef.current = false
     try {
       const [conversationList, sidebar] = await Promise.all([listConversations(apiClient), listProjectSidebar(apiClient)])
-      if (!mountedRef.current) return
+      if (!mountedRef.current || gen !== reloadGenRef.current) return
       const nextChats = Array.isArray(conversationList?.items) ? conversationList.items : []
       const nextProjects = Array.isArray(sidebar?.items) ? sidebar.items : []
       setChats(nextChats)
-      onChatsChange?.(nextChats)
+      onChatsChangeRef.current?.(nextChats)
       setProjects(nextProjects)
       const live: SessionLiveInfo[] = [
         ...nextChats.map((chat) => ({ id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: null })),
@@ -290,13 +296,16 @@ export function WorkspaceNavigation({
       // Both lists are complete, so a pinned tab missing from them was deleted elsewhere.
       syncSessions(live, { complete: Array.isArray(conversationList?.items) && Array.isArray(sidebar?.items) })
     } finally {
-      inFlightRef.current = false
-      if (pendingReloadRef.current && mountedRef.current) {
-        pendingReloadRef.current = false
-        void reload().catch(() => undefined)
+      if (gen === reloadGenRef.current) {
+        inFlightRef.current = false
+        if (pendingReloadRef.current && mountedRef.current) {
+          pendingReloadRef.current = false
+          void latestReloadRef.current().catch(() => undefined)
+        }
       }
     }
-  }, [apiClient, onChatsChange])
+  }, [apiClient])
+  latestReloadRef.current = reload
 
   const activeSessionCount = useMemo(() => {
     const activeStates = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
@@ -318,21 +327,29 @@ export function WorkspaceNavigation({
 
   useEffect(() => {
     mountedRef.current = true
+    reloadGenRef.current += 1
+    inFlightRef.current = false
+    pendingReloadRef.current = false
+    const gen = reloadGenRef.current
     let active = true
     queueMicrotask(() => {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || gen !== reloadGenRef.current) return
       void reload().catch(() => {
-        if (active && mountedRef.current) setError('Não foi possível atualizar a navegação.')
+        if (active && mountedRef.current && gen === reloadGenRef.current) {
+          setError('Não foi possível atualizar a navegação.')
+        }
       })
     })
     const onUpdated = () => {
-      void reload().catch(() => undefined)
+      void latestReloadRef.current().catch(() => undefined)
     }
     window.addEventListener('orin:projects-updated', onUpdated)
     window.addEventListener('orin:conversations-updated', onUpdated)
     return () => {
       active = false
       mountedRef.current = false
+      reloadGenRef.current += 1
+      inFlightRef.current = false
       pendingReloadRef.current = false
       window.removeEventListener('orin:projects-updated', onUpdated)
       window.removeEventListener('orin:conversations-updated', onUpdated)

@@ -554,4 +554,182 @@ describe('OrinActivityCenter & WorkspaceNavigation HTTP/1.1 socket discipline', 
       expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
     })
   })
+
+  it('aborts in-flight list requests on rapid refresh events and preserves detailCacheRef + approvals on transient /v1/conversations failure', async () => {
+    const listSignals: AbortSignal[] = []
+    let failConvList = false
+    let waitDetailCalls = 0
+    let holdListRequest = false
+    let releaseHeldList: (() => void) | null = null
+
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input)
+      if (url.endsWith('/v1/conversations')) {
+        if (init?.signal) listSignals.push(init.signal)
+        if (holdListRequest) {
+          await new Promise<void>((resolve, reject) => {
+            releaseHeldList = resolve
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('The request was aborted', 'AbortError'))
+            })
+          })
+        }
+        if (failConvList) {
+          return jsonResponse({ detail: 'Gateway restarting' }, 502)
+        }
+        return jsonResponse({
+          items: [
+            {
+              conversation_id: 'conv_cached_wait',
+              title: 'Cached Waiting',
+              state: 'waiting_user',
+              updated_at: '2026-11-15T15:00:00Z',
+            },
+          ],
+        })
+      }
+      if (url.endsWith('/v1/projects/sidebar')) {
+        if (init?.signal) listSignals.push(init.signal)
+        return jsonResponse({ items: [] })
+      }
+      if (url.endsWith('/v1/conversations/conv_cached_wait')) {
+        waitDetailCalls += 1
+        return jsonResponse(
+          makeConversationDetail('conv_cached_wait', 'waiting_user', [
+            makeWorkspaceTrustActivity('C:/proj'),
+          ]),
+        )
+      }
+      return jsonResponse({})
+    })
+
+    const client = new ApiClient({ baseUrl: 'http://localhost:8000', fetchImpl, maxAttempts: 1 })
+    render(
+      <MemoryRouter>
+        <OrinActivityCenter client={client} />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
+    })
+    expect(waitDetailCalls).toBe(1)
+    expect(listSignals.length).toBeGreaterThanOrEqual(2)
+
+    // Hold next list request and fire a second refresh event -> first list request's AbortSignal must abort!
+    holdListRequest = true
+    const signalCountBefore = listSignals.length
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('orin:conversations-updated'))
+      await Promise.resolve()
+    })
+    const heldConvSignal = listSignals[signalCountBefore]!
+    expect(heldConvSignal).toBeInstanceOf(AbortSignal)
+    expect(heldConvSignal.aborted).toBe(false)
+
+    holdListRequest = false
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      releaseHeldList?.()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(heldConvSignal.aborted).toBe(true)
+    expect(waitDetailCalls).toBe(1)
+
+    // Simulate transient 502 on /v1/conversations: MUST NOT wipe existing approvals or evict detailCacheRef!
+    failConvList = true
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
+
+    // Recover /v1/conversations: detailCacheRef must STILL be intact (waitDetailCalls remains 1)!
+    failConvList = false
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(waitDetailCalls).toBe(1)
+    expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
+  })
+
+  it('WorkspaceNavigation ignores stale in-flight clientA reload when swapped to clientB and does not loop on inline onChatsChange', async () => {
+    let resolveClientA: (() => void) | null = null
+    let clientACalls = 0
+    let clientBCalls = 0
+
+    const fetchA = vi.fn<typeof fetch>(async (input) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input)
+      if (url.endsWith('/v1/conversations')) {
+        clientACalls += 1
+        await new Promise<void>((resolve) => {
+          resolveClientA = resolve
+        })
+        return jsonResponse({
+          items: [{ conversation_id: 'chat_stale_a', title: 'Stale A', state: 'completed', updated_at: null }],
+        })
+      }
+      return jsonResponse({ items: [] })
+    })
+
+    const fetchB = vi.fn<typeof fetch>(async (input) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input)
+      if (url.endsWith('/v1/conversations')) {
+        clientBCalls += 1
+        return jsonResponse({
+          items: [{ conversation_id: 'chat_fresh_b', title: 'Fresh B', state: 'completed', updated_at: null }],
+        })
+      }
+      return jsonResponse({ items: [] })
+    })
+
+    const clientA = new ApiClient({ baseUrl: 'http://localhost:8000', fetchImpl: fetchA, maxAttempts: 1 })
+    const clientB = new ApiClient({ baseUrl: 'http://localhost:8000', fetchImpl: fetchB, maxAttempts: 1 })
+
+    const observedTitles: string[][] = []
+    const { rerender } = render(
+      <MemoryRouter>
+        <WorkspaceNavigation
+          client={clientA}
+          onChatsChange={(chats) => observedTitles.push(chats.map((c) => c.title))}
+        />
+      </MemoryRouter>,
+    )
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(clientACalls).toBe(1)
+
+    // Swap to clientB with a brand new inline onChatsChange while clientA's reload is still in flight
+    rerender(
+      <MemoryRouter>
+        <WorkspaceNavigation
+          client={clientB}
+          onChatsChange={(chats) => observedTitles.push(chats.map((c) => c.title))}
+        />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('Fresh B')).toBeInTheDocument()
+    })
+    expect(clientBCalls).toBe(1)
+
+    // Now resolve clientA's slow request: it MUST NOT overwrite Fresh B or re-query clientA!
+    await act(async () => {
+      resolveClientA?.()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.getByText('Fresh B')).toBeInTheDocument()
+    expect(screen.queryByText('Stale A')).not.toBeInTheDocument()
+    expect(clientACalls).toBe(1)
+    expect(clientBCalls).toBe(1)
+    expect(observedTitles).toEqual([['Fresh B']])
+  })
 })

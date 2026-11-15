@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../src/api/client'
 import type { ConversationActivityEvent } from '../../src/features/conversations/activityTypes'
@@ -270,5 +270,86 @@ describe('OverviewPanel polling discipline', () => {
     )
     expect(fetchImpl).toHaveBeenCalledTimes(3)
     expect(requestedUrls[2]).toContain('/v1/conversations/conv_2/overview')
+  })
+
+  it('cancels pending throttle timer when 4000ms interval ticks and resets overview/error state when conversationId changes', async () => {
+    let shouldFailConv2 = false
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const url = typeof input === 'string' ? input : (input as Request).url ?? String(input)
+      if (url.includes('/conv_2/') && shouldFailConv2) {
+        return new Response(JSON.stringify({ detail: 'Failed' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return makeOverviewResponse(url.includes('/conv_2/') ? 'Conv 2 Title' : 'Conv 1 Title')
+    })
+    const client = new ApiClient({ baseUrl: 'http://localhost:8000', fetchImpl, maxAttempts: 1 })
+
+    const { rerender } = render(
+      <OverviewPanel client={client} conversationId="conv_1" liveEvents={makeEvents(1)} onClose={() => {}} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('heading', { name: 'Conv 1 Title' })).toBeInTheDocument()
+
+    // At t = 3800ms, emit structural event #1 -> fires immediately (call #2)
+    await act(async () => {
+      vi.advanceTimersByTime(3800)
+    })
+    rerender(
+      <OverviewPanel
+        client={client}
+        conversationId="conv_1"
+        liveEvents={makeEvents(2, 'agent.created')}
+        onClose={() => {}}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+
+    // At t = 3900ms, emit structural event #2 -> schedules trailing throttle timer for t = 5300ms
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+    })
+    rerender(
+      <OverviewPanel
+        client={client}
+        conversationId="conv_1"
+        liveEvents={makeEvents(3, 'delegation.created')}
+        onClose={() => {}}
+      />,
+    )
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+
+    // At t = 4000ms, the 4s interval fires (call #3) and MUST cancel the stale t = 5300ms throttle timer!
+    await act(async () => {
+      vi.advanceTimersByTime(100)
+      await Promise.resolve()
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+
+    // Advance past t = 5300ms (up to t = 5500ms, before the next 8000ms interval): NO extra fetch may fire!
+    await act(async () => {
+      vi.advanceTimersByTime(1500)
+      await Promise.resolve()
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+
+    // Switching to conv_2 when conv_2 fails MUST clear conv_1's stale overview and render the error alert
+    shouldFailConv2 = true
+    rerender(
+      <OverviewPanel client={client} conversationId="conv_2" liveEvents={[]} onClose={() => {}} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(screen.queryByRole('heading', { name: 'Conv 1 Title' })).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível carregar a visão geral.')
   })
 })
