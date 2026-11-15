@@ -46,6 +46,14 @@ class _WindowsJob:
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
         kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
@@ -54,6 +62,18 @@ class _WindowsJob:
         kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
         kernel32.CloseHandle.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        class BasicAccountingInfo(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_longlong),
+                ("TotalKernelTime", ctypes.c_longlong),
+                ("ThisPeriodTotalUserTime", ctypes.c_longlong),
+                ("ThisPeriodTotalKernelTime", ctypes.c_longlong),
+                ("TotalPageFaultCount", wintypes.DWORD),
+                ("TotalProcesses", wintypes.DWORD),
+                ("ActiveProcesses", wintypes.DWORD),
+                ("TotalTerminatedProcesses", wintypes.DWORD),
+            ]
 
         class IoCounters(ctypes.Structure):
             _fields_ = [(name, ctypes.c_ulonglong) for name in (
@@ -84,6 +104,8 @@ class _WindowsJob:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
+        self._ctypes = ctypes
+        self._basic_accounting_cls = BasicAccountingInfo
         self._kernel32 = kernel32
         self.handle = kernel32.CreateJobObjectW(None, None)
         if not self.handle:
@@ -109,6 +131,21 @@ class _WindowsJob:
             self._kernel32, self.handle, pid, root_handle=root_handle
         )
         return bool(assigned or descendants_assigned > 0)
+
+    def has_active_processes(self) -> bool:
+        if not self.handle:
+            return False
+        info = self._basic_accounting_cls()
+        ok = bool(
+            self._kernel32.QueryInformationJobObject(
+                self.handle,
+                1,  # JobObjectBasicAccountingInformation
+                self._ctypes.byref(info),
+                self._ctypes.sizeof(info),
+                None,
+            )
+        )
+        return bool(ok and info.ActiveProcesses > 0)
 
     def terminate(self) -> None:
         if self.handle:

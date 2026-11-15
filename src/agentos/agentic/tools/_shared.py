@@ -822,13 +822,43 @@ _BACKGROUND_POPENS: dict[int, Any] = {}
 _BACKGROUND_JOBS: dict[int, Any] = {}
 
 
+def _job_has_active_processes(job: Any) -> bool:
+    checker = getattr(job, "has_active_processes", None)
+    if callable(checker):
+        try:
+            return bool(checker())
+        except Exception:  # noqa: BLE001
+            return False
+    return True
+
+
+def _popen_has_exited(proc: Any) -> bool:
+    try:
+        return proc.poll() is not None
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def register_background_popen(pid: int, process: Any) -> None:
     """Keep a bounded reference to a background ``Popen`` so later turns or the worker observer can read its exit code."""
     if not isinstance(pid, int) or pid <= 0 or process is None or not hasattr(process, "poll"):
         return
+    cap = MAX_TRACKED_PROCESSES * 4
     with _BACKGROUND_POPENS_LOCK:
         _BACKGROUND_POPENS[pid] = process
-        while len(_BACKGROUND_POPENS) > MAX_TRACKED_PROCESSES * 4:
+        if len(_BACKGROUND_POPENS) > cap:
+            dead_pids = [
+                p
+                for p, proc in _BACKGROUND_POPENS.items()
+                if p != pid
+                and _popen_has_exited(proc)
+                and not (p in _BACKGROUND_JOBS and _job_has_active_processes(_BACKGROUND_JOBS[p]))
+            ]
+            for dead_pid in dead_pids:
+                if len(_BACKGROUND_POPENS) <= cap:
+                    break
+                _BACKGROUND_POPENS.pop(dead_pid, None)
+        while len(_BACKGROUND_POPENS) > cap:
             oldest = next(iter(_BACKGROUND_POPENS))
             _BACKGROUND_POPENS.pop(oldest, None)
 
@@ -837,6 +867,7 @@ def register_background_job(pid: int, job: Any) -> None:
     """Keep the Windows Job Object for a backgrounded command so ``stop_process`` and session teardown kill its tree."""
     if not isinstance(pid, int) or pid <= 0 or job is None:
         return
+    cap = MAX_TRACKED_PROCESSES * 4
     with _BACKGROUND_POPENS_LOCK:
         old = _BACKGROUND_JOBS.get(pid)
         if old is not None and old is not job:
@@ -845,7 +876,20 @@ def register_background_job(pid: int, job: Any) -> None:
             except Exception:  # noqa: BLE001
                 pass
         _BACKGROUND_JOBS[pid] = job
-        while len(_BACKGROUND_JOBS) > MAX_TRACKED_PROCESSES * 4:
+        if len(_BACKGROUND_JOBS) > cap:
+            dead_pids = [
+                p
+                for p, candidate in _BACKGROUND_JOBS.items()
+                if p != pid and not _job_has_active_processes(candidate)
+            ]
+            for dead_pid in dead_pids:
+                evicted = _BACKGROUND_JOBS.pop(dead_pid, None)
+                if evicted is not None:
+                    try:
+                        evicted.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        while len(_BACKGROUND_JOBS) > cap:
             oldest = next(iter(_BACKGROUND_JOBS))
             evicted = _BACKGROUND_JOBS.pop(oldest, None)
             if evicted is not None:

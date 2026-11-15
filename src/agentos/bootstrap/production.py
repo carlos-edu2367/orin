@@ -38,6 +38,7 @@ from agentos.configuration import AgentOSSettings
 from agentos.configuration.capabilities import InstanceCapabilities
 from agentos.configuration.mode import RuntimeMode
 from agentos.installation import orin_paths
+from agentos.launcher.state import lock_is_free, stop_requested
 from agentos.persistence.postgres.event_stream import PostgresClientEventStream
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.tool_activity import PostgresToolActivitySink
@@ -507,6 +508,12 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
         manager = _omniroute_manager()
         if manager is None:
             return
+        try:
+            paths = orin_paths()
+            if not lock_is_free(paths) and not stop_requested(paths):
+                return
+        except Exception:
+            pass
         try:
             await run_in_threadpool(manager.stop)
         except Exception:

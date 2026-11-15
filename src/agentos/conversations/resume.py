@@ -227,9 +227,10 @@ def resume_paused_turn(
             }
         if current_state != "paused":
             raise ApplicationConflictError(
-                "only a paused turn can be resumed",
+                turn_id,
                 code="TURN_NOT_PAUSED",
-                details={"turn_id": turn_id, "state": current_state},
+                message="only a paused turn can be resumed",
+                retryable=False,
             )
         step_rows = (
             c.execute(
@@ -250,6 +251,38 @@ def resume_paused_turn(
         str(r["tool_call_id"]): (str(r["tool_name"] or ""), str(r["payload"] or ""))
         for r in step_rows
     }
+    query = ExecutionQueryAdapter(store._engine)
+    control = ExecutionApplicationAdapter(store._engine)
+    execution_id = str(turn["execution_id"])
+    try:
+        view = query.get(
+            {
+                "resource_id": execution_id,
+                "user_id": user_id,
+                "purpose": "execution.read",
+            }
+        )
+        if view["state"] == "PAUSED":
+            control.control(
+                {
+                    "context": {"user_id": user_id, "execution_id": execution_id},
+                    "action": "RESUME",
+                    "expected_state_version": view["state_version"],
+                    "reason": reason,
+                    "idempotency_key": f"turn-resume:{turn_id}:{view['state_version']}",
+                    "requested_at": now,
+                }
+            )
+        elif view["state"] in {"FAILED", "CANCELLED", "COMPLETED"}:
+            raise ApplicationConflictError(
+                execution_id,
+                int(view.get("state_version") or 0),
+                code="TURN_NOT_PAUSED",
+                message=f"turn {turn_id} cannot be resumed from terminal execution state '{view['state']}'",
+                retryable=False,
+            )
+    except (LookupError, ApplicationNotFoundError):
+        pass
     scope = ExecutionJournalScope(
         execution_id=str(turn["execution_id"]),
         user_id=str(turn["user_id"]),
@@ -286,30 +319,6 @@ def resume_paused_turn(
                 unknown_tools.append(f"{t_name or req_name} ({inv_ref}) {t_args[:200]}")
             else:
                 unknown_tools.append(f"{req_name} ({inv_ref})")
-    query = ExecutionQueryAdapter(store._engine)
-    control = ExecutionApplicationAdapter(store._engine)
-    execution_id = str(turn["execution_id"])
-    try:
-        view = query.get(
-            {
-                "resource_id": execution_id,
-                "user_id": user_id,
-                "purpose": "execution.read",
-            }
-        )
-        if view["state"] == "PAUSED":
-            control.control(
-                {
-                    "context": {"user_id": user_id, "execution_id": execution_id},
-                    "action": "RESUME",
-                    "expected_state_version": view["state_version"],
-                    "reason": reason,
-                    "idempotency_key": f"turn-resume:{turn_id}:{view['state_version']}",
-                    "requested_at": now,
-                }
-            )
-    except LookupError:
-        pass
     if unknown_tools:
         listed = ", ".join(unknown_tools)
         note_text = system_reminder(
@@ -320,16 +329,22 @@ def resume_paused_turn(
         )
     else:
         note_text = system_reminder(STREAM_RESUME_REMINDER)
-    store.record_step(
-        turn,
-        kind=turn_transcript.STEP_QUEUED_INPUT,
-        payload={
-            "content": note_text,
-            "resume_reason": reason,
-            "unknown_tools": unknown_tools,
-        },
-    )
     with store._engine.begin() as c:
+        turn_updated = c.execute(
+            update(conversation_turns)
+            .where(
+                conversation_turns.c.turn_id == turn_id,
+                conversation_turns.c.state == "paused",
+            )
+            .values(state="queued", updated_at=now)
+        )
+        if not turn_updated.rowcount:
+            raise ApplicationConflictError(
+                turn_id,
+                code="TURN_NOT_PAUSED",
+                message="only a paused turn can be resumed",
+                retryable=False,
+            )
         c.execute(
             update(conversation_dispatches)
             .where(conversation_dispatches.c.turn_id == turn_id)
@@ -340,11 +355,6 @@ def resume_paused_turn(
                 acquired_at=None,
                 updated_at=now,
             )
-        )
-        c.execute(
-            update(conversation_turns)
-            .where(conversation_turns.c.turn_id == turn_id)
-            .values(state="queued", updated_at=now)
         )
         c.execute(
             update(conversation_messages)
@@ -371,6 +381,15 @@ def resume_paused_turn(
                 created_at=now,
             )
         )
+    store.record_step(
+        turn,
+        kind=turn_transcript.STEP_QUEUED_INPUT,
+        payload={
+            "content": note_text,
+            "resume_reason": reason,
+            "unknown_tools": unknown_tools,
+        },
+    )
     store._activity(
         turn,
         AgentActivityEventType.TURN_STARTED,

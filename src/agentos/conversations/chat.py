@@ -54,6 +54,12 @@ def _id(prefix: str) -> str: return f"{prefix}_{uuid4().hex}"
 def _title(message: str) -> str: return " ".join(message.split())[:80] or "Nova conversa"
 
 
+def _utc(dt: datetime | str) -> datetime:
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+    return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def _truncate_activity_payload(payload: Mapping[str, object]) -> dict[str, object]:
     return _coerce_stored_payload(payload)
 
@@ -3535,8 +3541,10 @@ class PostgresChatStore:
                 errors.append({"event_id": row["event_id"], "code": str(payload["error_code"]), "summary": row["summary"], "occurred_at": row["created_at"].isoformat()})
         messages = messages[-200:]
         errors = errors[-200:]
-        started = next((t["started_at"] for t in turns if t["started_at"]), None)
-        finished = turns[-1]["finished_at"] if turns and turns[-1]["finished_at"] else None
+        started_raw = next((t["started_at"] for t in turns if t["started_at"]), None)
+        finished_raw = turns[-1]["finished_at"] if turns and turns[-1]["finished_at"] else None
+        started = _utc(started_raw) if started_raw is not None else None
+        finished = _utc(finished_raw) if finished_raw is not None else None
         duration = (finished - started).total_seconds() if started and finished else None
         return {
             "conversation_id": conversation_id, "title": conv["title"], "state": conv["state"],
@@ -3888,6 +3896,15 @@ class PostgresChatStore:
                         and exec_updated_at is not None
                         and exec_updated_at >= cutoff
                     ):
+                        continue
+
+                    with self._engine.connect() as check_c:
+                        current_turn_state = check_c.execute(
+                            select(conversation_turns.c.state).where(
+                                conversation_turns.c.turn_id == tid
+                            )
+                        ).scalar_one_or_none()
+                    if current_turn_state != "paused":
                         continue
 
                     if exec_state == "QUEUED":

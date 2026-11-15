@@ -1271,3 +1271,129 @@ def test_ollama_embedder_translates_malformed_vector_elements_to_embedding_unava
     with pytest.raises(EmbeddingUnavailable):
         embedder.embed(["hello"])
     assert embedder.identity.dim == 0
+
+
+def test_resume_paused_turn_rejects_terminal_failed_execution_race(engine):
+    from agentos.api.contracts import ApplicationConflictError
+    from agentos.conversations.resume import resume_paused_turn
+    from agentos.persistence.postgres.schema import conversation_turn_steps
+
+    store = PostgresChatStore(engine)
+    exec_queries = ExecutionQueryAdapter(engine)
+    exec_app = ExecutionApplicationAdapter(engine)
+
+    receipt = store.create(
+        user_id="u1",
+        message="race turn",
+        provider="codex_cli",
+        model_id="gpt-5",
+        idempotency_key="m-race-paused-1",
+    )
+    cid = receipt.conversation_id
+    tid = receipt.turn_id
+    turn = store.claim(tid)
+    assert turn is not None
+    store.pause_for_reconciliation(turn, code="PROCESS_RECONCILE_LOST")
+
+    now = datetime.now(timezone.utc)
+    for idx, target in enumerate(("STARTING", "RUNNING", "PAUSED"), start=1):
+        view = exec_queries.get(
+            {
+                "resource_id": str(turn["execution_id"]),
+                "user_id": "u1",
+                "purpose": "execution.read",
+            }
+        )
+        exec_app.transition(
+            {
+                "execution_id": str(turn["execution_id"]),
+                "user_id": "u1",
+                "target_state": target,
+                "reason_code": "race_setup",
+                "result_ref": None,
+                "expected_state_version": int(view["state_version"]),
+                "idempotency_key": f"race-setup-{idx}",
+                "requested_at": now,
+            }
+        )
+
+    # Simulate Step 1 of expire_abandoned_paused_turns: Execution transitions to FAILED
+    # while conversation_turns.state is still "paused".
+    view_paused = exec_queries.get(
+        {
+            "resource_id": str(turn["execution_id"]),
+            "user_id": "u1",
+            "purpose": "execution.read",
+        }
+    )
+    exec_app.transition(
+        {
+            "execution_id": str(turn["execution_id"]),
+            "user_id": "u1",
+            "target_state": "FAILED",
+            "reason_code": "abandoned_paused_turn_expired",
+            "result_ref": None,
+            "expected_state_version": int(view_paused["state_version"]),
+            "idempotency_key": f"expire-paused-fail:{tid}",
+            "requested_at": now,
+        }
+    )
+
+    with pytest.raises(ApplicationConflictError):
+        resume_paused_turn(store, cid, tid, "u1", reason="user_resumed")
+
+    # Verify resume_paused_turn did NOT append STEP_QUEUED_INPUT or flip turn to "queued"
+    with engine.begin() as c:
+        t_state = c.execute(
+            select(conversation_turns.c.state).where(conversation_turns.c.turn_id == tid)
+        ).scalar_one()
+        step_count = len(
+            c.execute(
+                select(conversation_turn_steps.c.id).where(
+                    conversation_turn_steps.c.turn_id == tid
+                )
+            ).all()
+        )
+    assert t_state == "paused"
+    assert step_count == 0
+
+    # Now Step 2 of expire_abandoned_paused_turns completes and marks the turn failed
+    stale_ts = datetime.now(timezone.utc) - timedelta(hours=3)
+    with engine.begin() as c:
+        c.execute(
+            update(conversation_turns)
+            .where(conversation_turns.c.turn_id == tid)
+            .values(updated_at=stale_ts)
+        )
+        c.execute(
+            update(conversation_dispatches)
+            .where(conversation_dispatches.c.turn_id == tid)
+            .values(updated_at=stale_ts)
+        )
+    expired = store.expire_abandoned_paused_turns(older_than=timedelta(hours=2))
+    assert tid in expired
+
+
+def test_overview_normalizes_mixed_naive_and_aware_turn_timestamps(engine):
+    activity_store = PostgresAgenticActivityStore(engine, cursor_secret="test-secret")
+    store = PostgresChatStore(engine, activity_store=activity_store)
+    receipt = store.create(
+        user_id="u1",
+        message="mixed tz overview",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="m-mixed-tz-1",
+    )
+    cid = receipt.conversation_id
+    tid = receipt.turn_id
+
+    # Bind raw SQLite strings mixing naive ('YYYY-MM-DD HH:MM:SS') and offset-aware ('...T...+00:00')
+    with engine.begin() as c:
+        c.exec_driver_sql(
+            "UPDATE conversation_turns SET started_at = :s, finished_at = :f WHERE turn_id = :t",
+            {"s": "2026-11-15 10:00:00", "f": "2026-11-15T10:01:30+00:00", "t": tid},
+        )
+
+    ov = store.overview(cid, "u1")
+    assert ov["duration_seconds"] == pytest.approx(90.0)
+

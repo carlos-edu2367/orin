@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createBrowserApiClient, type ApiClient } from '../api/client'
+import { ApiError } from '../api/errors'
 import {
   getConversation,
   listConversations,
@@ -439,6 +440,7 @@ export function OrinActivityCenter({
   const locallyResolvedRef = useRef<Set<string>>(new Set())
   const activeBackgroundIdsRef = useRef<Set<string>>(new Set())
   const hasSeededInitialRef = useRef<boolean>(false)
+  const lastApiClientRef = useRef<ApiClient>(apiClient)
   const latestCatalogRef = useRef<
     Array<{
       conversationId: string
@@ -451,6 +453,10 @@ export function OrinActivityCenter({
   >([])
 
   const refreshActivityCenter = useCallback(async () => {
+    if (lastApiClientRef.current !== apiClient) {
+      lastApiClientRef.current = apiClient
+      detailCacheRef.current.clear()
+    }
     abortControllerRef.current?.abort()
     const controller = new AbortController()
     abortControllerRef.current = controller
@@ -458,14 +464,28 @@ export function OrinActivityCenter({
     const signaledClient = withAbortSignal(apiClient, signal)
     const seq = ++refreshSeqRef.current
     let convListOk = true
+    let projectListOk = true
     const [convResp, projectResp] = await Promise.all([
       listConversations(signaledClient).catch(() => {
         convListOk = false
         return { items: [] }
       }),
-      listProjectSidebar(signaledClient).catch((): { items: ProjectSidebarItem[] } => ({ items: [] })),
+      listProjectSidebar(signaledClient).catch((err): { items: ProjectSidebarItem[] } => {
+        if (!(err instanceof ApiError && err.code === 'invalid_response')) {
+          projectListOk = false
+        }
+        return { items: [] }
+      }),
     ])
-    if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current || !convListOk) return
+    if (
+      signal.aborted ||
+      !mountedRef.current ||
+      seq !== refreshSeqRef.current ||
+      !convListOk ||
+      !projectListOk
+    ) {
+      return
+    }
 
     const convList = Array.isArray(convResp?.items) ? convResp.items : []
     const projectList = Array.isArray(projectResp?.items) ? projectResp.items : []
@@ -792,7 +812,9 @@ export function OrinActivityCenter({
   }
 
   const refreshActivityCenterRef = useRef(refreshActivityCenter)
-  refreshActivityCenterRef.current = refreshActivityCenter
+  useEffect(() => {
+    refreshActivityCenterRef.current = refreshActivityCenter
+  }, [refreshActivityCenter])
 
   async function runGuardedAction(actionKey: string, task: () => Promise<void>) {
     if (inFlightRef.current.has(actionKey)) return

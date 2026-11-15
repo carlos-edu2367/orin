@@ -352,4 +352,45 @@ describe('OverviewPanel polling discipline', () => {
     expect(screen.queryByRole('heading', { name: 'Conv 1 Title' })).not.toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('Não foi possível carregar a visão geral.')
   })
+
+  it('resets lastStructuralIdRef when liveEvents empties so a recurring structural event ID triggers a refresh', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => makeOverviewResponse())
+    const client = new ApiClient({ baseUrl: 'http://localhost:8000', fetchImpl, maxAttempts: 1 })
+
+    const structuralEvents: ConversationActivityEvent[] = [
+      {
+        eventId: 'evt_struct_repeat',
+        cursor: '1',
+        type: 'agent.created',
+        kind: 'agent',
+        state: 'working',
+        agentId: 'agent:main',
+        summary: 'created',
+        occurredAt: '2026-11-15T15:00:00Z',
+      },
+    ]
+
+    const { rerender } = render(
+      <OverviewPanel client={client} conversationId="conv_1" liveEvents={structuralEvents} onClose={() => {}} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+
+    // Briefly empty liveEvents
+    rerender(<OverviewPanel client={client} conversationId="conv_1" liveEvents={[]} onClose={() => {}} />)
+
+    // Advance past throttle window and re-emit the same structural event ID
+    await act(async () => {
+      vi.advanceTimersByTime(1600)
+    })
+    rerender(
+      <OverviewPanel client={client} conversationId="conv_1" liveEvents={structuralEvents} onClose={() => {}} />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
 })

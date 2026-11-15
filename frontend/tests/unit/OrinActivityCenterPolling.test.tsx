@@ -657,6 +657,108 @@ describe('OrinActivityCenter & WorkspaceNavigation HTTP/1.1 socket discipline', 
     expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
   })
 
+  it('preserves project-chat approvals and detailCacheRef on transient /v1/projects/sidebar 5xx failure and clears detailCacheRef on client swap', async () => {
+    let failProjectSidebar = false
+    let projDetailCallsA = 0
+    let projDetailCallsB = 0
+
+    const makeFetch = (onDetailCall: () => void) =>
+      vi.fn<typeof fetch>(async (input) => {
+        const url = typeof input === 'string' ? input : (input as Request).url ?? String(input)
+        if (url.endsWith('/v1/conversations')) {
+          return jsonResponse({ items: [] })
+        }
+        if (url.endsWith('/v1/projects/sidebar')) {
+          if (failProjectSidebar) {
+            return jsonResponse({ detail: 'Sidebar 502' }, 502)
+          }
+          return jsonResponse({
+            items: [
+              {
+                project_id: 'proj_1',
+                name: 'Projeto 1',
+                description: null,
+                chats: [
+                  {
+                    conversation_id: 'conv_proj_wait',
+                    title: 'Project Waiting Chat',
+                    state: 'waiting_user',
+                    mode: 'code',
+                    updated_at: '2026-11-15T15:00:00Z',
+                  },
+                ],
+              },
+            ],
+          })
+        }
+        if (url.endsWith('/v1/conversations/conv_proj_wait')) {
+          onDetailCall()
+          return jsonResponse(
+            makeConversationDetail('conv_proj_wait', 'waiting_user', [
+              makeWorkspaceTrustActivity('C:/proj_1'),
+            ]),
+          )
+        }
+        return jsonResponse({})
+      })
+
+    const clientA = new ApiClient({
+      baseUrl: 'http://localhost:8000',
+      fetchImpl: makeFetch(() => {
+        projDetailCallsA += 1
+      }),
+      maxAttempts: 1,
+    })
+    const clientB = new ApiClient({
+      baseUrl: 'http://localhost:8000',
+      fetchImpl: makeFetch(() => {
+        projDetailCallsB += 1
+      }),
+      maxAttempts: 1,
+    })
+
+    const { rerender } = render(
+      <MemoryRouter>
+        <OrinActivityCenter client={clientA} />
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
+    })
+    expect(projDetailCallsA).toBe(1)
+
+    // Simulate transient 502 on /v1/projects/sidebar while /v1/conversations succeeds
+    failProjectSidebar = true
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    // Must preserve project approval badge and cached detail
+    expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
+
+    // Recover /v1/projects/sidebar: detailCacheRef must still have conv_proj_wait cached!
+    failProjectSidebar = false
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(projDetailCallsA).toBe(1)
+    expect(screen.getByTestId('orin-activity-center-badge')).toHaveTextContent('1')
+
+    // Swap clientA -> clientB: detailCacheRef must clear so clientB fetches its own detail snapshot
+    rerender(
+      <MemoryRouter>
+        <OrinActivityCenter client={clientB} />
+      </MemoryRouter>,
+    )
+    await waitFor(() => {
+      expect(projDetailCallsB).toBe(1)
+    })
+  })
+
   it('WorkspaceNavigation ignores stale in-flight clientA reload when swapped to clientB and does not loop on inline onChatsChange', async () => {
     let resolveClientA: (() => void) | null = null
     let clientACalls = 0

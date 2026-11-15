@@ -48,6 +48,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
   const throttleTimerRef = useRef<number | null>(null)
   const loadGenRef = useRef(0)
   const prevConversationIdRef = useRef(conversationId)
+  const loadRef = useRef<() => void>(() => {})
 
   const clearThrottleTimer = useCallback(() => {
     if (throttleTimerRef.current !== null) {
@@ -86,12 +87,16 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
             const remaining = Math.max(0, STRUCTURAL_THROTTLE_MS - (Date.now() - lastLoadAtRef.current))
             throttleTimerRef.current = window.setTimeout(() => {
               throttleTimerRef.current = null
-              load()
+              loadRef.current()
             }, remaining)
           }
         }
       })
   }, [client, conversationId, clearThrottleTimer])
+
+  useEffect(() => {
+    loadRef.current = load
+  }, [load])
 
   const latestStructuralEventId = useMemo(() => {
     for (let i = liveEvents.length - 1; i >= 0; i -= 1) {
@@ -104,6 +109,7 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
   }, [liveEvents])
 
   useEffect(() => {
+    loadRef.current = load
     mountedRef.current = true
     loadGenRef.current += 1
     inFlightRef.current = false
@@ -134,7 +140,10 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
   }, [client, conversationId, load, clearThrottleTimer])
 
   useEffect(() => {
-    if (!latestStructuralEventId) return
+    if (!latestStructuralEventId) {
+      lastStructuralIdRef.current = null
+      return
+    }
     if (latestStructuralEventId === lastStructuralIdRef.current) return
     lastStructuralIdRef.current = latestStructuralEventId
 

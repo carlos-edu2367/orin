@@ -38,6 +38,7 @@ from .state import (
     InstanceState,
     clear_state,
     clear_stop_request,
+    request_stop,
     stop_requested,
     write_state,
 )
@@ -516,9 +517,13 @@ class Supervisor:
         if not self.children:
             self.group.close()
             return
-        self.console.stopping()
-        self._stop_children()
-        self.group.close()
+        request_stop(self.paths)
+        try:
+            self.console.stopping()
+            self._stop_children()
+            self.group.close()
+        finally:
+            clear_stop_request(self.paths)
 
     def _stop_children(self) -> None:
         reported: set[str] = set()
@@ -536,6 +541,7 @@ class Supervisor:
         self.children.clear()
 
     def shutdown(self) -> None:
+        request_stop(self.paths)
         self.console.stopping()
         self._stop_children()
         if self.omniroute_ready and self._owned_omniroute_is_gone():

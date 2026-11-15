@@ -268,8 +268,11 @@ export function WorkspaceNavigation({
   const pendingReloadRef = useRef(false)
   const reloadGenRef = useRef(0)
   const onChatsChangeRef = useRef(onChatsChange)
-  onChatsChangeRef.current = onChatsChange
   const latestReloadRef = useRef<() => Promise<void>>(() => Promise.resolve())
+
+  useEffect(() => {
+    onChatsChangeRef.current = onChatsChange
+  }, [onChatsChange])
 
   const reload = useCallback(async () => {
     if (inFlightRef.current) {
@@ -305,7 +308,6 @@ export function WorkspaceNavigation({
       }
     }
   }, [apiClient])
-  latestReloadRef.current = reload
 
   const activeSessionCount = useMemo(() => {
     const activeStates = new Set(['queued', 'starting', 'running', 'streaming', 'cancelling'])
@@ -326,6 +328,7 @@ export function WorkspaceNavigation({
   }, [chats, projects])
 
   useEffect(() => {
+    latestReloadRef.current = reload
     mountedRef.current = true
     reloadGenRef.current += 1
     inFlightRef.current = false

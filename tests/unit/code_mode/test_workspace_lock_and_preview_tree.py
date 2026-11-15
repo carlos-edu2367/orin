@@ -524,3 +524,76 @@ def test_fast_exiting_parent_still_adopts_live_descendant_into_job(tmp_path: Pat
                 os.kill(child_pid, 9)
             except OSError:
                 pass
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object active process sweep test")
+def test_background_jobs_sweep_dead_entries_before_evicting_live_windows_job(tmp_path: Path) -> None:
+    from agentos.agentic.tools._shared import (
+        MAX_TRACKED_PROCESSES,
+        has_background_job,
+        poll_background_popen,
+        register_background_popen,
+    )
+    from agentos.hooks.processes import _WindowsJob
+
+    real_py = getattr(sys, "_base_executable", sys.executable)
+    gc_pid_file = tmp_path / "detached_gc_pid.txt"
+    shim_code = (
+        "import subprocess, sys, pathlib; "
+        f"c = subprocess.Popen([{real_py!r}, '-c', 'import time; time.sleep(60)']); "
+        f"pathlib.Path({str(gc_pid_file)!r}).write_text(str(c.pid), encoding='utf-8'); "
+        "sys.exit(0)"
+    )
+
+    live_job = _WindowsJob(kill_on_close=False)
+    shim_proc: subprocess.Popen[bytes] | None = None
+    gc_pid: int | None = None
+    try:
+        shim_proc = subprocess.Popen([real_py, "-c", shim_code])
+        shim_proc.wait(timeout=5.0)
+        assert gc_pid_file.is_file()
+        gc_pid = int(gc_pid_file.read_text(encoding="utf-8").strip())
+        assert process_is_alive(gc_pid)
+
+        assert live_job.assign(shim_proc.pid, root_handle=getattr(shim_proc, "_handle", None)) is True
+        assert live_job.has_active_processes() is True
+
+        register_background_job(shim_proc.pid, live_job)
+        register_background_popen(shim_proc.pid, shim_proc)
+
+        # Register > MAX_TRACKED_PROCESSES * 4 (205) already-exited jobs and popens
+        cap = MAX_TRACKED_PROCESSES * 4
+        dead_jobs: list[_WindowsJob] = []
+        for idx in range(cap + 5):
+            fake_pid = 900_000 + idx
+            dead_job = _WindowsJob(kill_on_close=False)
+            assert dead_job.has_active_processes() is False
+            dead_jobs.append(dead_job)
+            register_background_job(fake_pid, dead_job)
+
+            dead_popen = MagicMock()
+            dead_popen.poll.return_value = 0
+            register_background_popen(fake_pid, dead_popen)
+
+        # Live job with active grandchild MUST NOT have been evicted by the 205 dead jobs!
+        assert has_background_job(shim_proc.pid) is True
+        assert poll_background_popen(shim_proc.pid) == (False, 0)
+
+        # Session cleanup must still reach and kill the detached grandchild
+        cleanup_session_background_processes()
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and process_is_alive(gc_pid):
+            time.sleep(0.05)
+        assert process_is_alive(gc_pid) is False
+    finally:
+        cleanup_session_background_processes()
+        live_job.terminate()
+        live_job.close()
+        if shim_proc is not None and shim_proc.poll() is None:
+            shim_proc.kill()
+        if gc_pid is not None and process_is_alive(gc_pid):
+            try:
+                os.kill(gc_pid, 9)
+            except OSError:
+                pass
+

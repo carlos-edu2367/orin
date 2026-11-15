@@ -304,3 +304,83 @@ def test_win64_job_object_struct_size_and_breakaway_flags() -> None:
         g_strict.close()
     assert g_root._job is None
     assert g_strict._job is None
+
+
+@pytest.mark.anyio
+async def test_backend_shutdown_preserves_omniroute_during_supervisor_auto_heal_and_stops_on_full_shutdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentos.bootstrap.production as prod_mod
+    from agentos.launcher.state import InstanceLock, stop_requested
+
+    paths, profile = _make_paths_and_profile(tmp_path)
+    monkeypatch.setattr(prod_mod, "orin_paths", lambda: paths)
+
+    # 1. Verify Supervisor.shutdown() sets request_stop(self.paths) BEFORE stopping children
+    console = Console(io.StringIO(), quiet=True, colour=False)
+    sup = Supervisor(paths, profile, console, options=LaunchOptions(open_browser=False))
+    observed_stop_during_child_stop: list[bool] = []
+
+    fake_backend = MagicMock()
+    fake_backend.name = "backend"
+    fake_backend.pid = 4321
+    fake_backend.process = MagicMock()
+    fake_backend.stop.side_effect = lambda: observed_stop_during_child_stop.append(stop_requested(paths))
+    sup.children = [fake_backend]
+    sup.shutdown()
+    assert observed_stop_during_child_stop == [True]
+    # And after shutdown finishes, stop_requested is cleared
+    assert stop_requested(paths) is False
+
+    # 2. Verify Supervisor._rollback() also sets request_stop(self.paths) during child stop and clears it after
+    sup2 = Supervisor(paths, profile, console, options=LaunchOptions(open_browser=False))
+    observed_rollback_stop: list[bool] = []
+    fake_backend_rb = MagicMock()
+    fake_backend_rb.name = "backend"
+    fake_backend_rb.pid = 4322
+    fake_backend_rb.process = MagicMock()
+    fake_backend_rb.stop.side_effect = lambda: observed_rollback_stop.append(stop_requested(paths))
+    sup2.children = [fake_backend_rb]
+    sup2._rollback()
+    assert observed_rollback_stop == [True]
+    assert stop_requested(paths) is False
+
+    # 3. Verify production.py _stop_owned_omniroute skips manager.stop() when InstanceLock is held
+    #    and stop_requested(paths) is False (isolated backend auto-heal), but calls manager.stop()
+    #    when stop_requested(paths) is True or when InstanceLock is free (standalone uvicorn).
+    dsn = f"sqlite:///{tmp_path / 'prod_omni.db'}"
+    settings = prod_mod.ProductionSettings(
+        DATABASE_URL=dsn,
+        AGENTOS_ENV="development",
+        LOCALHOST_TRUST_ENABLED=False,
+    )
+    fake_manager = MagicMock()
+    services = prod_mod.unavailable_production_services()
+    services.omniroute_runtime = fake_manager
+    app = prod_mod.create_production_app(settings, services=services, probe=MagicMock())
+
+    shutdown_handlers = list(app.router.on_shutdown)
+    assert len(shutdown_handlers) >= 1
+
+    with InstanceLock(paths.instance_lock) as lock:
+        assert lock.acquire() is True
+        # Case A: Supervisor lock held, stop_requested is False (isolated backend restart)
+        for handler in shutdown_handlers:
+            await handler()
+        fake_manager.stop.assert_not_called()
+
+        # Case B: Supervisor lock held, stop_requested is True (full Supervisor shutdown)
+        request_stop(paths)
+        for handler in shutdown_handlers:
+            await handler()
+        fake_manager.stop.assert_called_once()
+
+    # Case C: Standalone Uvicorn (InstanceLock is free, stop_requested is False)
+    from agentos.launcher.state import clear_stop_request
+
+    clear_stop_request(paths)
+    fake_manager.stop.reset_mock()
+    for handler in shutdown_handlers:
+        await handler()
+    fake_manager.stop.assert_called_once()
+
