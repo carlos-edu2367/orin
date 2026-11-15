@@ -165,7 +165,7 @@ class OpenCodeBridgeProcessManager:
     def __init__(self, *, startup_timeout: float = 12.0) -> None:
         self._startup_timeout = startup_timeout
         self._lock = threading.Lock()
-        self._processes: dict[int, subprocess.Popen[bytes]] = {}
+        self._processes: dict[int, Any] = {}
 
     def ensure_running(self, base_url: str) -> None:
         normalized = normalize_opencode_base_url(base_url)
@@ -178,6 +178,10 @@ class OpenCodeBridgeProcessManager:
                 return
             parsed = urlsplit(normalized)
             port = parsed.port or 18446
+            prev = self._processes.pop(port, None)
+            if prev is not None:
+                prev_proc, prev_created = prev if isinstance(prev, tuple) else (prev, None)
+                self._cleanup_process(prev_proc, prev_created)
             binary = _locate_opencode_binary()
             if not binary:
                 raise RuntimeError(
@@ -205,23 +209,33 @@ class OpenCodeBridgeProcessManager:
                 stderr=subprocess.DEVNULL,
                 creationflags=creationflags,
             )
-            self._processes[port] = proc
-            created = process_created(proc.pid) if isinstance(getattr(proc, "pid", None), int) else None
-            deadline = time.monotonic() + self._startup_timeout
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    break
-                if self._is_healthy(normalized):
-                    return
-                time.sleep(0.25)
-            self._processes.pop(port, None)
-            self._cleanup_process(proc, created)
+            proc_pid = getattr(proc, "pid", None)
+            created = (
+                process_created(proc_pid)
+                if isinstance(proc_pid, int) and not isinstance(proc_pid, bool) and proc_pid > 0
+                else None
+            )
+            self._processes[port] = (proc, created)
+            started = False
+            try:
+                deadline = time.monotonic() + self._startup_timeout
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        break
+                    if self._is_healthy(normalized):
+                        started = True
+                        return
+                    time.sleep(0.25)
+            finally:
+                if not started:
+                    self._processes.pop(port, None)
+                    self._cleanup_process(proc, created)
             raise RuntimeError("OpenCode local bridge could not be started")
 
     @staticmethod
-    def _cleanup_process(proc: Any, created: float | None = None) -> None:
+    def _cleanup_process(proc: Any, created: int | float | str | None = None) -> None:
         pid = getattr(proc, "pid", None)
-        if isinstance(pid, int) and pid > 0 and created is not None:
+        if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and created is not None:
             try:
                 kill_verified(pid, created)
             except Exception:

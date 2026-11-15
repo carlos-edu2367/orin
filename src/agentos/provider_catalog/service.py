@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+import threading
 import time
 from typing import Callable, Mapping, Protocol, Sequence
 
@@ -97,6 +98,8 @@ class ProviderModelCatalogService:
         self._context_reference = context_reference
         self._now = now
         self._auto_refresh_backoff: dict[tuple[str, str], float] = {}
+        self._auto_refresh_locks_guard = threading.Lock()
+        self._auto_refresh_locks: dict[tuple[str, str], threading.Lock] = {}
 
     def _fill_context_windows(self, records: list[ProviderModelRecord]) -> list[ProviderModelRecord]:
         """Give models the upstream listed without a window a known one.
@@ -209,7 +212,6 @@ class ProviderModelCatalogService:
 
     def refresh(self, context: ProviderCatalogContext, provider: str) -> RefreshReceipt:
         normalized_provider = _provider(provider)
-        self._auto_refresh_backoff.pop((context.user_id, normalized_provider), None)
         credential = self._repository.credential(context, normalized_provider)
         if credential is None or credential.get("enabled") is not True:
             raise ProviderCatalogUnavailable("provider is not configured")
@@ -300,6 +302,7 @@ class ProviderModelCatalogService:
             deduplicated[record.model_id] = record
         records = sorted(deduplicated.values(), key=lambda item: (item.display_name.casefold(), item.model_id))
         self._repository.replace(context, normalized_provider, records, refreshed_at)
+        self._auto_refresh_backoff.pop((context.user_id, normalized_provider), None)
         return RefreshReceipt(refreshed_at, len(records))
 
     def _normalize(
@@ -343,18 +346,37 @@ class ProviderModelCatalogService:
             records.append(_normalize_nvidia(dict(item), ts))
         return records
 
+    def _auto_refresh_lock(self, key: tuple[str, str]) -> threading.Lock:
+        with self._auto_refresh_locks_guard:
+            lock = self._auto_refresh_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._auto_refresh_locks[key] = lock
+            return lock
+
     def _try_auto_refresh(self, context: ProviderCatalogContext, normalized_provider: str) -> bool:
         key = (context.user_id, normalized_provider)
-        now = time.monotonic()
-        if now < self._auto_refresh_backoff.get(key, 0.0):
+        if time.monotonic() < self._auto_refresh_backoff.get(key, 0.0):
             return False
-        try:
-            self.refresh(context, normalized_provider)
-            self._auto_refresh_backoff.pop(key, None)
-            return True
-        except Exception:
-            self._auto_refresh_backoff[key] = time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
-            return False
+        with self._auto_refresh_lock(key):
+            if time.monotonic() < self._auto_refresh_backoff.get(key, 0.0):
+                return False
+            current = self._repository.list(context, normalized_provider, False)
+            if normalized_provider == "anthropic":
+                if len(current) >= 5:
+                    return True
+            elif normalized_provider == "google-antigravity":
+                if current and not _antigravity_modalities_are_stale(current):
+                    return True
+            elif current:
+                return True
+            try:
+                self.refresh(context, normalized_provider)
+                self._auto_refresh_backoff.pop(key, None)
+                return True
+            except Exception:
+                self._auto_refresh_backoff[key] = time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
+                return False
 
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         normalized_provider = _provider(provider)

@@ -126,12 +126,15 @@ class OmniRouteProcessManager:
         self._owner_file = self._resolve_owner_file(settings, owner_file)
         self._process: _Process | None = None
         self._lock = RLock()
+        self._generation: int = 0
         self._last_failure: str | None = None
 
     @staticmethod
-    def _resolve_owner_file(settings: OmniRouteRuntimeSettingsStore, owner_file: str | Path | None) -> Path:
+    def _resolve_owner_file(settings: OmniRouteRuntimeSettingsStore, owner_file: str | Path | None) -> Path | None:
         if owner_file is not None:
             return Path(owner_file)
+        if not isinstance(settings, OmniRouteRuntimeSettingsStore):
+            return None
         default_settings_path = orin_paths().data / "omniroute-runtime.json"
         settings_path = getattr(settings, "_path", None)
         if isinstance(settings_path, Path) and settings_path != default_settings_path:
@@ -175,24 +178,25 @@ class OmniRouteProcessManager:
         """
         if not self._settings.any_enabled():
             return self.status()
-        healthy = self._healthy()
+        healthy, _ = self._probe_state()
         with self._lock:
+            owned = self._owned_alive()
             if healthy:
-                return {"state": "external", "ownership": "external"} if not self._owned_alive() else {"state": "ready", "ownership": "agentos"}
-            if self._owned_alive():
+                return {"state": "external", "ownership": "external"} if not owned else {"state": "ready", "ownership": "agentos"}
+            if owned:
                 return {"state": "starting", "ownership": "agentos"}
             try:
                 self._process = self._start_process(self._command)
             except (OSError, ValueError) as error:
                 self._last_failure = str(error) or "OmniRoute could not be started"
                 return {"state": "failed", "ownership": None}
+            self._generation += 1
             self._record_owner(getattr(self._process, "pid", None))
             return {"state": "starting", "ownership": "agentos"}
 
     def status(self) -> dict[str, object]:
-        healthy = self._healthy()
+        healthy, owned = self._probe_state()
         with self._lock:
-            owned = self._owned_alive()
             if healthy:
                 return {"state": "ready", "ownership": "agentos" if owned else "external"}
             if owned:
@@ -200,48 +204,77 @@ class OmniRouteProcessManager:
             return {"state": "stopped", "ownership": None, **({"failure": self._last_failure} if self._last_failure else {})}
 
     def start(self) -> dict[str, object]:
-        healthy = self._healthy()
+        healthy, _ = self._probe_state()
         with self._lock:
+            owned = self._owned_alive()
             if healthy:
-                return {"state": "external", "ownership": "external"} if not self._owned_alive() else {"state": "ready", "ownership": "agentos"}
-            if self._owned_alive():
+                return {"state": "external", "ownership": "external"} if not owned else {"state": "ready", "ownership": "agentos"}
+            if owned:
                 return {"state": "starting", "ownership": "agentos"}
             try:
                 self._process = self._start_process(self._command)
             except (OSError, ValueError) as error:
                 self._last_failure = str(error) or "OmniRoute could not be started"
                 return {"state": "failed", "ownership": None}
+            self._generation += 1
+            spawn_gen = self._generation
             self._record_owner(getattr(self._process, "pid", None))
         ready = self._wait_ready()
+        reprobe = False
         with self._lock:
-            if ready:
+            if self._generation != spawn_gen:
+                reprobe = True
+            elif ready and self._owned_alive():
                 self._last_failure = None
                 return {"state": "ready", "ownership": "agentos"}
-            if self._owned_alive():
+            elif self._owned_alive():
                 # Slow is not broken. A cold gateway can take minutes to serve
                 # its first request, and killing it at the timeout guarantees it
                 # never finishes. Ownership is kept so Stop and Restart still
                 # act on this exact process.
                 self._last_failure = None
                 return {"state": "starting", "ownership": "agentos"}
-            self._last_failure = "OmniRoute exited before it became ready"
-            self._terminate_owned()
-            return {"state": "failed", "ownership": None}
+            else:
+                self._last_failure = "OmniRoute exited before it became ready"
+                self._terminate_owned()
+                return {"state": "failed", "ownership": None}
+        if reprobe:
+            return self.status()
+        return {"state": "stopped", "ownership": None}
 
     def stop(self) -> dict[str, object]:
         with self._lock:
             if self._owned_alive():
                 self._terminate_owned()
                 return {"state": "stopped", "ownership": None}
-        return {"state": "external", "ownership": "external"} if self._healthy() else {"state": "stopped", "ownership": None}
+        healthy, owned = self._probe_state()
+        if owned:
+            with self._lock:
+                if self._owned_alive():
+                    self._terminate_owned()
+                    return {"state": "stopped", "ownership": None}
+            healthy, _ = self._probe_state()
+        return {"state": "external", "ownership": "external"} if healthy else {"state": "stopped", "ownership": None}
 
     def restart(self) -> dict[str, object]:
-        healthy = self._healthy()
+        healthy, _ = self._probe_state()
         with self._lock:
             if not self._owned_alive() and healthy:
                 return {"state": "external", "ownership": "external"}
             self._terminate_owned()
         return self.start()
+
+    def _probe_state(self) -> tuple[bool, bool]:
+        with self._lock:
+            owned_before = self._owned_alive()
+        healthy = self._healthy()
+        with self._lock:
+            owned_after = self._owned_alive()
+        if owned_before != owned_after:
+            healthy = self._healthy()
+            with self._lock:
+                owned_after = self._owned_alive()
+        return healthy, owned_after
 
     def _healthy(self) -> bool:
         try:
@@ -250,6 +283,8 @@ class OmniRouteProcessManager:
             return False
 
     def _record_owner(self, pid: object) -> None:
+        if self._owner_file is None:
+            return
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
             self._clear_owner()
             return
@@ -266,6 +301,8 @@ class OmniRouteProcessManager:
             return
 
     def _read_owner(self) -> tuple[int, int | float | str] | None:
+        if self._owner_file is None:
+            return None
         try:
             raw = json.loads(self._owner_file.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -289,6 +326,8 @@ class OmniRouteProcessManager:
         return pid, created
 
     def _clear_owner(self) -> None:
+        if self._owner_file is None:
+            return
         try:
             self._owner_file.unlink(missing_ok=True)
         except OSError:
@@ -311,15 +350,17 @@ class OmniRouteProcessManager:
         return False
 
     def _terminate_owned(self) -> None:
+        self._generation += 1
         process = self._process
         self._process = None
         owner = self._read_owner()
         self._clear_owner()
         if process is not None:
             if process.poll() is None:
-                if owner is not None and kill_verified(owner[0], owner[1]):
+                proc_pid = getattr(process, "pid", None)
+                if owner is not None and owner[0] == proc_pid and kill_verified(owner[0], owner[1]):
                     return
-                if os.name == "nt" and _terminate_tree(process.pid):
+                if os.name == "nt" and isinstance(proc_pid, int) and proc_pid > 0 and _terminate_tree(proc_pid):
                     return
                 try:
                     process.terminate()
@@ -339,6 +380,9 @@ class OmniRouteProcessManager:
     def _wait_for_health(self) -> bool:
         deadline = monotonic() + _startup_timeout()
         while monotonic() < deadline:
+            with self._lock:
+                if not self._owned_alive():
+                    return False
             if self._healthy():
                 return True
             sleep(0.25)

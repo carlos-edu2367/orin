@@ -521,3 +521,264 @@ def test_slow_rewind_conversation_turn_runs_in_worker_thread_without_blocking_ev
     assert fast_elapsed < SLOW_SECONDS / 2, f"rewind_conversation_message blocked event loop ({fast_elapsed:.3f}s)"
     assert rewind_thread_ids, "rewind was not executed"
     assert all(tid != main_thread_id for tid in rewind_thread_ids), "rewind lock/check ran on the event-loop thread!"
+
+
+def test_omniroute_generation_guard_and_toctou_probe_and_stub_settings_isolation(tmp_path: Path) -> None:
+    # 1C: Stub settings (not OmniRouteRuntimeSettingsStore) with owner_file=None must NOT touch live Orin run dir.
+    class StubSettings:
+        def auto_start(self, user_id: str) -> bool:
+            return False
+
+        def set_auto_start(self, user_id: str, value: bool) -> bool:
+            return value
+
+        def any_enabled(self) -> bool:
+            return False
+
+    stub_mgr = OmniRouteProcessManager(
+        StubSettings(),  # type: ignore[arg-type]
+        command=("omniroute",),
+        health=lambda: False,
+        start_process=lambda cmd: None,  # type: ignore[return-value]
+        wait_ready=lambda: False,
+    )
+    assert stub_mgr._owner_file is None
+
+    # 1A: Concurrent stop() while start() is inside _wait_ready() must NOT mark _last_failure or return "failed"/"ready".
+    settings = OmniRouteRuntimeSettingsStore(tmp_path / "runtime.json")
+    owner_file = tmp_path / "omniroute-owner.json"
+    wait_entered = threading.Event()
+    release_wait = threading.Event()
+
+    class StoppableProc:
+        pid = 717171
+
+        def __init__(self) -> None:
+            self._rc: int | None = None
+
+        def poll(self) -> int | None:
+            return self._rc
+
+        def terminate(self) -> None:
+            self._rc = 0
+
+    proc_instance = StoppableProc()
+
+    def wait_then_return_false() -> bool:
+        wait_entered.set()
+        release_wait.wait(timeout=5.0)
+        return False
+
+    mgr = OmniRouteProcessManager(
+        settings,
+        command=("omniroute",),
+        health=lambda: False,
+        start_process=lambda cmd: proc_instance,
+        wait_ready=wait_then_return_false,
+        owner_file=owner_file,
+    )
+
+    start_result: dict[str, object] = {}
+
+    def run_start() -> None:
+        start_result.update(mgr.start())
+
+    t = threading.Thread(target=run_start)
+    t.start()
+    assert wait_entered.wait(timeout=2.0)
+    # Stop while start() is waiting in _wait_ready()
+    stop_res = mgr.stop()
+    assert stop_res == {"state": "stopped", "ownership": None}
+    release_wait.set()
+    t.join(timeout=2.0)
+
+    assert start_result == {"state": "stopped", "ownership": None}
+    assert mgr.status() == {"state": "stopped", "ownership": None}
+
+    # 1B: TOCTOU around _healthy(): if an owned process answers _healthy() -> True and dies right before _owned_alive()
+    # is checked, _probe_state() must re-probe and report "stopped" (not false "external").
+    health_calls = 0
+    dying_proc = StoppableProc()
+
+    def dying_health() -> bool:
+        nonlocal health_calls
+        health_calls += 1
+        if health_calls == 1:
+            # Process answers the first health check and immediately exits before lock re-acquisition
+            dying_proc._rc = 1
+            return True
+        return False
+
+    toctou_mgr = OmniRouteProcessManager(
+        settings,
+        command=("omniroute",),
+        health=dying_health,
+        start_process=lambda cmd: dying_proc,
+        wait_ready=lambda: True,
+        owner_file=owner_file,
+    )
+    toctou_mgr._process = dying_proc
+    assert toctou_mgr.status() == {"state": "stopped", "ownership": None}
+    assert health_calls == 2
+
+
+def test_provider_catalog_failed_manual_refresh_preserves_backoff_and_singleflights_auto_refresh() -> None:
+    fetch_calls = 0
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+
+    class SlowFailingOpenCodeUpstream:
+        def fetch(self, api_key: str | None = None, *, base_url: str | None = None):
+            nonlocal fetch_calls
+            fetch_calls += 1
+            fetch_entered.set()
+            release_fetch.wait(timeout=5.0)
+            raise RuntimeError("bridge offline")
+
+    class FakeRepo:
+        def credential(self, context: ProviderCatalogContext, provider: str):
+            return {"enabled": True, "api_key": "", "base_url": None, "updated_at": None}
+
+        def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False):
+            return []
+
+        def replace_discovered(self, context: ProviderCatalogContext, provider: str, entries, *, base_url=None):
+            return list(entries)
+
+    service = ProviderModelCatalogService(FakeRepo(), {"opencode": SlowFailingOpenCodeUpstream()})
+    ctx = ProviderCatalogContext(user_id="user-1", purpose="test")
+
+    # Concurrent list() calls while cache is empty must single-flight the auto-refresh instead of stampeding N x 12s.
+    barrier = threading.Barrier(4)
+    results: list[list[Any]] = []
+    res_lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait(timeout=5.0)
+        items = service.list(ctx, "opencode")
+        with res_lock:
+            results.append(items)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for th in threads:
+        th.start()
+    assert fetch_entered.wait(timeout=2.0)
+    time.sleep(0.05)
+    release_fetch.set()
+    for th in threads:
+        th.join(timeout=5.0)
+
+    assert len(results) == 4
+    assert fetch_calls == 1, f"expected single-flight auto-refresh, got {fetch_calls} upstream calls"
+
+    # A failing manual refresh() must NOT clear the active _auto_refresh_backoff window!
+    with pytest.raises(RuntimeError, match="provider catalog refresh failed"):
+        service.refresh(ctx, "opencode")
+    assert fetch_calls == 2
+
+    # Subsequent list() must still be protected by the active backoff window (no 3rd fetch call).
+    assert service.list(ctx, "opencode") == []
+    assert fetch_calls == 2
+
+
+def test_opencode_ensure_running_cleans_up_prior_hung_process_and_cleans_up_on_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    terminated_pids: list[int] = []
+    next_pid = 800000
+
+    class FakeProc:
+        def __init__(self) -> None:
+            nonlocal next_pid
+            next_pid += 1
+            self.pid = next_pid
+            self._rc: int | None = None
+
+        def poll(self) -> int | None:
+            return self._rc
+
+        def terminate(self) -> None:
+            terminated_pids.append(self.pid)
+            self._rc = -15
+
+        def wait(self, timeout: float | None = None) -> int:
+            return -15
+
+        def kill(self) -> None:
+            terminated_pids.append(self.pid)
+            self._rc = -9
+
+    monkeypatch.setattr("agentos.provider_catalog.opencode.shutil.which", lambda name: "opencode")
+    monkeypatch.setattr("agentos.provider_catalog.opencode.subprocess.Popen", lambda *a, **kw: FakeProc())
+    monkeypatch.setattr("agentos.provider_catalog.opencode.time.sleep", lambda s: None)
+
+    manager = OpenCodeBridgeProcessManager()
+    hung_prior = FakeProc()
+    manager._processes[43112] = (hung_prior, None)  # type: ignore[assignment]
+
+    def boom_is_healthy(url: str) -> bool:
+        if hung_prior.pid not in terminated_pids:
+            # First health check sees the prior hung process is unhealthy
+            return False
+        raise ValueError("unexpected probe crash")
+
+    monkeypatch.setattr(manager, "_is_healthy", boom_is_healthy)
+
+    with pytest.raises(ValueError, match="unexpected probe crash"):
+        manager.ensure_running("http://127.0.0.1:43112")
+
+    # Both the prior hung process AND the newly spawned process that crashed during readiness must be cleaned up!
+    assert hung_prior.pid in terminated_pids
+    assert len(terminated_pids) == 2
+    assert 43112 not in manager._processes
+
+
+def test_production_startup_hooks_and_local_spa_offload_sync_io_to_threadpool(tmp_path: Path) -> None:
+    from agentos.bootstrap.production import unavailable_production_services
+
+    spa_dir = tmp_path / "spa"
+    (spa_dir / "assets").mkdir(parents=True)
+    (spa_dir / "index.html").write_text('<!doctype html><html><head><meta name="agentos-auth-mode" content=""></head><body>Orin</body></html>', encoding="utf-8")
+
+    omniroute_threads: list[int] = []
+
+    class SlowOmniRouteManager:
+        def start_if_any_enabled_in_background(self) -> dict[str, object]:
+            omniroute_threads.append(threading.get_ident())
+            time.sleep(SLOW_SECONDS)
+            return {"state": "starting", "ownership": "agentos"}
+
+        def stop(self) -> dict[str, object]:
+            return {"state": "stopped", "ownership": None}
+
+    settings = ProductionSettings(
+        DATABASE_URL=f"sqlite:///{(tmp_path / 'prod_hooks.db').as_posix()}",
+        WEB_DIST_DIR=str(spa_dir),
+        LOCALHOST_TRUST_ENABLED=True,
+    )
+    services = unavailable_production_services()
+    services.omniroute_runtime = SlowOmniRouteManager()  # type: ignore[assignment]
+    app = create_production_app(
+        settings,
+        services=services,
+        probe=DependencyProbe(postgres=lambda: True),
+    )
+
+    async def exercise() -> None:
+        loop_thread = threading.get_ident()
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://localhost") as client:
+            # Run startup hooks manually and verify _start_configured_omniroute does not block the event loop
+            startup_coros = [handler() for handler in app.router.on_startup if asyncio.iscoroutinefunction(handler)]
+            slow_task = asyncio.ensure_future(asyncio.gather(*startup_coros))
+            await asyncio.sleep(SLOW_SECONDS / 4)
+            t0 = time.monotonic()
+            spa_resp = await client.get("/")
+            spa_elapsed = time.monotonic() - t0
+            assert spa_resp.status_code == 200
+            assert "Orin" in spa_resp.text
+            assert spa_elapsed < SLOW_SECONDS / 2, f"startup hook blocked event loop ({spa_elapsed:.3f}s)"
+            await slow_task
+            assert omniroute_threads and all(tid != loop_thread for tid in omniroute_threads)
+
+    asyncio.run(exercise())

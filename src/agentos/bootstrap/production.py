@@ -455,7 +455,7 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
         accounts = getattr(services, "accounts", None) if services is not None else None
         if accounts is None:
             return
-        token = accounts.setup.issue_if_needed(accounts.users)
+        token = await run_in_threadpool(accounts.setup.issue_if_needed, accounts.users)
         if token is None:
             return
         # The only place the raw token exists. The operator reads it from the
@@ -491,9 +491,9 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
             # AgentOS readiness depend on that gateway.
             start_in_background = getattr(manager, "start_if_any_enabled_in_background", None)
             if callable(start_in_background):
-                start_in_background()
+                await run_in_threadpool(start_in_background)
             else:
-                await __import__("fastapi.concurrency", fromlist=["run_in_threadpool"]).run_in_threadpool(manager.start_if_any_enabled)
+                await run_in_threadpool(manager.start_if_any_enabled)
         except Exception:
             # OmniRoute is optional: a failed local gateway must never make
             # AgentOS unavailable.
@@ -508,7 +508,7 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
         if manager is None:
             return
         try:
-            await __import__("fastapi.concurrency", fromlist=["run_in_threadpool"]).run_in_threadpool(manager.stop)
+            await run_in_threadpool(manager.stop)
         except Exception:
             return
 
@@ -552,4 +552,4 @@ def _mount_frontend(app: FastAPI, directory: str | None, *, auth_mode: str) -> N
                     "retryable": False, "retry_after": None,
                 },
             }, status_code=404)
-        return HTMLResponse(document(), headers={"Cache-Control": "no-store"})
+        return HTMLResponse(await run_in_threadpool(document), headers={"Cache-Control": "no-store"})
