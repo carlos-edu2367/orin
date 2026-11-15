@@ -278,7 +278,7 @@ def strip_attached_workspace_links(
                     else:
                         out.append(f"`{label_clean}`" if not label_clean.startswith("`") else label_clean)
                 elif allow_nested and label_clean != raw_label.strip():
-                    out.append(f"[{label_clean}]{segment[s_idx + 1 + len(raw_label) : e_idx]}")
+                    out.append(f"[{label_clean}]{segment[s_idx + 2 + len(raw_label) : e_idx]}")
                 else:
                     out.append(segment[s_idx:e_idx])
             cursor = e_idx

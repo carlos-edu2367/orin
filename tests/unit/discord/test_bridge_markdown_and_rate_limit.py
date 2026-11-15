@@ -318,3 +318,107 @@ async def test_watch_coordinator_backoff_zombies_and_turn_advance() -> None:
     assert final_conv["state"] == "completed"
     # Tick 1 (running) + Tick 2 (completed) == exactly 2 calls (1 per tick, never 3 per tick!)
     assert chat_store.get.call_count == 2
+
+    # 8. `waiting_user` Decision Card respects 429/403/10003 prompt backoff without leaking bindings every 2s
+    chat_store.get.side_effect = None
+    chat_store.get.return_value = {
+        "conversation_id": "conv_wait",
+        "title": "Blocked Code Session",
+        "mode": "code",
+        "state": "waiting_user",
+        "turns": [{"turn_id": "turn_wait", "state": "waiting_user"}],
+        "messages": [],
+        "activities": [
+            {
+                "id": 20,
+                "turn_id": "turn_wait",
+                "event_type": "turn.waiting_user",
+                "summary": "Escolher",
+                "payload": {
+                    "in_turn": True,
+                    "questions": [{"header": "Q1", "question": "Confirmar?", "options": [{"label": "Sim", "value": "sim"}]}],
+                },
+            }
+        ],
+    }
+    discord_store.create_binding.reset_mock()
+    discord_store.create_binding.side_effect = lambda *args, **kwargs: MagicMock(binding_id="dbnd_prompt_1")
+    rest.send_message.reset_mock()
+    rest.send_message.side_effect = DiscordApiError("unknown channel", status_code=404, error_code=10003)
+
+    waiting_auto_watch = FriendSessionWatch(
+        watch_id="fsw_wait_backoff",
+        user_id="local-user",
+        friend_conversation_id=None,
+        target_conversation_id="conv_wait",
+        target_turn_id="turn_wait",
+        origin="code_auto",
+        discord_channel_id=CHAN_ID,
+        discord_progress_message_id=None,
+        discord_prompt_message_id=None,
+        status="watching",
+        last_activity_seq=0,
+        last_digest_hash=None,
+        last_prompt_fingerprint=None,
+        last_patched_at=None,
+        notified_terminal=False,
+        created_at=now_ref[0] - timedelta(minutes=10),
+        updated_at=now_ref[0] - timedelta(minutes=10),
+    )
+    await bridge.watch_coordinator._process_watch(waiting_auto_watch)
+    assert rest.send_message.await_count == 1
+    initial_binding_calls = discord_store.create_binding.call_count
+    assert initial_binding_calls >= 1
+
+    # Next ticks 2s and 4s later must NOT call send_message or create_binding again during 300s backoff
+    now_ref[0] = now_ref[0] + timedelta(seconds=2)
+    await bridge.watch_coordinator._process_watch(waiting_auto_watch)
+    now_ref[0] = now_ref[0] + timedelta(seconds=2)
+    await bridge.watch_coordinator._process_watch(waiting_auto_watch)
+    assert rest.send_message.await_count == 1
+    assert discord_store.create_binding.call_count == initial_binding_calls
+
+    # 9. Rewound / deleted `watch.target_turn_id` with historical completed `turn_1` closes watch as cancelled
+    # without advancing backward onto `turn_1` or waking Friend
+    chat_store.get.return_value = {
+        "conversation_id": "conv_rewound",
+        "title": "Rewound Session",
+        "mode": "code",
+        "state": "completed",
+        "turns": [{"turn_id": "turn_1", "state": "completed"}],
+        "messages": [{"role": "assistant", "content": "Resposta antiga do turn_1"}],
+        "activities": [],
+    }
+    discord_store.upsert_watch.reset_mock()
+    updated_calls.clear()
+    rest.edit_message.reset_mock()
+    rest.edit_message.side_effect = None
+    rest.edit_message.return_value = {"id": PROG_MSG_ID}
+    rewound_watch = FriendSessionWatch(
+        watch_id="fsw_rewound",
+        user_id="local-user",
+        friend_conversation_id="friend_1",
+        target_conversation_id="conv_rewound",
+        target_turn_id="turn_2",
+        origin="friend",
+        discord_channel_id=CHAN_ID,
+        discord_progress_message_id=PROG_MSG_ID,
+        discord_prompt_message_id=None,
+        status="watching",
+        last_activity_seq=5,
+        last_digest_hash="old_hash",
+        last_prompt_fingerprint=None,
+        last_patched_at=now_ref[0] - timedelta(seconds=30),
+        notified_terminal=False,
+        created_at=now_ref[0] - timedelta(minutes=5),
+        updated_at=now_ref[0] - timedelta(seconds=30),
+    )
+    await bridge.watch_coordinator._process_watch(rewound_watch)
+    discord_store.upsert_watch.assert_not_called()
+    assert any(
+        wid == "fsw_rewound" and kw.get("status") == "cancelled" and kw.get("notified_terminal") is True
+        for wid, kw in updated_calls
+    )
+    assert rest.edit_message.await_count == 1
+    assert rest.edit_message.call_args.kwargs["components"] == []
+

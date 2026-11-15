@@ -296,6 +296,8 @@ class SessionWatchCoordinator:
         self._activity_seq_cursors: dict[str, int] = {}
         self._patch_backoff_until: dict[str, float] = {}
         self._patch_failures: dict[str, int] = {}
+        self._prompt_backoff_until: dict[str, float] = {}
+        self._prompt_failures: dict[str, int] = {}
 
     def _record_progress_api_error(
         self,
@@ -313,6 +315,10 @@ class SessionWatchCoordinator:
             return
         if isinstance(err, DiscordApiError) and (err.status_code == 403 or err.error_code == 10003):
             self._patch_backoff_until[watch.watch_id] = now_ts + 300.0
+            self._prompt_backoff_until[watch.watch_id] = max(
+                self._prompt_backoff_until.get(watch.watch_id, 0.0),
+                now_ts + 300.0,
+            )
             watch_updates["last_patched_at"] = now
             return
 
@@ -335,7 +341,27 @@ class SessionWatchCoordinator:
             cooldown = max(cooldown, 120.0)
 
         self._patch_backoff_until[watch.watch_id] = now_ts + cooldown
+        self._prompt_backoff_until[watch.watch_id] = max(
+            self._prompt_backoff_until.get(watch.watch_id, 0.0),
+            now_ts + cooldown,
+        )
         watch_updates["last_patched_at"] = now
+
+    def _record_prompt_api_error(
+        self,
+        watch: FriendSessionWatch,
+        err: Exception,
+        now: datetime,
+    ) -> None:
+        now_ts = now.timestamp()
+        if isinstance(err, DiscordApiError) and (err.status_code == 403 or err.error_code == 10003):
+            self._prompt_backoff_until[watch.watch_id] = now_ts + 300.0
+            return
+        failures = self._prompt_failures.get(watch.watch_id, 0) + 1
+        self._prompt_failures[watch.watch_id] = failures
+        retry_hint = getattr(err, "retry_after", None) or 15.0
+        cooldown = max(float(retry_hint), min(300.0, 15.0 * (2 ** (failures - 1))))
+        self._prompt_backoff_until[watch.watch_id] = now_ts + cooldown
 
     async def wait_background_tasks(self, *, user_id: str | None = None, timeout: float = 10.0) -> None:
         await self._bridge.wait_background_tasks(user_id=user_id, timeout=timeout)
@@ -524,6 +550,8 @@ class SessionWatchCoordinator:
             self._activity_seq_cursors.pop(watch.watch_id, None)
             self._patch_backoff_until.pop(watch.watch_id, None)
             self._patch_failures.pop(watch.watch_id, None)
+            self._prompt_backoff_until.pop(watch.watch_id, None)
+            self._prompt_failures.pop(watch.watch_id, None)
             runner = self._bridge._runners.get(watch.user_id)
             if runner is not None:
                 runner.stop_bindings_by_watch.pop(watch.watch_id, None)
@@ -543,6 +571,7 @@ class SessionWatchCoordinator:
         effective_state = str(snapshot.get("state") or raw_turn_state).strip().lower()
         pending_block = snapshot.get("pending_block")
         current_turn_id = str(inspection.get("current_turn_id") or watch.target_turn_id)
+        target_turn_missing = bool(watch.target_turn_id) and not inspection.get("target_turn_found", True)
 
         config = await asyncio.to_thread(self._bridge.discord_store.get_config, watch.user_id)
         fallback_channel = (
@@ -551,10 +580,12 @@ class SessionWatchCoordinator:
             else None
         )
         channel_id = watch.discord_channel_id or fallback_channel
-        if current_turn_id and current_turn_id != watch.target_turn_id:
+        if current_turn_id and current_turn_id != watch.target_turn_id and raw_turn_state not in _TERMINAL_TURN_STATES:
             self._activity_seq_cursors.pop(watch.watch_id, None)
             self._patch_backoff_until.pop(watch.watch_id, None)
             self._patch_failures.pop(watch.watch_id, None)
+            self._prompt_backoff_until.pop(watch.watch_id, None)
+            self._prompt_failures.pop(watch.watch_id, None)
             await asyncio.to_thread(
                 self._bridge._advance_watch_to_new_turn,
                 user_id=watch.user_id,
@@ -563,6 +594,9 @@ class SessionWatchCoordinator:
                 channel_id=channel_id,
             )
             return
+        if target_turn_missing:
+            raw_turn_state = "cancelled"
+            pending_block = None
         rest_client = self._bridge._get_rest_client(watch.user_id)
         is_auto_watch = watch.origin == "code_auto"
 
@@ -609,7 +643,7 @@ class SessionWatchCoordinator:
                             watch.watch_id,
                             exc_info=True,
                         )
-                else:
+                elif not target_turn_missing:
                     try:
                         sent = await rest_client.send_message(
                             channel_id,
@@ -704,16 +738,29 @@ class SessionWatchCoordinator:
             if watch.status != "waiting_user":
                 watch_updates["status"] = "waiting_user"
 
-            if prompt_fingerprint != watch.last_prompt_fingerprint and rest_client is not None and channel_id:
-                prompt_msg_id = await self._bridge._publish_decision_card(
-                    user_id=watch.user_id,
-                    target_conversation_id=watch.target_conversation_id,
-                    target_turn_id=current_turn_id,
-                    session_title=str(snapshot.get("title") or "Sessão"),
-                    pending_block=pending_block,
-                    channel_id=channel_id,
-                    rest_client=rest_client,
-                )
+            prompt_in_backoff = now.timestamp() < self._prompt_backoff_until.get(watch.watch_id, 0.0)
+            if (
+                prompt_fingerprint != watch.last_prompt_fingerprint
+                and rest_client is not None
+                and channel_id
+                and not prompt_in_backoff
+            ):
+                try:
+                    prompt_msg_id = await self._bridge._publish_decision_card(
+                        user_id=watch.user_id,
+                        target_conversation_id=watch.target_conversation_id,
+                        target_turn_id=current_turn_id,
+                        session_title=str(snapshot.get("title") or "Sessão"),
+                        pending_block=pending_block,
+                        channel_id=channel_id,
+                        rest_client=rest_client,
+                        raise_on_error=True,
+                    )
+                    self._prompt_backoff_until.pop(watch.watch_id, None)
+                    self._prompt_failures.pop(watch.watch_id, None)
+                except Exception as err:
+                    self._record_prompt_api_error(watch, err, now)
+                    prompt_msg_id = None
                 if prompt_msg_id:
                     watch_updates["discord_prompt_message_id"] = prompt_msg_id
                     watch_updates["last_prompt_fingerprint"] = prompt_fingerprint
@@ -721,6 +768,8 @@ class SessionWatchCoordinator:
                 # Record status transition without marking the prompt sent so it can be sent if channel connects
                 pass
         elif not is_terminal and watch.status == "waiting_user" and pending_block is None:
+            self._prompt_backoff_until.pop(watch.watch_id, None)
+            self._prompt_failures.pop(watch.watch_id, None)
             watch_updates["status"] = "watching"
             watch_updates["last_prompt_fingerprint"] = None
 
@@ -733,6 +782,8 @@ class SessionWatchCoordinator:
             self._activity_seq_cursors.pop(watch.watch_id, None)
             self._patch_backoff_until.pop(watch.watch_id, None)
             self._patch_failures.pop(watch.watch_id, None)
+            self._prompt_backoff_until.pop(watch.watch_id, None)
+            self._prompt_failures.pop(watch.watch_id, None)
             runner = self._bridge._runners.get(watch.user_id)
             if runner is not None:
                 runner.stop_bindings_by_watch.pop(watch.watch_id, None)
@@ -746,7 +797,7 @@ class SessionWatchCoordinator:
             )
             watch_updates.clear()
             effective_watch = updated_watch or watch
-            if not stopped_by_discord and not is_auto_watch:
+            if not stopped_by_discord and not is_auto_watch and not target_turn_missing:
                 self._bridge._spawn_user_task(
                     watch.user_id,
                     self._bridge._trigger_friend_wakeup(
@@ -3179,10 +3230,15 @@ class DiscordBridgeService:
             return None
 
         turns = [t for t in (conv.get("turns") or ()) if isinstance(t, Mapping)]
-        target_turn = next(
-            (t for t in reversed(turns) if str(t.get("turn_id") or "") == watch.target_turn_id),
-            turns[-1] if turns else None,
+        matched_turn = (
+            next(
+                (t for t in reversed(turns) if str(t.get("turn_id") or "") == watch.target_turn_id),
+                None,
+            )
+            if watch.target_turn_id
+            else None
         )
+        target_turn = matched_turn if matched_turn is not None else (turns[-1] if turns else None)
         if (
             target_turn is not None
             and turns
@@ -3191,9 +3247,14 @@ class DiscordBridgeService:
             and str(turns[-1].get("state") or "").strip().lower() in (_ACTIVE_TURN_STATES | {"waiting_user"})
         ):
             target_turn = turns[-1]
+        target_turn_found = not bool(watch.target_turn_id) or matched_turn is not None or (
+            target_turn is not None
+            and str(target_turn.get("state") or "").strip().lower() not in _TERMINAL_TURN_STATES
+        )
         current_turn_id = str(target_turn.get("turn_id") if target_turn else watch.target_turn_id)
         turn_state = str(
-            (target_turn.get("state") if target_turn else conv.get("state")) or "running"
+            (target_turn.get("state") if target_turn else ("cancelled" if watch.target_turn_id else conv.get("state")))
+            or "running"
         ).strip().lower()
         conv_state = str(conv.get("state") or turn_state).strip().lower()
 
@@ -3504,6 +3565,7 @@ class DiscordBridgeService:
             "turn_state": turn_state,
             "current_turn_id": current_turn_id,
             "max_activity_seq": max_seq,
+            "target_turn_found": target_turn_found,
         }
 
     async def _ensure_stop_binding(
@@ -3548,6 +3610,7 @@ class DiscordBridgeService:
         pending_block: Mapping[str, Any],
         channel_id: str,
         rest_client: DiscordRestClient,
+        raise_on_error: bool = False,
     ) -> str | None:
         block_kind = str(pending_block.get("kind") or "ask_user").strip().lower()
         bindings: list[DiscordInteractionBinding] = []
@@ -3777,6 +3840,8 @@ class DiscordBridgeService:
             )
         except Exception:
             _LOGGER.warning("Could not send decision card to Discord channel %s", channel_id, exc_info=True)
+            if raise_on_error:
+                raise
             return None
 
         msg_id = str(sent.get("id") or "").strip()

@@ -106,10 +106,17 @@ def test_markdown_scanner_preserves_valid_links_and_all_four_edge_cases() -> Non
     assert "`doc.pdf`" in cleaned_both
 
     cleaned_inner_only = strip_attached_workspace_links(
-        "[![alt](workspace://img.png)](https://example.com/ external)",
+        "[Ver ![alt](workspace://img.png)](https://example.com/external)",
         ["workspace://img.png"],
     )
     assert "workspace://img.png" not in cleaned_inner_only
+    assert cleaned_inner_only == "[Ver](https://example.com/external)"
+
+    cleaned_inner_empty_label = strip_attached_workspace_links(
+        "[![alt](workspace://img.png)](https://example.com/external)",
+        ["workspace://img.png"],
+    )
+    assert cleaned_inner_empty_label == "[](https://example.com/external)"
 
 
 def test_redact_text_linear_on_adversarial_inputs() -> None:
