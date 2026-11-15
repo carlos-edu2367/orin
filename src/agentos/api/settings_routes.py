@@ -488,112 +488,157 @@ def register_settings_routes(
 
     @app.get("/v1/settings/effective")
     async def effective_settings(request: Request, conversation_id: str | None = None) -> JSONResponse:
-        principal = owner(request, mutable=False, purpose="settings.effective")
-        root, trusted = folder_of(principal, conversation_id)
-        return JSONResponse(await run_in_threadpool(effective_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=False, purpose="settings.effective")
+            root, trusted = folder_of(principal, conversation_id)
+            return effective_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.put("/v1/settings/permissions")
     async def change_permissions(payload: PermissionRuleChange, request: Request) -> JSONResponse:
-        principal = owner(request, mutable=True, purpose="settings.permissions")
-        root, trusted = folder_of(principal, payload.conversation_id)
-        await run_in_threadpool(change_permission_rule, root, payload)
-        report = await run_in_threadpool(effective_report, root, trusted)
-        return JSONResponse({"permissions": report["permissions"]})
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.permissions")
+            root, trusted = folder_of(principal, payload.conversation_id)
+            change_permission_rule(root, payload)
+            report = effective_report(root, trusted)
+            return {"permissions": report["permissions"]}
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.get("/v1/settings/hooks")
     async def list_hooks(request: Request, conversation_id: str | None = None) -> JSONResponse:
-        principal = owner(request, mutable=False, purpose="settings.hooks")
-        root, trusted = folder_of(principal, conversation_id)
-        return JSONResponse(await run_in_threadpool(hooks_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=False, purpose="settings.hooks")
+            root, trusted = folder_of(principal, conversation_id)
+            return hooks_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.put("/v1/settings/hooks")
     async def save_hooks(payload: HooksChange, request: Request) -> JSONResponse:
-        principal = owner(request, mutable=True, purpose="settings.hooks")
-        root, trusted = folder_of(principal, payload.conversation_id)
-        await run_in_threadpool(change_hooks, root, payload)
-        return JSONResponse(await run_in_threadpool(hooks_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.hooks")
+            root, trusted = folder_of(principal, payload.conversation_id)
+            change_hooks(root, payload)
+            return hooks_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.get("/v1/settings/agents")
     async def list_agents(request: Request, conversation_id: str | None = None) -> JSONResponse:
-        principal = owner(request, mutable=False, purpose="settings.agents")
-        root, trusted = folder_of(principal, conversation_id)
-        return JSONResponse(await run_in_threadpool(agents_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=False, purpose="settings.agents")
+            root, trusted = folder_of(principal, conversation_id)
+            return agents_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.put("/v1/settings/agents/{name}")
     async def save_agent(name: str, payload: AgentFile, request: Request) -> JSONResponse:
-        principal = owner(request, mutable=True, purpose="settings.agents")
-        root, trusted = folder_of(principal, payload.conversation_id)
-        path = await run_in_threadpool(write_agent, root, name, payload)
-        return JSONResponse({"path": str(path), **await run_in_threadpool(agents_report, root, trusted)})
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.agents")
+            root, trusted = folder_of(principal, payload.conversation_id)
+            path = write_agent(root, name, payload)
+            return {"path": str(path), **agents_report(root, trusted)}
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.delete("/v1/settings/agents/{name}")
     async def remove_agent(name: str, request: Request, scope: Literal["user", "project"] = "user",
                            conversation_id: str | None = None) -> JSONResponse:
-        principal = owner(request, mutable=True, purpose="settings.agents")
-        root, trusted = folder_of(principal, conversation_id)
-        if not await run_in_threadpool(delete_agent, root, name, scope):
-            raise ApplicationNotFoundError(name)
-        return JSONResponse(await run_in_threadpool(agents_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.agents")
+            root, trusted = folder_of(principal, conversation_id)
+            if not delete_agent(root, name, scope):
+                raise ApplicationNotFoundError(name)
+            return agents_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.get("/v1/settings/output-styles")
     async def list_output_styles(request: Request, conversation_id: str | None = None) -> JSONResponse:
-        principal = owner(request, mutable=False, purpose="settings.output_styles")
-        root, trusted = folder_of(principal, conversation_id)
-        return JSONResponse(await run_in_threadpool(output_styles_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=False, purpose="settings.output_styles")
+            root, trusted = folder_of(principal, conversation_id)
+            return output_styles_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.put("/v1/settings/output-styles")
     async def choose_output_style(payload: OutputStyleChange, request: Request) -> JSONResponse:
-        principal = owner(request, mutable=True, purpose="settings.output_styles")
-        root, trusted = folder_of(principal, payload.conversation_id)
-        await run_in_threadpool(change_output_style, root, trusted, payload)
-        return JSONResponse(await run_in_threadpool(output_styles_report, root, trusted))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.output_styles")
+            root, trusted = folder_of(principal, payload.conversation_id)
+            change_output_style(root, trusted, payload)
+            return output_styles_report(root, trusted)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.get("/v1/settings/keybindings")
     async def read_keybindings(request: Request) -> JSONResponse:
-        owner(request, mutable=False, purpose="settings.keybindings")
-        return JSONResponse(await run_in_threadpool(keybindings_report))
+        def _sync() -> dict[str, object]:
+            owner(request, mutable=False, purpose="settings.keybindings")
+            return keybindings_report()
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.put("/v1/settings/keybindings")
     async def save_keybindings(payload: KeybindingsChange, request: Request) -> JSONResponse:
-        owner(request, mutable=True, purpose="settings.keybindings")
-        await run_in_threadpool(write_keybindings, payload)
-        return JSONResponse(await run_in_threadpool(keybindings_report))
+        def _sync() -> dict[str, object]:
+            owner(request, mutable=True, purpose="settings.keybindings")
+            write_keybindings(payload)
+            return keybindings_report()
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.get("/v1/settings/trusted-folders")
     async def list_trusted_folders(request: Request) -> JSONResponse:
         from agentos.permissions.trust import WorkspaceTrustStore
 
-        principal = owner(request, mutable=False, purpose="settings.trusted_folders")
-        folders = await run_in_threadpool(WorkspaceTrustStore().trusted_roots, principal.user_id)
-        return JSONResponse({"folders": folders})
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=False, purpose="settings.trusted_folders")
+            folders = WorkspaceTrustStore().trusted_roots(principal.user_id)
+            return {"folders": folders}
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.get("/v1/settings/mcp")
     async def mcp_servers(request: Request, conversation_id: str | None = None) -> JSONResponse:
         """W7: the configuration-file MCP servers in force for a folder, per scope, and the project's pending ones."""
-        principal = owner(request, mutable=False, purpose="settings.mcp")
-        root, trusted = folder_of(principal, conversation_id)
-        return JSONResponse(await run_in_threadpool(lambda: mcp_report(root, trusted, personal=services.capabilities.host_folders)))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=False, purpose="settings.mcp")
+            root, trusted = folder_of(principal, conversation_id)
+            return mcp_report(root, trusted, personal=services.capabilities.host_folders)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.put("/v1/settings/mcp/approval")
     async def mcp_approval(payload: McpApproval, request: Request) -> JSONResponse:
         """W7: approve, deny or forget one of the project's servers (the per-folder grants file only)."""
-        principal = owner(request, mutable=True, purpose="settings.mcp")
-        root, trusted = folder_of(principal, payload.conversation_id)
-        if root is None:
-            raise ApplicationNotFoundError("conversation folder")
-        await run_in_threadpool(change_mcp_approval, root, trusted, payload)
-        return JSONResponse(await run_in_threadpool(lambda: mcp_report(root, trusted, personal=services.capabilities.host_folders)))
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.mcp")
+            root, trusted = folder_of(principal, payload.conversation_id)
+            if root is None:
+                raise ApplicationNotFoundError("conversation folder")
+            change_mcp_approval(root, trusted, payload)
+            return mcp_report(root, trusted, personal=services.capabilities.host_folders)
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
     @app.post("/v1/settings/trusted-folders/revoke")
     async def revoke_trusted_folder(payload: TrustedFolderChange, request: Request) -> JSONResponse:
         from agentos.permissions.trust import WorkspaceTrustStore
 
-        principal = owner(request, mutable=True, purpose="settings.trusted_folders")
-        store = WorkspaceTrustStore()
-        if payload.path not in await run_in_threadpool(store.trusted_roots, principal.user_id):
-            raise ApplicationNotFoundError("trusted folder")
-        await run_in_threadpool(store.revoke_key, principal.user_id, payload.path)
-        return JSONResponse({"folders": await run_in_threadpool(store.trusted_roots, principal.user_id)})
+        def _sync() -> dict[str, object]:
+            principal = owner(request, mutable=True, purpose="settings.trusted_folders")
+            store = WorkspaceTrustStore()
+            if payload.path not in store.trusted_roots(principal.user_id):
+                raise ApplicationNotFoundError("trusted folder")
+            store.revoke_key(principal.user_id, payload.path)
+            return {"folders": store.trusted_roots(principal.user_id)}
+
+        return JSONResponse(await run_in_threadpool(_sync))
 
 
 __all__ = ["SettingsRejected", "register_settings_routes"]

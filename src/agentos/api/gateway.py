@@ -697,7 +697,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return port
 
     @app.post("/v1/executions", status_code=202)
-    async def create_execution(payload: CreateExecutionRequest, request: Request) -> JSONResponse:
+    def create_execution(payload: CreateExecutionRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="execution.create", origin=request.headers.get("origin"))
         idempotency_key = _idempotency(request)
@@ -722,11 +722,20 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/uploads", status_code=201)
     async def create_upload(request: Request, file: UploadFile = File(...)) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
+        def _auth() -> AuthenticatedPrincipal:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
+            return principal
+
+        principal = await run_in_threadpool(_auth)
         # The staging area applies the per-kind limit once the content is classified (audio and video get a higher one).
         data = await file.read(max(MAX_UPLOAD_BYTES, MAX_MEDIA_UPLOAD_BYTES) + 1)
-        staged = require_port(services.uploads).store(principal.user_id, file.filename or "arquivo", data)  # type: ignore[union-attr]
+        staged = await run_in_threadpool(
+            require_port(services.uploads).store,  # type: ignore[union-attr]
+            principal.user_id,
+            file.filename or "arquivo",
+            data,
+        )
         return JSONResponse({
             "upload_id": staged.upload_id, "filename": staged.filename,
             "media_type": staged.media_type, "kind": staged.kind, "bytes": staged.bytes,
@@ -734,11 +743,14 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.delete("/v1/uploads/{upload_id}", status_code=204)
     async def delete_upload(upload_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
-        if not require_port(services.uploads).discard(principal.user_id, upload_id):  # type: ignore[union-attr]
-            raise ApplicationNotFoundError(upload_id)
-        return JSONResponse(status_code=204, content=None)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=None, purpose="conversation.upload")
+            if not require_port(services.uploads).discard(principal.user_id, upload_id):  # type: ignore[union-attr]
+                raise ApplicationNotFoundError(upload_id)
+            return JSONResponse(status_code=204, content=None)
+
+        return await run_in_threadpool(_sync)
 
     def workspace_for(workspace_id: str, principal: AuthenticatedPrincipal) -> ConversationWorkspace:
         return resolve_workspace(workspace_id, managed_root=services.managed_root_for(principal.user_id), local_root=local_root_for(workspace_id, principal))
@@ -760,130 +772,140 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/workspaces/inspect")
     async def inspect_new_workspace(payload: InspectNewWorkspaceFolderRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        if payload.project_id is not None:
-            project = require_port(services.projects).get(payload.project_id, principal.user_id)
-            if project is None:
-                raise ApplicationNotFoundError(payload.project_id)
-            resource_id = payload.project_id
-        else:
-            resource_id = None
-        services.security.authorize(principal, action="conversation.create", resource_id=resource_id, purpose="conversation.workspace.inspect")
-        chosen = payload.path
-        if chosen is None:
-            client_host = request.client.host if request.client is not None else None
-            if not services.capabilities.host_folders or not _is_loopback_client(client_host):
-                return JSONResponse({"dialog_unavailable": True}, status_code=200)
-            result = await run_in_threadpool(choose_folder)
-            if not result.available:
-                return JSONResponse({"dialog_unavailable": True}, status_code=200)
-            if result.cancelled or not result.path:
-                return JSONResponse({"cancelled": True}, status_code=200)
-            chosen = result.path
-        try:
-            inspection = inspect_for(principal, chosen)
-        except FolderRejected as error:
-            raise ApplicationValidationError("invalid workspace folder") from error
-        return JSONResponse(asdict(inspection))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            if payload.project_id is not None:
+                project = require_port(services.projects).get(payload.project_id, principal.user_id)
+                if project is None:
+                    raise ApplicationNotFoundError(payload.project_id)
+                resource_id = payload.project_id
+            else:
+                resource_id = None
+            services.security.authorize(principal, action="conversation.create", resource_id=resource_id, purpose="conversation.workspace.inspect")
+            chosen = payload.path
+            if chosen is None:
+                client_host = request.client.host if request.client is not None else None
+                if not services.capabilities.host_folders or not _is_loopback_client(client_host):
+                    return JSONResponse({"dialog_unavailable": True}, status_code=200)
+                result = choose_folder()
+                if not result.available:
+                    return JSONResponse({"dialog_unavailable": True}, status_code=200)
+                if result.cancelled or not result.path:
+                    return JSONResponse({"cancelled": True}, status_code=200)
+                chosen = result.path
+            try:
+                inspection = inspect_for(principal, chosen)
+            except FolderRejected as error:
+                raise ApplicationValidationError("invalid workspace folder") from error
+            return JSONResponse(asdict(inspection))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations", status_code=201)
     async def create_conversation(payload: CreateConversationRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        cli_options = _cli_options_for(principal, payload.cli)
-        provider = _provider_name(payload.selection.provider)
-        services.security.check_rate_limit(principal, action="conversation.create", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="conversation.create", resource_id=provider, purpose="conversation.create")
-        require_content(payload.message, payload.attachments)
-        application = require_port(services.conversation_application)
-        conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
-        project = None
-        if payload.project_id is not None:
-            project = require_port(services.projects).get(payload.project_id, principal.user_id)
-            if project is None:
-                raise ApplicationNotFoundError(payload.project_id)
-        workspace_root_id = project.workspace_id if project is not None else conversation_id
-        attachment_workspace_id = workspace_root_id
-        previous_root = stored_root_for(workspace_root_id, principal) if payload.workspace_path else None
-        if payload.workspace_path:
-            try:
-                inspection = inspect_for(principal, payload.workspace_path)
-            except FolderRejected as error:
-                raise ApplicationValidationError("invalid workspace folder") from error
-            if not inspection.is_directory:
-                raise ApplicationValidationError("workspace folder does not exist")
-            if not inspection.writable:
-                raise ApplicationValidationError("workspace folder is not writable")
-            if inspection.risk != "none" and not payload.workspace_acknowledged_risk:
-                return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
-            _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, bind_path_for(principal, inspection))
-            if payload.cli is not None and payload.cli.trust_workspace:
-                # `orin code --trust` (W6): before the turn is queued, so the worker already sees a trusted folder.
-                _trust_workspace(principal.user_id, Path(bind_path_for(principal, inspection)))
-        attachments: list[dict[str, object]] = []
-        try:
-            attachments = promote(attachment_workspace_id, principal, payload.attachments)
-            create_kwargs: dict[str, object] = {
-                "message": payload.message,
-                "provider": provider,
-                "model_id": payload.selection.model_id,
-                "workspace_id": payload.workspace_id,
-                "project_id": payload.project_id,
-                "idempotency_key": _idempotency(request),
-                "attachments": attachments,
-                "new_conversation_id": conversation_id,
-                "code_mode": payload.code_mode,
-            }
-            if payload.permission_mode is not None:
-                create_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
-            if cli_options is not None:
-                create_kwargs["cli_options"] = cli_options
-            if payload.live_mode:
-                create_kwargs["live_mode"] = True
-            result = application.create(  # type: ignore[union-attr]
-                ProviderCatalogContext(principal.user_id, "conversation.create"),
-                **create_kwargs,
-            )
-        except Exception:
-            discard_promoted(workspace_for(attachment_workspace_id, principal), attachments)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            cli_options = _cli_options_for(principal, payload.cli)
+            provider = _provider_name(payload.selection.provider)
+            services.security.check_rate_limit(principal, action="conversation.create", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="conversation.create", resource_id=provider, purpose="conversation.create")
+            require_content(payload.message, payload.attachments)
+            application = require_port(services.conversation_application)
+            conversation_id = application.allocate_conversation_id()  # type: ignore[union-attr]
+            project = None
+            if payload.project_id is not None:
+                project = require_port(services.projects).get(payload.project_id, principal.user_id)
+                if project is None:
+                    raise ApplicationNotFoundError(payload.project_id)
+            workspace_root_id = project.workspace_id if project is not None else conversation_id
+            attachment_workspace_id = workspace_root_id
+            previous_root = stored_root_for(workspace_root_id, principal) if payload.workspace_path else None
             if payload.workspace_path:
-                if previous_root:
-                    _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, previous_root)
-                else:
-                    _require_port(services.local_workspaces).clear_root(workspace_root_id, principal.user_id)
-            raise
-        data = _jsonable(result)
-        if not isinstance(data, dict):
-            raise ValueError("conversation response is invalid")
-        response_payload = {key: data.get(key) for key in ("conversation_id", "title", "turn_id", "message_id", "state")}
-        if "mode" in data:
-            response_payload["mode"] = data["mode"]
-        if "permission_mode" in data:
-            response_payload["permission_mode"] = data["permission_mode"]
-        return JSONResponse(response_payload, status_code=201)
+                try:
+                    inspection = inspect_for(principal, payload.workspace_path)
+                except FolderRejected as error:
+                    raise ApplicationValidationError("invalid workspace folder") from error
+                if not inspection.is_directory:
+                    raise ApplicationValidationError("workspace folder does not exist")
+                if not inspection.writable:
+                    raise ApplicationValidationError("workspace folder is not writable")
+                if inspection.risk != "none" and not payload.workspace_acknowledged_risk:
+                    return _error(409, "CONFLICT", "workspace_risk_acknowledgement_required", retryable=False)
+                _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, bind_path_for(principal, inspection))
+                if payload.cli is not None and payload.cli.trust_workspace:
+                    # `orin code --trust` (W6): before the turn is queued, so the worker already sees a trusted folder.
+                    _trust_workspace(principal.user_id, Path(bind_path_for(principal, inspection)))
+            attachments: list[dict[str, object]] = []
+            try:
+                attachments = promote(attachment_workspace_id, principal, payload.attachments)
+                create_kwargs: dict[str, object] = {
+                    "message": payload.message,
+                    "provider": provider,
+                    "model_id": payload.selection.model_id,
+                    "workspace_id": payload.workspace_id,
+                    "project_id": payload.project_id,
+                    "idempotency_key": _idempotency(request),
+                    "attachments": attachments,
+                    "new_conversation_id": conversation_id,
+                    "code_mode": payload.code_mode,
+                }
+                if payload.permission_mode is not None:
+                    create_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
+                if cli_options is not None:
+                    create_kwargs["cli_options"] = cli_options
+                if payload.live_mode:
+                    create_kwargs["live_mode"] = True
+                result = application.create(  # type: ignore[union-attr]
+                    ProviderCatalogContext(principal.user_id, "conversation.create"),
+                    **create_kwargs,
+                )
+            except Exception:
+                discard_promoted(workspace_for(attachment_workspace_id, principal), attachments)
+                if payload.workspace_path:
+                    if previous_root:
+                        _require_port(services.local_workspaces).set_root(workspace_root_id, principal.user_id, previous_root)
+                    else:
+                        _require_port(services.local_workspaces).clear_root(workspace_root_id, principal.user_id)
+                raise
+            data = _jsonable(result)
+            if not isinstance(data, dict):
+                raise ValueError("conversation response is invalid")
+            response_payload = {key: data.get(key) for key in ("conversation_id", "title", "turn_id", "message_id", "state")}
+            if "mode" in data:
+                response_payload["mode"] = data["mode"]
+            if "permission_mode" in data:
+                response_payload["permission_mode"] = data["permission_mode"]
+            return JSONResponse(response_payload, status_code=201)
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations")
     async def list_conversations(request: Request, mode: str | None = None) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.list", resource_id=None, purpose="conversation.read")
-        conv_port = require_port(services.conversation_application)
-        if mode is not None and str(mode).strip():
-            norm_mode = str(mode).strip().lower()
-            try:
-                raw_result = conv_port.list(principal.user_id, mode=norm_mode)  # type: ignore[union-attr]
-            except TypeError:
-                raw_result = conv_port.list(principal.user_id)  # type: ignore[union-attr]
-                data = _jsonable(raw_result)
-                if isinstance(data, dict) and isinstance(data.get("items"), list):
-                    data = {
-                        **data,
-                        "items": [item for item in data["items"] if isinstance(item, dict) and item.get("mode") == norm_mode],
-                    }
-                return JSONResponse(data)
-            return JSONResponse(_jsonable(raw_result))
-        return JSONResponse(_jsonable(conv_port.list(principal.user_id)))  # type: ignore[union-attr]
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.check_rate_limit(principal, action="conversations.list", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="conversation.list", resource_id=None, purpose="conversation.read")
+            conv_port = require_port(services.conversation_application)
+            if mode is not None and str(mode).strip():
+                norm_mode = str(mode).strip().lower()
+                try:
+                    raw_result = conv_port.list(principal.user_id, mode=norm_mode)  # type: ignore[union-attr]
+                except TypeError:
+                    raw_result = conv_port.list(principal.user_id)  # type: ignore[union-attr]
+                    data = _jsonable(raw_result)
+                    if isinstance(data, dict) and isinstance(data.get("items"), list):
+                        data = {
+                            **data,
+                            "items": [item for item in data["items"] if isinstance(item, dict) and item.get("mode") == norm_mode],
+                        }
+                    return JSONResponse(data)
+                return JSONResponse(_jsonable(raw_result))
+            return JSONResponse(_jsonable(conv_port.list(principal.user_id)))  # type: ignore[union-attr]
+
+        return await run_in_threadpool(_sync)
 
     @app.patch("/v1/conversations/{conversation_id}/permission-mode")
-    async def update_conversation_permission_mode(
+    def update_conversation_permission_mode(
         conversation_id: str,
         payload: UpdateConversationPermissionModeRequest,
         request: Request,
@@ -903,7 +925,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.patch("/v1/conversations/{conversation_id}/project")
-    async def update_conversation_project(
+    def update_conversation_project(
         conversation_id: str,
         payload: UpdateConversationProjectRequest,
         request: Request,
@@ -929,7 +951,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse({**_jsonable(result), "workspace": workspace_state(conversation, principal)})
 
     @app.post("/v1/schedules", status_code=201)
-    async def create_scheduled_chat(payload: CreateScheduledChatRequest, request: Request) -> JSONResponse:
+    def create_scheduled_chat(payload: CreateScheduledChatRequest, request: Request) -> JSONResponse:
         from agentos.scheduler.scheduled_chats import ScheduledChatInput
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="schedule.create", origin=request.headers.get("origin"))
@@ -951,13 +973,13 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.get("/v1/schedules")
-    async def list_scheduled_chats(request: Request) -> JSONResponse:
+    def list_scheduled_chats(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="schedule.list", resource_id=None, purpose="schedule.read")
         return JSONResponse(_jsonable(require_port(services.scheduled_chats).list(principal.user_id)))  # type: ignore[union-attr]
 
     @app.delete("/v1/schedules/{schedule_id}", status_code=204)
-    async def cancel_scheduled_chat(schedule_id: str, request: Request) -> JSONResponse:
+    def cancel_scheduled_chat(schedule_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="schedule.cancel", resource_id=schedule_id, purpose="schedule.cancel")
         if not require_port(services.scheduled_chats).cancel(principal.user_id, schedule_id):  # type: ignore[union-attr]
@@ -965,7 +987,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(status_code=204, content=None)
 
     @app.post("/v1/projects", status_code=201)
-    async def create_project(payload: CreateProjectRequest, request: Request) -> JSONResponse:
+    def create_project(payload: CreateProjectRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="project.create", resource_id=None, purpose="project.create")
         store = require_port(services.projects)
@@ -1001,26 +1023,36 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.get("/v1/projects")
     async def list_projects(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        store = require_port(services.projects)
-        return JSONResponse({"items": [{**_project_public(item), "workspace": project_workspace_state(item, principal)} for item in store.list_active(principal.user_id)]})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            store = require_port(services.projects)
+            return JSONResponse({"items": [{**_project_public(item), "workspace": project_workspace_state(item, principal)} for item in store.list_active(principal.user_id)]})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/projects/sidebar")
     async def project_sidebar(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        store = require_port(services.projects)
-        return JSONResponse({"items": [{**_project_sidebar_public(item), "workspace": project_workspace_state(item, principal)} for item in store.sidebar(principal.user_id)]})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            store = require_port(services.projects)
+            return JSONResponse({"items": [{**_project_sidebar_public(item), "workspace": project_workspace_state(item, principal)} for item in store.sidebar(principal.user_id)]})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/projects/{project_id}")
     async def get_project(project_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        store = require_port(services.projects)
-        project = store.get(project_id, principal.user_id)
-        if project is None: raise ApplicationNotFoundError(project_id)
-        return JSONResponse({**_project_public(project), "workspace": project_workspace_state(project, principal)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            store = require_port(services.projects)
+            project = store.get(project_id, principal.user_id)
+            if project is None:
+                raise ApplicationNotFoundError(project_id)
+            return JSONResponse({**_project_public(project), "workspace": project_workspace_state(project, principal)})
+
+        return await run_in_threadpool(_sync)
 
     @app.patch("/v1/projects/{project_id}")
-    async def update_project(project_id: str, payload: UpdateProjectRequest, request: Request) -> JSONResponse:
+    def update_project(project_id: str, payload: UpdateProjectRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         store = require_port(services.projects)
         project = store.update(project_id, principal.user_id, name=payload.name, description=payload.description)
@@ -1028,7 +1060,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse({**_project_public(project), "workspace": project_workspace_state(project, principal)})
 
     @app.put("/v1/projects/{project_id}/workspace")
-    async def attach_project_workspace(project_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
+    def attach_project_workspace(project_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=project_id, purpose="project.workspace.attach")
         store = require_port(services.projects)
@@ -1049,7 +1081,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(project_workspace_state(project, principal))
 
     @app.delete("/v1/projects/{project_id}/workspace")
-    async def detach_project_workspace(project_id: str, request: Request) -> JSONResponse:
+    def detach_project_workspace(project_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=project_id, purpose="project.workspace.detach")
         store = require_port(services.projects)
@@ -1060,13 +1092,13 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(project_workspace_state(project, principal))
 
     @app.post("/v1/projects/{project_id}/archive")
-    async def archive_project(project_id: str, request: Request) -> JSONResponse:
+    def archive_project(project_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         if not require_port(services.projects).archive(project_id, principal.user_id): raise ApplicationNotFoundError(project_id)
         return JSONResponse({"project_id": project_id, "archived": True})
 
     @app.post("/v1/projects/{project_id}/conversations", status_code=201)
-    async def create_project_conversation(project_id: str, payload: CreateConversationRequest, request: Request) -> JSONResponse:
+    def create_project_conversation(project_id: str, payload: CreateConversationRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         project = require_port(services.projects).get(project_id, principal.user_id)
         if project is None: raise ApplicationNotFoundError(project_id)
@@ -1095,21 +1127,21 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(data, status_code=201)
 
     @app.get("/v1/projects/{project_id}/memories")
-    async def list_project_memories(project_id: str, request: Request) -> JSONResponse:
+    def list_project_memories(project_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         store = require_port(services.projects)
         if store.get(project_id, principal.user_id) is None: raise ApplicationNotFoundError(project_id)
         return JSONResponse({"items": store.list_memories(project_id, principal.user_id)})
 
     @app.delete("/v1/projects/{project_id}/memories/{memory_id}", status_code=204)
-    async def delete_project_memory(project_id: str, memory_id: str, request: Request) -> JSONResponse:
+    def delete_project_memory(project_id: str, memory_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         store = require_port(services.projects)
         if not store.delete_memory(project_id, principal.user_id, memory_id): raise ApplicationNotFoundError(memory_id)
         return JSONResponse(status_code=204, content=None)
 
     @app.get("/v1/memories")
-    async def list_managed_memories(request: Request, scope: str = "user", project_id: str | None = None, query: str = "", cursor: str | None = None, limit: int = 50) -> JSONResponse:
+    def list_managed_memories(request: Request, scope: str = "user", project_id: str | None = None, query: str = "", cursor: str | None = None, limit: int = 50) -> JSONResponse:
         if scope not in {"user", "project"} or (scope == "project" and not project_id):
             raise ApplicationValidationError("invalid memory scope")
         principal = principal_for(request)
@@ -1118,7 +1150,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.delete("/v1/memories/{memory_id}", status_code=204)
-    async def delete_managed_memory(memory_id: str, request: Request, scope: str = "user", project_id: str | None = None) -> JSONResponse:
+    def delete_managed_memory(memory_id: str, request: Request, scope: str = "user", project_id: str | None = None) -> JSONResponse:
         if scope not in {"user", "project"} or (scope == "project" and not project_id):
             raise ApplicationValidationError("invalid memory scope")
         principal = principal_for(request, mutable=True)
@@ -1127,7 +1159,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(status_code=204, content=None)
 
     @app.patch("/v1/memories/{memory_id}")
-    async def update_managed_memory(memory_id: str, payload: UpdateMemoryRequest, request: Request, scope: str = "user", project_id: str | None = None) -> JSONResponse:
+    def update_managed_memory(memory_id: str, payload: UpdateMemoryRequest, request: Request, scope: str = "user", project_id: str | None = None) -> JSONResponse:
         if scope not in {"user", "project"} or (scope == "project" and not project_id):
             raise ApplicationValidationError("invalid memory scope")
         principal = principal_for(request, mutable=True)
@@ -1253,10 +1285,13 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.get("/v1/conversations/{conversation_id}")
     async def get_conversation(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
-        conversation = conversation_record(conversation_id, principal)
-        return JSONResponse({**conversation, "workspace": workspace_state(conversation, principal)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
+            conversation = conversation_record(conversation_id, principal)
+            return JSONResponse({**conversation, "workspace": workspace_state(conversation, principal)})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/activities")
     async def get_conversation_older_activities(
@@ -1265,24 +1300,31 @@ def create_app(services: ApiServices) -> FastAPI:
         before_id: int = 0,
         limit: int = 100,
     ) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
-        app_port = require_port(services.conversation_application)
-        if not hasattr(app_port, "list_older_activities"):
-            return JSONResponse({"activities": [], "has_older_activities": False, "oldest_activity_id": None})
-        result = app_port.list_older_activities(  # type: ignore[union-attr]
-            conversation_id,
-            principal.user_id,
-            before_id=before_id,
-            limit=min(max(limit, 1), 300),
-        )
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
+            app_port = require_port(services.conversation_application)
+            if not hasattr(app_port, "list_older_activities"):
+                return JSONResponse({"activities": [], "has_older_activities": False, "oldest_activity_id": None})
+            result = app_port.list_older_activities(  # type: ignore[union-attr]
+                conversation_id,
+                principal.user_id,
+                before_id=before_id,
+                limit=min(max(limit, 1), 300),
+            )
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/workspace/inspect")
     async def inspect_conversation_workspace(conversation_id: str, payload: InspectWorkspaceFolderRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.inspect")
-        conversation_record(conversation_id, principal)
+        def _precheck() -> AuthenticatedPrincipal:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.inspect")
+            conversation_record(conversation_id, principal)
+            return principal
+
+        principal = await run_in_threadpool(_precheck)
         chosen = payload.path
         if chosen is None:
             client_host = request.client.host if request.client is not None else None
@@ -1294,14 +1336,18 @@ def create_app(services: ApiServices) -> FastAPI:
             if result.cancelled or not result.path:
                 return JSONResponse({"cancelled": True}, status_code=200)
             chosen = result.path
-        try:
-            inspection = inspect_for(principal, chosen)
-        except FolderRejected as error:
-            raise ApplicationValidationError("invalid workspace folder") from error
-        return JSONResponse(asdict(inspection))
+
+        def _inspect() -> JSONResponse:
+            try:
+                inspection = inspect_for(principal, chosen)
+            except FolderRejected as error:
+                raise ApplicationValidationError("invalid workspace folder") from error
+            return JSONResponse(asdict(inspection))
+
+        return await run_in_threadpool(_inspect)
 
     @app.put("/v1/conversations/{conversation_id}/workspace")
-    async def attach_conversation_workspace(conversation_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
+    def attach_conversation_workspace(conversation_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.attach")
         conversation = conversation_record(conversation_id, principal)
@@ -1320,7 +1366,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(workspace_state(conversation, principal))
 
     @app.delete("/v1/conversations/{conversation_id}/workspace")
-    async def detach_conversation_workspace(conversation_id: str, request: Request) -> JSONResponse:
+    def detach_conversation_workspace(conversation_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.detach")
         conversation = conversation_record(conversation_id, principal)
@@ -1334,7 +1380,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return resolve_workspace(workspace_id, managed_root=services.managed_root_for(principal.user_id), local_root=local_root_for(workspace_id, principal))
 
     @app.get("/v1/conversations/{conversation_id}/files/{path:path}")
-    async def get_conversation_file(conversation_id: str, path: str, request: Request, disposition: str = "inline") -> FileResponse:
+    def get_conversation_file(conversation_id: str, path: str, request: Request, disposition: str = "inline") -> FileResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.file.read")
         if disposition not in {"inline", "attachment"}: raise ApplicationValidationError("invalid disposition")
@@ -1346,7 +1392,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return FileResponse(target, media_type=media_type_for(target), filename=target.name, content_disposition_type=disposition, headers={"X-Content-Type-Options": "nosniff"})
 
     @app.post("/v1/conversations/{conversation_id}/files/{path:path}/open", dependencies=[capability("open_in_desktop_app")])
-    async def open_conversation_file(conversation_id: str, path: str, request: Request) -> JSONResponse:
+    def open_conversation_file(conversation_id: str, path: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.open_file", resource_id=conversation_id, purpose="conversation.file.open")
         try:
@@ -1365,69 +1411,38 @@ def create_app(services: ApiServices) -> FastAPI:
         q: str = "",
         limit: int = 20,
     ) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(
-            principal,
-            action="conversation.read",
-            resource_id=conversation_id,
-            purpose="conversation.workspace.files",
-        )
-        workspace = conversation_workspace(conversation_id, principal)
-        effective_query = query if query.strip() else q
-        bounded_limit = min(max(int(limit), 1), 100)
-        items = await run_in_threadpool(list_workspace_files, workspace, effective_query, limit=bounded_limit)
-        return JSONResponse({"items": items, "files": items, "query": effective_query})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(
+                principal,
+                action="conversation.read",
+                resource_id=conversation_id,
+                purpose="conversation.workspace.files",
+            )
+            workspace = conversation_workspace(conversation_id, principal)
+            effective_query = query if query.strip() else q
+            bounded_limit = min(max(int(limit), 1), 100)
+            items = list_workspace_files(workspace, effective_query, limit=bounded_limit)
+            return JSONResponse({"items": items, "files": items, "query": effective_query})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/worktree")
     async def get_conversation_worktree(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(
-            principal,
-            action="conversation.read",
-            resource_id=conversation_id,
-            purpose="conversation.worktree.read",
-        )
-        workspace = conversation_workspace(conversation_id, principal)
-        manager = WorktreeManager(workspace.root)
-        is_git = await run_in_threadpool(manager.is_git_repo)
-        if not is_git:
-            return JSONResponse({"is_git_repo": False, "active": False, "worktree": None, "worktrees": []})
-        worktrees = await run_in_threadpool(manager.list_worktrees)
-        active = await run_in_threadpool(manager.active_worktree)
-        return JSONResponse({
-            "is_git_repo": True,
-            "active": active is not None,
-            "worktree": active.as_dict() if active is not None else None,
-            "worktrees": [wt.as_dict() for wt in worktrees],
-        })
-
-    @app.post("/v1/conversations/{conversation_id}/worktree")
-    async def manage_conversation_worktree(
-        conversation_id: str,
-        payload: ConversationWorktreeRequest,
-        request: Request,
-    ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.send",
-            resource_id=conversation_id,
-            purpose="conversation.worktree.manage",
-        )
-        workspace = conversation_workspace(conversation_id, principal)
-        manager = WorktreeManager(workspace.root)
-        action = payload.action
-        if payload.enabled is True:
-            action = "enter"
-        elif payload.enabled is False:
-            action = "exit"
-
-        is_git = await run_in_threadpool(manager.is_git_repo)
-        if action in {"status", "list"}:
-            if not is_git:
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(
+                principal,
+                action="conversation.read",
+                resource_id=conversation_id,
+                purpose="conversation.worktree.read",
+            )
+            workspace = conversation_workspace(conversation_id, principal)
+            manager = WorktreeManager(workspace.root)
+            if not manager.is_git_repo():
                 return JSONResponse({"is_git_repo": False, "active": False, "worktree": None, "worktrees": []})
-            worktrees = await run_in_threadpool(manager.list_worktrees)
-            active = await run_in_threadpool(manager.active_worktree)
+            worktrees = manager.list_worktrees()
+            active = manager.active_worktree()
             return JSONResponse({
                 "is_git_repo": True,
                 "active": active is not None,
@@ -1435,99 +1450,138 @@ def create_app(services: ApiServices) -> FastAPI:
                 "worktrees": [wt.as_dict() for wt in worktrees],
             })
 
-        if not is_git:
-            raise ApplicationValidationError("workspace is not a Git repository")
+        return await run_in_threadpool(_sync)
 
-        try:
-            if action in {"enter", "create"}:
-                slug = payload.name or f"chat-{conversation_id[:8]}"
-                info = await run_in_threadpool(manager.create_worktree, slug, payload.base_branch)
+    @app.post("/v1/conversations/{conversation_id}/worktree")
+    async def manage_conversation_worktree(
+        conversation_id: str,
+        payload: ConversationWorktreeRequest,
+        request: Request,
+    ) -> JSONResponse:
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.send",
+                resource_id=conversation_id,
+                purpose="conversation.worktree.manage",
+            )
+            workspace = conversation_workspace(conversation_id, principal)
+            manager = WorktreeManager(workspace.root)
+            action = payload.action
+            if payload.enabled is True:
+                action = "enter"
+            elif payload.enabled is False:
+                action = "exit"
+
+            is_git = manager.is_git_repo()
+            if action in {"status", "list"}:
+                if not is_git:
+                    return JSONResponse({"is_git_repo": False, "active": False, "worktree": None, "worktrees": []})
+                worktrees = manager.list_worktrees()
+                active = manager.active_worktree()
                 return JSONResponse({
-                    "active": True,
                     "is_git_repo": True,
-                    "worktree": info.as_dict(),
-                    **info.as_dict(),
+                    "active": active is not None,
+                    "worktree": active.as_dict() if active is not None else None,
+                    "worktrees": [wt.as_dict() for wt in worktrees],
                 })
 
-            main_root = await run_in_threadpool(manager.main_worktree_root)
-            active = await run_in_threadpool(manager.active_worktree)
-            target_ref: Path | str | None = payload.name or (active.path if active is not None else None)
-            if action == "remove" or payload.cleanup == "remove":
-                if target_ref is None:
-                    raise WorktreeError("no active worktree to remove")
-                removed = await run_in_threadpool(manager.remove_worktree, target_ref, force=payload.force)
+            if not is_git:
+                raise ApplicationValidationError("workspace is not a Git repository")
+
+            try:
+                if action in {"enter", "create"}:
+                    slug = payload.name or f"chat-{conversation_id[:8]}"
+                    info = manager.create_worktree(slug, payload.base_branch)
+                    return JSONResponse({
+                        "active": True,
+                        "is_git_repo": True,
+                        "worktree": info.as_dict(),
+                        **info.as_dict(),
+                    })
+
+                main_root = manager.main_worktree_root()
+                active = manager.active_worktree()
+                target_ref: Path | str | None = payload.name or (active.path if active is not None else None)
+                if action == "remove" or payload.cleanup == "remove":
+                    if target_ref is None:
+                        raise WorktreeError("no active worktree to remove")
+                    removed = manager.remove_worktree(target_ref, force=payload.force)
+                    return JSONResponse({
+                        "active": False,
+                        "is_git_repo": True,
+                        "worktree": None,
+                        "action": "remove",
+                        **removed,
+                    })
+
+                meta_path = main_root / ".orin" / "active_worktree.json"
+                if meta_path.is_file():
+                    meta_path.unlink(missing_ok=True)
                 return JSONResponse({
                     "active": False,
                     "is_git_repo": True,
                     "worktree": None,
-                    "action": "remove",
-                    **removed,
+                    "action": "keep",
+                    "kept_path": str(active.path) if active is not None else None,
                 })
+            except WorktreeError as error:
+                raise ApplicationValidationError(str(error)) from error
 
-            meta_path = main_root / ".orin" / "active_worktree.json"
-            if meta_path.is_file():
-                meta_path.unlink(missing_ok=True)
-            return JSONResponse({
-                "active": False,
-                "is_git_repo": True,
-                "worktree": None,
-                "action": "keep",
-                "kept_path": str(active.path) if active is not None else None,
-            })
-        except WorktreeError as error:
-            raise ApplicationValidationError(str(error)) from error
-
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/messages", status_code=201)
     async def send_conversation_message(conversation_id: str, payload: SendConversationMessageRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
-        cli_options = _cli_options_for(principal, payload.cli)
-        if payload.cli is not None and payload.cli.trust_workspace:
-            # `orin code --trust` (W6): before the turn is queued, and only for a folder of the person's own that the
-            # conversation is bound to; a managed workspace has nothing to trust.
-            bound = local_root_for(effective_workspace_id(conversation_record(conversation_id, principal), principal)[0], principal)
-            if bound:
-                _trust_workspace(principal.user_id, Path(bound))
-        require_content(payload.message, payload.attachments)
-        provider = ""
-        model_id = ""
-        if payload.selection is not None:
-            provider = _provider_name(payload.selection.provider)
-            model_id = payload.selection.model_id
-            if services.provider_catalog is not None:
-                available = _require_port(services.provider_catalog).list(
-                    ProviderCatalogContext(principal.user_id, "conversation.send"), provider,
-                )
-                if not any(_catalog_model_id(item) == model_id for item in available):
-                    raise ApplicationValidationError("model is not authorized for this conversation")
-        attachments: list[dict[str, object]] = []
-        workspace_id = conversation_id
-        if payload.attachments:
-            workspace_id, _ = effective_workspace_id(conversation_record(conversation_id, principal), principal)
-            attachments = promote(workspace_id, principal, payload.attachments)
-        try:
-            send_kwargs: dict[str, object] = {}
-            if payload.permission_mode is not None:
-                send_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
-            if cli_options is not None:
-                send_kwargs["cli_options"] = cli_options
-            if payload.live_mode:
-                send_kwargs["live_mode"] = True
-            result = require_port(services.conversation_application).send(
-                principal.user_id, conversation_id, payload.message, _idempotency(request),
-                attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,
-                **send_kwargs,
-            )  # type: ignore[union-attr]
-        except Exception:
-            discard_promoted(workspace_for(workspace_id, principal), attachments)
-            raise
-        return JSONResponse(_jsonable(result), status_code=201)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.send")
+            cli_options = _cli_options_for(principal, payload.cli)
+            if payload.cli is not None and payload.cli.trust_workspace:
+                # `orin code --trust` (W6): before the turn is queued, and only for a folder of the person's own that the
+                # conversation is bound to; a managed workspace has nothing to trust.
+                bound = local_root_for(effective_workspace_id(conversation_record(conversation_id, principal), principal)[0], principal)
+                if bound:
+                    _trust_workspace(principal.user_id, Path(bound))
+            require_content(payload.message, payload.attachments)
+            provider = ""
+            model_id = ""
+            if payload.selection is not None:
+                provider = _provider_name(payload.selection.provider)
+                model_id = payload.selection.model_id
+                if services.provider_catalog is not None:
+                    available = _require_port(services.provider_catalog).list(
+                        ProviderCatalogContext(principal.user_id, "conversation.send"), provider,
+                    )
+                    if not any(_catalog_model_id(item) == model_id for item in available):
+                        raise ApplicationValidationError("model is not authorized for this conversation")
+            attachments: list[dict[str, object]] = []
+            workspace_id = conversation_id
+            if payload.attachments:
+                workspace_id, _ = effective_workspace_id(conversation_record(conversation_id, principal), principal)
+                attachments = promote(workspace_id, principal, payload.attachments)
+            try:
+                send_kwargs: dict[str, object] = {}
+                if payload.permission_mode is not None:
+                    send_kwargs["permission_mode"] = normalize_permission_mode(payload.permission_mode).value
+                if cli_options is not None:
+                    send_kwargs["cli_options"] = cli_options
+                if payload.live_mode:
+                    send_kwargs["live_mode"] = True
+                result = require_port(services.conversation_application).send(
+                    principal.user_id, conversation_id, payload.message, _idempotency(request),
+                    attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,
+                    **send_kwargs,
+                )  # type: ignore[union-attr]
+            except Exception:
+                discard_promoted(workspace_for(workspace_id, principal), attachments)
+                raise
+            return JSONResponse(_jsonable(result), status_code=201)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/cancel", status_code=202)
     async def cancel_conversation(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.cancel", resource_id=conversation_id, purpose="conversation.cancel")
         keep_subagents = False
         try:
             raw_body = await request.json()
@@ -1535,12 +1589,18 @@ def create_app(services: ApiServices) -> FastAPI:
                 keep_subagents = bool(raw_body.get("keep_subagents"))
         except Exception:
             pass
-        app_port = require_port(services.conversation_application)
-        try:
-            result = app_port.cancel(conversation_id, principal.user_id, keep_subagents=keep_subagents)  # type: ignore[union-attr]
-        except TypeError:
-            result = app_port.cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
-        return JSONResponse(_jsonable(result), status_code=202)
+
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.cancel", resource_id=conversation_id, purpose="conversation.cancel")
+            app_port = require_port(services.conversation_application)
+            try:
+                result = app_port.cancel(conversation_id, principal.user_id, keep_subagents=keep_subagents)  # type: ignore[union-attr]
+            except TypeError:
+                result = app_port.cancel(conversation_id, principal.user_id)  # type: ignore[union-attr]
+            return JSONResponse(_jsonable(result), status_code=202)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/resume", status_code=202)
     async def resume_conversation_turn(
@@ -1548,39 +1608,43 @@ def create_app(services: ApiServices) -> FastAPI:
         turn_id: str,
         request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.send",
-            resource_id=conversation_id,
-            purpose="conversation.resume",
-        )
-        app_port = require_port(services.conversation_application)
-        result = await run_in_threadpool(
-            app_port.resume_turn,  # type: ignore[union-attr]
-            conversation_id,
-            turn_id,
-            principal.user_id,
-        )
-        return JSONResponse(_jsonable(result), status_code=202)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.send",
+                resource_id=conversation_id,
+                purpose="conversation.resume",
+            )
+            app_port = require_port(services.conversation_application)
+            result = app_port.resume_turn(  # type: ignore[union-attr]
+                conversation_id,
+                turn_id,
+                principal.user_id,
+            )
+            return JSONResponse(_jsonable(result), status_code=202)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/agents/{agent_id}/stop", status_code=202)
     async def stop_conversation_agent(conversation_id: str, agent_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.cancel",
-            resource_id=conversation_id,
-            purpose="conversation.cancel",
-        )
-        app_port = require_port(services.conversation_application)
-        result = await run_in_threadpool(
-            app_port.request_agent_stop,  # type: ignore[union-attr]
-            conversation_id,
-            principal.user_id,
-            agent_id,
-        )
-        return JSONResponse(_jsonable(result), status_code=202)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.cancel",
+                resource_id=conversation_id,
+                purpose="conversation.cancel",
+            )
+            app_port = require_port(services.conversation_application)
+            result = app_port.request_agent_stop(  # type: ignore[union-attr]
+                conversation_id,
+                principal.user_id,
+                agent_id,
+            )
+            return JSONResponse(_jsonable(result), status_code=202)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/agents/{agent_id}/messages", status_code=202)
     async def send_conversation_agent_message(
@@ -1589,32 +1653,27 @@ def create_app(services: ApiServices) -> FastAPI:
         payload: SendConversationAgentMessageRequest,
         request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.send",
-            resource_id=conversation_id,
-            purpose="conversation.send",
-        )
-        app_port = require_port(services.conversation_application)
-        result = await run_in_threadpool(
-            app_port.send_agent_message,  # type: ignore[union-attr]
-            conversation_id,
-            principal.user_id,
-            agent_id,
-            payload.message,
-        )
-        return JSONResponse(_jsonable(result), status_code=202)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.send",
+                resource_id=conversation_id,
+                purpose="conversation.send",
+            )
+            app_port = require_port(services.conversation_application)
+            result = app_port.send_agent_message(  # type: ignore[union-attr]
+                conversation_id,
+                principal.user_id,
+                agent_id,
+                payload.message,
+            )
+            return JSONResponse(_jsonable(result), status_code=202)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/preview/start", status_code=202)
     async def start_conversation_preview(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.send",
-            resource_id=conversation_id,
-            purpose="conversation.preview.start",
-        )
         try:
             raw_body = await request.json()
         except Exception:
@@ -1624,12 +1683,19 @@ def create_app(services: ApiServices) -> FastAPI:
             if isinstance(raw_body, Mapping) and raw_body.get("name")
             else None
         )
-        app_port = require_port(services.conversation_application)
 
         def _start_and_record() -> dict[str, object]:
             from agentos.agentic.tools.orin.preview import _has_hmr
             from agentos.code_mode.preview_server import PreviewServerError, PreviewServerManager
 
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.send",
+                resource_id=conversation_id,
+                purpose="conversation.preview.start",
+            )
+            app_port = require_port(services.conversation_application)
             workspace = conversation_workspace(conversation_id, principal)
             workspace_root = Path(getattr(workspace, "root", workspace))
             manager = PreviewServerManager(workspace_root)
@@ -1659,129 +1725,152 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/conversations/{conversation_id}/queue", status_code=201)
     async def queue_conversation_input(conversation_id: str, payload: QueueConversationInputRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.queue")
-        idempotency = _idempotency(request)
-        result = await run_in_threadpool(
-            require_port(services.conversation_application).enqueue,  # type: ignore[union-attr]
-            principal.user_id, conversation_id, payload.message, idempotency,
-        )
-        return JSONResponse(_jsonable(result), status_code=201)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.queue")
+            idempotency = _idempotency(request)
+            result = require_port(services.conversation_application).enqueue(  # type: ignore[union-attr]
+                principal.user_id, conversation_id, payload.message, idempotency,
+            )
+            return JSONResponse(_jsonable(result), status_code=201)
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/queue")
     async def list_conversation_queue(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.queue")
-        items = await run_in_threadpool(
-            require_port(services.conversation_application).queued_inputs, conversation_id, principal.user_id,  # type: ignore[union-attr]
-        )
-        return JSONResponse({"items": _jsonable(items)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.queue")
+            items = require_port(services.conversation_application).queued_inputs(conversation_id, principal.user_id)  # type: ignore[union-attr]
+            return JSONResponse({"items": _jsonable(items)})
+
+        return await run_in_threadpool(_sync)
 
     @app.delete("/v1/conversations/{conversation_id}/queue/{queue_id}")
     async def cancel_conversation_queue_item(conversation_id: str, queue_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.queue")
-        if not queue_id or len(queue_id) > 255:
-            raise ApplicationNotFoundError(queue_id)
-        cancelled = await run_in_threadpool(
-            require_port(services.conversation_application).cancel_queued_input,  # type: ignore[union-attr]
-            conversation_id, principal.user_id, queue_id,
-        )
-        if not cancelled:
-            raise ApplicationNotFoundError(queue_id)
-        return JSONResponse({"queue_id": queue_id, "cancelled": True})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.queue")
+            if not queue_id or len(queue_id) > 255:
+                raise ApplicationNotFoundError(queue_id)
+            cancelled = require_port(services.conversation_application).cancel_queued_input(  # type: ignore[union-attr]
+                conversation_id, principal.user_id, queue_id,
+            )
+            if not cancelled:
+                raise ApplicationNotFoundError(queue_id)
+            return JSONResponse({"queue_id": queue_id, "cancelled": True})
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/compact", status_code=202)
     async def compact_conversation(conversation_id: str, payload: CompactConversationRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.compact")
-        idempotency = _idempotency(request)
-        receipt = await run_in_threadpool(
-            require_port(services.conversation_application).request_compaction,  # type: ignore[union-attr]
-            principal.user_id, conversation_id, payload.instructions or "", idempotency,
-        )
-        return JSONResponse(_jsonable(receipt), status_code=202)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.compact")
+            idempotency = _idempotency(request)
+            receipt = require_port(services.conversation_application).request_compaction(  # type: ignore[union-attr]
+                principal.user_id, conversation_id, payload.instructions or "", idempotency,
+            )
+            return JSONResponse(_jsonable(receipt), status_code=202)
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/context")
     async def conversation_context(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.context")
-        usage = await run_in_threadpool(
-            require_port(services.conversation_application).context_usage, conversation_id, principal.user_id,  # type: ignore[union-attr]
-        )
-        return JSONResponse(_jsonable(usage))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.context")
+            usage = require_port(services.conversation_application).context_usage(conversation_id, principal.user_id)  # type: ignore[union-attr]
+            return JSONResponse(_jsonable(usage))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/workspace-trust")
     async def get_workspace_trust(conversation_id: str, request: Request) -> JSONResponse:
         from agentos.permissions.trust import WorkspaceTrustStore
 
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace_trust")
-        workspace = conversation_workspace(conversation_id, principal)
-        root = Path(getattr(workspace, "root", workspace))
-        trusted = await run_in_threadpool(WorkspaceTrustStore().is_trusted, principal.user_id, root)
-        return JSONResponse({"trusted": bool(trusted), "path": str(root)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace_trust")
+            workspace = conversation_workspace(conversation_id, principal)
+            root = Path(getattr(workspace, "root", workspace))
+            trusted = WorkspaceTrustStore().is_trusted(principal.user_id, root)
+            return JSONResponse({"trusted": bool(trusted), "path": str(root)})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/transcript/{entry_id}")
     async def read_cli_transcript(conversation_id: str, entry_id: str, request: Request) -> JSONResponse:
         """A CLI turn's tool input or result (W6), for `orin code` only: it is the unsanitized transcript."""
         from agentos.agentic.cli_transcript import TranscriptStore
 
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.transcript")
-        conversation_record(conversation_id, principal)
-        if principal.credential_kind != "cli_token":
-            raise AuthorizationError("the transcript is for orin code")
-        entry = await run_in_threadpool(TranscriptStore(conversation_id).read, entry_id)
-        if entry is None:
-            raise ApplicationNotFoundError(entry_id)
-        return JSONResponse(entry)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.transcript")
+            conversation_record(conversation_id, principal)
+            if principal.credential_kind != "cli_token":
+                raise AuthorizationError("the transcript is for orin code")
+            entry = TranscriptStore(conversation_id).read(entry_id)
+            if entry is None:
+                raise ApplicationNotFoundError(entry_id)
+            return JSONResponse(entry)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/cli-lease", status_code=204)
     async def renew_cli_lease(conversation_id: str, turn_id: str, request: Request) -> Response:
         """`orin code` says it still follows this turn (W6-R2); a turn it stops following is cancelled after the lease."""
         from agentos.agentic import cli_lease
 
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.cli_lease")
-        if principal.credential_kind != "cli_token":
-            raise AuthorizationError("the turn lease is for orin code")
-        conversation = conversation_record(conversation_id, principal)
-        turns = conversation.get("turns") if isinstance(conversation.get("turns"), list) else []
-        if not any(isinstance(item, dict) and item.get("turn_id") == turn_id for item in turns):
-            raise ApplicationNotFoundError(turn_id)
-        try:
-            await run_in_threadpool(cli_lease.renew, turn_id)
-        except (OSError, ValueError) as error:
-            raise ApplicationNotFoundError(turn_id) from error
-        return Response(status_code=204)
+        def _sync() -> Response:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.cli_lease")
+            if principal.credential_kind != "cli_token":
+                raise AuthorizationError("the turn lease is for orin code")
+            conversation = conversation_record(conversation_id, principal)
+            turns = conversation.get("turns") if isinstance(conversation.get("turns"), list) else []
+            if not any(isinstance(item, dict) and item.get("turn_id") == turn_id for item in turns):
+                raise ApplicationNotFoundError(turn_id)
+            try:
+                cli_lease.renew(turn_id)
+            except (OSError, ValueError) as error:
+                raise ApplicationNotFoundError(turn_id) from error
+            return Response(status_code=204)
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/host-requests/{request_id}")
     async def answer_host_request(conversation_id: str, request_id: str, payload: HostRequestAnswer, request: Request) -> JSONResponse:
         """The SDK host's answer, relayed by `orin code` (W6): only its token may write it."""
         from agentos.agentic.host_requests import HostRequests
 
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.host_request")
-        conversation_record(conversation_id, principal)
-        if principal.credential_kind != "cli_token":
-            raise AuthorizationError("only orin code answers its host's requests")
-        answered = await run_in_threadpool(HostRequests(conversation_id).answer, request_id, payload.response)
-        if not answered:
-            raise ApplicationNotFoundError(request_id)
-        return JSONResponse({"request_id": request_id, "answered": True})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.host_request")
+            conversation_record(conversation_id, principal)
+            if principal.credential_kind != "cli_token":
+                raise AuthorizationError("only orin code answers its host's requests")
+            answered = HostRequests(conversation_id).answer(request_id, payload.response)
+            if not answered:
+                raise ApplicationNotFoundError(request_id)
+            return JSONResponse({"request_id": request_id, "answered": True})
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/workspace-trust")
     async def trust_workspace(conversation_id: str, request: Request) -> JSONResponse:
         from agentos.permissions.trust import WorkspaceTrustStore
 
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace_trust")
-        _idempotency(request)
-        workspace = conversation_workspace(conversation_id, principal)
-        root = Path(getattr(workspace, "root", workspace))
-        await run_in_threadpool(WorkspaceTrustStore().trust, principal.user_id, root)
-        return JSONResponse({"trusted": True, "path": str(root)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace_trust")
+            _idempotency(request)
+            workspace = conversation_workspace(conversation_id, principal)
+            root = Path(getattr(workspace, "root", workspace))
+            WorkspaceTrustStore().trust(principal.user_id, root)
+            return JSONResponse({"trusted": True, "path": str(root)})
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission")
     async def submit_turn_tool_permission(
@@ -1790,22 +1879,24 @@ def create_app(services: ApiServices) -> FastAPI:
         payload: ToolPermissionDecisionRequest,
         request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.send",
-            resource_id=conversation_id,
-            purpose="conversation.tool_permission",
-        )
-        workspace = conversation_workspace(conversation_id, principal)
-        broker = ToolPermissionBroker(workspace)
-        result = await run_in_threadpool(
-            broker.submit_decision,
-            payload.request_id,
-            decision=payload.decision,
-            reason=payload.reason,
-        )
-        return JSONResponse(_jsonable({**result, "turn_id": turn_id}))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.send",
+                resource_id=conversation_id,
+                purpose="conversation.tool_permission",
+            )
+            workspace = conversation_workspace(conversation_id, principal)
+            broker = ToolPermissionBroker(workspace)
+            result = broker.submit_decision(
+                payload.request_id,
+                decision=payload.decision,
+                reason=payload.reason,
+            )
+            return JSONResponse(_jsonable({**result, "turn_id": turn_id}))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/turns/{turn_id}/rewind")
     async def rewind_conversation_turn(
@@ -1813,131 +1904,158 @@ def create_app(services: ApiServices) -> FastAPI:
         turn_id: str,
         request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.send",
-            resource_id=conversation_id,
-            purpose="conversation.rewind",
-        )
-        workspace = conversation_workspace(conversation_id, principal)
-        store = FileCheckpointStore(workspace)
-        try:
-            # The busy check and the rewind run under the folder's lock, so no turn of the folder starts in between
-            # and a sibling chat's turn in the same folder counts too (W4-R11).
-            with exclusive_folder(workspace.root):
-                if _turn_in_flight(conversation_record(conversation_id, principal)):
-                    return _error(409, "CONFLICT", "turn_running", retryable=True)
-                result = await run_in_threadpool(store.rewind_turn, turn_id)
-        except WorkspaceBusy:
-            return _error(409, "CONFLICT", "turn_running", retryable=True)
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.send",
+                resource_id=conversation_id,
+                purpose="conversation.rewind",
+            )
+            workspace = conversation_workspace(conversation_id, principal)
+            store = FileCheckpointStore(workspace)
+            try:
+                # The busy check and the rewind run under the folder's lock, so no turn of the folder starts in between
+                # and a sibling chat's turn in the same folder counts too (W4-R11).
+                with exclusive_folder(workspace.root):
+                    if _turn_in_flight(conversation_record(conversation_id, principal)):
+                        return _error(409, "CONFLICT", "turn_running", retryable=True)
+                    result = store.rewind_turn(turn_id)
+            except WorkspaceBusy:
+                return _error(409, "CONFLICT", "turn_running", retryable=True)
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/messages/{message_id}/rewind")
     async def rewind_conversation_message(
         conversation_id: str, message_id: str, payload: RewindMessageRequest, request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rewind")
-        if payload.mode == "conversation":
-            # The conversation goes back to before the message in a new conversation (the original stays as it was).
-            from .conversation_routes import fork_conversation
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rewind")
+            if payload.mode == "conversation":
+                # The conversation goes back to before the message in a new conversation (the original stays as it was).
+                from .conversation_routes import fork_conversation
 
-            conversation_record(conversation_id, principal)
-            fork = await run_in_threadpool(lambda: fork_conversation(services, principal.user_id, conversation_id, before_message_id=message_id))
-            return JSONResponse(_jsonable({"message_id": message_id, "mode": "conversation", "fork": fork}))
-        workspace = conversation_workspace(conversation_id, principal)
-        history = FileHistory(services.history_root(), conversation_id)
-        roots = [Path(workspace.root)]
-        directories = services.conversation_directories
-        if directories is not None and services.capabilities.host_folders:
-            # Folders added with /add-dir are working directories too: their files are restored, nothing else is.
-            roots += [Path(path) for path in await run_in_threadpool(directories.paths, principal.user_id, conversation_id)]  # type: ignore[union-attr]
-        try:
-            # The busy check and the rewind run under the folder's lock (W4-R11): see the per-turn route.
-            with exclusive_folder(workspace.root):
-                if _turn_in_flight(conversation_record(conversation_id, principal)):
-                    return _error(409, "CONFLICT", "turn_running", retryable=True)
-                result = await run_in_threadpool(lambda: history.rewind(message_id, roots=roots, force_unbacked=payload.force_unbacked))
-        except WorkspaceBusy:
-            return _error(409, "CONFLICT", "turn_running", retryable=True)
-        except LookupError as error:
-            raise ApplicationNotFoundError(message_id) from error
-        if result["blocked"]:
-            # Nothing was changed: the response names the files that blocked the rewind (W4-R10).
-            return _error(409, "CONFLICT", "rewind_blocked", retryable=False, details={"files": result["skipped"]})
-        if payload.mode == "both":
-            from .conversation_routes import fork_conversation
+                conversation_record(conversation_id, principal)
+                fork = fork_conversation(services, principal.user_id, conversation_id, before_message_id=message_id)
+                return JSONResponse(_jsonable({"message_id": message_id, "mode": "conversation", "fork": fork}))
+            workspace = conversation_workspace(conversation_id, principal)
+            history = FileHistory(services.history_root(), conversation_id)
+            roots = [Path(workspace.root)]
+            directories = services.conversation_directories
+            if directories is not None and services.capabilities.host_folders:
+                # Folders added with /add-dir are working directories too: their files are restored, nothing else is.
+                roots += [Path(path) for path in directories.paths(principal.user_id, conversation_id)]  # type: ignore[union-attr]
+            try:
+                # The busy check and the rewind run under the folder's lock (W4-R11): see the per-turn route.
+                with exclusive_folder(workspace.root):
+                    if _turn_in_flight(conversation_record(conversation_id, principal)):
+                        return _error(409, "CONFLICT", "turn_running", retryable=True)
+                    result = history.rewind(message_id, roots=roots, force_unbacked=payload.force_unbacked)
+            except WorkspaceBusy:
+                return _error(409, "CONFLICT", "turn_running", retryable=True)
+            except LookupError as error:
+                raise ApplicationNotFoundError(message_id) from error
+            if result["blocked"]:
+                # Nothing was changed: the response names the files that blocked the rewind (W4-R10).
+                return _error(409, "CONFLICT", "rewind_blocked", retryable=False, details={"files": result["skipped"]})
+            if payload.mode == "both":
+                from .conversation_routes import fork_conversation
 
-            result = {**result, "mode": "both", "fork": await run_in_threadpool(
-                lambda: fork_conversation(services, principal.user_id, conversation_id, before_message_id=message_id))}
-        return JSONResponse(_jsonable(result))
+                result = {
+                    **result,
+                    "mode": "both",
+                    "fork": fork_conversation(services, principal.user_id, conversation_id, before_message_id=message_id),
+                }
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/directories", dependencies=[capability("host_folders")])
     async def list_conversation_directories(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.directories")
-        conversation_record(conversation_id, principal)
-        store = require_port(services.conversation_directories)
-        try:
-            items = await run_in_threadpool(store.list, principal.user_id, conversation_id)  # type: ignore[union-attr]
-        except LookupError as error:
-            raise ApplicationNotFoundError(conversation_id) from error
-        return JSONResponse(_jsonable({"items": items}))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.directories")
+            conversation_record(conversation_id, principal)
+            store = require_port(services.conversation_directories)
+            try:
+                items = store.list(principal.user_id, conversation_id)  # type: ignore[union-attr]
+            except LookupError as error:
+                raise ApplicationNotFoundError(conversation_id) from error
+            return JSONResponse(_jsonable({"items": items}))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/conversations/{conversation_id}/directories", dependencies=[capability("host_folders")])
     async def add_conversation_directory(conversation_id: str, payload: AddDirectoryRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.directories")
-        workspace = conversation_workspace(conversation_id, principal)
-        store = require_port(services.conversation_directories)
-        try:
-            directory, created = await run_in_threadpool(
-                lambda: store.add(principal.user_id, conversation_id, payload.path, workspace_root=Path(workspace.root)),  # type: ignore[union-attr]
-            )
-        except LookupError as error:
-            raise ApplicationNotFoundError(conversation_id) from error
-        except DirectoryError as error:
-            raise ApplicationValidationError(str(error)) from error
-        return JSONResponse(_jsonable(directory), status_code=201 if created else 200)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.directories")
+            workspace = conversation_workspace(conversation_id, principal)
+            store = require_port(services.conversation_directories)
+            try:
+                directory, created = store.add(principal.user_id, conversation_id, payload.path, workspace_root=Path(workspace.root))  # type: ignore[union-attr]
+            except LookupError as error:
+                raise ApplicationNotFoundError(conversation_id) from error
+            except DirectoryError as error:
+                raise ApplicationValidationError(str(error)) from error
+            return JSONResponse(_jsonable(directory), status_code=201 if created else 200)
+
+        return await run_in_threadpool(_sync)
 
     @app.delete("/v1/conversations/{conversation_id}/directories/{directory_id}", status_code=204, dependencies=[capability("host_folders")])
     async def remove_conversation_directory(conversation_id: str, directory_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.directories")
-        conversation_record(conversation_id, principal)
-        store = require_port(services.conversation_directories)
-        try:
-            removed = await run_in_threadpool(store.remove, principal.user_id, conversation_id, directory_id)  # type: ignore[union-attr]
-        except LookupError as error:
-            raise ApplicationNotFoundError(conversation_id) from error
-        if not removed:
-            raise ApplicationNotFoundError(directory_id)
-        return JSONResponse(status_code=204, content=None)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.directories")
+            conversation_record(conversation_id, principal)
+            store = require_port(services.conversation_directories)
+            try:
+                removed = store.remove(principal.user_id, conversation_id, directory_id)  # type: ignore[union-attr]
+            except LookupError as error:
+                raise ApplicationNotFoundError(conversation_id) from error
+            if not removed:
+                raise ApplicationNotFoundError(directory_id)
+            return JSONResponse(status_code=204, content=None)
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/file-history")
     async def conversation_file_history(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.file_history")
-        conversation_record(conversation_id, principal)  # the conversation must be this person's
-        history = FileHistory(services.history_root(), conversation_id)
-        return JSONResponse(_jsonable({"items": await run_in_threadpool(history.messages)}))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.file_history")
+            conversation_record(conversation_id, principal)  # the conversation must be this person's
+            history = FileHistory(services.history_root(), conversation_id)
+            return JSONResponse(_jsonable({"items": history.messages()}))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/overview")
     async def conversation_overview(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.overview")
-        return JSONResponse(_jsonable(require_port(services.conversation_application).overview(conversation_id, principal.user_id)))  # type: ignore[union-attr]
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.overview")
+            return JSONResponse(_jsonable(require_port(services.conversation_application).overview(conversation_id, principal.user_id)))  # type: ignore[union-attr]
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/conversations/{conversation_id}/events")
     async def conversation_events(conversation_id: str, request: Request, after: str = "0") -> StreamingResponse:
-        principal = principal_for(request)
-        if not after or len(after) > 512: raise ValueError("invalid cursor")
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.observe")
-        app_service = require_port(services.conversation_application)
-        # Resolve ownership before the stream opens: another profile's id must
-        # be a 404, not an empty stream that stays open for minutes.
-        conversation_record(conversation_id, principal)
+        def _prepare() -> tuple[AuthenticatedPrincipal, Any]:
+            principal = principal_for(request)
+            if not after or len(after) > 512:
+                raise ValueError("invalid cursor")
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.observe")
+            app_service = require_port(services.conversation_application)
+            # Resolve ownership before the stream opens: another profile's id must
+            # be a 404, not an empty stream that stays open for minutes.
+            conversation_record(conversation_id, principal)
+            return principal, app_service
+
+        principal, app_service = await run_in_threadpool(_prepare)
 
         async def body() -> Any:
             # A long-lived stream: the client attaches once per conversation and
@@ -1979,7 +2097,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
     @app.post("/v1/executions/{execution_id}/control", status_code=202)
-    async def control_execution(execution_id: str, payload: ControlExecutionRequest, request: Request) -> JSONResponse:
+    def control_execution(execution_id: str, payload: ControlExecutionRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="execution.control", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="execution.control", resource_id=execution_id, purpose=payload.purpose)
@@ -1988,7 +2106,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_receipt(result, execution_id), status_code=202)
 
     @app.post("/v1/executions/{execution_id}/input", status_code=202)
-    async def provide_execution_input(execution_id: str, payload: ExecutionInputRequest, request: Request) -> JSONResponse:
+    def provide_execution_input(execution_id: str, payload: ExecutionInputRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="execution.input", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="execution.input", resource_id=execution_id, purpose=payload.purpose)
@@ -1997,18 +2115,18 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_receipt(result, execution_id), status_code=202)
 
     @app.get("/v1/executions/{execution_id}")
-    async def get_execution(execution_id: str, request: Request) -> JSONResponse:
+    def get_execution(execution_id: str, request: Request) -> JSONResponse:
         return _get_resource("executions", execution_id, request, services, principal_for)
 
     @app.get("/v1/executions")
-    async def list_executions(request: Request) -> JSONResponse:
+    def list_executions(request: Request) -> JSONResponse:
         return _list_resource("executions", request, services, principal_for)
 
     for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts"):
         _register_resource_routes(app, resource, services, principal_for)
 
     @app.get("/v1/skills")
-    async def list_skills(request: Request, query: str = "", source: str | None = None, limit: int = 20, cursor: str | None = None) -> JSONResponse:
+    def list_skills(request: Request, query: str = "", source: str | None = None, limit: int = 20, cursor: str | None = None) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="skills.list", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.list", resource_id=None, purpose="skills.read")
@@ -2016,7 +2134,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/skills/{skill_id}")
-    async def get_skill(skill_id: str, request: Request) -> JSONResponse:
+    def get_skill(skill_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="skills.get", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.get", resource_id=skill_id, purpose="skills.read")
@@ -2024,7 +2142,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.post("/v1/skills", status_code=201)
-    async def create_skill(payload: CreateSkillRequest, request: Request) -> JSONResponse:
+    def create_skill(payload: CreateSkillRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.create", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.create", resource_id=None, purpose="skills.create")
@@ -2035,7 +2153,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.put("/v1/skills/{skill_id}")
-    async def update_skill(skill_id: str, payload: UpdateSkillRequest, request: Request) -> JSONResponse:
+    def update_skill(skill_id: str, payload: UpdateSkillRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.update", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.update", resource_id=skill_id, purpose="skills.update")
@@ -2047,7 +2165,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.delete("/v1/skills/{skill_id}/versions/{version}")
-    async def remove_skill_version(skill_id: str, version: str, request: Request) -> JSONResponse:
+    def remove_skill_version(skill_id: str, version: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.version.remove", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.update", resource_id=f"{skill_id}@{version}", purpose="skills.version.remove")
@@ -2061,14 +2179,14 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/skills/{skill_id}/agents")
-    async def agents_for_skill(skill_id: str, request: Request) -> JSONResponse:
+    def agents_for_skill(skill_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="skills.agents", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.get", resource_id=skill_id, purpose="skills.read")
         return JSONResponse(_jsonable(_require_port(services.skills).agents_for_skill({"user_id": principal.user_id, "skill_id": skill_id})))
 
     @app.get("/v1/skill-proposals")
-    async def list_skill_proposals(request: Request, status: str = "pending") -> JSONResponse:
+    def list_skill_proposals(request: Request, status: str = "pending") -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="skills.list", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.list", resource_id=None, purpose="skills.read")
@@ -2077,7 +2195,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable({"items": items}))
 
     @app.patch("/v1/skill-proposals/{proposal_id}")
-    async def update_skill_proposal(proposal_id: str, payload: UpdateSkillProposalRequest, request: Request) -> JSONResponse:
+    def update_skill_proposal(proposal_id: str, payload: UpdateSkillProposalRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.update", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.update", resource_id=proposal_id, purpose="skills.update")
@@ -2096,7 +2214,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(updated))
 
     @app.post("/v1/skill-proposals/{proposal_id}/approve")
-    async def approve_skill_proposal(
+    def approve_skill_proposal(
         proposal_id: str,
         request: Request,
         payload: UpdateSkillProposalRequest | None = None,
@@ -2120,7 +2238,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.delete("/v1/skill-proposals/{proposal_id}")
-    async def dismiss_skill_proposal(proposal_id: str, request: Request) -> JSONResponse:
+    def dismiss_skill_proposal(proposal_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="skills.update", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.update", resource_id=proposal_id, purpose="skills.update")
@@ -2129,14 +2247,14 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/agents/{agent_id}/skills")
-    async def get_agent_skills(agent_id: str, request: Request) -> JSONResponse:
+    def get_agent_skills(agent_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="agents.skills.get", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="agents.get", resource_id=agent_id, purpose="agents.read")
         return JSONResponse(_jsonable(_require_port(services.skills).agent_skills({"user_id": principal.user_id, "agent_id": agent_id})))
 
     @app.put("/v1/agents/{agent_id}/skills")
-    async def set_agent_skills(agent_id: str, payload: AgentSkillsRequest, request: Request) -> JSONResponse:
+    def set_agent_skills(agent_id: str, payload: AgentSkillsRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="agents.skills.set", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="agents.update", resource_id=agent_id, purpose="agents.update")
@@ -2144,7 +2262,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/plugins")
-    async def list_plugins(request: Request) -> JSONResponse:
+    def list_plugins(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="plugins.list", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.list", resource_id=None, purpose="plugins.read")
@@ -2152,16 +2270,18 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.get("/v1/plugins/library")
     async def get_plugin_library(request: Request, refresh: bool = False, q: str = "") -> JSONResponse:
-        principal = principal_for(request)
-        services.security.check_rate_limit(principal, action="plugins.library", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="plugins.library", resource_id=None, purpose="plugins.read")
-        # Web search is blocking I/O just like plugin inspection, so keep it off the event loop.
-        result = await run_in_threadpool(
-            _require_port(services.plugins).discover_library, user_id=principal.user_id, refresh=refresh, query=q.strip() or None)
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.check_rate_limit(principal, action="plugins.library", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="plugins.library", resource_id=None, purpose="plugins.read")
+            # Web search is blocking I/O just like plugin inspection, so keep it off the event loop.
+            result = _require_port(services.plugins).discover_library(user_id=principal.user_id, refresh=refresh, query=q.strip() or None)
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/plugins/commands")
-    async def list_plugin_commands(request: Request) -> JSONResponse:
+    def list_plugin_commands(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="plugins.commands", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.commands", resource_id=None, purpose="plugins.read")
@@ -2169,47 +2289,55 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/plugins/inspect")
     async def inspect_plugin(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="plugins.inspect", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="plugins.inspect", resource_id=None, purpose="plugins.inspect")
-        # Fetching a plugin package (git clone) is blocking I/O that can take up to
-        # PluginFetcher's own timeout; keeping it off the event loop matters here
-        # because otherwise it stalls every other request and open SSE stream.
-        result = await run_in_threadpool(_require_port(services.plugins).inspect, user_id=principal.user_id, reference=payload.reference)
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="plugins.inspect", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="plugins.inspect", resource_id=None, purpose="plugins.inspect")
+            # Fetching a plugin package (git clone) is blocking I/O that can take up to
+            # PluginFetcher's own timeout; keeping it off the event loop matters here
+            # because otherwise it stalls every other request and open SSE stream.
+            result = _require_port(services.plugins).inspect(user_id=principal.user_id, reference=payload.reference)
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/plugins/library/infer-mcp")
     async def infer_mcp_from_repository(payload: PluginInferMcpRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="plugins.library.infer_mcp", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="plugins.library.infer_mcp", resource_id=None, purpose="plugins.inspect")
-        # Cloning a repository to read its config files is blocking I/O, same as plugin inspection.
-        result = await run_in_threadpool(_require_port(services.plugins).infer_mcp_launch, source_url=payload.source_url)
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="plugins.library.infer_mcp", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="plugins.library.infer_mcp", resource_id=None, purpose="plugins.inspect")
+            # Cloning a repository to read its config files is blocking I/O, same as plugin inspection.
+            result = _require_port(services.plugins).infer_mcp_launch(source_url=payload.source_url)
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/plugins/{plugin_id}/approve")
     async def approve_plugin(plugin_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="plugins.approve", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="plugins.approve", resource_id=plugin_id, purpose="plugins.configure")
-        # Activation parses and registers every contribution (and may propose
-        # MCP servers), so it is blocking work just like inspection.
-        result = await run_in_threadpool(
-            _require_port(services.plugins).approve,
-            user_id=principal.user_id,
-            plugin_id=plugin_id,
-        )
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="plugins.approve", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="plugins.approve", resource_id=plugin_id, purpose="plugins.configure")
+            # Activation parses and registers every contribution (and may propose
+            # MCP servers), so it is blocking work just like inspection.
+            result = _require_port(services.plugins).approve(
+                user_id=principal.user_id,
+                plugin_id=plugin_id,
+            )
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.put("/v1/plugins/{plugin_id}/enabled")
-    async def set_plugin_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:
+    def set_plugin_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.enable", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.enable", resource_id=plugin_id, purpose="plugins.configure")
         return JSONResponse(_jsonable(_require_port(services.plugins).set_enabled(user_id=principal.user_id, plugin_id=plugin_id, enabled=payload.enabled)))
 
     @app.put("/v1/plugins/{plugin_id}/hooks-enabled")
-    async def set_plugin_hooks_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:
+    def set_plugin_hooks_enabled(plugin_id: str, payload: PluginEnabledRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.hooks_enabled", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.hooks_enabled", resource_id=plugin_id, purpose="plugins.configure")
@@ -2218,14 +2346,14 @@ def create_app(services: ApiServices) -> FastAPI:
         )))
 
     @app.get("/v1/plugins/{plugin_id}/config")
-    async def get_plugin_config(plugin_id: str, request: Request) -> JSONResponse:
+    def get_plugin_config(plugin_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="plugins.config.read", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.config.read", resource_id=plugin_id, purpose="plugins.read")
         return JSONResponse(_jsonable(_require_port(services.plugins).user_config(user_id=principal.user_id, plugin_id=plugin_id)))
 
     @app.put("/v1/plugins/{plugin_id}/config")
-    async def set_plugin_config(plugin_id: str, payload: PluginConfigRequest, request: Request) -> JSONResponse:
+    def set_plugin_config(plugin_id: str, payload: PluginConfigRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.config", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.config", resource_id=plugin_id, purpose="plugins.configure")
@@ -2234,7 +2362,7 @@ def create_app(services: ApiServices) -> FastAPI:
         )))
 
     @app.delete("/v1/plugins/{plugin_id}", status_code=204)
-    async def remove_plugin(plugin_id: str, request: Request) -> JSONResponse:
+    def remove_plugin(plugin_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.remove", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.remove", resource_id=plugin_id, purpose="plugins.configure")
@@ -2242,21 +2370,21 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(None, status_code=204)
 
     @app.get("/v1/plugins/marketplaces")
-    async def list_plugin_marketplaces(request: Request) -> JSONResponse:
+    def list_plugin_marketplaces(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="plugins.marketplaces.list", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.marketplaces.list", resource_id=None, purpose="plugins.read")
         return JSONResponse(_jsonable(_require_port(services.plugins).list_marketplaces(principal.user_id)))
 
     @app.post("/v1/plugins/marketplaces", status_code=201)
-    async def add_plugin_marketplace(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
+    def add_plugin_marketplace(payload: PluginReferenceRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="plugins.marketplaces.add", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="plugins.marketplaces.add", resource_id=None, purpose="plugins.configure")
         return JSONResponse(_jsonable(_require_port(services.plugins).add_marketplace(user_id=principal.user_id, reference=payload.reference)), status_code=201)
 
     @app.get("/v1/mcp/catalog")
-    async def get_mcp_catalog(request: Request, query: str = "") -> JSONResponse:
+    def get_mcp_catalog(request: Request, query: str = "") -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="mcp.catalog", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.catalog", resource_id=None, purpose="mcp.read")
@@ -2269,14 +2397,14 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse({"entries": entries})
 
     @app.get("/v1/mcp/servers")
-    async def list_mcp_servers(request: Request) -> JSONResponse:
+    def list_mcp_servers(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="mcp.servers.list", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.list", resource_id=None, purpose="mcp.read")
         return JSONResponse(_jsonable(_require_port(services.mcp).list(principal.user_id)))
 
     @app.post("/v1/mcp/servers", status_code=201)
-    async def propose_mcp_server(payload: McpProposeServerRequest, request: Request) -> JSONResponse:
+    def propose_mcp_server(payload: McpProposeServerRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="mcp.servers.propose", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.propose", resource_id=None, purpose="mcp.configure")
@@ -2285,7 +2413,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result), status_code=201)
 
     @app.get("/v1/mcp/servers/{server_id}")
-    async def get_mcp_server(server_id: str, request: Request) -> JSONResponse:
+    def get_mcp_server(server_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="mcp.servers.get", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.get", resource_id=server_id, purpose="mcp.read")
@@ -2293,73 +2421,84 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/mcp/servers/{server_id}/approve")
     async def approve_mcp_server(server_id: str, payload: McpApproveServerRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="mcp.servers.approve", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="mcp.servers.approve", resource_id=server_id, purpose="mcp.configure")
-        secrets = {name: value.get_secret_value() for name, value in payload.secrets.items()}
-        # Approving a server opens a real MCP connection (subprocess launch or HTTP
-        # handshake), which is blocking I/O that can take seconds; run it off the
-        # event loop so it doesn't stall every other request and open SSE stream.
-        result = await run_in_threadpool(
-            _require_port(services.mcp).approve, user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=connector_for(services.mcp_oauth),
-        )
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="mcp.servers.approve", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="mcp.servers.approve", resource_id=server_id, purpose="mcp.configure")
+            secrets = {name: value.get_secret_value() for name, value in payload.secrets.items()}
+            # Approving a server opens a real MCP connection (subprocess launch or HTTP
+            # handshake), which is blocking I/O that can take seconds; run it off the
+            # event loop so it doesn't stall every other request and open SSE stream.
+            result = _require_port(services.mcp).approve(
+                user_id=principal.user_id, server_id=server_id, secrets=secrets, connect=connector_for(services.mcp_oauth),
+            )
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/mcp/servers/{server_id}/test")
     async def test_mcp_server(server_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="mcp.servers.test", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="mcp.servers.test", resource_id=server_id, purpose="mcp.configure")
-        server = _require_port(services.mcp).get(principal.user_id, server_id)
-        result = await run_in_threadpool(_require_port(services.mcp).test, principal.user_id, str(server["slug"]), connector_for(services.mcp_oauth))
-        return JSONResponse(_jsonable(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="mcp.servers.test", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="mcp.servers.test", resource_id=server_id, purpose="mcp.configure")
+            server = _require_port(services.mcp).get(principal.user_id, server_id)
+            result = _require_port(services.mcp).test(principal.user_id, str(server["slug"]), connector_for(services.mcp_oauth))
+            return JSONResponse(_jsonable(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/mcp/servers/{server_id}/oauth/start")
     async def start_mcp_oauth(server_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="mcp.servers.oauth.start", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="mcp.servers.oauth.start", resource_id=server_id, purpose="mcp.configure")
-        redirect_uri = _oauth_redirect_uri(request)
-        started = await run_in_threadpool(
-            _require_port(services.mcp_oauth).start, user_id=principal.user_id, server_id=server_id, redirect_uri=redirect_uri,
-        )
-        return JSONResponse({"authorization_url": started.authorization_url, "expires_at": started.expires_at.isoformat()})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="mcp.servers.oauth.start", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="mcp.servers.oauth.start", resource_id=server_id, purpose="mcp.configure")
+            redirect_uri = _oauth_redirect_uri(request)
+            started = _require_port(services.mcp_oauth).start(
+                user_id=principal.user_id, server_id=server_id, redirect_uri=redirect_uri,
+            )
+            return JSONResponse({"authorization_url": started.authorization_url, "expires_at": started.expires_at.isoformat()})
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/mcp/servers/{server_id}/oauth/cancel", status_code=204)
     async def cancel_mcp_oauth(server_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="mcp.servers.oauth.cancel", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="mcp.servers.oauth.cancel", resource_id=server_id, purpose="mcp.configure")
-        await run_in_threadpool(_require_port(services.mcp_oauth).cancel, user_id=principal.user_id, server_id=server_id)
-        return JSONResponse(status_code=204, content=None)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="mcp.servers.oauth.cancel", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="mcp.servers.oauth.cancel", resource_id=server_id, purpose="mcp.configure")
+            _require_port(services.mcp_oauth).cancel(user_id=principal.user_id, server_id=server_id)
+            return JSONResponse(status_code=204, content=None)
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/mcp/oauth/callback")
     async def complete_mcp_oauth(request: Request, state: str = "", code: str = "", error: str = "") -> HTMLResponse:
-        # A plain GET from the system browser: no CSRF header can exist here, and
-        # the single-use `state` bound to this user is what protects it.
-        principal = principal_for(request)
-        services.security.check_rate_limit(principal, action="mcp.oauth.callback", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="mcp.oauth.callback", resource_id=None, purpose="mcp.configure")
-        oauth = _require_port(services.mcp_oauth)
-        try:
-            server_id = await run_in_threadpool(
-                oauth.complete, user_id=principal.user_id, state=state[:128], code=code[:2048], error=error[:64],
-            )
-            await run_in_threadpool(
-                _require_port(services.mcp).activate_after_authorization, principal.user_id, server_id, connector_for(oauth),
-            )
-        except McpOAuthCallbackError as failure:
-            return _oauth_page("Não foi possível conectar", str(failure), status_code=400)
-        except McpConnectionFailed:
-            return _oauth_page(
-                "Login concluído, conexão falhou",
-                "O Orin recebeu a autorização, mas não conseguiu conversar com o servidor. Veja o motivo em Configurações → MCP.",
-                status_code=502,
-            )
-        return _oauth_page("Conectado", "Pode fechar esta aba e voltar ao Orin.")
+        def _sync() -> HTMLResponse:
+            # A plain GET from the system browser: no CSRF header can exist here, and
+            # the single-use `state` bound to this user is what protects it.
+            principal = principal_for(request)
+            services.security.check_rate_limit(principal, action="mcp.oauth.callback", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="mcp.oauth.callback", resource_id=None, purpose="mcp.configure")
+            oauth = _require_port(services.mcp_oauth)
+            try:
+                server_id = oauth.complete(user_id=principal.user_id, state=state[:128], code=code[:2048], error=error[:64])
+                _require_port(services.mcp).activate_after_authorization(principal.user_id, server_id, connector_for(oauth))
+            except McpOAuthCallbackError as failure:
+                return _oauth_page("Não foi possível conectar", str(failure), status_code=400)
+            except McpConnectionFailed:
+                return _oauth_page(
+                    "Login concluído, conexão falhou",
+                    "O Orin recebeu a autorização, mas não conseguiu conversar com o servidor. Veja o motivo em Configurações → MCP.",
+                    status_code=502,
+                )
+            return _oauth_page("Conectado", "Pode fechar esta aba e voltar ao Orin.")
+
+        return await run_in_threadpool(_sync)
 
     @app.put("/v1/mcp/servers/{server_id}/enabled")
-    async def set_mcp_server_enabled(server_id: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
+    def set_mcp_server_enabled(server_id: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="mcp.servers.enable", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.servers.enable", resource_id=server_id, purpose="mcp.configure")
@@ -2367,7 +2506,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_jsonable(result))
 
     @app.put("/v1/mcp/servers/{server_id}/tools/{tool_name}/enabled")
-    async def set_mcp_tool_enabled(server_id: str, tool_name: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
+    def set_mcp_tool_enabled(server_id: str, tool_name: str, payload: McpEnabledRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="mcp.tools.enable", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="mcp.tools.enable", resource_id=server_id, purpose="mcp.configure")
@@ -2376,17 +2515,20 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.delete("/v1/mcp/servers/{server_id}", status_code=204)
     async def remove_mcp_server(server_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="mcp.servers.remove", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="mcp.servers.remove", resource_id=server_id, purpose="mcp.configure")
-        server = _require_port(services.mcp).get(principal.user_id, server_id)
-        if server.get("auth_kind") == "oauth" and services.mcp_oauth is not None:
-            await run_in_threadpool(services.mcp_oauth.revoke, user_id=principal.user_id, server_id=server_id)
-        _require_port(services.mcp).remove(principal.user_id, server_id)
-        return JSONResponse(status_code=204, content=None)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="mcp.servers.remove", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="mcp.servers.remove", resource_id=server_id, purpose="mcp.configure")
+            server = _require_port(services.mcp).get(principal.user_id, server_id)
+            if server.get("auth_kind") == "oauth" and services.mcp_oauth is not None:
+                services.mcp_oauth.revoke(user_id=principal.user_id, server_id=server_id)
+            _require_port(services.mcp).remove(principal.user_id, server_id)
+            return JSONResponse(status_code=204, content=None)
+
+        return await run_in_threadpool(_sync)
 
     @app.put("/v1/providers/{provider}")
-    async def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
+    def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         if provider_name not in SUBSCRIPTION_CLI_PROVIDERS and provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
             raise ValueError("API key is required for this provider")
@@ -2419,7 +2561,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_public(result))
 
     @app.get("/v1/providers/{provider}")
-    async def inspect_provider(provider: str, request: Request) -> JSONResponse:
+    def inspect_provider(provider: str, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="provider.inspect", origin=request.headers.get("origin"))
@@ -2428,7 +2570,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_public(result))
 
     @app.delete("/v1/providers/{provider}")
-    async def revoke_provider(provider: str, request: Request) -> JSONResponse:
+    def revoke_provider(provider: str, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.revoke", origin=request.headers.get("origin"))
@@ -2437,7 +2579,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_public(result))
 
     @app.get("/v1/providers/{provider}/keys")
-    async def list_provider_keys(provider: str, request: Request) -> JSONResponse:
+    def list_provider_keys(provider: str, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="provider.keys.list", origin=request.headers.get("origin"))
@@ -2446,7 +2588,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse([_provider_key_public(item) for item in result])
 
     @app.post("/v1/providers/{provider}/keys", status_code=201)
-    async def add_provider_key(provider: str, payload: ProviderApiKeyCreateRequest, request: Request) -> JSONResponse:
+    def add_provider_key(provider: str, payload: ProviderApiKeyCreateRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.add", origin=request.headers.get("origin"))
@@ -2459,7 +2601,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_key_public(result), status_code=201)
 
     @app.patch("/v1/providers/{provider}/keys/{key_id}")
-    async def rename_provider_key(provider: str, key_id: int, payload: ProviderApiKeyRenameRequest, request: Request) -> JSONResponse:
+    def rename_provider_key(provider: str, key_id: int, payload: ProviderApiKeyRenameRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.rename", origin=request.headers.get("origin"))
@@ -2471,7 +2613,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_key_public(result))
 
     @app.delete("/v1/providers/{provider}/keys/{key_id}", status_code=204)
-    async def remove_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
+    def remove_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.remove", origin=request.headers.get("origin"))
@@ -2483,7 +2625,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(status_code=204, content=None)
 
     @app.post("/v1/providers/{provider}/keys/{key_id}:activate")
-    async def activate_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
+    def activate_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.activate", origin=request.headers.get("origin"))
@@ -2494,7 +2636,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_key_public(result))
 
     @app.put("/v1/providers/{provider}/keys:reorder")
-    async def reorder_provider_keys(provider: str, payload: ProviderApiKeyReorderRequest, request: Request) -> JSONResponse:
+    def reorder_provider_keys(provider: str, payload: ProviderApiKeyReorderRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.reorder", origin=request.headers.get("origin"))
@@ -2506,7 +2648,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse([_provider_key_public(item) for item in result])
 
     @app.put("/v1/providers/{provider}/keys:cooldown")
-    async def set_provider_key_cooldown(provider: str, payload: ProviderKeyCooldownRequest, request: Request) -> JSONResponse:
+    def set_provider_key_cooldown(provider: str, payload: ProviderKeyCooldownRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
@@ -2518,7 +2660,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_provider_public(result))
 
     @app.post("/v1/providers/omniroute/test", dependencies=[capability("omniroute")])
-    async def test_omniroute_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
+    def test_omniroute_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.test", resource_id="omniroute", purpose=payload.purpose)
@@ -2531,143 +2673,171 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/providers/ollama/test")
     async def test_ollama_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.test", resource_id="ollama", purpose=payload.purpose)
-        _idempotency(request)
-        # Reaching a local daemon is blocking I/O; keeping it off the event
-        # loop matters more here than for a hosted gateway, because an Ollama
-        # that is simply not running takes the full connect timeout to fail.
-        result = await run_in_threadpool(
-            _require_port(services.provider_configuration).test_connection,
-            {"provider": "ollama", "user_id": principal.user_id, "purpose": payload.purpose,
-             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
-             "base_url": payload.base_url},
-        )
-        return JSONResponse(_connection_test_public(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.test", resource_id="ollama", purpose=payload.purpose)
+            _idempotency(request)
+            # Reaching a local daemon is blocking I/O; keeping it off the event
+            # loop matters more here than for a hosted gateway, because an Ollama
+            # that is simply not running takes the full connect timeout to fail.
+            result = _require_port(services.provider_configuration).test_connection(
+                {"provider": "ollama", "user_id": principal.user_id, "purpose": payload.purpose,
+                 "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+                 "base_url": payload.base_url},
+            )
+            return JSONResponse(_connection_test_public(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/providers/anthropic/test")
     async def test_anthropic_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.test", resource_id="anthropic", purpose=payload.purpose)
-        _idempotency(request)
-        result = await run_in_threadpool(
-            _require_port(services.provider_configuration).test_connection,
-            {"provider": "anthropic", "user_id": principal.user_id, "purpose": payload.purpose,
-             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
-             "base_url": payload.base_url},
-        )
-        return JSONResponse(_connection_test_public(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.test", resource_id="anthropic", purpose=payload.purpose)
+            _idempotency(request)
+            result = _require_port(services.provider_configuration).test_connection(
+                {"provider": "anthropic", "user_id": principal.user_id, "purpose": payload.purpose,
+                 "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+                 "base_url": payload.base_url},
+            )
+            return JSONResponse(_connection_test_public(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/providers/opencode/test")
     async def test_opencode_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.test", resource_id="opencode", purpose=payload.purpose)
-        _idempotency(request)
-        result = await run_in_threadpool(
-            _require_port(services.provider_configuration).test_connection,
-            {"provider": "opencode", "user_id": principal.user_id, "purpose": payload.purpose,
-             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
-             "base_url": payload.base_url},
-        )
-        return JSONResponse(_connection_test_public(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.test", resource_id="opencode", purpose=payload.purpose)
+            _idempotency(request)
+            result = _require_port(services.provider_configuration).test_connection(
+                {"provider": "opencode", "user_id": principal.user_id, "purpose": payload.purpose,
+                 "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+                 "base_url": payload.base_url},
+            )
+            return JSONResponse(_connection_test_public(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/providers/openai-codex/status")
     @app.get("/v1/providers/codex-cli/status")
     async def codex_cli_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="provider.inspect", resource_id="openai-codex", purpose="provider.inspect")
-        status = await run_in_threadpool(_inspect_codex_cli_status)
-        return JSONResponse(status)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="provider.inspect", resource_id="openai-codex", purpose="provider.inspect")
+            return JSONResponse(_inspect_codex_cli_status())
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/providers/google-antigravity/status")
     @app.get("/v1/providers/antigravity-cli/status")
     async def antigravity_cli_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="provider.inspect", resource_id="google-antigravity", purpose="provider.inspect")
-        status = await run_in_threadpool(_inspect_antigravity_cli_status)
-        return JSONResponse(status)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="provider.inspect", resource_id="google-antigravity", purpose="provider.inspect")
+            return JSONResponse(_inspect_antigravity_cli_status())
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/providers/claude-cli/status")
     async def claude_cli_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="provider.inspect", resource_id="anthropic", purpose="provider.inspect")
-        status = await run_in_threadpool(_inspect_claude_cli_status)
-        return JSONResponse(status)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="provider.inspect", resource_id="anthropic", purpose="provider.inspect")
+            return JSONResponse(_inspect_claude_cli_status())
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/providers/nvidia/test")
     async def test_nvidia_connection(payload: ProviderSetupRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.test", resource_id="nvidia", purpose=payload.purpose)
-        result = await run_in_threadpool(
-            _require_port(services.provider_configuration).test_connection,
-            {"provider": "nvidia", "user_id": principal.user_id, "purpose": payload.purpose,
-             "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
-             "base_url": payload.base_url},
-        )
-        return JSONResponse(_connection_test_public(result))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.test", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.test", resource_id="nvidia", purpose=payload.purpose)
+            result = _require_port(services.provider_configuration).test_connection(
+                {"provider": "nvidia", "user_id": principal.user_id, "purpose": payload.purpose,
+                 "api_key": payload.api_key.get_secret_value() if payload.api_key is not None else "",
+                 "base_url": payload.base_url},
+            )
+            return JSONResponse(_connection_test_public(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/providers/omniroute/install", dependencies=[capability("omniroute")])
     async def install_omniroute(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.install", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.install", resource_id="omniroute", purpose="provider.install")
-        _idempotency(request)
-        result = await run_in_threadpool(
-            _require_port(services.provider_configuration).install,
-            {"provider": "omniroute", "user_id": principal.user_id, "purpose": "provider.install"},
-        )
-        data = _jsonable(result)
-        if not isinstance(data, dict) or data.get("installed") is not True or data.get("next_step") != "omniroute":
-            raise ValueError("OmniRoute installation response is invalid")
-        return JSONResponse({"installed": True, "next_step": "omniroute"})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.install", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.install", resource_id="omniroute", purpose="provider.install")
+            _idempotency(request)
+            result = _require_port(services.provider_configuration).install(
+                {"provider": "omniroute", "user_id": principal.user_id, "purpose": "provider.install"},
+            )
+            data = _jsonable(result)
+            if not isinstance(data, dict) or data.get("installed") is not True or data.get("next_step") != "omniroute":
+                raise ValueError("OmniRoute installation response is invalid")
+            return JSONResponse({"installed": True, "next_step": "omniroute"})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/providers/omniroute/install", dependencies=[capability("omniroute")])
     async def omniroute_installation_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.check_rate_limit(principal, action="provider.install.status", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.install.status", resource_id="omniroute", purpose="provider.install.status")
-        result = _require_port(services.provider_configuration).installation_status({
-            "provider": "omniroute", "user_id": principal.user_id, "purpose": "provider.install.status",
-        })
-        data = _jsonable(result)
-        if not isinstance(data, dict) or not isinstance(data.get("installed"), bool):
-            raise ValueError("OmniRoute installation status response is invalid")
-        return JSONResponse({"installed": data["installed"]})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.check_rate_limit(principal, action="provider.install.status", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.install.status", resource_id="omniroute", purpose="provider.install.status")
+            result = _require_port(services.provider_configuration).installation_status({
+                "provider": "omniroute", "user_id": principal.user_id, "purpose": "provider.install.status",
+            })
+            data = _jsonable(result)
+            if not isinstance(data, dict) or not isinstance(data.get("installed"), bool):
+                raise ValueError("OmniRoute installation status response is invalid")
+            return JSONResponse({"installed": data["installed"]})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/providers/omniroute/runtime", dependencies=[capability("omniroute")])
     async def omniroute_runtime_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="provider.inspect", resource_id="omniroute", purpose="provider.inspect")
-        manager = _require_port(services.omniroute_runtime)
-        return JSONResponse({**manager.status(), "auto_start": manager.auto_start(principal.user_id)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="provider.inspect", resource_id="omniroute", purpose="provider.inspect")
+            manager = _require_port(services.omniroute_runtime)
+            return JSONResponse({**manager.status(), "auto_start": manager.auto_start(principal.user_id)})
+
+        return await run_in_threadpool(_sync)
 
     @app.put("/v1/providers/omniroute/runtime", dependencies=[capability("omniroute")])
     async def update_omniroute_runtime(payload: OmniRouteRuntimeRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="provider.configure", resource_id="omniroute", purpose="provider.configure")
-        manager = _require_port(services.omniroute_runtime)
-        return JSONResponse({**manager.status(), **manager.set_auto_start(principal.user_id, payload.auto_start)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="provider.configure", resource_id="omniroute", purpose="provider.configure")
+            manager = _require_port(services.omniroute_runtime)
+            return JSONResponse({**manager.status(), **manager.set_auto_start(principal.user_id, payload.auto_start)})
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/providers/omniroute/runtime/actions", dependencies=[capability("omniroute")])
     async def control_omniroute_runtime(payload: OmniRouteRuntimeActionRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="provider.configure", resource_id="omniroute", purpose="provider.configure")
-        manager = _require_port(services.omniroute_runtime)
-        outcome = getattr(manager, payload.action)()
-        return JSONResponse({**outcome, "auto_start": manager.auto_start(principal.user_id)})
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="provider.configure", resource_id="omniroute", purpose="provider.configure")
+            manager = _require_port(services.omniroute_runtime)
+            outcome = getattr(manager, payload.action)()
+            return JSONResponse({**outcome, "auto_start": manager.auto_start(principal.user_id)})
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/runtime/settings")
-    async def get_agent_runtime_settings(request: Request) -> JSONResponse:
+    def get_agent_runtime_settings(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="runtime.inspect", resource_id="agentic", purpose="runtime.inspect")
         return JSONResponse(_require_port(services.agentic_runtime).get(principal.user_id))
 
     @app.put("/v1/runtime/settings")
-    async def update_agent_runtime_settings(payload: AgentRuntimeSettingsRequest, request: Request) -> JSONResponse:
+    def update_agent_runtime_settings(payload: AgentRuntimeSettingsRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="runtime.configure", resource_id="agentic", purpose="runtime.configure")
         _idempotency(request)
@@ -2686,14 +2856,14 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(port.set_max_iterations(principal.user_id, payload.max_iterations))
 
     @app.get("/v1/code-mode/settings")
-    async def get_code_mode_settings(request: Request) -> JSONResponse:
+    def get_code_mode_settings(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="runtime.inspect", resource_id="code-mode", purpose="code_mode.inspect")
         settings = _require_port(services.agentic_runtime).get_code_mode(principal.user_id)
         return JSONResponse(settings.as_dict())
 
     @app.put("/v1/code-mode/settings")
-    async def update_code_mode_settings(payload: CodeModeSettingsRequest, request: Request) -> JSONResponse:
+    def update_code_mode_settings(payload: CodeModeSettingsRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="runtime.configure", resource_id="code-mode", purpose="code_mode.configure")
         _idempotency(request)
@@ -2724,13 +2894,16 @@ def create_app(services: ApiServices) -> FastAPI:
         This is the measurement a change to the turn loop is judged against,
         so it is a read of durable history and never derives anything live.
         """
-        principal = principal_for(request)
-        services.security.authorize(principal, action="runtime.inspect", resource_id="agentic", purpose="runtime.inspect")
-        summary = require_port(services.conversation_application).quality_summary(principal.user_id, days=days)  # type: ignore[union-attr]
-        return JSONResponse(_jsonable(summary))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="runtime.inspect", resource_id="agentic", purpose="runtime.inspect")
+            summary = require_port(services.conversation_application).quality_summary(principal.user_id, days=days)  # type: ignore[union-attr]
+            return JSONResponse(_jsonable(summary))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/instance")
-    async def get_instance(request: Request) -> JSONResponse:
+    def get_instance(request: Request) -> JSONResponse:
         """What `orin code` checks before it drives this Orin (W6): its version, mode and capabilities."""
         from agentos.configuration.mode import current_mode
         from agentos.version import __version__
@@ -2746,65 +2919,83 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.get("/v1/installation/status")
     async def get_installation_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.inspect")
-        status = await run_in_threadpool(read_installation_status, runtime_profile())
-        return JSONResponse(status)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.inspect")
+            return JSONResponse(read_installation_status(runtime_profile()))
+
+        return await run_in_threadpool(_sync)
 
     @app.delete("/v1/installation/versions/{version}", dependencies=[capability("ui_updater")])
     async def delete_installation_version(version: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="installation.configure", resource_id=version, purpose="installation.version.remove")
-        _idempotency(request)
-        result = await run_in_threadpool(remove_installed_version, version, runtime_profile())
-        return JSONResponse(result)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="installation.configure", resource_id=version, purpose="installation.version.remove")
+            _idempotency(request)
+            return JSONResponse(remove_installed_version(version, runtime_profile()))
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/installation/update", dependencies=[capability("ui_updater")])
     async def install_latest_release(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update")
-        _idempotency(request)
-        # The download + SHA-256 verify + extract this runs (agentos.installation.start_update)
-        # is real, network-bound I/O; off the event loop for the same reason the
-        # Ollama connection test above is.
-        result = await run_in_threadpool(start_update, runtime_profile())
-        return JSONResponse(result)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update")
+            _idempotency(request)
+            # The download + SHA-256 verify + extract this runs (agentos.installation.start_update)
+            # is real, network-bound I/O; off the event loop for the same reason the
+            # Ollama connection test above is.
+            return JSONResponse(start_update(runtime_profile()))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/installation/update/status")
     async def get_update_status(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.update.inspect")
-        return JSONResponse(await run_in_threadpool(lambda: update_job(runtime_profile()).status()))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.update.inspect")
+            return JSONResponse(update_job(runtime_profile()).status())
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/installation/update/prepare", dependencies=[capability("ui_updater")])
     async def prepare_update(request: Request) -> JSONResponse:
         """Starts downloading and verifying the latest release in the background; poll the GET above."""
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update.prepare")
-        _idempotency(request)
-        return JSONResponse(await run_in_threadpool(lambda: update_job(runtime_profile()).start()), status_code=202)
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.update.prepare")
+            _idempotency(request)
+            return JSONResponse(update_job(runtime_profile()).start(), status_code=202)
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/installation/autostart")
     async def get_autostart(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.autostart.inspect")
-        return JSONResponse(await run_in_threadpool(lambda: autostart_for(runtime_profile()).status().as_dict()))
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="installation.inspect", resource_id=None, purpose="installation.autostart.inspect")
+            return JSONResponse(autostart_for(runtime_profile()).status().as_dict())
+
+        return await run_in_threadpool(_sync)
 
     @app.put("/v1/installation/autostart", dependencies=[capability("ui_updater")])
     async def set_autostart(payload: AutostartRequest, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.autostart")
-        _idempotency(request)
-        try:
-            status = await run_in_threadpool(lambda: autostart_for(runtime_profile()).set(payload.enabled))
-        except RuntimeError:
-            return _error(409, "CONFLICT", "autostart_unavailable", retryable=False)
-        except OSError:
-            return _error(500, "INTERNAL", "autostart_failed", retryable=True)
-        return JSONResponse(status.as_dict())
+        def _sync() -> JSONResponse:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="installation.configure", resource_id=None, purpose="installation.autostart")
+            _idempotency(request)
+            try:
+                status = autostart_for(runtime_profile()).set(payload.enabled)
+            except RuntimeError:
+                return _error(409, "CONFLICT", "autostart_unavailable", retryable=False)
+            except OSError:
+                return _error(500, "INTERNAL", "autostart_failed", retryable=True)
+            return JSONResponse(status.as_dict())
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/settings/vision-model")
-    async def get_vision_model_setting(request: Request) -> JSONResponse:
+    def get_vision_model_setting(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="settings.vision_model.read", resource_id=None, purpose="settings.vision_model.read")
         selection = _require_port(services.vision_model_settings).get(principal.user_id)
@@ -2813,7 +3004,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse({"provider": selection.provider, "model_id": selection.model_id, "mode": "manual"})
 
     @app.put("/v1/settings/vision-model")
-    async def set_vision_model_setting(payload: VisionModelRequest, request: Request) -> JSONResponse:
+    def set_vision_model_setting(payload: VisionModelRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="settings.vision_model.configure", resource_id=None, purpose="settings.vision_model.configure")
         if (payload.provider is None) != (payload.model_id is None):
@@ -2826,7 +3017,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse({"provider": payload.provider, "model_id": payload.model_id, "mode": "manual"})
 
     @app.get("/v1/settings/media-models")
-    async def get_media_model_settings(request: Request) -> JSONResponse:
+    def get_media_model_settings(request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.authorize(principal, action="settings.vision_model.read", resource_id=None, purpose="settings.vision_model.read")
         store = services.media_model_settings or services.vision_model_settings
@@ -2848,7 +3039,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(response_body)
 
     @app.put("/v1/settings/media-models/{modality}")
-    async def set_media_model_setting(modality: str, payload: VisionModelRequest, request: Request) -> JSONResponse:
+    def set_media_model_setting(modality: str, payload: VisionModelRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="settings.vision_model.configure", resource_id=None, purpose="settings.vision_model.configure")
         norm_modality = str(modality or "").strip().lower()
@@ -2882,62 +3073,74 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/providers/{provider}/models:refresh")
     async def refresh_provider_models(provider: str, request: Request) -> JSONResponse:
-        provider_name = _provider_name(provider)
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.catalog.refresh", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.catalog.refresh", resource_id=provider_name, purpose="provider.catalog.refresh")
-        _idempotency(request)
-        result = _require_port(services.provider_catalog).refresh(ProviderCatalogContext(principal.user_id, "provider.catalog.refresh"), provider_name)
-        return JSONResponse(_catalog_refresh_public(result))
+        def _sync() -> JSONResponse:
+            provider_name = _provider_name(provider)
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.catalog.refresh", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.catalog.refresh", resource_id=provider_name, purpose="provider.catalog.refresh")
+            _idempotency(request)
+            result = _require_port(services.provider_catalog).refresh(ProviderCatalogContext(principal.user_id, "provider.catalog.refresh"), provider_name)
+            return JSONResponse(_catalog_refresh_public(result))
+
+        return await run_in_threadpool(_sync)
 
     @app.get("/v1/providers/{provider}/models")
     async def list_provider_models(provider: str, request: Request, favorites_only: bool = False) -> JSONResponse:
-        provider_name = _provider_name(provider)
-        principal = principal_for(request)
-        services.security.check_rate_limit(principal, action="provider.catalog.list", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.catalog.list", resource_id=provider_name, purpose="provider.catalog.list")
-        items = _require_port(services.provider_catalog).list(ProviderCatalogContext(principal.user_id, "provider.catalog.list"), provider_name, favorites_only)
-        public_items = [_catalog_model_public(item) for item in items]
-        refreshed_at = public_items[0]["refreshed_at"] if public_items else None
-        return JSONResponse({"items": public_items, "refreshed_at": refreshed_at})
+        def _sync() -> JSONResponse:
+            provider_name = _provider_name(provider)
+            principal = principal_for(request)
+            services.security.check_rate_limit(principal, action="provider.catalog.list", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.catalog.list", resource_id=provider_name, purpose="provider.catalog.list")
+            items = _require_port(services.provider_catalog).list(ProviderCatalogContext(principal.user_id, "provider.catalog.list"), provider_name, favorites_only)
+            public_items = [_catalog_model_public(item) for item in items]
+            refreshed_at = public_items[0]["refreshed_at"] if public_items else None
+            return JSONResponse({"items": public_items, "refreshed_at": refreshed_at})
+
+        return await run_in_threadpool(_sync)
 
     @app.post("/v1/providers/{provider}/models", status_code=201)
     async def add_provider_custom_model(provider: str, payload: ProviderCustomModelRequest, request: Request) -> JSONResponse:
-        provider_name = _provider_name(provider)
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.catalog.custom.add", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.catalog.custom.add", resource_id=provider_name, purpose="provider.catalog.custom.add")
-        _idempotency(request)
-        catalog = _require_port(services.provider_catalog)
-        ctx = ProviderCatalogContext(principal.user_id, "provider.catalog.custom.add")
-        if payload.output_modalities is not None:
-            try:
-                result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name, payload.output_modalities)
-            except TypeError:
+        def _sync() -> JSONResponse:
+            provider_name = _provider_name(provider)
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.catalog.custom.add", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.catalog.custom.add", resource_id=provider_name, purpose="provider.catalog.custom.add")
+            _idempotency(request)
+            catalog = _require_port(services.provider_catalog)
+            ctx = ProviderCatalogContext(principal.user_id, "provider.catalog.custom.add")
+            if payload.output_modalities is not None:
+                try:
+                    result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name, payload.output_modalities)
+                except TypeError:
+                    result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name)
+            else:
                 result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name)
-        else:
-            result = catalog.add_custom(ctx, provider_name, payload.model_id, payload.display_name)
-        return JSONResponse(_catalog_model_public(result), status_code=201)
+            return JSONResponse(_catalog_model_public(result), status_code=201)
+
+        return await run_in_threadpool(_sync)
 
     @app.delete("/v1/providers/{provider}/custom-models/{model_id:path}", status_code=204)
     async def remove_provider_custom_model(provider: str, model_id: str, request: Request) -> JSONResponse:
-        provider_name = _provider_name(provider)
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="provider.catalog.custom.remove", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="provider.catalog.custom.remove", resource_id=provider_name, purpose="provider.catalog.custom.remove")
-        _idempotency(request)
-        _require_port(services.provider_catalog).remove_custom(
-            ProviderCatalogContext(principal.user_id, "provider.catalog.custom.remove"), provider_name, model_id,
-        )
-        return JSONResponse(status_code=204, content=None)
+        def _sync() -> JSONResponse:
+            provider_name = _provider_name(provider)
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(principal, action="provider.catalog.custom.remove", origin=request.headers.get("origin"))
+            services.security.authorize(principal, action="provider.catalog.custom.remove", resource_id=provider_name, purpose="provider.catalog.custom.remove")
+            _idempotency(request)
+            _require_port(services.provider_catalog).remove_custom(
+                ProviderCatalogContext(principal.user_id, "provider.catalog.custom.remove"), provider_name, model_id,
+            )
+            return JSONResponse(status_code=204, content=None)
+
+        return await run_in_threadpool(_sync)
 
     @app.put("/v1/providers/{provider}/favorites/{model_id:path}")
     async def favorite_provider_model(provider: str, model_id: str, request: Request) -> JSONResponse:
-        return _set_provider_favorite(provider, model_id, True, request)
+        return await run_in_threadpool(_set_provider_favorite, provider, model_id, True, request)
 
     @app.delete("/v1/providers/{provider}/favorites/{model_id:path}")
     async def unfavorite_provider_model(provider: str, model_id: str, request: Request) -> JSONResponse:
-        return _set_provider_favorite(provider, model_id, False, request)
+        return await run_in_threadpool(_set_provider_favorite, provider, model_id, False, request)
 
     def _set_provider_favorite(provider: str, model_id: str, favorite: bool, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
@@ -2951,7 +3154,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse(_catalog_model_public(result))
 
     @app.post("/v1/events/streams", status_code=201)
-    async def open_event_stream(payload: OpenStreamRequest, request: Request) -> JSONResponse:
+    def open_event_stream(payload: OpenStreamRequest, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="events.open", origin=request.headers.get("origin"))
         for execution_id in payload.execution_ids:
@@ -2960,7 +3163,7 @@ def create_app(services: ApiServices) -> FastAPI:
         return JSONResponse({"stream_id": binding.stream_id, "cursor": cursor, "stream_binding_digest": binding.digest, "revocation_epoch": binding.epoch}, status_code=201)
 
     @app.post("/v1/events/streams/{stream_id}/read")
-    async def read_event_stream(stream_id: str, payload: ReadStreamRequest, request: Request) -> JSONResponse:
+    def read_event_stream(stream_id: str, payload: ReadStreamRequest, request: Request) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="events.read", origin=request.headers.get("origin"))
         events, cursor = services.events.read(principal, stream_id, payload.cursor, services.security.revocation_epoch(principal), payload.maximum_events)
@@ -2968,12 +3171,19 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.get("/v1/events/streams/{stream_id}")
     async def sse(stream_id: str, cursor: str, request: Request) -> StreamingResponse:
-        principal = principal_for(request)
-        events, next_cursor = services.events.read(principal, stream_id, cursor, services.security.revocation_epoch(principal))
+        def _prepare() -> tuple[AuthenticatedPrincipal, list[Any], str]:
+            principal = principal_for(request)
+            events, next_cursor = services.events.read(principal, stream_id, cursor, services.security.revocation_epoch(principal))
+            return principal, list(events), next_cursor
+
+        principal, events, next_cursor = await run_in_threadpool(_prepare)
 
         async def body() -> Any:
             for event in events:
-                if not services.events.delivery_permitted(principal, stream_id, services.security.revocation_epoch(principal)):
+                permitted = await run_in_threadpool(
+                    lambda: services.events.delivery_permitted(principal, stream_id, services.security.revocation_epoch(principal))
+                )
+                if not permitted:
                     return
                 yield f"id: {event.event_id}\nevent: {event.event_type}\ndata: {json_dumps(_event_json(event))}\n\n"
             yield f"event: heartbeat\ndata: {json_dumps({'cursor': next_cursor})}\n\n"
@@ -3027,11 +3237,11 @@ def create_app(services: ApiServices) -> FastAPI:
 
 def _register_resource_routes(app: FastAPI, resource: str, services: ApiServices, principal_for: Any) -> None:
     @app.get(f"/v1/{resource}/{{resource_id}}", name=f"get_{resource}")
-    async def get_resource(resource_id: str, request: Request) -> JSONResponse:
+    def get_resource(resource_id: str, request: Request) -> JSONResponse:
         return _get_resource(resource, resource_id, request, services, principal_for)
 
     @app.get(f"/v1/{resource}", name=f"list_{resource}")
-    async def list_resource(request: Request) -> JSONResponse:
+    def list_resource(request: Request) -> JSONResponse:
         return _list_resource(resource, request, services, principal_for)
 
 

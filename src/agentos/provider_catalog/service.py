@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+import time
 from typing import Callable, Mapping, Protocol, Sequence
 
 import httpx
@@ -76,21 +77,26 @@ class ContextWindowReference(Protocol):
     def load(self) -> ContextWindowLookup: ...
 
 
+AUTO_REFRESH_BACKOFF_SECONDS = 60.0
+
+
 class ProviderModelCatalogService:
     def __init__(
         self,
         repository: ProviderCatalogRepository,
         upstreams: Mapping[str, ProviderCatalogUpstream] | None = None,
         *,
+        clients: Mapping[str, ProviderCatalogUpstream] | None = None,
         nvidia_client: NvidiaModelCatalogClient | None = None,
         context_reference: ContextWindowReference | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._repository = repository
-        self._upstreams = dict(upstreams or {})
+        self._upstreams = dict(upstreams or clients or {})
         self._nvidia_client = nvidia_client or NvidiaModelCatalogClient()
         self._context_reference = context_reference
         self._now = now
+        self._auto_refresh_backoff: dict[tuple[str, str], float] = {}
 
     def _fill_context_windows(self, records: list[ProviderModelRecord]) -> list[ProviderModelRecord]:
         """Give models the upstream listed without a window a known one.
@@ -203,6 +209,7 @@ class ProviderModelCatalogService:
 
     def refresh(self, context: ProviderCatalogContext, provider: str) -> RefreshReceipt:
         normalized_provider = _provider(provider)
+        self._auto_refresh_backoff.pop((context.user_id, normalized_provider), None)
         credential = self._repository.credential(context, normalized_provider)
         if credential is None or credential.get("enabled") is not True:
             raise ProviderCatalogUnavailable("provider is not configured")
@@ -336,6 +343,19 @@ class ProviderModelCatalogService:
             records.append(_normalize_nvidia(dict(item), ts))
         return records
 
+    def _try_auto_refresh(self, context: ProviderCatalogContext, normalized_provider: str) -> bool:
+        key = (context.user_id, normalized_provider)
+        now = time.monotonic()
+        if now < self._auto_refresh_backoff.get(key, 0.0):
+            return False
+        try:
+            self.refresh(context, normalized_provider)
+            self._auto_refresh_backoff.pop(key, None)
+            return True
+        except Exception:
+            self._auto_refresh_backoff[key] = time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
+            return False
+
     def list(self, context: ProviderCatalogContext, provider: str, favorites_only: bool = False) -> list[ProviderModelRecord]:
         normalized_provider = _provider(provider)
         if normalized_provider == "google-antigravity":
@@ -346,39 +366,27 @@ class ProviderModelCatalogService:
         if normalized_provider == "anthropic" and (not items or (not favorites_only and len(items) < 5)):
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True and is_claude_cli_bridge_url(str(credential.get("base_url") or "")):
-                try:
-                    self.refresh(context, normalized_provider)
+                if self._try_auto_refresh(context, normalized_provider):
                     items = self._repository.list(context, normalized_provider, favorites_only)
-                except Exception:
-                    pass
         if normalized_provider == "google-antigravity" and items and _antigravity_modalities_are_stale(items):
             # A catalog stored before Orin knew these models see images keeps
             # saying "text"; the composer and view_file would keep routing
             # pictures to another model. The catalog is static, so refresh it.
-            try:
-                self.refresh(context, normalized_provider)
+            if self._try_auto_refresh(context, normalized_provider):
                 items = self._repository.list(context, normalized_provider, favorites_only)
-            except Exception:
-                pass
         if normalized_provider in {"openai-codex", "google-antigravity"} and not items and not favorites_only:
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True:
-                try:
-                    self.refresh(context, normalized_provider)
+                if self._try_auto_refresh(context, normalized_provider):
                     items = self._repository.list(context, normalized_provider, favorites_only)
-                except Exception:
-                    pass
-        if normalized_provider == "opencode":
+        if normalized_provider == "opencode" and not items and not favorites_only:
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True:
                 raw_base = str(credential.get("base_url") or "")
                 has_key = bool(str(credential.get("api_key") or "").strip())
-                if (not raw_base and not has_key) or (not items and not is_opencode_cloud(raw_base or DEFAULT_OPENCODE_LOCAL_BASE_URL)):
-                    try:
-                        self.refresh(context, normalized_provider)
+                if (not raw_base and not has_key) or not is_opencode_cloud(raw_base or DEFAULT_OPENCODE_LOCAL_BASE_URL):
+                    if self._try_auto_refresh(context, normalized_provider):
                         items = self._repository.list(context, normalized_provider, favorites_only)
-                    except Exception:
-                        pass
         return items
 
     def favorite(self, context: ProviderCatalogContext, provider: str, model_id: str, favorite: bool) -> ProviderModelRecord:

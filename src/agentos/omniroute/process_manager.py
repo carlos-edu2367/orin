@@ -18,6 +18,7 @@ from typing import Callable, Protocol, Sequence
 import httpx
 
 from agentos.installation import orin_paths
+from agentos.process_identity import kill_verified, process_created, same_process
 
 # The gateway is a Node application that reads its own configuration and
 # provider catalog before it serves anything. On a cold start that takes tens of
@@ -113,6 +114,7 @@ class OmniRouteProcessManager:
         health: Callable[[], bool] | None = None,
         start_process: Callable[[tuple[str, ...]], _Process] | None = None,
         wait_ready: Callable[[], bool] | None = None,
+        owner_file: str | Path | None = None,
     ) -> None:
         self._settings = settings
         self._base_url = base_url.rstrip("/")
@@ -121,9 +123,20 @@ class OmniRouteProcessManager:
         self._health = health or self._request_health
         self._start_process = start_process or self._spawn
         self._wait_ready = wait_ready or self._wait_for_health
+        self._owner_file = self._resolve_owner_file(settings, owner_file)
         self._process: _Process | None = None
         self._lock = RLock()
         self._last_failure: str | None = None
+
+    @staticmethod
+    def _resolve_owner_file(settings: OmniRouteRuntimeSettingsStore, owner_file: str | Path | None) -> Path:
+        if owner_file is not None:
+            return Path(owner_file)
+        default_settings_path = orin_paths().data / "omniroute-runtime.json"
+        settings_path = getattr(settings, "_path", None)
+        if isinstance(settings_path, Path) and settings_path != default_settings_path:
+            return settings_path.with_name("omniroute-owner.json")
+        return orin_paths().run / "omniroute-owner.json"
 
     def auto_start(self, user_id: str) -> bool:
         return self._settings.auto_start(user_id)
@@ -162,8 +175,9 @@ class OmniRouteProcessManager:
         """
         if not self._settings.any_enabled():
             return self.status()
+        healthy = self._healthy()
         with self._lock:
-            if self._healthy():
+            if healthy:
                 return {"state": "external", "ownership": "external"} if not self._owned_alive() else {"state": "ready", "ownership": "agentos"}
             if self._owned_alive():
                 return {"state": "starting", "ownership": "agentos"}
@@ -172,19 +186,23 @@ class OmniRouteProcessManager:
             except (OSError, ValueError) as error:
                 self._last_failure = str(error) or "OmniRoute could not be started"
                 return {"state": "failed", "ownership": None}
+            self._record_owner(getattr(self._process, "pid", None))
             return {"state": "starting", "ownership": "agentos"}
 
     def status(self) -> dict[str, object]:
+        healthy = self._healthy()
         with self._lock:
-            if self._healthy():
-                return {"state": "ready", "ownership": "agentos" if self._owned_alive() else "external"}
-            if self._owned_alive():
+            owned = self._owned_alive()
+            if healthy:
+                return {"state": "ready", "ownership": "agentos" if owned else "external"}
+            if owned:
                 return {"state": "starting", "ownership": "agentos"}
             return {"state": "stopped", "ownership": None, **({"failure": self._last_failure} if self._last_failure else {})}
 
     def start(self) -> dict[str, object]:
+        healthy = self._healthy()
         with self._lock:
-            if self._healthy():
+            if healthy:
                 return {"state": "external", "ownership": "external"} if not self._owned_alive() else {"state": "ready", "ownership": "agentos"}
             if self._owned_alive():
                 return {"state": "starting", "ownership": "agentos"}
@@ -193,7 +211,10 @@ class OmniRouteProcessManager:
             except (OSError, ValueError) as error:
                 self._last_failure = str(error) or "OmniRoute could not be started"
                 return {"state": "failed", "ownership": None}
-            if self._wait_ready():
+            self._record_owner(getattr(self._process, "pid", None))
+        ready = self._wait_ready()
+        with self._lock:
+            if ready:
                 self._last_failure = None
                 return {"state": "ready", "ownership": "agentos"}
             if self._owned_alive():
@@ -209,17 +230,18 @@ class OmniRouteProcessManager:
 
     def stop(self) -> dict[str, object]:
         with self._lock:
-            if not self._owned_alive():
-                return {"state": "external", "ownership": "external"} if self._healthy() else {"state": "stopped", "ownership": None}
-            self._terminate_owned()
-            return {"state": "stopped", "ownership": None}
+            if self._owned_alive():
+                self._terminate_owned()
+                return {"state": "stopped", "ownership": None}
+        return {"state": "external", "ownership": "external"} if self._healthy() else {"state": "stopped", "ownership": None}
 
     def restart(self) -> dict[str, object]:
+        healthy = self._healthy()
         with self._lock:
-            if not self._owned_alive() and self._healthy():
+            if not self._owned_alive() and healthy:
                 return {"state": "external", "ownership": "external"}
             self._terminate_owned()
-            return self.start()
+        return self.start()
 
     def _healthy(self) -> bool:
         try:
@@ -227,21 +249,85 @@ class OmniRouteProcessManager:
         except Exception:
             return False
 
+    def _record_owner(self, pid: object) -> None:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            self._clear_owner()
+            return
+        created = process_created(pid)
+        if created is None or isinstance(created, bool) or (isinstance(created, str) and not created.strip()):
+            self._clear_owner()
+            return
+        try:
+            self._owner_file.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self._owner_file.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"pid": pid, "created": created}), encoding="utf-8")
+            temporary.replace(self._owner_file)
+        except OSError:
+            return
+
+    def _read_owner(self) -> tuple[int, int | float | str] | None:
+        try:
+            raw = json.loads(self._owner_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError):
+            self._clear_owner()
+            return None
+        if not isinstance(raw, dict):
+            self._clear_owner()
+            return None
+        pid = raw.get("pid")
+        created = raw.get("created")
+        valid_pid = isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+        valid_created = (
+            (isinstance(created, (int, float)) and not isinstance(created, bool) and created > 0)
+            or (isinstance(created, str) and bool(created.strip()))
+        )
+        if not valid_pid or not valid_created:
+            self._clear_owner()
+            return None
+        return pid, created
+
+    def _clear_owner(self) -> None:
+        try:
+            self._owner_file.unlink(missing_ok=True)
+        except OSError:
+            return
+
     def _owned_alive(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        if self._process is not None:
+            if self._process.poll() is None:
+                return True
+            self._process = None
+            self._clear_owner()
+            return False
+        owner = self._read_owner()
+        if owner is None:
+            return False
+        pid, created = owner
+        if same_process(pid, created):
+            return True
+        self._clear_owner()
+        return False
 
     def _terminate_owned(self) -> None:
         process = self._process
         self._process = None
-        if process is None or process.poll() is not None:
+        owner = self._read_owner()
+        self._clear_owner()
+        if process is not None:
+            if process.poll() is None:
+                if owner is not None and kill_verified(owner[0], owner[1]):
+                    return
+                if os.name == "nt" and _terminate_tree(process.pid):
+                    return
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
             return
-        # On Windows the detected executable is an npm `.cmd` shim, so the
-        # process we hold is a shell whose child is the actual gateway.
-        # Terminating only the shim leaves the gateway running with nothing
-        # supervising it; the tree is one unit and is ended as one.
-        if os.name == "nt" and _terminate_tree(process.pid):
-            return
-        process.terminate()
+        if owner is not None:
+            kill_verified(owner[0], owner[1])
 
     def _request_health(self) -> bool:
         try:

@@ -1,6 +1,6 @@
 """Production ASGI entry point composed with durable adapters."""
 
-from agentos.bootstrap.production import ProductionSettings, compose_production_services, create_production_app
+from agentos.bootstrap.production import DependencyProbe, ProductionSettings, compose_production_services, create_production_app
 from agentos.persistence.sqlite import create_local_engine
 
 settings = ProductionSettings()
@@ -14,4 +14,5 @@ app = create_production_app(
         mode=settings.ORIN_MODE,
         public_origin=settings.public_origin,
     ),
+    probe=DependencyProbe.from_engine(engine),
 )

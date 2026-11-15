@@ -8,11 +8,13 @@ from pathlib import Path
 import secrets
 import os
 import sys
+import threading
 from typing import Callable
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import SecretStr, model_validator
@@ -149,16 +151,46 @@ class DependencyProbe:
     redis: Callable[[], bool] | None = None
 
     @classmethod
-    def from_settings(cls, settings: ProductionSettings) -> "DependencyProbe":
+    def from_engine(cls, engine: Engine) -> "DependencyProbe":
         def database_ready() -> bool:
             try:
                 from sqlalchemy import text
-                engine = create_local_engine(settings.DATABASE_URL)
+
                 with engine.connect() as connection:
                     connection.execute(text("SELECT 1"))
-                engine.dispose()
                 return True
             except Exception:
+                return False
+
+        return cls(database_ready)
+
+    @classmethod
+    def from_settings(cls, settings: ProductionSettings) -> "DependencyProbe":
+        shared_engine: Engine | None = None
+        lock = threading.Lock()
+
+        def database_ready() -> bool:
+            nonlocal shared_engine
+            engine: Engine | None = None
+            try:
+                from sqlalchemy import text
+
+                with lock:
+                    if shared_engine is None:
+                        shared_engine = create_local_engine(settings.DATABASE_URL)
+                    engine = shared_engine
+                with engine.connect() as connection:
+                    connection.execute(text("SELECT 1"))
+                return True
+            except Exception:
+                with lock:
+                    if shared_engine is engine:
+                        shared_engine = None
+                if engine is not None:
+                    try:
+                        engine.dispose()
+                    except Exception:
+                        pass
                 return False
 
         return cls(database_ready)
@@ -409,7 +441,7 @@ def create_production_app(settings: ProductionSettings, *, services: ApiServices
 
     @app.get("/readyz", include_in_schema=False)
     async def readyz() -> JSONResponse:
-        if dependency_probe.ready():
+        if await run_in_threadpool(dependency_probe.ready):
             return JSONResponse({"status": "ready"})
         return JSONResponse({"status": "unavailable"}, status_code=503)
 

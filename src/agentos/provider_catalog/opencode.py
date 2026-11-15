@@ -23,6 +23,7 @@ from agentos.agentic.provider_stream import (
 )
 from agentos.agentic.retry import parse_retry_after
 from agentos.agentic.tools.public_names import internal_name, public_name
+from agentos.process_identity import kill_verified, process_created
 from agentos.providers.models import (
     FinishReason,
     ProviderError,
@@ -205,6 +206,7 @@ class OpenCodeBridgeProcessManager:
                 creationflags=creationflags,
             )
             self._processes[port] = proc
+            created = process_created(proc.pid) if isinstance(getattr(proc, "pid", None), int) else None
             deadline = time.monotonic() + self._startup_timeout
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
@@ -212,7 +214,27 @@ class OpenCodeBridgeProcessManager:
                 if self._is_healthy(normalized):
                     return
                 time.sleep(0.25)
+            self._processes.pop(port, None)
+            self._cleanup_process(proc, created)
             raise RuntimeError("OpenCode local bridge could not be started")
+
+    @staticmethod
+    def _cleanup_process(proc: Any, created: float | None = None) -> None:
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, int) and pid > 0 and created is not None:
+            try:
+                kill_verified(pid, created)
+            except Exception:
+                pass
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    proc.kill()
+        except Exception:
+            pass
 
     @staticmethod
     def _is_healthy(base_url: str) -> bool:
