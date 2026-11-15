@@ -203,69 +203,85 @@ def register_conversation_routes(
 ) -> None:
     @app.get("/v1/conversations/{conversation_id}/tasks")
     async def list_tasks(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.tasks")
-        root = conversation_root(conversation_id, principal)
-        return JSONResponse({"tasks": await run_in_threadpool(shell_tasks, root)})
+        def _list_tasks() -> dict[str, Any]:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.tasks")
+            root = conversation_root(conversation_id, principal)
+            return {"tasks": shell_tasks(root)}
+
+        return JSONResponse(await run_in_threadpool(_list_tasks))
 
     @app.post("/v1/conversations/{conversation_id}/tasks/{task_id}/stop")
     async def stop_task(conversation_id: str, task_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.tasks")
-        services.capabilities.require("shell")
-        root = conversation_root(conversation_id, principal)
-        stopped = await run_in_threadpool(stop_shell, root, task_id)
-        return JSONResponse({"task_id": task_id, "stopped": stopped, "tasks": await run_in_threadpool(shell_tasks, root)})
+        def _stop_task() -> dict[str, Any]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.tasks")
+            services.capabilities.require("shell")
+            root = conversation_root(conversation_id, principal)
+            stopped = stop_shell(root, task_id)
+            return {"task_id": task_id, "stopped": stopped, "tasks": shell_tasks(root)}
+
+        return JSONResponse(await run_in_threadpool(_stop_task))
 
     @app.post("/v1/conversations/{conversation_id}/fork", status_code=201)
     async def fork(conversation_id: str, payload: ForkRequest, request: Request) -> JSONResponse:
         """/branch and /fork (W7): a new conversation with this one's messages (or those before one of them)."""
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.fork")
-        result = await run_in_threadpool(lambda: fork_conversation(
-            services, principal.user_id, conversation_id, before_message_id=payload.before_message_id, title=payload.title))
-        return JSONResponse(result, status_code=201)
+        def _fork() -> dict[str, Any]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.fork")
+            return fork_conversation(
+                services, principal.user_id, conversation_id, before_message_id=payload.before_message_id, title=payload.title
+            )
+
+        return JSONResponse(await run_in_threadpool(_fork), status_code=201)
 
     @app.patch("/v1/conversations/{conversation_id}/title")
     async def rename(conversation_id: str, payload: RenameRequest, request: Request) -> JSONResponse:
         """/rename (W7)."""
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rename")
-        try:
-            result = await run_in_threadpool(services.conversation_application.rename, conversation_id, principal.user_id, payload.title)
-        except ValueError as error:
-            raise ApplicationValidationError(str(error)) from error
-        return JSONResponse(result)
+        def _rename() -> dict[str, Any]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.rename")
+            try:
+                return services.conversation_application.rename(conversation_id, principal.user_id, payload.title)
+            except ValueError as error:
+                raise ApplicationValidationError(str(error)) from error
+
+        return JSONResponse(await run_in_threadpool(_rename))
 
     @app.delete("/v1/conversations/{conversation_id}", status_code=204)
     async def delete_conversation(conversation_id: str, request: Request) -> Response:
         """Delete a conversation and its history (404 if not the person's, 409 while it runs or for the Friend).
         Files on disk stay where they are."""
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.delete")
-        await run_in_threadpool(services.conversation_application.delete, conversation_id, principal.user_id)
-        _STATUSLINE_CACHE.pop(conversation_id, None)
-        _STATUSLINE_LOCKS.pop(conversation_id, None)
+        def _delete() -> None:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.delete")
+            services.conversation_application.delete(conversation_id, principal.user_id)
+            _STATUSLINE_CACHE.pop(conversation_id, None)
+            _STATUSLINE_LOCKS.pop(conversation_id, None)
+
+        await run_in_threadpool(_delete)
         return Response(status_code=204)
 
     @app.post("/v1/conversations/{conversation_id}/shell", status_code=201)
     async def shell(conversation_id: str, payload: ShellRequest, request: Request) -> JSONResponse:
         """`!command` (W7): a turn that runs the person's command in the session's folder, without the model."""
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.shell")
-        services.capabilities.require("shell")
-        key = request.headers.get("idempotency-key") or ""
-        if not key or len(key) > 255:
-            raise ApplicationValidationError("an Idempotency-Key header is required")
-        try:
-            receipt = await run_in_threadpool(services.conversation_application.shell, principal.user_id, conversation_id, payload.command, key)
-        except ValueError as error:
-            raise ApplicationValidationError(str(error)) from error
-        data = receipt if isinstance(receipt, dict) else {
-            "conversation_id": getattr(receipt, "conversation_id", conversation_id), "turn_id": getattr(receipt, "turn_id", None),
-            "message_id": getattr(receipt, "message_id", None), "state": getattr(receipt, "state", None),
-        }
-        return JSONResponse(data, status_code=201)
+        def _shell() -> dict[str, Any]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.shell")
+            services.capabilities.require("shell")
+            key = request.headers.get("idempotency-key") or ""
+            if not key or len(key) > 255:
+                raise ApplicationValidationError("an Idempotency-Key header is required")
+            try:
+                receipt = services.conversation_application.shell(principal.user_id, conversation_id, payload.command, key)
+            except ValueError as error:
+                raise ApplicationValidationError(str(error)) from error
+            return receipt if isinstance(receipt, dict) else {
+                "conversation_id": getattr(receipt, "conversation_id", conversation_id), "turn_id": getattr(receipt, "turn_id", None),
+                "message_id": getattr(receipt, "message_id", None), "state": getattr(receipt, "state", None),
+            }
+
+        return JSONResponse(await run_in_threadpool(_shell), status_code=201)
 
     def trusted(principal: AuthenticatedPrincipal, root: Path) -> bool:
         from agentos.permissions.trust import WorkspaceTrustStore
@@ -274,44 +290,50 @@ def register_conversation_routes(
 
     @app.get("/v1/conversations/{conversation_id}/commands")
     async def list_commands(conversation_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.commands")
-        root = conversation_root(conversation_id, principal)
-        is_trusted = await run_in_threadpool(trusted, principal, root)
-        items = await run_in_threadpool(lambda: command_catalog(root, is_trusted, personal=services.capabilities.host_folders))
-        return JSONResponse({"commands": items, "trusted": is_trusted})
+        def _list_commands() -> dict[str, Any]:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.commands")
+            root = conversation_root(conversation_id, principal)
+            is_trusted = trusted(principal, root)
+            items = command_catalog(root, is_trusted, personal=services.capabilities.host_folders)
+            return {"commands": items, "trusted": is_trusted}
+
+        return JSONResponse(await run_in_threadpool(_list_commands))
 
     @app.post("/v1/conversations/{conversation_id}/statusline")
     async def statusline(conversation_id: str, request: Request) -> JSONResponse:
         """The status line (settings ``statusLine``): a command that reads the session as JSON and prints a line."""
         from agentos.settings import load_effective_settings
 
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.statusline")
-        root = conversation_root(conversation_id, principal)  # the conversation must be this person's, whatever else
-        if not services.capabilities.shell:
-            return JSONResponse({"enabled": False, "lines": [], "error": "shell_unavailable"})
-        is_trusted = await run_in_threadpool(trusted, principal, root)
-        if not is_trusted:  # as in Claude Code: the line stays blank until the folder is trusted
-            return JSONResponse({"enabled": False, "lines": [], "error": "workspace_not_trusted"})
-        settings = await run_in_threadpool(lambda: load_effective_settings(root, trusted=True))
-        command, why_not = statusline_command(settings)
-        if command is None:
-            return JSONResponse({"enabled": False, "lines": [], "error": why_not})
-        application = services.conversation_application
-        conversation = await run_in_threadpool(application.get, conversation_id, principal.user_id) if application is not None else {}
-        usage: dict[str, Any] = {}
-        try:
-            overview = await run_in_threadpool(application.overview, conversation_id, principal.user_id)
-            usage = dict((overview or {}).get("token_usage") or {}) if isinstance(overview, dict) else {}
-        except Exception:  # noqa: BLE001 - the line runs without cost figures rather than not at all
-            usage = {}
-        added: list[str] = []
-        directories = services.conversation_directories
-        if directories is not None and services.capabilities.host_folders:
-            added = [str(path) for path in await run_in_threadpool(directories.paths, principal.user_id, conversation_id)]
-        payload = statusline_input(dict(conversation or {}), root, settings, added_dirs=added, usage=usage)
-        return JSONResponse(await run_in_threadpool(run_statusline, conversation_id, command, root, payload))
+        def _statusline() -> dict[str, Any]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.statusline")
+            root = conversation_root(conversation_id, principal)  # the conversation must be this person's, whatever else
+            if not services.capabilities.shell:
+                return {"enabled": False, "lines": [], "error": "shell_unavailable"}
+            is_trusted = trusted(principal, root)
+            if not is_trusted:  # as in Claude Code: the line stays blank until the folder is trusted
+                return {"enabled": False, "lines": [], "error": "workspace_not_trusted"}
+            settings = load_effective_settings(root, trusted=True)
+            command, why_not = statusline_command(settings)
+            if command is None:
+                return {"enabled": False, "lines": [], "error": why_not}
+            application = services.conversation_application
+            conversation = application.get(conversation_id, principal.user_id) if application is not None else {}
+            usage: dict[str, Any] = {}
+            try:
+                overview = application.overview(conversation_id, principal.user_id)
+                usage = dict((overview or {}).get("token_usage") or {}) if isinstance(overview, dict) else {}
+            except Exception:  # noqa: BLE001 - the line runs without cost figures rather than not at all
+                usage = {}
+            added: list[str] = []
+            directories = services.conversation_directories
+            if directories is not None and services.capabilities.host_folders:
+                added = [str(path) for path in directories.paths(principal.user_id, conversation_id)]
+            payload = statusline_input(dict(conversation or {}), root, settings, added_dirs=added, usage=usage)
+            return run_statusline(conversation_id, command, root, payload)
+
+        return JSONResponse(await run_in_threadpool(_statusline))
 
 
 __all__ = ["fork_conversation", "register_conversation_routes", "shell_tasks", "stop_shell"]

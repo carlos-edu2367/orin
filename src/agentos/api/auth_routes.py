@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Callable
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,71 +86,88 @@ def register_auth_routes(app: FastAPI, services, principal_for: Callable[..., Au
 
     @app.get("/v1/auth/me")
     async def me(request: Request) -> JSONResponse:
-        bundle = accounts()
-        if bundle.users.count() == 0:
-            raise SetupRequired("this instance has no account yet")
-        principal = principal_for(request, allow_pending_password=True)
-        return JSONResponse(session_body(current_user(principal), csrf_of(principal)), headers=_NO_STORE)
+        def _me() -> dict[str, object]:
+            bundle = accounts()
+            if bundle.users.count() == 0:
+                raise SetupRequired("this instance has no account yet")
+            principal = principal_for(request, allow_pending_password=True)
+            return session_body(current_user(principal), csrf_of(principal))
+
+        return JSONResponse(await run_in_threadpool(_me), headers=_NO_STORE)
 
     @app.post("/v1/auth/setup", status_code=201)
     async def setup(payload: SetupRequest, request: Request) -> Response:
-        bundle = accounts()
-        require_public_origin(request)
-        if bundle.users.count() > 0:
-            raise SetupCompleted("this instance already has an account")
-        # Validate before consuming so a typo never burns the one-time token.
-        normalize_username(payload.username)
-        validate_password(payload.password)
-        bundle.setup.consume(payload.token, bundle.users)
-        user = bundle.users.create(username=payload.username, password=payload.password, role="admin", display_name=payload.display_name)
-        session_id, csrf = bundle.sessions.open_session(user)
-        return with_cookie(JSONResponse(session_body(user, csrf), status_code=201, headers=_NO_STORE), session_id)
+        def _setup() -> tuple[dict[str, object], str]:
+            bundle = accounts()
+            require_public_origin(request)
+            if bundle.users.count() > 0:
+                raise SetupCompleted("this instance already has an account")
+            # Validate before consuming so a typo never burns the one-time token.
+            normalize_username(payload.username)
+            validate_password(payload.password)
+            bundle.setup.consume(payload.token, bundle.users)
+            user = bundle.users.create(username=payload.username, password=payload.password, role="admin", display_name=payload.display_name)
+            session_id, csrf = bundle.sessions.open_session(user)
+            return session_body(user, csrf), session_id
+
+        body, session_id = await run_in_threadpool(_setup)
+        return with_cookie(JSONResponse(body, status_code=201, headers=_NO_STORE), session_id)
 
     @app.post("/v1/auth/login")
     async def login(payload: LoginRequest, request: Request) -> Response:
-        bundle = accounts()
-        require_public_origin(request)
-        if bundle.users.count() == 0:
-            raise SetupRequired("this instance has no account yet")
-        ip = client_ip(request)
-        bundle.guard.check(username=payload.username, ip=ip)
-        found = bundle.users.find_for_login(payload.username)
-        if found is None:
-            burn_password_check(payload.password)
-            bundle.guard.record(username=payload.username, ip=ip, succeeded=False)
-            raise InvalidCredentials("username or password is incorrect")
-        user, encoded = found
-        if not verify_password(payload.password, encoded) or not user.active:
-            bundle.guard.record(username=payload.username, ip=ip, succeeded=False)
-            raise InvalidCredentials("username or password is incorrect")
-        bundle.guard.record(username=payload.username, ip=ip, succeeded=True)
-        session_id, csrf = bundle.sessions.open_session(user)
-        return with_cookie(JSONResponse(session_body(user, csrf), headers=_NO_STORE), session_id)
+        def _login() -> tuple[dict[str, object], str]:
+            bundle = accounts()
+            require_public_origin(request)
+            if bundle.users.count() == 0:
+                raise SetupRequired("this instance has no account yet")
+            ip = client_ip(request)
+            bundle.guard.check(username=payload.username, ip=ip)
+            found = bundle.users.find_for_login(payload.username)
+            if found is None:
+                burn_password_check(payload.password)
+                bundle.guard.record(username=payload.username, ip=ip, succeeded=False)
+                raise InvalidCredentials("username or password is incorrect")
+            user, encoded = found
+            if not verify_password(payload.password, encoded) or not user.active:
+                bundle.guard.record(username=payload.username, ip=ip, succeeded=False)
+                raise InvalidCredentials("username or password is incorrect")
+            bundle.guard.record(username=payload.username, ip=ip, succeeded=True)
+            session_id, csrf = bundle.sessions.open_session(user)
+            return session_body(user, csrf), session_id
+
+        body, session_id = await run_in_threadpool(_login)
+        return with_cookie(JSONResponse(body, headers=_NO_STORE), session_id)
 
     @app.post("/v1/auth/logout", status_code=204)
     async def logout(request: Request) -> Response:
-        bundle = accounts()
-        principal = principal_for(request, mutable=True, allow_pending_password=True)
-        if principal.session_id:
-            bundle.sessions.close_session(principal.session_id)
+        def _logout() -> None:
+            bundle = accounts()
+            principal = principal_for(request, mutable=True, allow_pending_password=True)
+            if principal.session_id:
+                bundle.sessions.close_session(principal.session_id)
+
+        await run_in_threadpool(_logout)
         response = Response(status_code=204)
         response.delete_cookie(SESSION_COOKIE, path="/")
         return response
 
     @app.post("/v1/auth/password")
     async def change_password(payload: PasswordChangeRequest, request: Request) -> JSONResponse:
-        bundle = accounts()
-        principal = principal_for(request, mutable=True, allow_pending_password=True)
-        user = current_user(principal)
-        ip = client_ip(request)
-        bundle.guard.check(username=user.username, ip=ip)
-        found = bundle.users.find_for_login(user.username)
-        if found is None or not verify_password(payload.current_password, found[1]):
-            bundle.guard.record(username=user.username, ip=ip, succeeded=False)
-            raise InvalidCredentials("current password is incorrect")
-        updated = bundle.users.set_password(user.user_id, payload.new_password, temporary=False)
-        bundle.sessions.revoke_user(user.user_id, keep_session_id=principal.session_id)
-        return JSONResponse(session_body(updated, csrf_of(principal)), headers=_NO_STORE)
+        def _change_password() -> dict[str, object]:
+            bundle = accounts()
+            principal = principal_for(request, mutable=True, allow_pending_password=True)
+            user = current_user(principal)
+            ip = client_ip(request)
+            bundle.guard.check(username=user.username, ip=ip)
+            found = bundle.users.find_for_login(user.username)
+            if found is None or not verify_password(payload.current_password, found[1]):
+                bundle.guard.record(username=user.username, ip=ip, succeeded=False)
+                raise InvalidCredentials("current password is incorrect")
+            updated = bundle.users.set_password(user.user_id, payload.new_password, temporary=False)
+            bundle.sessions.revoke_user(user.user_id, keep_session_id=principal.session_id)
+            return session_body(updated, csrf_of(principal))
+
+        return JSONResponse(await run_in_threadpool(_change_password), headers=_NO_STORE)
 
     def admin(request: Request, *, mutable: bool, purpose: str) -> AuthenticatedPrincipal:
         accounts()
@@ -159,33 +177,45 @@ def register_auth_routes(app: FastAPI, services, principal_for: Callable[..., Au
 
     @app.get("/v1/admin/users")
     async def list_users(request: Request) -> JSONResponse:
-        admin(request, mutable=False, purpose="admin.users.list")
-        return JSONResponse({"items": [item.public() for item in accounts().users.list()]})
+        def _list_users() -> dict[str, object]:
+            admin(request, mutable=False, purpose="admin.users.list")
+            return {"items": [item.public() for item in accounts().users.list()]}
+
+        return JSONResponse(await run_in_threadpool(_list_users))
 
     @app.post("/v1/admin/users", status_code=201)
     async def create_user(payload: CreateUserRequest, request: Request) -> JSONResponse:
-        admin(request, mutable=True, purpose="admin.users.create")
-        temporary = generate_temporary_password()
-        user = accounts().users.create(username=payload.username, password=temporary, role=payload.role, must_change_password=True, display_name=payload.display_name)
-        return JSONResponse({"user": user.public(), "temporary_password": temporary}, status_code=201, headers=_NO_STORE)
+        def _create_user() -> dict[str, object]:
+            admin(request, mutable=True, purpose="admin.users.create")
+            temporary = generate_temporary_password()
+            user = accounts().users.create(username=payload.username, password=temporary, role=payload.role, must_change_password=True, display_name=payload.display_name)
+            return {"user": user.public(), "temporary_password": temporary}
+
+        return JSONResponse(await run_in_threadpool(_create_user), status_code=201, headers=_NO_STORE)
 
     @app.patch("/v1/admin/users/{user_id}")
     async def update_user(user_id: str, payload: UpdateUserRequest, request: Request) -> JSONResponse:
-        admin(request, mutable=True, purpose="admin.users.update")
-        bundle = accounts()
-        user = bundle.users.update(user_id, display_name=payload.display_name, role=payload.role, active=payload.active)
-        if payload.active is False:
-            bundle.sessions.revoke_user(user_id)
-        return JSONResponse({"user": user.public()})
+        def _update_user() -> dict[str, object]:
+            admin(request, mutable=True, purpose="admin.users.update")
+            bundle = accounts()
+            user = bundle.users.update(user_id, display_name=payload.display_name, role=payload.role, active=payload.active)
+            if payload.active is False:
+                bundle.sessions.revoke_user(user_id)
+            return {"user": user.public()}
+
+        return JSONResponse(await run_in_threadpool(_update_user))
 
     @app.post("/v1/admin/users/{user_id}/reset-password")
     async def reset_password(user_id: str, request: Request) -> JSONResponse:
-        admin(request, mutable=True, purpose="admin.users.reset_password")
-        bundle = accounts()
-        temporary = generate_temporary_password()
-        user = bundle.users.set_password(user_id, temporary, temporary=True)
-        bundle.sessions.revoke_user(user_id)
-        return JSONResponse({"user": user.public(), "temporary_password": temporary}, headers=_NO_STORE)
+        def _reset_password() -> dict[str, object]:
+            admin(request, mutable=True, purpose="admin.users.reset_password")
+            bundle = accounts()
+            temporary = generate_temporary_password()
+            user = bundle.users.set_password(user_id, temporary, temporary=True)
+            bundle.sessions.revoke_user(user_id)
+            return {"user": user.public(), "temporary_password": temporary}
+
+        return JSONResponse(await run_in_threadpool(_reset_password), headers=_NO_STORE)
 
 
 __all__ = ["register_auth_routes"]

@@ -132,19 +132,18 @@ def _normalize_traits_payload(raw_traits: Mapping[str, float] | None) -> dict[st
 def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> None:
     @app.post("/v1/conversations/friend/ensure")
     async def ensure_friend_conversation(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.create",
-            resource_id=None,
-            purpose="conversation.friend.ensure",
-        )
-        conv_app = getattr(services, "conversation_application", None)
-        if conv_app is None or not hasattr(conv_app, "ensure_friend_conversation"):
-            raise RuntimeError("conversation_application with ensure_friend_conversation is unavailable")
-        persona_store = _persona_store_for(services)
-
         def _ensure() -> dict[str, object]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.create",
+                resource_id=None,
+                purpose="conversation.friend.ensure",
+            )
+            conv_app = getattr(services, "conversation_application", None)
+            if conv_app is None or not hasattr(conv_app, "ensure_friend_conversation"):
+                raise RuntimeError("conversation_application with ensure_friend_conversation is unavailable")
+            persona_store = _persona_store_for(services)
             conv = conv_app.ensure_friend_conversation(principal.user_id)
             persona = persona_store.sync_from_disk_if_modified(principal.user_id)
             soul_path = str(persona_store.soul_file_path(principal.user_id))
@@ -178,17 +177,16 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
 
     @app.get("/v1/friend/persona")
     async def get_friend_persona(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(
-            principal,
-            action="conversation.list",
-            resource_id=None,
-            purpose="friend.persona.read",
-        )
-        persona_store = _persona_store_for(services)
-        memory_store = _memory_store_for(services, principal.user_id)
-
         def _load() -> dict[str, object]:
+            principal = principal_for(request)
+            services.security.authorize(
+                principal,
+                action="conversation.list",
+                resource_id=None,
+                purpose="friend.persona.read",
+            )
+            persona_store = _persona_store_for(services)
+            memory_store = _memory_store_for(services, principal.user_id)
             persona = persona_store.sync_from_disk_if_modified(principal.user_id)
             soul_path = str(persona_store.soul_file_path(principal.user_id))
             persona_dict = {**persona.to_dict(), "soul_markdown_path": soul_path}
@@ -200,16 +198,15 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
 
     @app.post("/v1/friend/soul/sync")
     async def sync_friend_soul(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.create",
-            resource_id=None,
-            purpose="friend.persona.sync",
-        )
-        persona_store = _persona_store_for(services)
-
         def _sync() -> dict[str, object]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.create",
+                resource_id=None,
+                purpose="friend.persona.sync",
+            )
+            persona_store = _persona_store_for(services)
             persona = persona_store.sync_from_disk_if_modified(principal.user_id)
             soul_path = str(persona_store.soul_file_path(principal.user_id))
             persona_dict = {**persona.to_dict(), "soul_markdown_path": soul_path}
@@ -220,66 +217,68 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
 
     @app.get("/v1/friend/memories")
     async def list_friend_memories(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(
-            principal,
-            action="conversation.list",
-            resource_id=None,
-            purpose="friend.memories.list",
-        )
-        memory_store = _memory_store_for(services, principal.user_id)
-        raw = await run_in_threadpool(lambda: memory_store.list_friend_memories(limit=50))
-        items = _serialize_friend_memories(raw)
-        return JSONResponse({"items": items, "memories": items}, status_code=200)
+        def _list_memories() -> dict[str, object]:
+            principal = principal_for(request)
+            services.security.authorize(
+                principal,
+                action="conversation.list",
+                resource_id=None,
+                purpose="friend.memories.list",
+            )
+            memory_store = _memory_store_for(services, principal.user_id)
+            raw = memory_store.list_friend_memories(limit=50)
+            items = _serialize_friend_memories(raw)
+            return {"items": items, "memories": items}
+
+        return JSONResponse(await run_in_threadpool(_list_memories), status_code=200)
 
     @app.put("/v1/friend/persona")
     async def update_friend_persona(
         payload: UpdateFriendPersonaRequest,
         request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.create",
-            resource_id=None,
-            purpose="friend.persona.update",
-        )
-        traits = _normalize_traits_payload(payload.traits)
-        bond_stage = _normalize_bond_stage(payload.bond_stage)
-        style_notes = _normalize_style_notes(payload.style_notes)
-        mood = payload.current_mood
-        if mood is not None:
-            cleaned_mood = str(mood).strip()
-            if not cleaned_mood:
-                raise ApplicationValidationError("current_mood cannot be blank")
-            try:
-                validate_style_note(cleaned_mood)
-            except ValueError as exc:
-                raise ApplicationValidationError(str(exc)) from exc
-            mood = cleaned_mood
-
-        display_name = None
-        if payload.display_name is not None:
-            try:
-                display_name = validate_display_name(payload.display_name)
-            except ValueError as exc:
-                raise ApplicationValidationError(str(exc)) from exc
-        user_nickname = None
-        if payload.user_nickname is not None:
-            try:
-                user_nickname = validate_display_name(payload.user_nickname, allow_blank=True)
-            except ValueError as exc:
-                raise ApplicationValidationError(str(exc)) from exc
-        orb_theme = None
-        if payload.orb_theme is not None:
-            orb_theme = payload.orb_theme.strip().lower()
-            if orb_theme not in VALID_ORB_THEMES:
-                raise ApplicationValidationError(f"unsupported orb_theme: {payload.orb_theme!r}")
-
-        persona_store = _persona_store_for(services)
-        conv_app = getattr(services, "conversation_application", None)
-
         def _update() -> dict[str, object]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.create",
+                resource_id=None,
+                purpose="friend.persona.update",
+            )
+            traits = _normalize_traits_payload(payload.traits)
+            bond_stage = _normalize_bond_stage(payload.bond_stage)
+            style_notes = _normalize_style_notes(payload.style_notes)
+            mood = payload.current_mood
+            if mood is not None:
+                cleaned_mood = str(mood).strip()
+                if not cleaned_mood:
+                    raise ApplicationValidationError("current_mood cannot be blank")
+                try:
+                    validate_style_note(cleaned_mood)
+                except ValueError as exc:
+                    raise ApplicationValidationError(str(exc)) from exc
+                mood = cleaned_mood
+
+            display_name = None
+            if payload.display_name is not None:
+                try:
+                    display_name = validate_display_name(payload.display_name)
+                except ValueError as exc:
+                    raise ApplicationValidationError(str(exc)) from exc
+            user_nickname = None
+            if payload.user_nickname is not None:
+                try:
+                    user_nickname = validate_display_name(payload.user_nickname, allow_blank=True)
+                except ValueError as exc:
+                    raise ApplicationValidationError(str(exc)) from exc
+            orb_theme = None
+            if payload.orb_theme is not None:
+                orb_theme = payload.orb_theme.strip().lower()
+                if orb_theme not in VALID_ORB_THEMES:
+                    raise ApplicationValidationError(f"unsupported orb_theme: {payload.orb_theme!r}")
+
+            persona_store = _persona_store_for(services)
+            conv_app = getattr(services, "conversation_application", None)
             try:
                 updated = persona_store.update_persona(
                     principal.user_id,
@@ -313,21 +312,24 @@ def register_friend_routes(app: FastAPI, services: Any, principal_for: Any) -> N
 
     @app.delete("/v1/friend/memories/{memory_id}")
     async def delete_friend_memory(memory_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.create",
-            resource_id=memory_id,
-            purpose="friend.memory.delete",
-        )
-        clean_id = str(memory_id or "").strip()
-        if not clean_id or len(clean_id) > 128:
-            raise ApplicationNotFoundError(memory_id)
-        memory_store = _memory_store_for(services, principal.user_id)
-        deleted = await run_in_threadpool(memory_store.forget, clean_id)
-        if not deleted:
-            raise ApplicationNotFoundError(clean_id)
-        return JSONResponse({"memory_id": clean_id, "deleted": True}, status_code=200)
+        def _delete_memory() -> dict[str, object]:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.create",
+                resource_id=memory_id,
+                purpose="friend.memory.delete",
+            )
+            clean_id = str(memory_id or "").strip()
+            if not clean_id or len(clean_id) > 128:
+                raise ApplicationNotFoundError(memory_id)
+            memory_store = _memory_store_for(services, principal.user_id)
+            deleted = memory_store.forget(clean_id)
+            if not deleted:
+                raise ApplicationNotFoundError(clean_id)
+            return {"memory_id": clean_id, "deleted": True}
+
+        return JSONResponse(await run_in_threadpool(_delete_memory), status_code=200)
 
 
 __all__ = ["UpdateFriendPersonaRequest", "engine_from_services", "register_friend_routes"]

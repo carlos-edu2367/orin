@@ -217,35 +217,52 @@ _ORIGINAL_DISCORD_REST_CLIENT = DiscordRestClient
 
 
 def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> None:
-    @app.get("/v1/integrations/discord")
-    async def get_discord_integration(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=False)
+    def _auth_and_services(
+        request: Request,
+        *,
+        mutable: bool,
+        action: str,
+        purpose: str,
+    ) -> tuple[Any, PostgresDiscordStore, DiscordBridgeService | None]:
+        principal = principal_for(request, mutable=mutable)
         services.security.authorize(
             principal,
-            action="conversation.read",
+            action=action,
             resource_id=principal.user_id,
-            purpose="discord.config.read",
+            purpose=purpose,
         )
         store = _discord_store_for(services)
         bridge = _discord_bridge_for(services)
-        config = await run_in_threadpool(store.get_config, principal.user_id)
-        runtime_status = _runtime_status_for(bridge, config, principal.user_id)
-        return JSONResponse(_build_discord_state_payload(config, runtime_status), status_code=200)
+        return principal, store, bridge
+
+    @app.get("/v1/integrations/discord")
+    async def get_discord_integration(request: Request) -> JSONResponse:
+        def _get_state() -> dict[str, Any]:
+            principal, store, bridge = _auth_and_services(
+                request,
+                mutable=False,
+                action="conversation.read",
+                purpose="discord.config.read",
+            )
+            config = store.get_config(principal.user_id)
+            runtime_status = _runtime_status_for(bridge, config, principal.user_id)
+            return _build_discord_state_payload(config, runtime_status)
+
+        return JSONResponse(await run_in_threadpool(_get_state), status_code=200)
 
     @app.put("/v1/integrations/discord")
     async def update_discord_integration(
         payload: UpdateDiscordConfigRequest,
         request: Request,
     ) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.create",
-            resource_id=principal.user_id,
-            purpose="discord.config.write",
+        principal, store, bridge = await run_in_threadpool(
+            lambda: _auth_and_services(
+                request,
+                mutable=True,
+                action="conversation.create",
+                purpose="discord.config.write",
+            )
         )
-        store = _discord_store_for(services)
-        bridge = _discord_bridge_for(services)
 
         try:
             normalized_user_ids = normalize_snowflake_ids(
@@ -337,13 +354,17 @@ def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> 
 
     @app.post("/v1/integrations/discord/test")
     async def test_discord_integration(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.create",
-            resource_id=principal.user_id,
-            purpose="discord.config.test",
-        )
+        def _auth_test() -> Any:
+            principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="conversation.create",
+                resource_id=principal.user_id,
+                purpose="discord.config.test",
+            )
+            return principal
+
+        principal = await run_in_threadpool(_auth_test)
         raw_body = await request.body()
         if raw_body and raw_body.strip():
             try:
@@ -357,15 +378,18 @@ def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> 
         else:
             payload = TestDiscordConfigRequest()
 
-        store = _discord_store_for(services)
-        bridge = _discord_bridge_for(services)
+        def _load_store_and_token() -> tuple[PostgresDiscordStore, DiscordBridgeService | None, str | None]:
+            st = _discord_store_for(services)
+            br = _discord_bridge_for(services)
+            return st, br, st.get_decrypted_bot_token(principal.user_id)
+
+        store, bridge, saved_token = await run_in_threadpool(_load_store_and_token)
 
         provided_token = (
             payload.bot_token.strip()
             if isinstance(payload.bot_token, str) and payload.bot_token.strip()
             else None
         )
-        saved_token = await run_in_threadpool(store.get_decrypted_bot_token, principal.user_id)
         token_to_test = provided_token or saved_token
 
         if not token_to_test:
@@ -528,15 +552,14 @@ def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> 
 
     @app.delete("/v1/integrations/discord")
     async def delete_discord_integration(request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(
-            principal,
-            action="conversation.delete",
-            resource_id=principal.user_id,
-            purpose="discord.config.delete",
+        principal, store, bridge = await run_in_threadpool(
+            lambda: _auth_and_services(
+                request,
+                mutable=True,
+                action="conversation.delete",
+                purpose="discord.config.delete",
+            )
         )
-        store = _discord_store_for(services)
-        bridge = _discord_bridge_for(services)
 
         if bridge is not None:
             await bridge.stop_user(principal.user_id)
@@ -544,14 +567,17 @@ def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> 
             if isinstance(disconnected_map, dict):
                 disconnected_map.pop(principal.user_id, None)
 
-        await run_in_threadpool(store.delete_config, principal.user_id)
-        config = await run_in_threadpool(store.get_config, principal.user_id)
-        runtime_status = _runtime_status_for(bridge, config, principal.user_id)
-        return JSONResponse(
-            {
+        def _delete_and_reload() -> dict[str, Any]:
+            store.delete_config(principal.user_id)
+            config = store.get_config(principal.user_id)
+            runtime_status = _runtime_status_for(bridge, config, principal.user_id)
+            return {
                 "deleted": True,
                 **_build_discord_state_payload(config, runtime_status),
-            },
+            }
+
+        return JSONResponse(
+            await run_in_threadpool(_delete_and_reload),
             status_code=200,
         )
 

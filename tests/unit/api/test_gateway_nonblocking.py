@@ -782,3 +782,90 @@ def test_production_startup_hooks_and_local_spa_offload_sync_io_to_threadpool(tm
             assert omniroute_threads and all(tid != loop_thread for tid in omniroute_threads)
 
     asyncio.run(exercise())
+
+
+def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_threadpool(tmp_path: Path) -> None:
+    import ast
+
+    # 1. Static AST invariant check across all API and production bootstrap modules:
+    # No async def handler may invoke synchronous auth/rate-limit/workspace helpers directly on the event loop.
+    api_dir = Path(__file__).resolve().parents[3] / "src" / "agentos" / "api"
+    prod_file = Path(__file__).resolve().parents[3] / "src" / "agentos" / "bootstrap" / "production.py"
+    targets = sorted(api_dir.glob("*.py")) + [prod_file]
+    forbidden_sync_helpers = {
+        "principal_for",
+        "check_rate_limit",
+        "exclusive_folder",
+        "conversation_record",
+        "conversation_workspace",
+        "conversation_root",
+        "folder_of",
+    }
+    violations: list[str] = []
+    for path in targets:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef):
+                stack = list(node.body)
+                while stack:
+                    cur = stack.pop(0)
+                    if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                        continue
+                    if isinstance(cur, ast.Call):
+                        fn = cur.func
+                        name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
+                        if name in forbidden_sync_helpers:
+                            violations.append(f"{path.name}:{cur.lineno} in async def {node.name} calls {name}(...)")
+                        if name == "run_in_threadpool":
+                            continue
+                    stack.extend(ast.iter_child_nodes(cur))
+
+    assert not violations, f"Synchronous helpers called on event loop: {violations}"
+
+    # 2. Runtime concurrency check: slow principal_for / delete_conversation / list_tasks in conversation_routes
+    # must run on worker threads and never block fast /v1/plugins requests.
+    class SlowSubrouterSecurity(InMemorySecurityService):
+        def check_rate_limit(self, principal, *, action: str = "", origin: str | None = None) -> None:
+            if action == "DELETE:/v1/conversations/conv-del":
+                time.sleep(SLOW_SECONDS)
+            super().check_rate_limit(principal, action=action, origin=origin)
+
+    class FakeConversations:
+        def get(self, conversation_id: str, user_id: str):
+            if conversation_id == "conv-tasks-slow":
+                time.sleep(SLOW_SECONDS)
+            return {"conversation_id": conversation_id, "project_id": None}
+
+        def delete(self, conversation_id: str, user_id: str) -> None:
+            return None
+
+    class FakePlugins:
+        def list(self, user_id: str):
+            return []
+
+    security = SlowSubrouterSecurity()
+    security.add_pat("pat", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    app = create_app(
+        ApiServices(
+            security=security,
+            conversation_application=FakeConversations(),  # type: ignore[arg-type]
+            plugins=FakePlugins(),  # type: ignore[arg-type]
+            workspace_root=tmp_path / "workspaces",
+        )
+    )
+
+    async def slow_delete(client: AsyncClient):
+        return await client.delete("/v1/conversations/conv-del", headers=_headers("del-1"))
+
+    async def slow_tasks(client: AsyncClient):
+        return await client.get("/v1/conversations/conv-tasks-slow/tasks", headers=_headers("tasks-1"))
+
+    async def fast_plugins(client: AsyncClient):
+        return await client.get("/v1/plugins", headers=_headers("fast-1"))
+
+    elapsed_del = asyncio.run(_measure_fast_request_under_slow_load(app, slow_delete, fast_plugins))
+    assert elapsed_del < SLOW_SECONDS / 2, f"DELETE /v1/conversations/{{id}} blocked event loop ({elapsed_del:.3f}s)"
+
+    elapsed_tasks = asyncio.run(_measure_fast_request_under_slow_load(app, slow_tasks, fast_plugins))
+    assert elapsed_tasks < SLOW_SECONDS / 2, f"GET /v1/conversations/{{id}}/tasks blocked event loop ({elapsed_tasks:.3f}s)"
+
