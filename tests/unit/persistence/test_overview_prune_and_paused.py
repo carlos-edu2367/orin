@@ -1397,3 +1397,216 @@ def test_overview_normalizes_mixed_naive_and_aware_turn_timestamps(engine):
     ov = store.overview(cid, "u1")
     assert ov["duration_seconds"] == pytest.approx(90.0)
 
+
+def test_concurrent_resume_and_expire_abandoned_paused_turns_wal_consistency(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+    from agentos.api.contracts import ApplicationConflictError
+    from agentos.conversations.resume import resume_paused_turn
+    from agentos.agentic.transcript import STEP_QUEUED_INPUT
+    from agentos.persistence.sqlite import create_local_engine
+    from agentos.persistence.postgres.schema import conversation_turn_steps, metadata
+
+    db_path = tmp_path / "race_wal.db"
+    eng = create_local_engine(f"sqlite:///{db_path}")
+    metadata.create_all(eng)
+    try:
+        store = PostgresChatStore(eng)
+        exec_queries = ExecutionQueryAdapter(eng)
+        exec_app = ExecutionApplicationAdapter(eng)
+
+        for trial in range(16):
+            receipt = store.create(
+                user_id="u1",
+                message=f"wal race {trial}",
+                provider="codex_cli",
+                model_id="gpt-5",
+                idempotency_key=f"m-wal-race-{trial}",
+            )
+            cid = receipt.conversation_id
+            tid = receipt.turn_id
+            turn = store.claim(tid)
+            assert turn is not None
+            store.pause_for_reconciliation(turn, code="PROCESS_RECONCILE_LOST")
+
+            now = datetime.now(timezone.utc)
+            for idx, target in enumerate(("STARTING", "RUNNING", "PAUSED"), start=1):
+                view = exec_queries.get(
+                    {
+                        "resource_id": str(turn["execution_id"]),
+                        "user_id": "u1",
+                        "purpose": "execution.read",
+                    }
+                )
+                exec_app.transition(
+                    {
+                        "execution_id": str(turn["execution_id"]),
+                        "user_id": "u1",
+                        "target_state": target,
+                        "reason_code": "wal_race_setup",
+                        "result_ref": None,
+                        "expected_state_version": int(view["state_version"]),
+                        "idempotency_key": f"wal-race-{trial}-{idx}",
+                        "requested_at": now,
+                    }
+                )
+
+            stale_ts = now - timedelta(hours=3)
+            with eng.begin() as c:
+                c.execute(
+                    update(conversation_turns)
+                    .where(conversation_turns.c.turn_id == tid)
+                    .values(updated_at=stale_ts)
+                )
+                c.execute(
+                    update(conversation_dispatches)
+                    .where(conversation_dispatches.c.turn_id == tid)
+                    .values(updated_at=stale_ts)
+                )
+
+            barrier = threading.Barrier(2)
+            delay_s = 0.002 if (trial % 2 == 1) else 0.0
+
+            def run_resume(d=delay_s):
+                barrier.wait(timeout=5.0)
+                if d:
+                    time.sleep(d)
+                return resume_paused_turn(store, cid, tid, "u1", reason="user_resumed")
+
+            def run_expire():
+                barrier.wait(timeout=5.0)
+                return store.expire_abandoned_paused_turns(older_than=timedelta(hours=2))
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                f_resume = pool.submit(run_resume)
+                f_expire = pool.submit(run_expire)
+                expired_ids = f_expire.result(timeout=10.0)
+                resume_exc: Exception | None = None
+                resume_res = None
+                try:
+                    resume_res = f_resume.result(timeout=10.0)
+                except Exception as exc:
+                    resume_exc = exc
+
+            with eng.begin() as c:
+                t_state = c.execute(
+                    select(conversation_turns.c.state).where(
+                        conversation_turns.c.turn_id == tid
+                    )
+                ).scalar_one()
+                d_state = c.execute(
+                    select(conversation_dispatches.c.state).where(
+                        conversation_dispatches.c.turn_id == tid
+                    )
+                ).scalar_one()
+                steps = (
+                    c.execute(
+                        select(conversation_turn_steps.c.kind).where(
+                            conversation_turn_steps.c.turn_id == tid
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+            exec_after = exec_queries.get(
+                {
+                    "resource_id": str(turn["execution_id"]),
+                    "user_id": "u1",
+                    "purpose": "execution.read",
+                }
+            )
+            e_state = str(exec_after["state"])
+
+            assert (t_state, d_state, e_state) in {
+                ("queued", "pending", "QUEUED"),
+                ("failed", "failed", "FAILED"),
+            }, f"trial {trial}: inconsistent triple {(t_state, d_state, e_state)}, expired={expired_ids}, resume_exc={resume_exc}"
+
+            if (t_state, d_state, e_state) == ("queued", "pending", "QUEUED"):
+                assert resume_exc is None
+                assert resume_res is not None and resume_res["resumed"] is True
+                assert tid not in expired_ids
+                assert STEP_QUEUED_INPUT in steps
+                # Clean up queued turn so next trial's expire doesn't see it
+                with eng.begin() as c:
+                    c.execute(
+                        update(conversation_turns)
+                        .where(conversation_turns.c.turn_id == tid)
+                        .values(state="completed")
+                    )
+                    c.execute(
+                        update(conversation_dispatches)
+                        .where(conversation_dispatches.c.turn_id == tid)
+                        .values(state="completed")
+                    )
+            else:
+                assert isinstance(resume_exc, ApplicationConflictError)
+                assert tid in expired_ids
+                assert STEP_QUEUED_INPUT not in steps
+
+        # Verify STEP_QUEUED_INPUT is recorded BEFORE dispatch.state becomes 'pending'
+        # and Phase 2 exceptions roll back conversation_turns.state to 'paused'.
+        r_order = store.create(
+            user_id="u1",
+            message="step ordering check",
+            provider="codex_cli",
+            model_id="gpt-5",
+            idempotency_key="m-wal-order-check",
+        )
+        t_order = store.claim(r_order.turn_id)
+        assert t_order is not None
+        store.pause_for_reconciliation(t_order, code="PROCESS_RECONCILE_LOST")
+
+        real_record_step = store.record_step
+        observed_dispatch_states: list[str] = []
+
+        def spy_record_step(turn_obj, *, kind, payload):
+            with eng.begin() as c:
+                ds = c.execute(
+                    select(conversation_dispatches.c.state).where(
+                        conversation_dispatches.c.turn_id == r_order.turn_id
+                    )
+                ).scalar_one()
+            observed_dispatch_states.append(str(ds))
+            # While in Phase 2 (turn='queued', dispatch='paused'), neither claim() nor a
+            # second resume_paused_turn() may treat the turn as already pending/resumed.
+            assert store.claim(r_order.turn_id) is None
+            with pytest.raises(ApplicationConflictError):
+                resume_paused_turn(store, r_order.conversation_id, r_order.turn_id, "u1")
+            return real_record_step(turn_obj, kind=kind, payload=payload)
+
+        store.record_step = spy_record_step  # type: ignore[method-assign]
+        try:
+            res_ok = resume_paused_turn(store, r_order.conversation_id, r_order.turn_id, "u1")
+            assert res_ok["resumed"] is True
+            assert observed_dispatch_states == ["paused"]
+        finally:
+            store.record_step = real_record_step  # type: ignore[method-assign]
+
+        # Verify Phase 2 failure rolls back turn.state to 'paused'
+        t_claimed_again = store.claim(r_order.turn_id)
+        assert t_claimed_again is not None
+        store.pause_for_reconciliation(t_claimed_again, code="PROCESS_RECONCILE_LOST")
+
+        def failing_record_step(turn_obj, *, kind, payload):
+            raise RuntimeError("simulated disk error during record_step")
+
+        store.record_step = failing_record_step  # type: ignore[method-assign]
+        try:
+            with pytest.raises(RuntimeError, match="simulated disk error"):
+                resume_paused_turn(store, r_order.conversation_id, r_order.turn_id, "u1")
+        finally:
+            store.record_step = real_record_step  # type: ignore[method-assign]
+
+        with eng.begin() as c:
+            reverted_state = c.execute(
+                select(conversation_turns.c.state).where(
+                    conversation_turns.c.turn_id == r_order.turn_id
+                )
+            ).scalar_one()
+        assert reverted_state == "paused"
+    finally:
+        eng.dispose()
+
+

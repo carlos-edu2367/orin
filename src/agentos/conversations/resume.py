@@ -197,6 +197,7 @@ def resume_paused_turn(
                 select(
                     conversation_turns,
                     projects.c.workspace_id.label("project_workspace_id"),
+                    conversation_dispatches.c.state.label("dispatch_state"),
                 )
                 .join(
                     conversations,
@@ -204,6 +205,10 @@ def resume_paused_turn(
                     == conversation_turns.c.conversation_id,
                 )
                 .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
+                .outerjoin(
+                    conversation_dispatches,
+                    conversation_dispatches.c.turn_id == conversation_turns.c.turn_id,
+                )
                 .where(
                     conversation_turns.c.conversation_id == conversation_id,
                     conversation_turns.c.turn_id == turn_id,
@@ -217,7 +222,8 @@ def resume_paused_turn(
             raise ApplicationNotFoundError(turn_id)
         turn = dict(turn_row)
         current_state = str(turn.get("state") or "")
-        if current_state in {"queued", "starting", "running"}:
+        dispatch_state = str(turn.get("dispatch_state") or "")
+        if current_state in {"queued", "starting", "running"} and dispatch_state != "paused":
             return {
                 "resumed": True,
                 "conversation_id": conversation_id,
@@ -262,18 +268,7 @@ def resume_paused_turn(
                 "purpose": "execution.read",
             }
         )
-        if view["state"] == "PAUSED":
-            control.control(
-                {
-                    "context": {"user_id": user_id, "execution_id": execution_id},
-                    "action": "RESUME",
-                    "expected_state_version": view["state_version"],
-                    "reason": reason,
-                    "idempotency_key": f"turn-resume:{turn_id}:{view['state_version']}",
-                    "requested_at": now,
-                }
-            )
-        elif view["state"] in {"FAILED", "CANCELLED", "COMPLETED"}:
+        if view["state"] in {"FAILED", "CANCELLED", "COMPLETED"}:
             raise ApplicationConflictError(
                 execution_id,
                 int(view.get("state_version") or 0),
@@ -283,52 +278,7 @@ def resume_paused_turn(
             )
     except (LookupError, ApplicationNotFoundError):
         pass
-    scope = ExecutionJournalScope(
-        execution_id=str(turn["execution_id"]),
-        user_id=str(turn["user_id"]),
-        workspace_id=(
-            str(turn["project_workspace_id"])
-            if turn.get("project_workspace_id")
-            else None
-        ),
-        agent_id=str(store.main_agent_id(turn)),
-        correlation_id=f"corr_{turn['execution_id']}",
-    )
-    journal = PostgresExecutionJournal(store._engine)
-    reconciliation_ref = f"{reason}:{turn_id}:{int(now.timestamp())}"
-    acknowledged = journal.acknowledge_unresolved(
-        scope, reconciliation_ref=reconciliation_ref, now=now
-    )
-    unknown_tools: list[str] = []
-    for eff in acknowledged:
-        if eff.kind is ExecutionEffectKind.TOOL:
-            inv_ref = str(eff.invocation_ref)
-            req_ref = str(eff.request_ref)
-            inv_id = (
-                inv_ref.split("tool:", 1)[-1]
-                if inv_ref.startswith("tool:")
-                else inv_ref
-            )
-            req_name = (
-                req_ref.split("tool:", 1)[-1]
-                if req_ref.startswith("tool:")
-                else req_ref
-            )
-            if inv_id in tool_by_inv:
-                t_name, t_args = tool_by_inv[inv_id]
-                unknown_tools.append(f"{t_name or req_name} ({inv_ref}) {t_args[:200]}")
-            else:
-                unknown_tools.append(f"{req_name} ({inv_ref})")
-    if unknown_tools:
-        listed = ", ".join(unknown_tools)
-        note_text = system_reminder(
-            "A sessão anterior foi interrompida enquanto uma ou mais chamadas de ferramenta ficaram em "
-            f"estado desconhecido (UNKNOWN_ACKED) e foram reconhecidas pelo usuário: {listed}. Antes de "
-            "repetir qualquer uma dessas ações, verifique no workspace/estado atual se o efeito já ocorreu "
-            "e continue a tarefa do ponto em que parou."
-        )
-    else:
-        note_text = system_reminder(STREAM_RESUME_REMINDER)
+
     with store._engine.begin() as c:
         turn_updated = c.execute(
             update(conversation_turns)
@@ -345,51 +295,142 @@ def resume_paused_turn(
                 message="only a paused turn can be resumed",
                 retryable=False,
             )
-        c.execute(
-            update(conversation_dispatches)
-            .where(conversation_dispatches.c.turn_id == turn_id)
-            .values(
-                state="pending",
-                last_error=reason,
-                queued_at=now,
-                acquired_at=None,
-                updated_at=now,
+
+    try:
+        try:
+            view = query.get(
+                {
+                    "resource_id": execution_id,
+                    "user_id": user_id,
+                    "purpose": "execution.read",
+                }
             )
+            if view["state"] in {"FAILED", "CANCELLED", "COMPLETED"}:
+                raise ApplicationConflictError(
+                    execution_id,
+                    int(view.get("state_version") or 0),
+                    code="TURN_NOT_PAUSED",
+                    message=f"turn {turn_id} cannot be resumed from terminal execution state '{view['state']}'",
+                    retryable=False,
+                )
+            if view["state"] == "PAUSED":
+                control.control(
+                    {
+                        "context": {"user_id": user_id, "execution_id": execution_id},
+                        "action": "RESUME",
+                        "expected_state_version": view["state_version"],
+                        "reason": reason,
+                        "idempotency_key": f"turn-resume:{turn_id}:{view['state_version']}",
+                        "requested_at": now,
+                    }
+                )
+        except (LookupError, ApplicationNotFoundError):
+            pass
+
+        scope = ExecutionJournalScope(
+            execution_id=str(turn["execution_id"]),
+            user_id=str(turn["user_id"]),
+            workspace_id=(
+                str(turn["project_workspace_id"])
+                if turn.get("project_workspace_id")
+                else None
+            ),
+            agent_id=str(store.main_agent_id(turn)),
+            correlation_id=f"corr_{turn['execution_id']}",
         )
-        c.execute(
-            update(conversation_messages)
-            .where(conversation_messages.c.message_id == turn["assistant_message_id"])
-            .values(status="queued", updated_at=now)
+        journal = PostgresExecutionJournal(store._engine)
+        reconciliation_ref = f"{reason}:{turn_id}:{int(now.timestamp())}"
+        acknowledged = journal.acknowledge_unresolved(
+            scope, reconciliation_ref=reconciliation_ref, now=now
         )
-        c.execute(
-            update(conversations)
-            .where(conversations.c.conversation_id == conversation_id)
-            .values(state="queued", updated_at=now)
-        )
-        c.execute(
-            insert(conversation_events).values(
-                conversation_id=conversation_id,
-                user_id=user_id,
-                event_type="turn.resumed",
-                message_id=turn["assistant_message_id"],
-                payload={
-                    "state": "queued",
-                    "turn_id": turn_id,
-                    "reason": reason,
-                    "acknowledged_effects": [eff.invocation_ref for eff in acknowledged],
-                },
-                created_at=now,
+        unknown_tools: list[str] = []
+        for eff in acknowledged:
+            if eff.kind is ExecutionEffectKind.TOOL:
+                inv_ref = str(eff.invocation_ref)
+                req_ref = str(eff.request_ref)
+                inv_id = (
+                    inv_ref.split("tool:", 1)[-1]
+                    if inv_ref.startswith("tool:")
+                    else inv_ref
+                )
+                req_name = (
+                    req_ref.split("tool:", 1)[-1]
+                    if req_ref.startswith("tool:")
+                    else req_ref
+                )
+                if inv_id in tool_by_inv:
+                    t_name, t_args = tool_by_inv[inv_id]
+                    unknown_tools.append(f"{t_name or req_name} ({inv_ref}) {t_args[:200]}")
+                else:
+                    unknown_tools.append(f"{req_name} ({inv_ref})")
+        if unknown_tools:
+            listed = ", ".join(unknown_tools)
+            note_text = system_reminder(
+                "A sessão anterior foi interrompida enquanto uma ou mais chamadas de ferramenta ficaram em "
+                f"estado desconhecido (UNKNOWN_ACKED) e foram reconhecidas pelo usuário: {listed}. Antes de "
+                "repetir qualquer uma dessas ações, verifique no workspace/estado atual se o efeito já ocorreu "
+                "e continue a tarefa do ponto em que parou."
             )
+        else:
+            note_text = system_reminder(STREAM_RESUME_REMINDER)
+
+        store.record_step(
+            turn,
+            kind=turn_transcript.STEP_QUEUED_INPUT,
+            payload={
+                "content": note_text,
+                "resume_reason": reason,
+                "unknown_tools": unknown_tools,
+            },
         )
-    store.record_step(
-        turn,
-        kind=turn_transcript.STEP_QUEUED_INPUT,
-        payload={
-            "content": note_text,
-            "resume_reason": reason,
-            "unknown_tools": unknown_tools,
-        },
-    )
+        with store._engine.begin() as c:
+            c.execute(
+                update(conversation_dispatches)
+                .where(conversation_dispatches.c.turn_id == turn_id)
+                .values(
+                    state="pending",
+                    last_error=reason,
+                    queued_at=now,
+                    acquired_at=None,
+                    updated_at=now,
+                )
+            )
+            c.execute(
+                update(conversation_messages)
+                .where(conversation_messages.c.message_id == turn["assistant_message_id"])
+                .values(status="queued", updated_at=now)
+            )
+            c.execute(
+                update(conversations)
+                .where(conversations.c.conversation_id == conversation_id)
+                .values(state="queued", updated_at=now)
+            )
+            c.execute(
+                insert(conversation_events).values(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    event_type="turn.resumed",
+                    message_id=turn["assistant_message_id"],
+                    payload={
+                        "state": "queued",
+                        "turn_id": turn_id,
+                        "reason": reason,
+                        "acknowledged_effects": [eff.invocation_ref for eff in acknowledged],
+                    },
+                    created_at=now,
+                )
+            )
+    except Exception:
+        with store._engine.begin() as c:
+            c.execute(
+                update(conversation_turns)
+                .where(
+                    conversation_turns.c.turn_id == turn_id,
+                    conversation_turns.c.state == "queued",
+                )
+                .values(state="paused")
+            )
+        raise
     store._activity(
         turn,
         AgentActivityEventType.TURN_STARTED,
