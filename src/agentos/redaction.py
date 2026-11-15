@@ -17,13 +17,18 @@ MAX_DEPTH = 32
 _SECRET_WORD = r"(?:token|secret|passw(?:or)?d|passphrase|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential|cookie|session[_-]?id|auth)"
 # NAME=value, NAME: value, "NAME": "value", where NAME contains a secret word (GITHUB_TOKEN, db_password, X-Api-Key).
 _ASSIGNMENT = re.compile(
-    rf"(?i)(?P<name>[\"']?[A-Za-z0-9_.-]*{_SECRET_WORD}[A-Za-z0-9_.-]*[\"']?)(?P<sep>\s*[:=]\s*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&|)\]}]+)"
+    rf"(?i)(?P<name>(?:[\"'](?=[A-Za-z0-9_.-])|(?<![A-Za-z0-9_.-]))(?=[A-Za-z0-9_.-]*?{_SECRET_WORD})[A-Za-z0-9_.-]++[\"']?)"
+    r"(?P<sep>\s*+[:=]\s*+)"
+    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*+\"|'(?:\\.|[^'\\\r\n])*+'|[^\s,;&|)\]}]+)"
 )
 # --password x, --token=x, -p is not covered (too ambiguous).
-_FLAG = re.compile(rf"(?i)(?P<flag>--?[A-Za-z0-9-]*{_SECRET_WORD}[A-Za-z0-9-]*)(?P<sep>[= ]+)(?P<value>\"[^\"]*\"|'[^']*'|\S+)")
+_FLAG = re.compile(
+    rf"(?i)(?<![A-Za-z0-9_-])(?P<flag>--?(?=[A-Za-z0-9-]*?{_SECRET_WORD})[A-Za-z0-9-]++)"
+    r"(?P<sep>[= ]++)"
+    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*+\"|'(?:\\.|[^'\\\r\n])*+'|\S+)"
+)
 _BEARER = re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{8,}")
-_URL_PASSWORD = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+):[^@\s/]+@")
+_URL_PASSWORD = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*+://[^/\s:@]++):[^@\s/]++@")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)", re.IGNORECASE | re.DOTALL)
 _KNOWN_TOKENS = re.compile(
     r"(?<![A-Za-z0-9])(?:"

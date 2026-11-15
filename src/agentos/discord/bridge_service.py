@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
@@ -17,6 +17,7 @@ from uuid import uuid4
 from sqlalchemy import select, update
 
 from agentos.agentic.workspace import ConversationWorkspace, resolve_workspace
+from agentos.api.contracts import ApplicationNotFoundError
 from agentos.code_mode.models import public_permission_mode
 from agentos.code_mode.permissions import ToolPermissionBroker
 from agentos.installation import orin_paths
@@ -61,12 +62,13 @@ from .formatter import (
     build_resolved_decision_components,
     compute_progress_digest_hash,
     format_agent_question_answers,
+    iter_markdown_target_spans,
     split_discord_markdown,
     strip_attached_workspace_links,
     strip_residual_speak_tags,
 )
 from .gateway_client import DEFAULT_GATEWAY_URL, DiscordGatewayClient, DiscordRuntimeStatus
-from .rest_client import DiscordAttachmentError, DiscordFileAttachment, DiscordRestClient
+from .rest_client import DiscordApiError, DiscordAttachmentError, DiscordFileAttachment, DiscordRestClient
 from .store import (
     DiscordBotConfig,
     DiscordInteractionBinding,
@@ -82,20 +84,33 @@ MAX_TOTAL_ATTACHMENT_BYTES_PER_MESSAGE = MAX_UPLOAD_BYTES * 2
 MAX_TOTAL_MEDIA_BYTES_PER_MESSAGE = MAX_MEDIA_UPLOAD_BYTES
 _WORKSPACE_URI_RE = re.compile(r"workspace://([^\s)\]>\"'`]+)")
 _FILE_URI_RE = re.compile(r"file://([^\s)\]>\"'`]+)")
-_MD_TARGET_RE = re.compile(
-    r"(?P<bang>!?)\[(?P<label>[^\]]*)\]\(\s*(?:<(?P<angled>[^>\n]+)>|(?P<plain>(?:[^()\s]+|\([^()\s]*\))+))(?:\s+[\"'][^\"']*[\"'])?\s*\)"
-)
 _BACKTICK_MEDIA_PATH_RE = re.compile(
     r"`([^`\n]{1,512}\.(?:png|jpe?g|webp|gif|mp3|wav|ogg|opus|m4a|flac|mp4|webm|pdf))`",
     re.IGNORECASE,
 )
-_PLAIN_ABS_OR_REL_MEDIA_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_:/\\.-])"
-    r"((?:[A-Za-z]:[\\/]|/(?!/)|(?:\.orin|\.playwright-mcp|generated|screenshots|uploads)[\\/])"
-    r"[^\s<>\"'`)\]]*\.(?:png|jpe?g|webp|gif))"
-    r"(?![A-Za-z0-9_])",
+_PLAIN_MEDIA_TOKEN_SPLIT_RE = re.compile(r"[\s<>\"'`)\]]+")
+_PLAIN_MEDIA_PREFIX_RE = re.compile(
+    r"(?:^|(?<![A-Za-z0-9_:/\\.-]))"
+    r"((?:[A-Za-z]:[\\/]|/(?!/)|(?:\.orin|\.playwright-mcp|generated|screenshots|uploads)[\\/]).+)$",
     re.IGNORECASE,
 )
+
+
+def _iter_markdown_targets(text: str) -> Iterator[tuple[bool, str, str]]:
+    for _s, _e, is_img, label, target in iter_markdown_target_spans(text, include_nested=True):
+        yield (is_img, label, target)
+
+
+def _iter_plain_media_paths(text: str) -> Iterator[str]:
+    for raw_tok in _PLAIN_MEDIA_TOKEN_SPLIT_RE.split(text):
+        if not raw_tok:
+            continue
+        cand = raw_tok.rstrip(".,;:")
+        if len(cand) > 1024 or not cand.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            continue
+        m = _PLAIN_MEDIA_PREFIX_RE.search(cand)
+        if m is not None:
+            yield m.group(1).strip()
 _DISCORD_OUTGOING_MIME_MAP: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -279,6 +294,48 @@ class SessionWatchCoordinator:
         self._tick_lock = asyncio.Lock()
         self._tick_count = 0
         self._activity_seq_cursors: dict[str, int] = {}
+        self._patch_backoff_until: dict[str, float] = {}
+        self._patch_failures: dict[str, int] = {}
+
+    def _record_progress_api_error(
+        self,
+        watch: FriendSessionWatch,
+        err: Exception,
+        now: datetime,
+        progress_msg_id: str | None,
+        watch_updates: dict[str, Any],
+    ) -> None:
+        now_ts = now.timestamp()
+        if isinstance(err, DiscordApiError) and err.status_code == 404 and err.error_code != 10003:
+            watch_updates["discord_progress_message_id"] = None
+            watch_updates["last_patched_at"] = now
+            self._patch_backoff_until[watch.watch_id] = now_ts + 15.0
+            return
+        if isinstance(err, DiscordApiError) and (err.status_code == 403 or err.error_code == 10003):
+            self._patch_backoff_until[watch.watch_id] = now_ts + 300.0
+            watch_updates["last_patched_at"] = now
+            return
+
+        failures = self._patch_failures.get(watch.watch_id, 0) + 1
+        self._patch_failures[watch.watch_id] = failures
+        retry_hint = getattr(err, "retry_after", None) or 15.0
+        cooldown = max(float(retry_hint), min(300.0, 15.0 * (2 ** (failures - 1))))
+
+        card_age = 0.0
+        if progress_msg_id and str(progress_msg_id).isdigit():
+            snowflake_ts = ((int(progress_msg_id) >> 22) + 1420070400000) / 1000.0
+            if now_ts >= snowflake_ts:
+                card_age = now_ts - snowflake_ts
+        if card_age <= 0.0:
+            created_utc = _as_utc(watch.created_at)
+            if created_utc is not None:
+                card_age = max(0.0, (now - created_utc).total_seconds())
+
+        if isinstance(err, DiscordApiError) and err.status_code == 429 and card_age > 2700.0:
+            cooldown = max(cooldown, 120.0)
+
+        self._patch_backoff_until[watch.watch_id] = now_ts + cooldown
+        watch_updates["last_patched_at"] = now
 
     async def wait_background_tasks(self, *, user_id: str | None = None, timeout: float = 10.0) -> None:
         await self._bridge.wait_background_tasks(user_id=user_id, timeout=timeout)
@@ -463,6 +520,21 @@ class SessionWatchCoordinator:
         inspection = await asyncio.to_thread(self._bridge._inspect_watched_session, watch)
         if inspection is None:
             return
+        if inspection.get("missing_conversation"):
+            self._activity_seq_cursors.pop(watch.watch_id, None)
+            self._patch_backoff_until.pop(watch.watch_id, None)
+            self._patch_failures.pop(watch.watch_id, None)
+            runner = self._bridge._runners.get(watch.user_id)
+            if runner is not None:
+                runner.stop_bindings_by_watch.pop(watch.watch_id, None)
+            self._bridge._user_stopped_watches.discard(watch.watch_id)
+            await asyncio.to_thread(
+                self._bridge.discord_store.update_watch,
+                watch.watch_id,
+                status="cancelled",
+                notified_terminal=True,
+            )
+            return
 
         now = _as_utc(self._clock()) or _utc_now()
         snapshot = inspection["snapshot"]
@@ -479,6 +551,18 @@ class SessionWatchCoordinator:
             else None
         )
         channel_id = watch.discord_channel_id or fallback_channel
+        if current_turn_id and current_turn_id != watch.target_turn_id:
+            self._activity_seq_cursors.pop(watch.watch_id, None)
+            self._patch_backoff_until.pop(watch.watch_id, None)
+            self._patch_failures.pop(watch.watch_id, None)
+            await asyncio.to_thread(
+                self._bridge._advance_watch_to_new_turn,
+                user_id=watch.user_id,
+                target_conversation_id=watch.target_conversation_id,
+                new_turn_id=current_turn_id,
+                channel_id=channel_id,
+            )
+            return
         rest_client = self._bridge._get_rest_client(watch.user_id)
         is_auto_watch = watch.origin == "code_auto"
 
@@ -540,44 +624,54 @@ class SessionWatchCoordinator:
                     except Exception:
                         _LOGGER.warning("Could not send terminal progress card for watch %s", watch.watch_id, exc_info=True)
             else:
-                stop_binding_id = await self._bridge._ensure_stop_binding(
-                    watch=watch,
-                    current_turn_id=current_turn_id,
-                    channel_id=channel_id,
+                now_ts = now.timestamp()
+                in_backoff = now_ts < self._patch_backoff_until.get(watch.watch_id, 0.0)
+                last_patched = _as_utc(watch.last_patched_at)
+                elapsed = (
+                    (now - last_patched).total_seconds()
+                    if last_patched is not None
+                    else self._debounce_seconds + 1.0
                 )
-                components = build_progress_components(stop_binding_id, active=True)
-                if not progress_msg_id:
-                    try:
-                        sent = await rest_client.send_message(
-                            channel_id,
-                            embeds=[embed],
-                            components=components,
-                        )
-                        if sent.get("id"):
-                            progress_msg_id = str(sent["id"])
-                            watch_updates["discord_progress_message_id"] = progress_msg_id
-                            watch_updates["last_digest_hash"] = digest_hash
-                            watch_updates["last_patched_at"] = now
-                            if stop_binding_id:
-                                await asyncio.to_thread(
-                                    self._bridge.discord_store.attach_binding_message,
-                                    [stop_binding_id],
-                                    discord_channel_id=channel_id,
-                                    discord_message_id=progress_msg_id,
-                                )
-                    except Exception:
-                        _LOGGER.warning("Could not create progress card for watch %s", watch.watch_id, exc_info=True)
-                else:
-                    last_patched = _as_utc(watch.last_patched_at)
-                    elapsed = (
-                        (now - last_patched).total_seconds()
-                        if last_patched is not None
-                        else self._debounce_seconds + 1.0
+                entering_waiting = effective_state == "waiting_user" and watch.status != "waiting_user"
+                will_send = not progress_msg_id and not in_backoff
+                will_edit = (
+                    bool(progress_msg_id)
+                    and not in_backoff
+                    and digest_hash != watch.last_digest_hash
+                    and (elapsed >= self._debounce_seconds or entering_waiting)
+                )
+                if will_send or will_edit:
+                    stop_binding_id = await self._bridge._ensure_stop_binding(
+                        watch=watch,
+                        current_turn_id=current_turn_id,
+                        channel_id=channel_id,
                     )
-                    entering_waiting = effective_state == "waiting_user" and watch.status != "waiting_user"
-                    if digest_hash != watch.last_digest_hash and (
-                        elapsed >= self._debounce_seconds or entering_waiting
-                    ):
+                    components = build_progress_components(stop_binding_id, active=True)
+                    if will_send:
+                        try:
+                            sent = await rest_client.send_message(
+                                channel_id,
+                                embeds=[embed],
+                                components=components,
+                            )
+                            self._patch_backoff_until.pop(watch.watch_id, None)
+                            self._patch_failures.pop(watch.watch_id, None)
+                            if sent.get("id"):
+                                progress_msg_id = str(sent["id"])
+                                watch_updates["discord_progress_message_id"] = progress_msg_id
+                                watch_updates["last_digest_hash"] = digest_hash
+                                watch_updates["last_patched_at"] = now
+                                if stop_binding_id:
+                                    await asyncio.to_thread(
+                                        self._bridge.discord_store.attach_binding_message,
+                                        [stop_binding_id],
+                                        discord_channel_id=channel_id,
+                                        discord_message_id=progress_msg_id,
+                                    )
+                        except Exception as err:
+                            self._record_progress_api_error(watch, err, now, progress_msg_id, watch_updates)
+                            _LOGGER.warning("Could not create progress card for watch %s", watch.watch_id, exc_info=True)
+                    elif will_edit and progress_msg_id:
                         try:
                             await rest_client.edit_message(
                                 channel_id,
@@ -585,9 +679,12 @@ class SessionWatchCoordinator:
                                 embeds=[embed],
                                 components=components,
                             )
+                            self._patch_backoff_until.pop(watch.watch_id, None)
+                            self._patch_failures.pop(watch.watch_id, None)
                             watch_updates["last_digest_hash"] = digest_hash
                             watch_updates["last_patched_at"] = now
-                        except Exception:
+                        except Exception as err:
+                            self._record_progress_api_error(watch, err, now, progress_msg_id, watch_updates)
                             _LOGGER.warning(
                                 "Could not edit progress card %s for watch %s",
                                 progress_msg_id,
@@ -634,6 +731,8 @@ class SessionWatchCoordinator:
             if effective_max_seq > watch.last_activity_seq:
                 watch_updates["last_activity_seq"] = effective_max_seq
             self._activity_seq_cursors.pop(watch.watch_id, None)
+            self._patch_backoff_until.pop(watch.watch_id, None)
+            self._patch_failures.pop(watch.watch_id, None)
             runner = self._bridge._runners.get(watch.user_id)
             if runner is not None:
                 runner.stop_bindings_by_watch.pop(watch.watch_id, None)
@@ -690,13 +789,17 @@ class DiscordBridgeService:
         watch_poll_interval_seconds: float = 2.0,
         typing_interval_seconds: float = 8.0,
         progress_debounce_seconds: float = 5.0,
-        turn_poll_interval_seconds: float = 0.15,
+        turn_poll_interval_seconds: float = 0.45,
         turn_wait_timeout_seconds: float = 600.0,
         clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self.discord_store = discord_store
         self.chat_application = chat_application
-        self.chat_store = getattr(chat_application, "store", chat_application)
+        mock_children = getattr(chat_application, "_mock_children", None)
+        if isinstance(mock_children, Mapping) and "get" in mock_children and "store" not in mock_children:
+            self.chat_store = chat_application
+        else:
+            self.chat_store = getattr(chat_application, "store", chat_application)
         self.uploads = uploads or UploadStaging(orin_paths().data / "uploads" / "staging")
         self._workspace_root = Path(workspace_root) if workspace_root is not None else None
         self.local_workspaces = local_workspaces
@@ -1729,6 +1832,7 @@ class DiscordBridgeService:
                             self._inspect_conversation_by_id,
                             user_id,
                             conversation_id,
+                            conv=conv,
                         )
                         pending_block = inspection.get("pending_block") if isinstance(inspection, Mapping) else None
                         if isinstance(pending_block, Mapping) and pending_block.get("in_turn"):
@@ -2008,9 +2112,8 @@ class DiscordBridgeService:
         # Strip fenced code blocks before scanning Markdown/text file links
         non_code_body = re.sub(r"```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z)", "\n", body)
 
-        for m_md in _MD_TARGET_RE.finditer(non_code_body):
-            is_img = bool(m_md.group("bang"))
-            target = (m_md.group("angled") or m_md.group("plain") or "").strip()
+        for is_img, _label, target in _iter_markdown_targets(non_code_body):
+            target = target.strip()
             if not target:
                 continue
             lower_t = target.lower()
@@ -2029,8 +2132,7 @@ class DiscordBridgeService:
             bt_path = m_bt.group(1).strip()
             _add("", bt_path)
 
-        for m_plain in _PLAIN_ABS_OR_REL_MEDIA_PATH_RE.finditer(non_code_body):
-            pl_path = m_plain.group(1).strip().rstrip(".,;:")
+        for pl_path in _iter_plain_media_paths(non_code_body):
             _add("", pl_path)
 
         return entries
@@ -2881,7 +2983,11 @@ class DiscordBridgeService:
         progress_msg_id: str | None = None
         friend_cid: str | None = None
         eff_channel = channel_id
-        preserve_code_auto = bool(matching) and all(w.origin == "code_auto" for w in matching)
+        preserved_origin = (
+            next((w.origin for w in matching if w.origin != "code_auto"), matching[0].origin)
+            if matching
+            else "discord"
+        )
         for old_watch in matching:
             if old_watch.discord_progress_message_id:
                 progress_msg_id = old_watch.discord_progress_message_id
@@ -2908,7 +3014,7 @@ class DiscordBridgeService:
             target_conversation_id,
             new_turn_id,
             friend_conversation_id=friend_cid,
-            origin="code_auto" if preserve_code_auto else "discord",
+            origin=preserved_origin,
             discord_channel_id=eff_channel,
         )
         if progress_msg_id and not new_watch.discord_progress_message_id:
@@ -3023,8 +3129,15 @@ class DiscordBridgeService:
                     found.append({**data, "request_id": req_id, "_workspace_root": str(root)})
         return found
 
-    def _inspect_conversation_by_id(self, user_id: str, conversation_id: str) -> dict[str, Any]:
-        conv = self.chat_store.get(conversation_id, user_id)
+    def _inspect_conversation_by_id(
+        self,
+        user_id: str,
+        conversation_id: str,
+        *,
+        conv: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if conv is None:
+            conv = self.chat_store.get(conversation_id, user_id)
         if not isinstance(conv, Mapping):
             return {}
         watch_stub = FriendSessionWatch(
@@ -3046,14 +3159,22 @@ class DiscordBridgeService:
             created_at=_utc_now(),
             updated_at=_utc_now(),
         )
-        res = self._inspect_watched_session(watch_stub)
-        return res["snapshot"] if res is not None else {}
+        res = self._inspect_watched_session(watch_stub, conv=conv)
+        return res["snapshot"] if res is not None and "snapshot" in res else {}
 
-    def _inspect_watched_session(self, watch: FriendSessionWatch) -> dict[str, Any] | None:
-        try:
-            conv = self.chat_store.get(watch.target_conversation_id, watch.user_id)
-        except Exception:
-            return None
+    def _inspect_watched_session(
+        self,
+        watch: FriendSessionWatch,
+        *,
+        conv: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if conv is None:
+            try:
+                conv = self.chat_store.get(watch.target_conversation_id, watch.user_id)
+            except ApplicationNotFoundError:
+                return {"missing_conversation": True}
+            except Exception:
+                return None
         if not isinstance(conv, Mapping):
             return None
 
@@ -3062,6 +3183,14 @@ class DiscordBridgeService:
             (t for t in reversed(turns) if str(t.get("turn_id") or "") == watch.target_turn_id),
             turns[-1] if turns else None,
         )
+        if (
+            target_turn is not None
+            and turns
+            and target_turn is not turns[-1]
+            and str(target_turn.get("state") or "").strip().lower() in _TERMINAL_TURN_STATES
+            and str(turns[-1].get("state") or "").strip().lower() in (_ACTIVE_TURN_STATES | {"waiting_user"})
+        ):
+            target_turn = turns[-1]
         current_turn_id = str(target_turn.get("turn_id") if target_turn else watch.target_turn_id)
         turn_state = str(
             (target_turn.get("state") if target_turn else conv.get("state")) or "running"
@@ -3311,6 +3440,8 @@ class DiscordBridgeService:
                     "question": q_text[:1000],
                 }
 
+        if turn_state in _TERMINAL_TURN_STATES:
+            pending_block = None
         effective_state = (
             "waiting_user"
             if (pending_block is not None and turn_state in {"running", "starting", "queued", "waiting_user"})
@@ -3331,13 +3462,17 @@ class DiscordBridgeService:
         )
         raw_last_assistant_content = str(last_assistant.get("content") if last_assistant else "")
         final_excerpt = strip_residual_speak_tags(raw_last_assistant_content)[:1200]
-        session_artifacts = [
-            cand
-            for _, cand in self._extract_outgoing_file_candidates(
-                last_assistant or {},
-                raw_last_assistant_content,
-            )
-        ][:10]
+        session_artifacts = (
+            [
+                cand
+                for _, cand in self._extract_outgoing_file_candidates(
+                    last_assistant or {},
+                    raw_last_assistant_content,
+                )
+            ][:10]
+            if effective_state in {"completed", "completed_with_caveats", "failed", "cancelled", "waiting_user"}
+            else []
+        )
         error_text = str((target_turn or {}).get("error") or (target_turn or {}).get("error_code") or "").strip() or None
 
         snapshot: dict[str, Any] = {

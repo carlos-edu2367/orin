@@ -1,7 +1,7 @@
 """Discord Markdown chunking, `<speak>` sanitization, Live Progress Embeds, and Decision Cards."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -53,12 +53,164 @@ _STATUS_BADGES: dict[str, tuple[str, int]] = {
 }
 
 
-_MD_IMAGE_LINK_RE = re.compile(
-    r"!\[(?P<alt>[^\]]*)\]\(\s*<?(?P<target>[^)\n>]+?)>?\s*\)"
-)
-_MD_FILE_LINK_RE = re.compile(
-    r"(?<!!)\[(?P<label>[^\]]+)\]\(\s*<?(?P<target>(?:workspace|file)://[^)\n>]+?)>?\s*\)"
-)
+def iter_markdown_target_spans(
+    text: str,
+    *,
+    include_nested: bool = True,
+    _allow_nested_bracket: bool = True,
+) -> Iterator[tuple[int, int, bool, str, str]]:
+    """Yield `(span_start, span_end, is_image, label, target)` in strict O(N) time without backtracking."""
+    n = len(text)
+    idx = 0
+    unclosed_angle_until = -1
+    unclosed_quote_until: dict[str, int] = {'"': -1, "'": -1}
+
+    while idx < n:
+        open_br = text.find("[", idx)
+        if open_br == -1:
+            break
+        is_img = open_br > 0 and text[open_br - 1] == "!"
+        span_start = open_br - 1 if is_img else open_br
+
+        scan = open_br + 1
+        limit = min(n, scan + 1024)
+        close_br = -1
+        label_depth = 0
+        had_nested_bracket = False
+        first_inner_bracket = -1
+
+        while scan < limit:
+            ch = text[scan]
+            if ch == "\\":
+                scan += 2
+                continue
+            if ch == "]":
+                if label_depth > 0:
+                    label_depth -= 1
+                    scan += 1
+                    continue
+                close_br = scan
+                break
+            if ch == "[":
+                if _allow_nested_bracket and not is_img and not had_nested_bracket and label_depth == 0:
+                    had_nested_bracket = True
+                    label_depth = 1
+                    first_inner_bracket = scan
+                    scan += 1
+                    continue
+                break
+            if ch == "\n" and scan + 1 < n and text[scan + 1] == "\n":
+                break
+            if ch == "\r" and scan + 3 < n and text[scan : scan + 4] == "\r\n\r\n":
+                break
+            scan += 1
+
+        if close_br == -1:
+            if first_inner_bracket != -1:
+                idx = first_inner_bracket
+            elif scan < limit and scan < n and text[scan] == "[":
+                idx = scan
+            else:
+                idx = max(open_br + 1, scan)
+            continue
+
+        if close_br + 1 >= n or text[close_br + 1] != "(":
+            idx = first_inner_bracket if first_inner_bracket != -1 else close_br + 1
+            continue
+
+        label = text[open_br + 1 : close_br]
+        p = close_br + 2
+        while p < n and text[p] in " \t\r\n":
+            p += 1
+        if p >= n:
+            if first_inner_bracket != -1:
+                idx = first_inner_bracket
+                continue
+            break
+
+        target = ""
+        first_target_bracket = -1
+        if text[p] == "<":
+            if p < unclosed_angle_until:
+                idx = first_inner_bracket if first_inner_bracket != -1 else p + 1
+                continue
+            end_angle = p + 1
+            while end_angle < n and text[end_angle] not in ">\r\n":
+                end_angle += 1
+            if end_angle >= n or text[end_angle] != ">":
+                unclosed_angle_until = end_angle
+                idx = first_inner_bracket if first_inner_bracket != -1 else p + 1
+                continue
+            target = text[p + 1 : end_angle].strip()
+            p = end_angle + 1
+        else:
+            start_plain = p
+            plain_limit = min(n, start_plain + 2048)
+            depth = 0
+            aborted_plain = False
+            while p < plain_limit:
+                ch = text[p]
+                if ch in " \t\r\n":
+                    break
+                if ch == "[" and first_target_bracket == -1:
+                    first_target_bracket = p
+                if ch == "(":
+                    if depth >= 1 or (first_target_bracket != -1 and p > start_plain and text[p - 1] == "]"):
+                        aborted_plain = True
+                        break
+                    depth += 1
+                elif ch == ")":
+                    if depth == 0:
+                        break
+                    depth -= 1
+                p += 1
+            if aborted_plain or depth != 0 or (p == plain_limit and p < n and text[p] not in " \t\r\n)"):
+                if first_inner_bracket != -1:
+                    idx = first_inner_bracket
+                elif first_target_bracket != -1:
+                    idx = first_target_bracket
+                else:
+                    idx = p if p > close_br + 2 else close_br + 2
+                continue
+            target = text[start_plain:p].strip()
+
+        while p < n and text[p] in " \t\r\n":
+            p += 1
+
+        if p < n and text[p] in "\"'":
+            quote = text[p]
+            quote_pos = p
+            if quote_pos < unclosed_quote_until[quote]:
+                idx = first_inner_bracket if first_inner_bracket != -1 else quote_pos + 1
+                continue
+            p += 1
+            while p < n and text[p] not in (quote, "\r", "\n"):
+                p += 1
+            if p >= n or text[p] != quote:
+                unclosed_quote_until[quote] = p
+                idx = first_inner_bracket if first_inner_bracket != -1 else quote_pos + 1
+                continue
+            p += 1
+            while p < n and text[p] in " \t\r\n":
+                p += 1
+
+        if p < n and text[p] == ")":
+            span_end = p + 1
+            if include_nested and had_nested_bracket:
+                for inner_s, inner_e, inner_img, inner_lbl, inner_tgt in iter_markdown_target_spans(
+                    label, include_nested=False, _allow_nested_bracket=False
+                ):
+                    yield (open_br + 1 + inner_s, open_br + 1 + inner_e, inner_img, inner_lbl, inner_tgt)
+            if target:
+                yield (span_start, span_end, is_img, label, target)
+            idx = span_end
+        else:
+            if first_inner_bracket != -1:
+                idx = first_inner_bracket
+            elif first_target_bracket != -1:
+                idx = first_target_bracket
+            else:
+                idx = max(close_br + 2, p)
 
 
 def strip_residual_speak_tags(text: str) -> str:
@@ -102,21 +254,36 @@ def strip_attached_workspace_links(
                 return True
         return False
 
-    def _replace_md_image(match: re.Match[str]) -> str:
-        target = (match.group("target") or "").strip()
-        if _matches_attached(target):
-            return ""
-        return match.group(0)
-
-    def _replace_md_link(match: re.Match[str]) -> str:
-        target = (match.group("target") or "").strip()
-        label = (match.group("label") or "").strip()
-        if not _matches_attached(target):
-            return match.group(0)
-        raw_name = PurePosixPath(target.replace("\\", "/")).name
-        if not label or label == target or label.startswith("workspace://"):
-            return f"`{raw_name}`" if raw_name else ""
-        return f"`{label}`" if not label.startswith("`") else label
+    def _rewrite_md_segment(segment: str, *, allow_nested: bool = True) -> str:
+        out: list[str] = []
+        cursor = 0
+        for s_idx, e_idx, is_img, raw_label, raw_target in iter_markdown_target_spans(
+            segment, include_nested=False, _allow_nested_bracket=allow_nested
+        ):
+            out.append(segment[cursor:s_idx])
+            target = raw_target.strip()
+            if is_img:
+                if not _matches_attached(target):
+                    out.append(segment[s_idx:e_idx])
+            else:
+                label_clean = (
+                    _rewrite_md_segment(raw_label, allow_nested=False).strip()
+                    if allow_nested and "![" in raw_label
+                    else raw_label.strip()
+                )
+                if target.lower().startswith(("workspace://", "file://")) and _matches_attached(target):
+                    raw_name = PurePosixPath(target.replace("\\", "/")).name
+                    if not label_clean or label_clean == target or label_clean.startswith("workspace://"):
+                        out.append(f"`{raw_name}`" if raw_name else "")
+                    else:
+                        out.append(f"`{label_clean}`" if not label_clean.startswith("`") else label_clean)
+                elif allow_nested and label_clean != raw_label.strip():
+                    out.append(f"[{label_clean}]{segment[s_idx + 1 + len(raw_label) : e_idx]}")
+                else:
+                    out.append(segment[s_idx:e_idx])
+            cursor = e_idx
+        out.append(segment[cursor:])
+        return "".join(out)
 
     parts = re.split(r"(```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z))", text)
     cleaned_parts: list[str] = []
@@ -124,8 +291,7 @@ def strip_attached_workspace_links(
         if idx % 2 == 1:
             cleaned_parts.append(part)
             continue
-        seg = _MD_IMAGE_LINK_RE.sub(_replace_md_image, part)
-        seg = _MD_FILE_LINK_RE.sub(_replace_md_link, seg)
+        seg = _rewrite_md_segment(part)
         for tok in sorted(normalized_targets, key=len, reverse=True):
             if tok.startswith(("workspace://", "file://")) and tok in seg:
                 fname = PurePosixPath(tok.replace("\\", "/")).name
@@ -895,6 +1061,7 @@ __all__ = [
     "build_resolved_decision_components",
     "compute_progress_digest_hash",
     "format_agent_question_answers",
+    "iter_markdown_target_spans",
     "sanitize_custom_id",
     "split_discord_markdown",
     "strip_Residual_speak_tags",

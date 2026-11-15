@@ -36,11 +36,13 @@ class DiscordApiError(RuntimeError):
         status_code: int,
         error_code: int | str | None = None,
         response_body: Any = None,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = int(status_code)
         self.error_code = error_code
         self.response_body = response_body
+        self.retry_after = float(retry_after) if retry_after is not None else None
 
 
 class DiscordAttachmentError(UploadRejected):
@@ -218,19 +220,21 @@ class DiscordRestClient:
                 except Exception:
                     parsed = response.text
 
-            if response.status_code == 429 and attempt < MAX_RATE_LIMIT_RETRIES:
+            retry_after: float | None = None
+            if response.status_code == 429:
                 retry_after = self._extract_retry_after(response, parsed)
-                bounded_wait = min(max(retry_after, 0.01), MAX_RATE_LIMIT_SLEEP_SECONDS)
-                _LOGGER.warning(
-                    "Discord REST rate limit (429) on %s %s; retrying in %.2fs (attempt %d/%d)",
-                    method,
-                    path,
-                    bounded_wait,
-                    attempt + 1,
-                    MAX_RATE_LIMIT_RETRIES,
-                )
-                await self._sleep(bounded_wait)
-                continue
+                if attempt < MAX_RATE_LIMIT_RETRIES and retry_after <= MAX_RATE_LIMIT_SLEEP_SECONDS:
+                    bounded_wait = min(max(retry_after, 0.01), MAX_RATE_LIMIT_SLEEP_SECONDS)
+                    _LOGGER.warning(
+                        "Discord REST rate limit (429) on %s %s; retrying in %.2fs (attempt %d/%d)",
+                        method,
+                        path,
+                        bounded_wait,
+                        attempt + 1,
+                        MAX_RATE_LIMIT_RETRIES,
+                    )
+                    await self._sleep(bounded_wait)
+                    continue
 
             if 200 <= response.status_code < 300:
                 return parsed if parsed is not None else {}
@@ -246,6 +250,7 @@ class DiscordRestClient:
                 status_code=response.status_code,
                 error_code=err_code,
                 response_body=parsed,
+                retry_after=retry_after,
             )
 
         raise DiscordApiError(
