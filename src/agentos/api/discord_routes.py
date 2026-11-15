@@ -342,15 +342,14 @@ def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> 
             return _discord_error_response(400, "invalid_discord_config", str(exc))
 
         if bridge is not None:
-            if payload.enabled:
-                await bridge.reload_user(principal.user_id)
-            else:
-                await bridge.stop_user(principal.user_id)
-                await bridge.reload_user(principal.user_id)
+            await bridge.reload_user(principal.user_id)
 
-        config = await run_in_threadpool(store.get_config, principal.user_id)
-        runtime_status = _runtime_status_for(bridge, config, principal.user_id)
-        return JSONResponse(_build_discord_state_payload(config, runtime_status), status_code=200)
+        def _load_updated_state() -> dict[str, Any]:
+            cfg = store.get_config(principal.user_id)
+            rt = _runtime_status_for(bridge, cfg, principal.user_id)
+            return _build_discord_state_payload(cfg, rt)
+
+        return JSONResponse(await run_in_threadpool(_load_updated_state), status_code=200)
 
     @app.post("/v1/integrations/discord/test")
     async def test_discord_integration(request: Request) -> JSONResponse:
@@ -525,9 +524,12 @@ def register_discord_routes(app: FastAPI, services: Any, principal_for: Any) -> 
         finally:
             await _close_rest_client(rest_client)
 
-        config = await run_in_threadpool(store.get_config, principal.user_id)
-        runtime_status = _runtime_status_for(bridge, config, principal.user_id)
-        state_payload = _build_discord_state_payload(config, runtime_status)
+        def _load_tested_state() -> dict[str, Any]:
+            cfg = store.get_config(principal.user_id)
+            rt = _runtime_status_for(bridge, cfg, principal.user_id)
+            return _build_discord_state_payload(cfg, rt)
+
+        state_payload = await run_in_threadpool(_load_tested_state)
         if not state_payload["bot_user_id"] and bot_user_id:
             state_payload["bot_user_id"] = bot_user_id
         if not state_payload["bot_username"] and bot_username:

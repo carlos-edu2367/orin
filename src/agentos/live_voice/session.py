@@ -878,8 +878,11 @@ def register_live_voice_routes(
     @app.get("/v1/live-voice/hardware-status")
     @app.get("/v1/live-voice/hardware")
     async def get_live_voice_hardware_status(request: Request) -> JSONResponse:
-        _optional_user_id(request)
-        profile = await run_in_threadpool(governor.recommend)
+        def _load_hardware_profile() -> HardwareProfile:
+            _optional_user_id(request)
+            return governor.recommend()
+
+        profile = await run_in_threadpool(_load_hardware_profile)
         profile_dict = profile.to_dict()
         reason_text = (
             "; ".join(profile.warnings)
@@ -912,12 +915,15 @@ def register_live_voice_routes(
 
     @app.get("/v1/live-voice/capabilities")
     async def get_live_voice_capabilities(request: Request) -> JSONResponse:
-        if principal_for is not None:
-            principal = principal_for(request)
-            user_id: str | None = str(principal.user_id)
-        else:
-            user_id = None
-        payload = await run_in_threadpool(_voice_capabilities, governor, services, user_id, engines_runtime, catalog)
+        def _load_capabilities() -> dict[str, Any]:
+            if principal_for is not None:
+                principal = principal_for(request)
+                user_id: str | None = str(principal.user_id)
+            else:
+                user_id = None
+            return _voice_capabilities(governor, services, user_id, engines_runtime, catalog)
+
+        payload = await run_in_threadpool(_load_capabilities)
         return JSONResponse(payload)
 
     def _known_engine(engine: str) -> str:
@@ -927,30 +933,42 @@ def register_live_voice_routes(
 
     @app.get("/v1/live-voice/engines/{engine}/install")
     async def get_engine_install(engine: str, request: Request) -> JSONResponse:
-        if principal_for is not None:
-            principal_for(request)
-        return JSONResponse(engines_runtime.status(_known_engine(engine)))
+        def _status() -> dict[str, Any]:
+            if principal_for is not None:
+                principal_for(request)
+            return engines_runtime.status(_known_engine(engine))
+
+        return JSONResponse(await run_in_threadpool(_status))
 
     @app.post("/v1/live-voice/engines/{engine}/install")
     async def start_engine_install(engine: str, request: Request) -> JSONResponse:
-        _mutable(request, f"live_voice.install_{engine}")
-        return JSONResponse(engines_runtime.start_install(_known_engine(engine)), status_code=202)
+        def _start() -> dict[str, Any]:
+            _mutable(request, f"live_voice.install_{engine}")
+            return engines_runtime.start_install(_known_engine(engine))
+
+        return JSONResponse(await run_in_threadpool(_start), status_code=202)
 
     @app.post("/v1/live-voice/engines/chatterbox/voices")
     async def upload_chatterbox_voice(payload: VoiceClipUpload, request: Request) -> JSONResponse:
-        _mutable(request, "live_voice.voice_clip")
-        try:
-            clip = await run_in_threadpool(engines_runtime.save_voice_clip, payload.name, payload.filename, payload.data_base64)
-        except ValueError as exc:
-            raise ApplicationValidationError(str(exc)) from exc
+        def _upload() -> dict[str, Any]:
+            _mutable(request, "live_voice.voice_clip")
+            try:
+                return engines_runtime.save_voice_clip(payload.name, payload.filename, payload.data_base64)
+            except ValueError as exc:
+                raise ApplicationValidationError(str(exc)) from exc
+
+        clip = await run_in_threadpool(_upload)
         return JSONResponse(clip, status_code=201)
 
     @app.delete("/v1/live-voice/engines/chatterbox/voices/{clip_id}")
     async def delete_chatterbox_voice(clip_id: str, request: Request) -> JSONResponse:
-        _mutable(request, "live_voice.voice_clip")
-        if not engines_runtime.delete_voice_clip(clip_id):
-            raise ApplicationNotFoundError(clip_id)
-        return JSONResponse({"id": clip_id, "deleted": True})
+        def _delete() -> dict[str, Any]:
+            _mutable(request, "live_voice.voice_clip")
+            if not engines_runtime.delete_voice_clip(clip_id):
+                raise ApplicationNotFoundError(clip_id)
+            return {"id": clip_id, "deleted": True}
+
+        return JSONResponse(await run_in_threadpool(_delete))
 
     def _transcribe(
         session: LiveVoiceSession,
@@ -1008,13 +1026,16 @@ def register_live_voice_routes(
 
     @app.post("/v1/live-voice/wake-check")
     async def check_wake_word_route(payload: WakeCheckRequest, request: Request) -> JSONResponse:
-        user_id: str | None = None
-        if principal_for is not None:
+        def _auth_wake_check() -> str | None:
+            if principal_for is None:
+                return None
             principal = principal_for(request, mutable=True)
             security = getattr(services, "security", None)
             if security is not None:
                 security.authorize(principal, action="conversation.list", resource_id=None, purpose="live_voice.wake_check")
-            user_id = str(principal.user_id)
+            return str(principal.user_id)
+
+        user_id = await run_in_threadpool(_auth_wake_check)
 
         raw_custom = list(payload.custom_wake_words or []) + list(payload.custom_names or [])
         custom_words = [str(w).strip()[:40] for w in raw_custom if str(w).strip()]
@@ -1138,7 +1159,7 @@ def register_live_voice_routes(
     ) -> None:
         user_id: str | None = None
         if principal_for is not None:
-            try:
+            def _auth_ws() -> str:
                 principal = principal_for(websocket)
                 security = getattr(services, "security", None)
                 if security is not None:
@@ -1146,7 +1167,10 @@ def register_live_voice_routes(
                     # session's CSRF token travels in the query string instead.
                     security.validate_csrf(principal, websocket.query_params.get("csrf"), websocket.headers.get("origin"))
                     security.authorize(principal, action="conversation.list", resource_id=conversation_id, purpose="conversation.live_voice")
-                user_id = str(principal.user_id)
+                return str(principal.user_id)
+
+            try:
+                user_id = await run_in_threadpool(_auth_ws)
             except Exception:
                 await websocket.close(code=4401)
                 return
@@ -1155,7 +1179,7 @@ def register_live_voice_routes(
             conversation_id=conversation_id,
             hardware_governor=governor,
         )
-        hw_profile = session.hardware_governor.recommend()
+        hw_profile = await run_in_threadpool(session.hardware_governor.recommend)
         session.voice_config = VoiceConfig(
             tts_provider=hw_profile.primary_tts_provider,
             tts_model=hw_profile.primary_tts_model,

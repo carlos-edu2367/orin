@@ -792,7 +792,8 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
     # either directly, via a transitive sync `def` wrapper, or as an eagerly-evaluated argument to `run_in_threadpool`.
     api_dir = Path(__file__).resolve().parents[3] / "src" / "agentos" / "api"
     prod_file = Path(__file__).resolve().parents[3] / "src" / "agentos" / "bootstrap" / "production.py"
-    targets = sorted(api_dir.glob("*.py")) + [prod_file]
+    live_voice_file = Path(__file__).resolve().parents[3] / "src" / "agentos" / "live_voice" / "session.py"
+    targets = sorted(api_dir.glob("*.py")) + [prod_file, live_voice_file]
     base_forbidden_sync_helpers = {
         "principal_for",
         "check_rate_limit",
@@ -814,8 +815,14 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
         "_store_for",
         "_discord_store_for",
         "_discord_bridge_for",
+        "_runtime_status_for",
+        "get_user_status",
         "_persona_store_for",
         "_memory_store_for",
+        "recommend",
+        "start_install",
+        "save_voice_clip",
+        "delete_voice_clip",
     }
 
     def _call_name(call_node: ast.Call) -> str | None:
@@ -980,4 +987,62 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
     finally:
         release_lock.set()
         holder.join(timeout=2.0)
+
+
+def test_events_cursor_and_provider_validation_return_409_and_422_and_statusline_cache_is_bounded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from types import SimpleNamespace
+    from fastapi.testclient import TestClient
+    from agentos.api import conversation_routes
+
+    class FakeConversations:
+        def get(self, conversation_id: str, user_id: str):
+            return {"conversation_id": conversation_id, "project_id": None}
+
+    class FakeProviderConfig:
+        def configure(self, command: dict[str, Any]) -> dict[str, Any]:
+            return {"provider": command["provider"], "enabled": command["enabled"]}
+
+    security = InMemorySecurityService()
+    security.add_pat("pat", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
+    app = create_app(
+        ApiServices(
+            security=security,
+            conversation_application=FakeConversations(),  # type: ignore[arg-type]
+            provider_configuration=FakeProviderConfig(),  # type: ignore[arg-type]
+        )
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    # 1. Invalid SSE cursor (`after=""` or `len(after) > 512`) returns 409 cursor_invalid (not 500)
+    for bad_after in ("", "x" * 600):
+        resp_ev = client.get(f"/v1/conversations/c1/events?after={bad_after}", headers=_headers("ev-1"))
+        assert resp_ev.status_code == 409, resp_ev.text
+        assert resp_ev.json()["error"]["code"] == "cursor_invalid"
+
+    # 2. Invalid provider setup requests return 422 invalid_request (not 500)
+    for url, body in (
+        ("/v1/providers/openai", {"enabled": True}),
+        ("/v1/providers/anthropic", {"enabled": True}),
+        ("/v1/providers/google-antigravity", {"enabled": True, "risk_acknowledged": False}),
+        ("/v1/providers/unknown-provider", {"enabled": True, "api_key": "sk-test"}),
+    ):
+        resp_prov = client.put(url, headers=_headers(f"p-{url}"), json=body)
+        assert resp_prov.status_code == 422, f"{url} returned {resp_prov.status_code}: {resp_prov.text}"
+        assert resp_prov.json()["error"]["code"] == "invalid_request"
+
+    # 3. _STATUSLINE_CACHE and _STATUSLINE_LOCKS remain bounded <= 512 across 600 distinct conversations
+    monkeypatch.setattr(
+        "agentos.hooks.processes.run_shell_command",
+        lambda *a, **kw: SimpleNamespace(exit_code=0, stdout="ok\n", stderr="", timed_out=False, error=None),
+    )
+    conversation_routes._STATUSLINE_CACHE.clear()
+    conversation_routes._STATUSLINE_LOCKS.clear()
+    for idx in range(600):
+        out = conversation_routes.run_statusline(f"conv-{idx}", "echo ok", tmp_path, {"i": idx})
+        assert out == {"enabled": True, "lines": ["ok"], "error": None}
+    assert len(conversation_routes._STATUSLINE_CACHE) <= 512
+    assert len(conversation_routes._STATUSLINE_LOCKS) <= 512
+
 

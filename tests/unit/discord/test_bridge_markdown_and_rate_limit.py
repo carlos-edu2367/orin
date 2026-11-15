@@ -422,3 +422,149 @@ async def test_watch_coordinator_backoff_zombies_and_turn_advance() -> None:
     assert rest.edit_message.await_count == 1
     assert rest.edit_message.call_args.kwargs["components"] == []
 
+
+@pytest.mark.anyio
+async def test_watch_coordinator_forget_watch_and_nonfinite_retry_after_guards() -> None:
+    from agentos.discord.bridge_service import _UserDiscordRunner
+    from agentos.discord.store import DiscordBotConfig, DiscordInteractionBinding
+
+    # 1. Non-finite or negative retry_after in DiscordRestClient & DiscordApiError
+    for bad_header in ("inf", "-inf", "nan", "-5", "Infinity", "NaN"):
+        resp = httpx.Response(429, headers={"Retry-After": bad_header})
+        extracted = DiscordRestClient._extract_retry_after(resp, {"retry_after": bad_header})
+        assert extracted == 1.0
+
+    for bad_body in (float("inf"), float("-inf"), float("nan"), -1.0):
+        resp = httpx.Response(429)
+        assert DiscordRestClient._extract_retry_after(resp, {"retry_after": bad_body}) == 1.0
+
+    err_inf = DiscordApiError("rate limit", status_code=429, retry_after=float("inf"))
+    assert err_inf.retry_after is None
+    err_nan = DiscordApiError("rate limit", status_code=429, retry_after=float("nan"))
+    assert err_nan.retry_after is None
+    err_neg = DiscordApiError("rate limit", status_code=429, retry_after=-3.0)
+    assert err_neg.retry_after is None
+
+    now_ref = [datetime(2026, 11, 15, 16, 0, tzinfo=UTC)]
+    discord_store = MagicMock()
+    discord_store.list_open_watches.return_value = []
+    chat_store = MagicMock()
+    rest = MagicMock()
+    bridge = DiscordBridgeService(
+        discord_store=discord_store,
+        chat_application=chat_store,
+        rest_client_factory=lambda _t: rest,
+        clock=lambda: now_ref[0],
+    )
+    coord = bridge.watch_coordinator
+
+    # Even if a custom error object injects retry_after = inf or 999999.0, backoff is capped at <= 300s
+    dummy_watch = FriendSessionWatch(
+        watch_id="fsw_cap",
+        user_id="local-user",
+        friend_conversation_id="f1",
+        target_conversation_id="c1",
+        target_turn_id="t1",
+        origin="friend",
+        discord_channel_id=CHAN_ID,
+        discord_progress_message_id=PROG_MSG_ID,
+        discord_prompt_message_id=None,
+        status="watching",
+        last_activity_seq=0,
+        last_digest_hash=None,
+        last_prompt_fingerprint=None,
+        last_patched_at=None,
+        notified_terminal=False,
+        created_at=now_ref[0],
+        updated_at=now_ref[0],
+    )
+
+    class _BogusError(Exception):
+        retry_after = float("inf")
+
+    updates: dict[str, object] = {}
+    coord._record_progress_api_error(dummy_watch, _BogusError(), now_ref[0], PROG_MSG_ID, updates)
+    assert coord._patch_backoff_until["fsw_cap"] == pytest.approx(now_ref[0].timestamp() + 15.0)
+    coord._record_prompt_api_error(dummy_watch, _BogusError(), now_ref[0])
+    assert coord._prompt_backoff_until["fsw_cap"] == pytest.approx(now_ref[0].timestamp() + 15.0)
+
+    class _HugeError(Exception):
+        retry_after = 999999.0
+
+    coord._record_progress_api_error(dummy_watch, _HugeError(), now_ref[0], PROG_MSG_ID, updates)
+    assert coord._patch_backoff_until["fsw_cap"] == pytest.approx(now_ref[0].timestamp() + 300.0)
+    coord._record_prompt_api_error(dummy_watch, _HugeError(), now_ref[0])
+    assert coord._prompt_backoff_until["fsw_cap"] == pytest.approx(now_ref[0].timestamp() + 300.0)
+
+    # 2. `stop_session`, `_advance_watch_to_new_turn`, and `tick()` must purge all 7 watch collections
+    runner = _UserDiscordRunner(
+        user_id="local-user",
+        config=MagicMock(spec=DiscordBotConfig),
+        rest_client=rest,
+        gateway_client=MagicMock(),
+    )
+    bridge._runners["local-user"] = runner
+
+    def _seed_watch_state(wid: str) -> None:
+        coord._activity_seq_cursors[wid] = 42
+        coord._patch_backoff_until[wid] = now_ref[0].timestamp() + 60.0
+        coord._patch_failures[wid] = 2
+        coord._prompt_backoff_until[wid] = now_ref[0].timestamp() + 60.0
+        coord._prompt_failures[wid] = 1
+        bridge._user_stopped_watches.add(wid)
+        runner.stop_bindings_by_watch[wid] = f"bind_{wid}"
+
+    def _assert_watch_purged(wid: str) -> None:
+        assert wid not in coord._activity_seq_cursors
+        assert wid not in coord._patch_backoff_until
+        assert wid not in coord._patch_failures
+        assert wid not in coord._prompt_backoff_until
+        assert wid not in coord._prompt_failures
+        assert wid not in bridge._user_stopped_watches
+        assert wid not in runner.stop_bindings_by_watch
+
+    # 2a. stop_session interaction binding
+    _seed_watch_state("fsw_stop_leak")
+    stop_binding = DiscordInteractionBinding(
+        binding_id="bind_stop_1",
+        user_id="local-user",
+        discord_channel_id=CHAN_ID,
+        discord_message_id=PROG_MSG_ID,
+        target_conversation_id="c1",
+        target_turn_id="t1",
+        action_kind="stop_session",
+        payload={"watch_id": "fsw_stop_leak"},
+        payload_json='{"watch_id": "fsw_stop_leak"}',
+        consumed_at=None,
+        expires_at=now_ref[0] + timedelta(hours=1),
+        created_at=now_ref[0],
+    )
+    await bridge._execute_interaction_binding(
+        user_id="local-user",
+        binding=stop_binding,
+        selected_value=None,
+        channel_id=CHAN_ID,
+        rest_client=rest,
+    )
+    _assert_watch_purged("fsw_stop_leak")
+
+    # 2b. _advance_watch_to_new_turn
+    _seed_watch_state("fsw_old_turn")
+    old_watch = replace(dummy_watch, watch_id="fsw_old_turn", target_turn_id="turn_old")
+    discord_store.list_open_watches.return_value = [old_watch]
+    discord_store.upsert_watch.return_value = replace(old_watch, watch_id="fsw_new_turn", target_turn_id="turn_new")
+    bridge._advance_watch_to_new_turn(
+        user_id="local-user",
+        target_conversation_id="c1",
+        new_turn_id="turn_new",
+        channel_id=CHAN_ID,
+    )
+    _assert_watch_purged("fsw_old_turn")
+
+    # 2c. tick() sweeps any stale watch_id not present in list_open_watches
+    _seed_watch_state("fsw_stale_orphan")
+    discord_store.list_open_watches.return_value = []
+    await coord.tick()
+    _assert_watch_purged("fsw_stale_orphan")
+
+

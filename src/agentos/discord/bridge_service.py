@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import re
 from typing import Any
@@ -299,6 +300,30 @@ class SessionWatchCoordinator:
         self._prompt_backoff_until: dict[str, float] = {}
         self._prompt_failures: dict[str, int] = {}
 
+    def forget_watch(self, watch_id: str) -> None:
+        clean_wid = str(watch_id or "").strip()
+        if not clean_wid:
+            return
+        self._activity_seq_cursors.pop(clean_wid, None)
+        self._patch_backoff_until.pop(clean_wid, None)
+        self._patch_failures.pop(clean_wid, None)
+        self._prompt_backoff_until.pop(clean_wid, None)
+        self._prompt_failures.pop(clean_wid, None)
+        self._bridge._user_stopped_watches.discard(clean_wid)
+        for runner in self._bridge._runners.values():
+            runner.stop_bindings_by_watch.pop(clean_wid, None)
+
+    @staticmethod
+    def _bounded_retry_hint(err: Exception, default: float = 15.0) -> float:
+        raw_hint = getattr(err, "retry_after", None)
+        try:
+            val = float(raw_hint) if raw_hint is not None else default
+        except (TypeError, ValueError):
+            val = default
+        if not math.isfinite(val) or val <= 0.0:
+            val = default
+        return min(val, 300.0)
+
     def _record_progress_api_error(
         self,
         watch: FriendSessionWatch,
@@ -324,8 +349,8 @@ class SessionWatchCoordinator:
 
         failures = self._patch_failures.get(watch.watch_id, 0) + 1
         self._patch_failures[watch.watch_id] = failures
-        retry_hint = getattr(err, "retry_after", None) or 15.0
-        cooldown = max(float(retry_hint), min(300.0, 15.0 * (2 ** (failures - 1))))
+        retry_hint = self._bounded_retry_hint(err, 15.0)
+        cooldown = max(retry_hint, min(300.0, 15.0 * (2 ** (failures - 1))))
 
         card_age = 0.0
         if progress_msg_id and str(progress_msg_id).isdigit():
@@ -359,8 +384,8 @@ class SessionWatchCoordinator:
             return
         failures = self._prompt_failures.get(watch.watch_id, 0) + 1
         self._prompt_failures[watch.watch_id] = failures
-        retry_hint = getattr(err, "retry_after", None) or 15.0
-        cooldown = max(float(retry_hint), min(300.0, 15.0 * (2 ** (failures - 1))))
+        retry_hint = self._bounded_retry_hint(err, 15.0)
+        cooldown = max(retry_hint, min(300.0, 15.0 * (2 ** (failures - 1))))
         self._prompt_backoff_until[watch.watch_id] = now_ts + cooldown
 
     async def wait_background_tasks(self, *, user_id: str | None = None, timeout: float = 10.0) -> None:
@@ -430,6 +455,35 @@ class SessionWatchCoordinator:
                     if item.watch_id not in existing_ids:
                         watches.append(item)
                         existing_ids.add(item.watch_id)
+
+            open_ids = {w.watch_id for w in watches}
+            tracked_ids = (
+                set(self._activity_seq_cursors)
+                | set(self._patch_backoff_until)
+                | set(self._patch_failures)
+                | set(self._prompt_backoff_until)
+                | set(self._prompt_failures)
+                | set(self._bridge._user_stopped_watches)
+                | {
+                    wid
+                    for r in self._bridge._runners.values()
+                    for wid in r.stop_bindings_by_watch
+                }
+            )
+            candidate_stale = tracked_ids - open_ids
+            if candidate_stale:
+                if user_id is not None:
+                    try:
+                        all_open = await asyncio.to_thread(
+                            self._bridge.discord_store.list_open_watches,
+                            user_id=None,
+                        )
+                        open_ids = {w.watch_id for w in all_open}
+                        candidate_stale = tracked_ids - open_ids
+                    except Exception:
+                        pass
+                for stale_wid in candidate_stale:
+                    self.forget_watch(stale_wid)
 
             processed = 0
             for watch in watches:
@@ -547,15 +601,7 @@ class SessionWatchCoordinator:
         if inspection is None:
             return
         if inspection.get("missing_conversation"):
-            self._activity_seq_cursors.pop(watch.watch_id, None)
-            self._patch_backoff_until.pop(watch.watch_id, None)
-            self._patch_failures.pop(watch.watch_id, None)
-            self._prompt_backoff_until.pop(watch.watch_id, None)
-            self._prompt_failures.pop(watch.watch_id, None)
-            runner = self._bridge._runners.get(watch.user_id)
-            if runner is not None:
-                runner.stop_bindings_by_watch.pop(watch.watch_id, None)
-            self._bridge._user_stopped_watches.discard(watch.watch_id)
+            self.forget_watch(watch.watch_id)
             await asyncio.to_thread(
                 self._bridge.discord_store.update_watch,
                 watch.watch_id,
@@ -581,11 +627,7 @@ class SessionWatchCoordinator:
         )
         channel_id = watch.discord_channel_id or fallback_channel
         if current_turn_id and current_turn_id != watch.target_turn_id and raw_turn_state not in _TERMINAL_TURN_STATES:
-            self._activity_seq_cursors.pop(watch.watch_id, None)
-            self._patch_backoff_until.pop(watch.watch_id, None)
-            self._patch_failures.pop(watch.watch_id, None)
-            self._prompt_backoff_until.pop(watch.watch_id, None)
-            self._prompt_failures.pop(watch.watch_id, None)
+            self.forget_watch(watch.watch_id)
             await asyncio.to_thread(
                 self._bridge._advance_watch_to_new_turn,
                 user_id=watch.user_id,
@@ -779,16 +821,8 @@ class SessionWatchCoordinator:
             watch_updates["notified_terminal"] = True
             if effective_max_seq > watch.last_activity_seq:
                 watch_updates["last_activity_seq"] = effective_max_seq
-            self._activity_seq_cursors.pop(watch.watch_id, None)
-            self._patch_backoff_until.pop(watch.watch_id, None)
-            self._patch_failures.pop(watch.watch_id, None)
-            self._prompt_backoff_until.pop(watch.watch_id, None)
-            self._prompt_failures.pop(watch.watch_id, None)
-            runner = self._bridge._runners.get(watch.user_id)
-            if runner is not None:
-                runner.stop_bindings_by_watch.pop(watch.watch_id, None)
             stopped_by_discord = watch.watch_id in self._bridge._user_stopped_watches
-            self._bridge._user_stopped_watches.discard(watch.watch_id)
+            self.forget_watch(watch.watch_id)
 
             updated_watch = await asyncio.to_thread(
                 self._bridge.discord_store.update_watch,
@@ -2684,6 +2718,7 @@ class DiscordBridgeService:
                     )
                 except Exception:
                     pass
+                self.watch_coordinator.forget_watch(watch_id)
             return "Sessão interrompida"
 
         if action_kind == "tool_permission":
@@ -3047,10 +3082,7 @@ class DiscordBridgeService:
             if not eff_channel and old_watch.discord_channel_id:
                 eff_channel = old_watch.discord_channel_id
             if old_watch.target_turn_id != new_turn_id:
-                self._user_stopped_watches.discard(old_watch.watch_id)
-                runner = self._runners.get(user_id)
-                if runner is not None:
-                    runner.stop_bindings_by_watch.pop(old_watch.watch_id, None)
+                self.watch_coordinator.forget_watch(old_watch.watch_id)
                 try:
                     self.discord_store.update_watch(
                         old_watch.watch_id,

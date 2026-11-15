@@ -2047,7 +2047,7 @@ def create_app(services: ApiServices) -> FastAPI:
         def _prepare() -> tuple[AuthenticatedPrincipal, Any]:
             principal = principal_for(request)
             if not after or len(after) > 512:
-                raise ValueError("invalid cursor")
+                raise CursorError("invalid cursor")
             services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.observe")
             app_service = require_port(services.conversation_application)
             # Resolve ownership before the stream opens: another profile's id must
@@ -2531,9 +2531,9 @@ def create_app(services: ApiServices) -> FastAPI:
     def configure_provider(provider: str, payload: ProviderSetupRequest, request: Request) -> JSONResponse:
         provider_name = _provider_name(provider)
         if provider_name not in SUBSCRIPTION_CLI_PROVIDERS and provider_name not in PROVIDERS_WITH_OPTIONAL_KEY and payload.api_key is None:
-            raise ValueError("API key is required for this provider")
+            raise ApplicationValidationError("API key is required for this provider")
         if provider_name == "anthropic" and not (payload.base_url and is_claude_cli_bridge_url(payload.base_url)) and payload.api_key is None:
-            raise ValueError("API key is required for this provider")
+            raise ApplicationValidationError("API key is required for this provider")
         if provider_name == "google-antigravity" and payload.enabled:
             has_valid_ack_at = (
                 isinstance(payload.risk_acknowledged_at, datetime)
@@ -2544,7 +2544,7 @@ def create_app(services: ApiServices) -> FastAPI:
                 )
             )
             if payload.risk_acknowledged is False or (not payload.risk_acknowledged and not has_valid_ack_at):
-                raise ValueError("É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity.")
+                raise ApplicationValidationError("É necessário aceitar o aviso de risco dos Termos de Uso para ativar o Antigravity.")
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.configure", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.configure", resource_id=provider_name, purpose=payload.purpose)
@@ -2626,7 +2626,10 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.post("/v1/providers/{provider}/keys/{key_id}:activate")
     def activate_provider_key(provider: str, key_id: int, request: Request) -> JSONResponse:
-        provider_name = _provider_name(provider)
+        try:
+            provider_name = _provider_name(provider)
+        except ApplicationValidationError as exc:
+            raise ValueError(str(exc)) from exc
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.activate", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.keys.activate", resource_id=provider_name, purpose="provider.keys.activate")
@@ -2637,7 +2640,10 @@ def create_app(services: ApiServices) -> FastAPI:
 
     @app.put("/v1/providers/{provider}/keys:reorder")
     def reorder_provider_keys(provider: str, payload: ProviderApiKeyReorderRequest, request: Request) -> JSONResponse:
-        provider_name = _provider_name(provider)
+        try:
+            provider_name = _provider_name(provider)
+        except ApplicationValidationError as exc:
+            raise ValueError(str(exc)) from exc
         principal = principal_for(request, mutable=True)
         services.security.check_rate_limit(principal, action="provider.keys.reorder", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="provider.keys.reorder", resource_id=provider_name, purpose="provider.keys.reorder")
@@ -3410,7 +3416,7 @@ def _provider_name(value: str) -> str:
         "openai-codex",
         "google-antigravity",
     }:
-        raise ValueError("unsupported provider")
+        raise ApplicationValidationError("unsupported provider")
     return normalized
 
 

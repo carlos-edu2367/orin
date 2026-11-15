@@ -29,6 +29,7 @@ def test_markdown_and_media_scanners_linear_on_adversarial_inputs() -> None:
         '[bad](http://x "unclosed ' * 4000,
         "[bad](http://x 'unclosed " * 4000,
         "[bad](\r\n  <http://x\r\n" * 4500,
+        ("[[a]](<" * 15000) + ">",
     ]
     for payload in adversarial_cases:
         t0 = time.perf_counter()
@@ -36,7 +37,7 @@ def test_markdown_and_media_scanners_linear_on_adversarial_inputs() -> None:
         stripped = strip_attached_workspace_links(payload, ["workspace://shot.png"])
         elapsed = time.perf_counter() - t0
         assert isinstance(stripped, str)
-        assert elapsed < 0.12, f"Markdown scanner/stripper took {elapsed:.3f}s on len={len(payload)}"
+        assert elapsed < 0.08, f"Markdown scanner/stripper took {elapsed:.3f}s on len={len(payload)}"
 
     media_adversarial = "=/a" * 35000
     t0 = time.perf_counter()
@@ -82,6 +83,11 @@ def test_markdown_scanner_preserves_valid_links_and_all_four_edge_cases() -> Non
     ):
         recovered = f"{prefix}![ok](workspace://shot.png)"
         assert list(_iter_markdown_targets(recovered)) == [(True, "ok", "workspace://shot.png")]
+
+    # Edge case 5: unclosed `<` before a real angle-destination link on the same line must NOT swallow the real link
+    assert list(iter_markdown_target_spans('[[bad]](<unclosed) [ok](<./file name.png> "title")')) == [
+        (19, 50, False, "ok", "./file name.png")
+    ]
 
     cands = DiscordBridgeService._extract_outgoing_file_candidates({}, f"{clickable}\nscreenshots/final.png.")
     targets = [c for _, c in cands]
@@ -134,7 +140,14 @@ def test_redact_text_linear_on_adversarial_inputs() -> None:
     assert elapsed < 0.08, f"Expected strict O(N) < 80ms across all adversarial inputs, took {elapsed:.3f}s"
 
     # 100 KB adversarial inputs
-    for p100k in (("auth_" * 20000), ("--token-" * 12500), ("token-" * 17000), ("A" * 100000), ("-" * 100000)):
+    for p100k in (
+        ("auth_" * 20000),
+        ("--token-" * 12500),
+        ("--token_" * 12500),
+        ("token-" * 17000),
+        ("A" * 100000),
+        ("-" * 100000),
+    ):
         t1 = time.perf_counter()
         assert redact_text(p100k) == p100k
         assert (time.perf_counter() - t1) < 0.08
@@ -158,6 +171,14 @@ def test_redact_text_linear_on_adversarial_inputs() -> None:
         ('"api_key":\n  "super_secret_multiline"', "super_secret_multiline"),
         ("'api_key': 'a\\'super_secret_sq\\'b'", "super_secret_sq"),
         ("--secret-token-" + ("a" * 135) + "=super_secret_long_flag", "super_secret_long_flag"),
+        # Underscore CLI flag variants (--api_key, --client_secret, --private_key, --access_key, --session_id, -api_key, --auth_token):
+        ("--api_key super_secret_123", "super_secret_123"),
+        ("--client_secret super_secret_cs", "super_secret_cs"),
+        ("--private_key super_secret_pk", "super_secret_pk"),
+        ("--access_key super_secret_ak", "super_secret_ak"),
+        ("--session_id super_secret_sid", "super_secret_sid"),
+        ("-api_key super_secret_short", "super_secret_short"),
+        ("--auth_token super_secret_at", "super_secret_at"),
     ],
 )
 def test_redact_text_zero_secret_leaks(raw: str, secret: str) -> None:

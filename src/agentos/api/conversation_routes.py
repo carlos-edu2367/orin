@@ -4,6 +4,7 @@ line. Agents and teammates come from ``/overview``; this module covers what only
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -88,8 +89,10 @@ STATUSLINE_TIMEOUT_SECONDS = 5.0
 STATUSLINE_MAX_LINES = 5
 STATUSLINE_MAX_CHARS = 400
 STATUSLINE_CACHE_SECONDS = 1.0
+STATUSLINE_MAX_CACHE_ENTRIES = 512
 _STATUSLINE_CACHE: dict[str, tuple[float, str, dict[str, Any]]] = {}
 _STATUSLINE_LOCKS: dict[str, Any] = {}
+_STATUSLINE_GUARD = threading.Lock()
 
 
 def statusline_command(settings) -> tuple[str | None, str | None]:
@@ -138,9 +141,26 @@ def run_statusline(conversation_id: str, command: str, root: Path, payload: dict
     from agentos.hooks.processes import run_shell_command
 
     digest = json.dumps(payload, sort_keys=True) + "\x00" + command
-    lock = _STATUSLINE_LOCKS.setdefault(conversation_id, threading.Lock())
+    with _STATUSLINE_GUARD:
+        lock = _STATUSLINE_LOCKS.get(conversation_id)
+        if lock is None:
+            if len(_STATUSLINE_LOCKS) >= STATUSLINE_MAX_CACHE_ENTRIES:
+                for stale_cid in list(_STATUSLINE_LOCKS.keys()):
+                    if len(_STATUSLINE_LOCKS) < STATUSLINE_MAX_CACHE_ENTRIES:
+                        break
+                    stale_lock = _STATUSLINE_LOCKS.get(stale_cid)
+                    if stale_lock is not None and not stale_lock.locked():
+                        _STATUSLINE_LOCKS.pop(stale_cid, None)
+            lock = threading.Lock()
+            _STATUSLINE_LOCKS[conversation_id] = lock
+        else:
+            # Refresh insertion order for active conversation lock
+            _STATUSLINE_LOCKS.pop(conversation_id, None)
+            _STATUSLINE_LOCKS[conversation_id] = lock
+
     with lock:  # one run per conversation at a time; a repeat within a second reuses the last answer
-        cached = _STATUSLINE_CACHE.get(conversation_id)
+        with _STATUSLINE_GUARD:
+            cached = _STATUSLINE_CACHE.get(conversation_id)
         if cached is not None and cached[1] == digest and time.monotonic() - cached[0] < STATUSLINE_CACHE_SECONDS:
             return cached[2]
         environment = {**os.environ, "COLUMNS": "120", "LINES": "1"}
@@ -150,7 +170,15 @@ def run_statusline(conversation_id: str, command: str, root: Path, payload: dict
         else:
             lines = [line[:STATUSLINE_MAX_CHARS] for line in result.stdout.replace("\r\n", "\n").split("\n") if line.strip()]
             answer = {"enabled": True, "lines": lines[:STATUSLINE_MAX_LINES], "error": None}
-        _STATUSLINE_CACHE[conversation_id] = (time.monotonic(), digest, answer)
+        with _STATUSLINE_GUARD:
+            _STATUSLINE_CACHE.pop(conversation_id, None)
+            _STATUSLINE_CACHE[conversation_id] = (time.monotonic(), digest, answer)
+            while len(_STATUSLINE_CACHE) > STATUSLINE_MAX_CACHE_ENTRIES:
+                oldest_cid = next(iter(_STATUSLINE_CACHE))
+                _STATUSLINE_CACHE.pop(oldest_cid, None)
+                stale_lock = _STATUSLINE_LOCKS.get(oldest_cid)
+                if stale_lock is not None and not stale_lock.locked():
+                    _STATUSLINE_LOCKS.pop(oldest_cid, None)
         return answer
 
 
@@ -256,8 +284,11 @@ def register_conversation_routes(
             principal = principal_for(request, mutable=True)
             services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.delete")
             services.conversation_application.delete(conversation_id, principal.user_id)
-            _STATUSLINE_CACHE.pop(conversation_id, None)
-            _STATUSLINE_LOCKS.pop(conversation_id, None)
+            with _STATUSLINE_GUARD:
+                _STATUSLINE_CACHE.pop(conversation_id, None)
+                existing_lock = _STATUSLINE_LOCKS.get(conversation_id)
+                if existing_lock is None or not existing_lock.locked():
+                    _STATUSLINE_LOCKS.pop(conversation_id, None)
 
         await run_in_threadpool(_delete)
         return Response(status_code=204)

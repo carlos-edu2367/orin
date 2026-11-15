@@ -23,7 +23,7 @@ _ASSIGNMENT = re.compile(
 )
 # --password x, --token=x, -p is not covered (too ambiguous).
 _FLAG = re.compile(
-    rf"(?i)(?<![A-Za-z0-9_-])(?P<flag>--?(?=[A-Za-z0-9-]*?{_SECRET_WORD})[A-Za-z0-9-]++)"
+    rf"(?i)(?<![A-Za-z0-9_-])(?P<flag>--?(?=[A-Za-z0-9_-]*?{_SECRET_WORD})[A-Za-z0-9_-]++)"
     r"(?P<sep>[= ]++)"
     r"(?P<value>\"(?:\\.|[^\"\\\r\n])*+\"|'(?:\\.|[^'\\\r\n])*+'|\S+)"
 )

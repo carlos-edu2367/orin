@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import logging
+import math
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -42,7 +43,15 @@ class DiscordApiError(RuntimeError):
         self.status_code = int(status_code)
         self.error_code = error_code
         self.response_body = response_body
-        self.retry_after = float(retry_after) if retry_after is not None else None
+        parsed_retry: float | None = None
+        if retry_after is not None:
+            try:
+                cand = float(retry_after)
+                if math.isfinite(cand) and cand >= 0.0:
+                    parsed_retry = cand
+            except (TypeError, ValueError):
+                parsed_retry = None
+        self.retry_after = parsed_retry
 
 
 class DiscordAttachmentError(UploadRejected):
@@ -172,17 +181,23 @@ class DiscordRestClient:
     def _extract_retry_after(response: httpx.Response, parsed_body: Any) -> float:
         if isinstance(parsed_body, Mapping):
             raw_retry = parsed_body.get("retry_after")
-            if isinstance(raw_retry, (int, float)) and raw_retry >= 0:
-                return float(raw_retry)
+            if isinstance(raw_retry, (int, float)) and not isinstance(raw_retry, bool):
+                val = float(raw_retry)
+                if math.isfinite(val) and val >= 0.0:
+                    return val
             if isinstance(raw_retry, str):
                 try:
-                    return max(0.0, float(raw_retry.strip()))
+                    val = float(raw_retry.strip())
+                    if math.isfinite(val) and val >= 0.0:
+                        return val
                 except ValueError:
                     pass
         header_val = response.headers.get("Retry-After") or response.headers.get("X-RateLimit-Reset-After")
         if header_val:
             try:
-                return max(0.0, float(header_val.strip()))
+                val = float(header_val.strip())
+                if math.isfinite(val) and val >= 0.0:
+                    return val
             except ValueError:
                 pass
         return 1.0

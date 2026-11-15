@@ -87,6 +87,8 @@ def iter_markdown_target_spans(
             if ch == "]":
                 if label_depth > 0:
                     label_depth -= 1
+                    if scan + 1 >= n or text[scan + 1] != "(":
+                        first_inner_bracket = -1
                     scan += 1
                     continue
                 close_br = scan
@@ -118,7 +120,6 @@ def iter_markdown_target_spans(
             idx = first_inner_bracket if first_inner_bracket != -1 else close_br + 1
             continue
 
-        label = text[open_br + 1 : close_br]
         p = close_br + 2
         while p < n and text[p] in " \t\r\n":
             p += 1
@@ -129,19 +130,22 @@ def iter_markdown_target_spans(
             break
 
         target = ""
+        raw_angle_range: tuple[int, int] | None = None
         first_target_bracket = -1
         if text[p] == "<":
             if p < unclosed_angle_until:
                 idx = first_inner_bracket if first_inner_bracket != -1 else p + 1
                 continue
             end_angle = p + 1
-            while end_angle < n and text[end_angle] not in ">\r\n":
+            angle_limit = min(n, end_angle + 2048)
+            while end_angle < angle_limit and text[end_angle] not in "<>\r\n":
                 end_angle += 1
-            if end_angle >= n or text[end_angle] != ">":
-                unclosed_angle_until = end_angle
+            if end_angle >= angle_limit or text[end_angle] != ">":
+                if end_angle >= n or text[end_angle] in "\r\n":
+                    unclosed_angle_until = end_angle
                 idx = first_inner_bracket if first_inner_bracket != -1 else p + 1
                 continue
-            target = text[p + 1 : end_angle].strip()
+            raw_angle_range = (p + 1, end_angle)
             p = end_angle + 1
         else:
             start_plain = p
@@ -196,11 +200,14 @@ def iter_markdown_target_spans(
 
         if p < n and text[p] == ")":
             span_end = p + 1
+            label = text[open_br + 1 : close_br]
             if include_nested and had_nested_bracket:
                 for inner_s, inner_e, inner_img, inner_lbl, inner_tgt in iter_markdown_target_spans(
                     label, include_nested=False, _allow_nested_bracket=False
                 ):
                     yield (open_br + 1 + inner_s, open_br + 1 + inner_e, inner_img, inner_lbl, inner_tgt)
+            if raw_angle_range is not None:
+                target = text[raw_angle_range[0] : raw_angle_range[1]].strip()
             if target:
                 yield (span_start, span_end, is_img, label, target)
             idx = span_end
