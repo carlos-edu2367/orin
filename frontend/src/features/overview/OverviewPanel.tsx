@@ -1,10 +1,24 @@
 import { motion, useReducedMotion } from 'motion/react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ApiClient } from '../../api/client'
 import { getConversationOverview, type ConversationOverview, type TokenUsage } from '../../api/conversations'
 import type { AgentEdge, AgentNode, ActivityState, ConversationActivityEvent } from '../conversations/activityTypes'
 import { activityStateLabel, toolKindLabel } from '../conversations/activitySummary'
 import { OrbitalScene } from './OrbitalScene'
+
+const OVERVIEW_POLL_INTERVAL_MS = 4000
+const STRUCTURAL_THROTTLE_MS = 1500
+
+const STRUCTURAL_OVERVIEW_EVENTS = new Set<string>([
+  'agent.created',
+  'delegation.created',
+  'delegation.completed',
+  'delegation.failed',
+  'turn.completed',
+  'turn.failed',
+  'turn.cancelled',
+  'turn.waiting_user',
+])
 
 type OverviewPanelProps = {
   conversationId: string
@@ -26,19 +40,116 @@ export function OverviewPanel({ conversationId, client, liveEvents, onClose }: O
   const [selected, setSelected] = useState<string | null>(null)
   const reduced = useReducedMotion()
 
-  useEffect(() => {
-    let cancelled = false
-    const load = () => {
-      getConversationOverview(client, conversationId)
-        .then((value) => { if (!cancelled) { setOverview(value); setFailed(false) } })
-        .catch(() => { if (!cancelled) setFailed(true) })
+  const mountedRef = useRef(false)
+  const inFlightRef = useRef(false)
+  const pendingStructuralRef = useRef(false)
+  const lastLoadAtRef = useRef(0)
+  const lastStructuralIdRef = useRef<string | null>(null)
+  const throttleTimerRef = useRef<number | null>(null)
+  const loadGenRef = useRef(0)
+
+  const clearThrottleTimer = useCallback(() => {
+    if (throttleTimerRef.current !== null) {
+      window.clearTimeout(throttleTimerRef.current)
+      throttleTimerRef.current = null
     }
+  }, [])
+
+  const load = useCallback(() => {
+    if (!mountedRef.current) return
+    if (inFlightRef.current) {
+      return
+    }
+    const gen = loadGenRef.current
+    inFlightRef.current = true
+    pendingStructuralRef.current = false
+    lastLoadAtRef.current = Date.now()
+    getConversationOverview(client, conversationId)
+      .then((value) => {
+        if (mountedRef.current && loadGenRef.current === gen) {
+          setOverview(value)
+          setFailed(false)
+        }
+      })
+      .catch(() => {
+        if (mountedRef.current && loadGenRef.current === gen) {
+          setFailed(true)
+        }
+      })
+      .finally(() => {
+        if (loadGenRef.current === gen) {
+          inFlightRef.current = false
+          if (pendingStructuralRef.current && mountedRef.current && throttleTimerRef.current === null) {
+            pendingStructuralRef.current = false
+            const remaining = Math.max(0, STRUCTURAL_THROTTLE_MS - (Date.now() - lastLoadAtRef.current))
+            throttleTimerRef.current = window.setTimeout(() => {
+              throttleTimerRef.current = null
+              load()
+            }, remaining)
+          }
+        }
+      })
+  }, [client, conversationId])
+
+  const latestStructuralEventId = useMemo(() => {
+    for (let i = liveEvents.length - 1; i >= 0; i -= 1) {
+      const ev = liveEvents[i]
+      if (ev && STRUCTURAL_OVERVIEW_EVENTS.has(ev.type)) {
+        return ev.eventId
+      }
+    }
+    return null
+  }, [liveEvents])
+
+  useEffect(() => {
+    mountedRef.current = true
+    loadGenRef.current += 1
+    inFlightRef.current = false
+    pendingStructuralRef.current = false
+    lastLoadAtRef.current = 0
+    clearThrottleTimer()
+    lastStructuralIdRef.current = latestStructuralEventId
+
     load()
     // The overview is a projection of the same log the chat streams, so it is
     // refreshed on a slow interval instead of holding a second live connection.
-    const timer = window.setInterval(load, 4000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [client, conversationId, liveEvents.length])
+    const timer = window.setInterval(load, OVERVIEW_POLL_INTERVAL_MS)
+    return () => {
+      mountedRef.current = false
+      loadGenRef.current += 1
+      inFlightRef.current = false
+      pendingStructuralRef.current = false
+      clearThrottleTimer()
+      window.clearInterval(timer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, conversationId, load, clearThrottleTimer])
+
+  useEffect(() => {
+    if (!latestStructuralEventId) return
+    if (latestStructuralEventId === lastStructuralIdRef.current) return
+    lastStructuralIdRef.current = latestStructuralEventId
+
+    if (inFlightRef.current) {
+      pendingStructuralRef.current = true
+      return
+    }
+
+    const elapsed = Date.now() - lastLoadAtRef.current
+    if (elapsed >= STRUCTURAL_THROTTLE_MS) {
+      clearThrottleTimer()
+      load()
+      return
+    }
+
+    if (throttleTimerRef.current === null) {
+      const remaining = Math.max(0, STRUCTURAL_THROTTLE_MS - elapsed)
+      throttleTimerRef.current = window.setTimeout(() => {
+        throttleTimerRef.current = null
+        load()
+      }, remaining)
+    }
+  }, [latestStructuralEventId, load, clearThrottleTimer])
 
   const nodes = useMemo<AgentNode[]>(() => (overview?.agents ?? []).map((agent) => ({
     agentId: agent.agent_id,

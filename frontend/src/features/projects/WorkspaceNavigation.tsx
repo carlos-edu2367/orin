@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiClient, createBrowserApiClient } from '../../api/client'
 import { ensureFriendConversation, listConversations, type Conversation, type ConversationMode } from '../../api/conversations'
@@ -263,21 +263,39 @@ export function WorkspaceNavigation({
     location.pathname.startsWith('/settings/permissions') ||
     location.pathname.startsWith('/settings/trusted-folders')
 
+  const mountedRef = useRef(true)
+  const inFlightRef = useRef(false)
+  const pendingReloadRef = useRef(false)
+
   const reload = useCallback(async () => {
-    const [conversationList, sidebar] = await Promise.all([listConversations(apiClient), listProjectSidebar(apiClient)])
-    const nextChats = Array.isArray(conversationList?.items) ? conversationList.items : []
-    const nextProjects = Array.isArray(sidebar?.items) ? sidebar.items : []
-    setChats(nextChats)
-    onChatsChange?.(nextChats)
-    setProjects(nextProjects)
-    const live: SessionLiveInfo[] = [
-      ...nextChats.map((chat) => ({ id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: null })),
-      ...nextProjects.flatMap((project) => project.chats.map((chat) => ({
-        id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: project.project_id,
-      }))),
-    ]
-    // Both lists are complete, so a pinned tab missing from them was deleted elsewhere.
-    syncSessions(live, { complete: Array.isArray(conversationList?.items) && Array.isArray(sidebar?.items) })
+    if (inFlightRef.current) {
+      pendingReloadRef.current = true
+      return
+    }
+    inFlightRef.current = true
+    try {
+      const [conversationList, sidebar] = await Promise.all([listConversations(apiClient), listProjectSidebar(apiClient)])
+      if (!mountedRef.current) return
+      const nextChats = Array.isArray(conversationList?.items) ? conversationList.items : []
+      const nextProjects = Array.isArray(sidebar?.items) ? sidebar.items : []
+      setChats(nextChats)
+      onChatsChange?.(nextChats)
+      setProjects(nextProjects)
+      const live: SessionLiveInfo[] = [
+        ...nextChats.map((chat) => ({ id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: null })),
+        ...nextProjects.flatMap((project) => project.chats.map((chat) => ({
+          id: chat.conversation_id, title: chat.title, mode: chat.mode, state: chat.state, projectId: project.project_id,
+        }))),
+      ]
+      // Both lists are complete, so a pinned tab missing from them was deleted elsewhere.
+      syncSessions(live, { complete: Array.isArray(conversationList?.items) && Array.isArray(sidebar?.items) })
+    } finally {
+      inFlightRef.current = false
+      if (pendingReloadRef.current && mountedRef.current) {
+        pendingReloadRef.current = false
+        void reload().catch(() => undefined)
+      }
+    }
   }, [apiClient, onChatsChange])
 
   const activeSessionCount = useMemo(() => {
@@ -299,10 +317,12 @@ export function WorkspaceNavigation({
   }, [chats, projects])
 
   useEffect(() => {
+    mountedRef.current = true
     let active = true
     queueMicrotask(() => {
+      if (!mountedRef.current) return
       void reload().catch(() => {
-        if (active) setError('Não foi possível atualizar a navegação.')
+        if (active && mountedRef.current) setError('Não foi possível atualizar a navegação.')
       })
     })
     const onUpdated = () => {
@@ -312,6 +332,8 @@ export function WorkspaceNavigation({
     window.addEventListener('orin:conversations-updated', onUpdated)
     return () => {
       active = false
+      mountedRef.current = false
+      pendingReloadRef.current = false
       window.removeEventListener('orin:projects-updated', onUpdated)
       window.removeEventListener('orin:conversations-updated', onUpdated)
     }

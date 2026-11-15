@@ -163,9 +163,15 @@ function sessionVersionStamp(item: { state: string; updatedAt?: string }): strin
   return `${item.state}:${item.updatedAt ?? ''}`
 }
 
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  return (err as { name?: unknown }).name === 'AbortError'
+}
+
 async function fetchConversationWithRawActivities(
   apiClient: ApiClient,
   conversationId: string,
+  signal?: AbortSignal,
 ): Promise<{ snapshot: Conversation; rawActivities: Array<Record<string, unknown>> }> {
   let rawActivities: Array<Record<string, unknown>> = []
   const proxyClient = Object.create(apiClient) as ApiClient
@@ -174,6 +180,7 @@ async function fetchConversationWithRawActivities(
   ): Promise<T> => {
     return apiClient.request<T>({
       ...(options as Parameters<ApiClient['request']>[0] & { parse: (v: unknown) => T }),
+      signal: signal ?? options.signal,
       parse: (value: unknown): T => {
         if (
           value &&
@@ -398,6 +405,19 @@ export function OrinActivityCenter({
   const rootRef = useRef<HTMLDivElement | null>(null)
   const mountedRef = useRef<boolean>(true)
   const refreshSeqRef = useRef<number>(0)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const suppressSelfRefreshEventRef = useRef<boolean>(false)
+  const detailCacheRef = useRef<
+    Map<
+      string,
+      {
+        updatedAt: string
+        state: string
+        snapshot: Conversation
+        rawActivities: Array<Record<string, unknown>>
+      }
+    >
+  >(new Map())
   const inFlightRef = useRef<Set<string>>(new Set())
   const locallyResolvedRef = useRef<Set<string>>(new Set())
   const activeBackgroundIdsRef = useRef<Set<string>>(new Set())
@@ -414,12 +434,16 @@ export function OrinActivityCenter({
   >([])
 
   const refreshActivityCenter = useCallback(async () => {
+    abortControllerRef.current?.abort()
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+    const { signal } = controller
     const seq = ++refreshSeqRef.current
     const [convResp, projectResp] = await Promise.all([
       listConversations(apiClient).catch(() => ({ items: [] })),
       listProjectSidebar(apiClient).catch((): { items: ProjectSidebarItem[] } => ({ items: [] })),
     ])
-    if (!mountedRef.current || seq !== refreshSeqRef.current) return
+    if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current) return
 
     const convList = Array.isArray(convResp?.items) ? convResp.items : []
     const projectList = Array.isArray(projectResp?.items) ? projectResp.items : []
@@ -465,6 +489,17 @@ export function OrinActivityCenter({
 
     const catalog = Array.from(catalogMap.values())
     latestCatalogRef.current = catalog
+
+    for (const cachedId of detailCacheRef.current.keys()) {
+      if (!catalogMap.has(cachedId) && cachedId !== activeConversationId) {
+        detailCacheRef.current.delete(cachedId)
+      }
+    }
+    for (const entry of catalog) {
+      if (entry.state !== 'waiting_user' || !entry.updatedAt) {
+        detailCacheRef.current.delete(entry.conversationId)
+      }
+    }
 
     const lastSeen = readLastSeenMap()
     const isFirstSeed = !hasSeededInitialRef.current && Object.keys(lastSeen).length === 0
@@ -516,19 +551,73 @@ export function OrinActivityCenter({
       })
     }
 
-    const detailResults = await Promise.all(
-      inspectCandidates.map(async (entry) => {
+    const detailResults: Array<{
+      entry: (typeof inspectCandidates)[number]
+      snapshot: Conversation
+      rawActivities: Array<Record<string, unknown>>
+    } | null> = new Array(inspectCandidates.length).fill(null)
+
+    const uncachedQueue: Array<{
+      index: number
+      entry: (typeof inspectCandidates)[number]
+    }> = []
+
+    for (let i = 0; i < inspectCandidates.length; i += 1) {
+      const entry = inspectCandidates[i]
+      if (entry.state === 'waiting_user' && Boolean(entry.updatedAt)) {
+        const cached = detailCacheRef.current.get(entry.conversationId)
+        if (cached && cached.state === entry.state && cached.updatedAt === entry.updatedAt) {
+          detailResults[i] = {
+            entry,
+            snapshot: cached.snapshot,
+            rawActivities: cached.rawActivities,
+          }
+          continue
+        }
+      }
+      uncachedQueue.push({ index: i, entry })
+    }
+
+    const maxConcurrency = 2
+    let cursor = 0
+    const workerCount = Math.min(maxConcurrency, uncachedQueue.length)
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (!signal.aborted && mountedRef.current && seq === refreshSeqRef.current) {
+        const nextIdx = cursor
+        cursor += 1
+        if (nextIdx >= uncachedQueue.length) break
+        const { index, entry } = uncachedQueue[nextIdx]
         try {
           const { snapshot, rawActivities } = await fetchConversationWithRawActivities(
             apiClient,
             entry.conversationId,
+            signal,
           )
-          return { entry, snapshot, rawActivities }
-        } catch {
-          return null
+          if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current) {
+            return
+          }
+          if (entry.state === 'waiting_user' && Boolean(entry.updatedAt)) {
+            detailCacheRef.current.set(entry.conversationId, {
+              updatedAt: entry.updatedAt,
+              state: entry.state,
+              snapshot,
+              rawActivities,
+            })
+          } else {
+            detailCacheRef.current.delete(entry.conversationId)
+          }
+          detailResults[index] = { entry, snapshot, rawActivities }
+        } catch (err) {
+          if (isAbortError(err) || signal.aborted) {
+            return
+          }
+          detailResults[index] = null
         }
-      }),
-    )
+      }
+    })
+
+    await Promise.all(workers)
+    if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current) return
 
     const nextApprovals: PendingApprovalItem[] = []
     const conversationsWithPendingApprovals = new Set<string>()
@@ -579,7 +668,7 @@ export function OrinActivityCenter({
       }
     }
 
-    if (!mountedRef.current || seq !== refreshSeqRef.current) return
+    if (signal.aborted || !mountedRef.current || seq !== refreshSeqRef.current) return
     setApprovals(nextApprovals)
     setUnreadUpdates(nextUnread)
   }, [apiClient, activeConversationId])
@@ -592,6 +681,7 @@ export function OrinActivityCenter({
     }, POLL_INTERVAL_MS)
 
     const handleRefreshEvent = () => {
+      if (suppressSelfRefreshEventRef.current) return
       void refreshActivityCenter()
     }
 
@@ -601,6 +691,8 @@ export function OrinActivityCenter({
 
     return () => {
       mountedRef.current = false
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
       window.clearInterval(intervalId)
       window.removeEventListener('orin:conversations-updated', handleRefreshEvent)
       window.removeEventListener('orin:projects-updated', handleRefreshEvent)
@@ -687,8 +779,13 @@ export function OrinActivityCenter({
       await task()
       locallyResolvedRef.current.add(actionKey)
       setApprovals((prev) => prev.filter((item) => item.key !== actionKey))
-      window.dispatchEvent(new CustomEvent('orin:conversations-updated'))
-      window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      suppressSelfRefreshEventRef.current = true
+      try {
+        window.dispatchEvent(new CustomEvent('orin:conversations-updated'))
+        window.dispatchEvent(new CustomEvent('orin:activity-center-refresh'))
+      } finally {
+        suppressSelfRefreshEventRef.current = false
+      }
       onApprovalResolved?.()
       await refreshActivityCenter()
     } catch (caught) {
@@ -703,6 +800,48 @@ export function OrinActivityCenter({
         return next
       })
     }
+  }
+
+  function handleResolveToolPermission(
+    item: PendingToolPermissionApproval,
+    decision: 'allow_once' | 'allow_always' | 'deny',
+  ) {
+    detailCacheRef.current.delete(item.conversationId)
+    void runGuardedAction(item.key, async () => {
+      await submitToolPermission(
+        apiClient,
+        item.conversationId,
+        item.turnId,
+        item.requestId,
+        decision,
+      )
+      detailCacheRef.current.delete(item.conversationId)
+    })
+  }
+
+  function handleResolvePlan(item: PendingPlanApproval) {
+    detailCacheRef.current.delete(item.conversationId)
+    void runGuardedAction(item.key, async () => {
+      await updateConversationPermissionMode(
+        apiClient,
+        item.conversationId,
+        'accept_edits',
+      ).catch(() => undefined)
+      await sendConversationMessage(apiClient, item.conversationId, {
+        message: 'Plano aprovado. Pode executar.',
+        mode: 'code',
+        permission_mode: 'accept_edits',
+      })
+      detailCacheRef.current.delete(item.conversationId)
+    })
+  }
+
+  function handleTrustWorkspace(item: PendingWorkspaceTrustApproval) {
+    detailCacheRef.current.delete(item.conversationId)
+    void runGuardedAction(item.key, async () => {
+      await trustConversationWorkspace(apiClient, item.conversationId)
+      detailCacheRef.current.delete(item.conversationId)
+    })
   }
 
   const classes = ['orin-activity-center', className].filter(Boolean).join(' ')
@@ -830,17 +969,7 @@ export function OrinActivityCenter({
                                   className="orin-activity-center__btn orin-activity-center__btn--primary"
                                   data-testid={`activity-center-allow-once-${item.requestId}`}
                                   disabled={busy}
-                                  onClick={() =>
-                                    void runGuardedAction(item.key, async () => {
-                                      await submitToolPermission(
-                                        apiClient,
-                                        item.conversationId,
-                                        item.turnId,
-                                        item.requestId,
-                                        'allow_once',
-                                      )
-                                    })
-                                  }
+                                  onClick={() => handleResolveToolPermission(item, 'allow_once')}
                                 >
                                   Permitir
                                 </button>
@@ -849,17 +978,7 @@ export function OrinActivityCenter({
                                   className="orin-activity-center__btn orin-activity-center__btn--secondary"
                                   data-testid={`activity-center-allow-always-${item.requestId}`}
                                   disabled={busy}
-                                  onClick={() =>
-                                    void runGuardedAction(item.key, async () => {
-                                      await submitToolPermission(
-                                        apiClient,
-                                        item.conversationId,
-                                        item.turnId,
-                                        item.requestId,
-                                        'allow_always',
-                                      )
-                                    })
-                                  }
+                                  onClick={() => handleResolveToolPermission(item, 'allow_always')}
                                 >
                                   Sempre permitir
                                 </button>
@@ -868,17 +987,7 @@ export function OrinActivityCenter({
                                   className="orin-activity-center__btn orin-activity-center__btn--danger"
                                   data-testid={`activity-center-deny-${item.requestId}`}
                                   disabled={busy}
-                                  onClick={() =>
-                                    void runGuardedAction(item.key, async () => {
-                                      await submitToolPermission(
-                                        apiClient,
-                                        item.conversationId,
-                                        item.turnId,
-                                        item.requestId,
-                                        'deny',
-                                      )
-                                    })
-                                  }
+                                  onClick={() => handleResolveToolPermission(item, 'deny')}
                                 >
                                   Negar
                                 </button>
@@ -892,20 +1001,7 @@ export function OrinActivityCenter({
                                 type="button"
                                 className="orin-activity-center__btn orin-activity-center__btn--primary"
                                 disabled={busy}
-                                onClick={() =>
-                                  void runGuardedAction(item.key, async () => {
-                                    await updateConversationPermissionMode(
-                                      apiClient,
-                                      item.conversationId,
-                                      'accept_edits',
-                                    ).catch(() => undefined)
-                                    await sendConversationMessage(apiClient, item.conversationId, {
-                                      message: 'Plano aprovado. Pode executar.',
-                                      mode: 'code',
-                                      permission_mode: 'accept_edits',
-                                    })
-                                  })
-                                }
+                                onClick={() => handleResolvePlan(item)}
                               >
                                 Aprovar plano
                               </button>
@@ -927,11 +1023,7 @@ export function OrinActivityCenter({
                                 type="button"
                                 className="orin-activity-center__btn orin-activity-center__btn--primary"
                                 disabled={busy}
-                                onClick={() =>
-                                  void runGuardedAction(item.key, async () => {
-                                    await trustConversationWorkspace(apiClient, item.conversationId)
-                                  })
-                                }
+                                onClick={() => handleTrustWorkspace(item)}
                               >
                                 Confiar na pasta
                               </button>
@@ -953,11 +1045,13 @@ export function OrinActivityCenter({
                                 type="button"
                                 className="orin-activity-center__btn orin-activity-center__btn--primary"
                                 disabled={busy}
-                                onClick={() =>
+                                onClick={() => {
+                                  detailCacheRef.current.delete(item.conversationId)
                                   void runGuardedAction(item.key, async () => {
                                     await approvePlugin(apiClient, item.pluginId)
+                                    detailCacheRef.current.delete(item.conversationId)
                                   })
-                                }
+                                }}
                               >
                                 Aprovar plugin
                               </button>
@@ -980,11 +1074,13 @@ export function OrinActivityCenter({
                                   type="button"
                                   className="orin-activity-center__btn orin-activity-center__btn--primary"
                                   disabled={busy}
-                                  onClick={() =>
+                                  onClick={() => {
+                                    detailCacheRef.current.delete(item.conversationId)
                                     void runGuardedAction(item.key, async () => {
                                       await approveMcpServer(apiClient, item.serverId, {})
+                                      detailCacheRef.current.delete(item.conversationId)
                                     })
-                                  }
+                                  }}
                                 >
                                   Aprovar MCP
                                 </button>
