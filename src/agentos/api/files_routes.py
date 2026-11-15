@@ -35,46 +35,66 @@ def register_files_routes(app: FastAPI, services, principal_for: Callable[..., A
 
     @app.get("/v1/files")
     async def list_files(request: Request, path: str = "") -> JSONResponse:
-        current = principal(request, mutable=False, purpose="files.list")
-        try:
-            return JSONResponse(list_folder(files_root(current.user_id), path))
-        except ProfileFolderRejected as error:
-            raise ApplicationNotFoundError(path) from error
+        def _list() -> dict[str, object]:
+            current = principal(request, mutable=False, purpose="files.list")
+            try:
+                return list_folder(files_root(current.user_id), path)
+            except ProfileFolderRejected as error:
+                raise ApplicationNotFoundError(path) from error
+
+        return JSONResponse(await run_in_threadpool(_list))
 
     @app.post("/v1/files/folders", status_code=201)
     async def create_folder(payload: CreateFolderRequest, request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="files.folder.create")
-        try:
-            created = make_folder(files_root(current.user_id), payload.parent, payload.name)
-        except ProfileFolderRejected as error:
-            raise ApplicationValidationError(str(error)) from error
+        def _create() -> str:
+            current = principal(request, mutable=True, purpose="files.folder.create")
+            try:
+                return make_folder(files_root(current.user_id), payload.parent, payload.name)
+            except ProfileFolderRejected as error:
+                raise ApplicationValidationError(str(error)) from error
+
+        created = await run_in_threadpool(_create)
         return JSONResponse({"path": created}, status_code=201)
 
     @app.post("/v1/files/import", status_code=201)
     async def import_archive(request: Request, file: UploadFile = File(...), folder_name: str = Form(default=""), parent: str = Form(default="")) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="files.import")
+        def _auth_and_open_spool():
+            current = principal(request, mutable=True, purpose="files.import")
+            return current, tempfile.TemporaryFile()
+
+        current, spooled = await run_in_threadpool(_auth_and_open_spool)
         name = folder_name.strip() or (file.filename or "importado").rsplit(".", 1)[0]
-        with tempfile.TemporaryFile() as spooled:
+        try:
             size = 0
             while chunk := await file.read(1024 * 1024):
                 size += len(chunk)
                 if size > MAX_IMPORT_BYTES:
                     raise ArchiveRejected("upload is larger than allowed")
-                spooled.write(chunk)
-            spooled.seek(0)
-            created = await run_in_threadpool(extract_zip, spooled, files_root(current.user_id), parent, name)
+                await run_in_threadpool(spooled.write, chunk)
+
+            def _extract() -> str:
+                spooled.seek(0)
+                return extract_zip(spooled, files_root(current.user_id), parent, name)
+
+            created = await run_in_threadpool(_extract)
+        finally:
+            await run_in_threadpool(spooled.close)
         return JSONResponse({"path": created}, status_code=201)
 
     @app.get("/v1/files/download")
     async def download_file(request: Request, path: str) -> FileResponse:
-        current = principal(request, mutable=False, purpose="files.download")
-        try:
-            target = resolve_inside(files_root(current.user_id), path)
-        except ProfileFolderRejected as error:
-            raise ApplicationNotFoundError(path) from error
-        if not target.is_file():
-            raise ApplicationNotFoundError(path)
-        return FileResponse(target, media_type=media_type_for(target), filename=target.name, content_disposition_type="attachment", headers={"X-Content-Type-Options": "nosniff"})
+        def _resolve():
+            current = principal(request, mutable=False, purpose="files.download")
+            try:
+                target = resolve_inside(files_root(current.user_id), path)
+            except ProfileFolderRejected as error:
+                raise ApplicationNotFoundError(path) from error
+            if not target.is_file():
+                raise ApplicationNotFoundError(path)
+            return target, media_type_for(target)
+
+        target, media_type = await run_in_threadpool(_resolve)
+        return FileResponse(target, media_type=media_type, filename=target.name, content_disposition_type="attachment", headers={"X-Content-Type-Options": "nosniff"})
 
 
 __all__ = ["register_files_routes"]

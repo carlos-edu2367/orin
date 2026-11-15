@@ -334,9 +334,8 @@ def register_scene_character_routes(
 
     @app.get("/v1/scene/characters")
     async def get_scene_characters(request: Request) -> JSONResponse:
-        current = principal(request, mutable=False, purpose="scene.characters.get")
-
         def load() -> dict[str, Any]:
+            current = principal(request, mutable=False, purpose="scene.characters.get")
             with _user_lock(current.user_id):
                 root = scene_characters_root(current.user_id)
                 state = _load_state_unlocked(root)
@@ -349,7 +348,9 @@ def register_scene_character_routes(
 
     @app.put("/v1/scene/characters/names")
     async def put_scene_character_names(request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="scene.characters.names.update")
+        current = await run_in_threadpool(
+            lambda: principal(request, mutable=True, purpose="scene.characters.names.update")
+        )
         try:
             body = await request.json()
         except Exception:
@@ -392,7 +393,9 @@ def register_scene_character_routes(
 
     @app.post("/v1/scene/characters", status_code=201)
     async def create_scene_character(request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="scene.characters.create")
+        current = await run_in_threadpool(
+            lambda: principal(request, mutable=True, purpose="scene.characters.create")
+        )
         content_type = (request.headers.get("content-type") or "").lower()
         if "multipart/form-data" not in content_type:
             return _rejected("invalid_character", ["multipart/form-data with 'name' and 'idle' is required"])
@@ -469,16 +472,21 @@ def register_scene_character_routes(
 
     @app.patch("/v1/scene/characters/{character_id}")
     async def update_scene_character(character_id: str, request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="scene.characters.update")
         clean_id = (character_id or "").strip()
-        if not _CHARACTER_ID_RE.fullmatch(clean_id):
-            return _not_found(clean_id)
 
-        with _user_lock(current.user_id):
-            root = scene_characters_root(current.user_id)
-            initial_state = _load_state_unlocked(root)
-            if not any(c["id"] == clean_id for c in initial_state["characters"]):
-                return _not_found(clean_id)
+        def _auth_and_check_exists() -> tuple[AuthenticatedPrincipal, bool]:
+            cur = principal(request, mutable=True, purpose="scene.characters.update")
+            if not _CHARACTER_ID_RE.fullmatch(clean_id):
+                return cur, False
+            with _user_lock(cur.user_id):
+                root = scene_characters_root(cur.user_id)
+                initial_state = _load_state_unlocked(root)
+                exists = any(c["id"] == clean_id for c in initial_state["characters"])
+                return cur, exists
+
+        current, exists = await run_in_threadpool(_auth_and_check_exists)
+        if not exists:
+            return _not_found(clean_id)
 
         content_type = (request.headers.get("content-type") or "").lower()
         new_name_raw: Any = None
@@ -580,12 +588,12 @@ def register_scene_character_routes(
 
     @app.delete("/v1/scene/characters/{character_id}")
     async def delete_scene_character(character_id: str, request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="scene.characters.delete")
         clean_id = (character_id or "").strip()
-        if not _CHARACTER_ID_RE.fullmatch(clean_id):
-            return _not_found(clean_id)
 
         def delete() -> JSONResponse:
+            current = principal(request, mutable=True, purpose="scene.characters.delete")
+            if not _CHARACTER_ID_RE.fullmatch(clean_id):
+                return _not_found(clean_id)
             with _user_lock(current.user_id):
                 root = scene_characters_root(current.user_id)
                 state = _load_state_unlocked(root)
@@ -612,13 +620,13 @@ def register_scene_character_routes(
 
     @app.get("/v1/scene/characters/{character_id}/{pose}.png")
     async def get_scene_character_pose_image(character_id: str, pose: str, request: Request):
-        current = principal(request, mutable=False, purpose="scene.characters.image")
         clean_id = (character_id or "").strip()
         clean_pose = (pose or "").strip().lower()
-        if not _CHARACTER_ID_RE.fullmatch(clean_id) or clean_pose not in VALID_POSES:
-            return _not_found(clean_id)
 
         def locate() -> Path | None:
+            current = principal(request, mutable=False, purpose="scene.characters.image")
+            if not _CHARACTER_ID_RE.fullmatch(clean_id) or clean_pose not in VALID_POSES:
+                return None
             with _user_lock(current.user_id):
                 root = scene_characters_root(current.user_id)
                 state = _load_state_unlocked(root)
@@ -645,7 +653,9 @@ def register_scene_character_routes(
 
     @app.put("/v1/scene/characters/bindings")
     async def put_scene_character_bindings(request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="scene.characters.bindings.update")
+        current = await run_in_threadpool(
+            lambda: principal(request, mutable=True, purpose="scene.characters.bindings.update")
+        )
         try:
             body = await request.json()
         except Exception:

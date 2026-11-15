@@ -788,11 +788,12 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
     import ast
 
     # 1. Static AST invariant check across all API and production bootstrap modules:
-    # No async def handler may invoke synchronous auth/rate-limit/workspace helpers directly on the event loop.
+    # No async def handler may invoke synchronous auth/rate-limit/workspace/lock/disk helpers directly on the event loop,
+    # either directly, via a transitive sync `def` wrapper, or as an eagerly-evaluated argument to `run_in_threadpool`.
     api_dir = Path(__file__).resolve().parents[3] / "src" / "agentos" / "api"
     prod_file = Path(__file__).resolve().parents[3] / "src" / "agentos" / "bootstrap" / "production.py"
     targets = sorted(api_dir.glob("*.py")) + [prod_file]
-    forbidden_sync_helpers = {
+    base_forbidden_sync_helpers = {
         "principal_for",
         "check_rate_limit",
         "exclusive_folder",
@@ -800,33 +801,91 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
         "conversation_workspace",
         "conversation_root",
         "folder_of",
+        "files_root",
+        "scene_characters_root",
+        "_user_lock",
+        "_load_state_unlocked",
+        "_save_state_unlocked",
+        "list_folder",
+        "make_folder",
+        "resolve_inside",
+        "extract_zip",
+        "TemporaryFile",
+        "_store_for",
+        "_discord_store_for",
+        "_discord_bridge_for",
+        "_persona_store_for",
+        "_memory_store_for",
     }
+
+    def _call_name(call_node: ast.Call) -> str | None:
+        fn = call_node.func
+        if isinstance(fn, ast.Name):
+            return fn.id
+        if isinstance(fn, ast.Attribute):
+            return fn.attr
+        return None
+
     violations: list[str] = []
     for path in targets:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+        # Compute per-file transitive closure of sync `def` functions that call any forbidden helper
+        sync_defs: dict[str, list[ast.FunctionDef]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                sync_defs.setdefault(node.name, []).append(node)
+
+        forbidden_in_file = set(base_forbidden_sync_helpers)
+        changed = True
+        while changed:
+            changed = False
+            for def_name, def_nodes in sync_defs.items():
+                if def_name in forbidden_in_file:
+                    continue
+                for def_node in def_nodes:
+                    for sub in ast.walk(def_node):
+                        if isinstance(sub, ast.Call) and _call_name(sub) in forbidden_in_file:
+                            forbidden_in_file.add(def_name)
+                            changed = True
+                            break
+
         for node in ast.walk(tree):
             if isinstance(node, ast.AsyncFunctionDef):
                 stack = list(node.body)
                 while stack:
                     cur = stack.pop(0)
-                    if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         continue
                     if isinstance(cur, ast.Call):
-                        fn = cur.func
-                        name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else None)
-                        if name in forbidden_sync_helpers:
-                            violations.append(f"{path.name}:{cur.lineno} in async def {node.name} calls {name}(...)")
+                        name = _call_name(cur)
                         if name == "run_in_threadpool":
+                            # Only args[0] when it is a Lambda (or a function reference, not a Call) is deferred to the threadpool;
+                            # any Call inside args[0] (if not Lambda), args[1:], or keywords is evaluated EAGERLY on the event loop!
+                            if cur.args:
+                                first_arg = cur.args[0]
+                                if not isinstance(first_arg, ast.Lambda):
+                                    stack.append(first_arg)
+                                stack.extend(cur.args[1:])
+                            stack.extend(cur.keywords)
                             continue
+                        if name in forbidden_in_file:
+                            violations.append(f"{path.name}:{cur.lineno} in async def {node.name} calls {name}(...)")
                     stack.extend(ast.iter_child_nodes(cur))
 
     assert not violations, f"Synchronous helpers called on event loop: {violations}"
 
-    # 2. Runtime concurrency check: slow principal_for / delete_conversation / list_tasks in conversation_routes
-    # must run on worker threads and never block fast /v1/plugins requests.
+    # 2. Runtime concurrency check: slow principal_for / delete_conversation / list_tasks / custom-agents / files /
+    # scene_characters (including contended _user_lock) must run on worker threads and never block fast /v1/plugins.
+    from agentos.api.scene_character_routes import _user_lock
+
     class SlowSubrouterSecurity(InMemorySecurityService):
         def check_rate_limit(self, principal, *, action: str = "", origin: str | None = None) -> None:
-            if action == "DELETE:/v1/conversations/conv-del":
+            if action in {
+                "DELETE:/v1/conversations/conv-del",
+                "GET:/v1/custom-agents",
+                "GET:/v1/files",
+            }:
                 time.sleep(SLOW_SECONDS)
             super().check_rate_limit(principal, action=action, origin=origin)
 
@@ -839,26 +898,36 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
         def delete(self, conversation_id: str, user_id: str) -> None:
             return None
 
+    class FakeUserAgents:
+        def list(self, user_id: str):
+            return []
+
     class FakePlugins:
         def list(self, user_id: str):
             return []
 
     security = SlowSubrouterSecurity()
     security.add_pat("pat", AuthenticatedPrincipal("user-1", "credential-1", frozenset({"api"})))
-    app = create_app(
-        ApiServices(
-            security=security,
-            conversation_application=FakeConversations(),  # type: ignore[arg-type]
-            plugins=FakePlugins(),  # type: ignore[arg-type]
-            workspace_root=tmp_path / "workspaces",
-        )
+    services = ApiServices(
+        security=security,
+        conversation_application=FakeConversations(),  # type: ignore[arg-type]
+        plugins=FakePlugins(),  # type: ignore[arg-type]
+        workspace_root=tmp_path / "workspaces",
     )
+    services.user_agents = FakeUserAgents()  # type: ignore[attr-defined]
+    app = create_app(services)
 
     async def slow_delete(client: AsyncClient):
         return await client.delete("/v1/conversations/conv-del", headers=_headers("del-1"))
 
     async def slow_tasks(client: AsyncClient):
         return await client.get("/v1/conversations/conv-tasks-slow/tasks", headers=_headers("tasks-1"))
+
+    async def slow_custom_agents(client: AsyncClient):
+        return await client.get("/v1/custom-agents", headers=_headers("ca-1"))
+
+    async def slow_files(client: AsyncClient):
+        return await client.get("/v1/files", headers=_headers("files-1"))
 
     async def fast_plugins(client: AsyncClient):
         return await client.get("/v1/plugins", headers=_headers("fast-1"))
@@ -868,4 +937,47 @@ def test_subrouter_endpoints_offload_principal_for_and_conversation_root_to_thre
 
     elapsed_tasks = asyncio.run(_measure_fast_request_under_slow_load(app, slow_tasks, fast_plugins))
     assert elapsed_tasks < SLOW_SECONDS / 2, f"GET /v1/conversations/{{id}}/tasks blocked event loop ({elapsed_tasks:.3f}s)"
+
+    elapsed_ca = asyncio.run(_measure_fast_request_under_slow_load(app, slow_custom_agents, fast_plugins))
+    assert elapsed_ca < SLOW_SECONDS / 2, f"GET /v1/custom-agents blocked event loop ({elapsed_ca:.3f}s)"
+
+    elapsed_files = asyncio.run(_measure_fast_request_under_slow_load(app, slow_files, fast_plugins))
+    assert elapsed_files < SLOW_SECONDS / 2, f"GET /v1/files blocked event loop ({elapsed_files:.3f}s)"
+
+    # Hold _user_lock("user-1") from a background thread while PATCH /v1/scene/characters/char_12345678 runs:
+    # must NOT block the event loop!
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_scene_lock() -> None:
+        with _user_lock("user-1"):
+            lock_held.set()
+            release_lock.wait(timeout=5.0)
+
+    holder = threading.Thread(target=hold_scene_lock)
+    holder.start()
+    try:
+        assert lock_held.wait(timeout=2.0)
+
+        async def slow_scene_patch(client: AsyncClient):
+            return await client.patch(
+                "/v1/scene/characters/char_12345678",
+                headers=_headers("scene-1"),
+                json={"name": "Bento"},
+            )
+
+        def release_soon() -> None:
+            time.sleep(SLOW_SECONDS)
+            release_lock.set()
+
+        releaser = threading.Thread(target=release_soon)
+        releaser.start()
+        try:
+            elapsed_scene = asyncio.run(_measure_fast_request_under_slow_load(app, slow_scene_patch, fast_plugins))
+            assert elapsed_scene < SLOW_SECONDS / 2, f"PATCH /v1/scene/characters blocked event loop on _user_lock ({elapsed_scene:.3f}s)"
+        finally:
+            releaser.join(timeout=2.0)
+    finally:
+        release_lock.set()
+        holder.join(timeout=2.0)
 

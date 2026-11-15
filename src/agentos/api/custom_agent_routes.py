@@ -139,18 +139,20 @@ def register_custom_agent_routes(app: FastAPI, services: Any, principal_for: Any
 
     @app.get("/v1/custom-agents")
     async def list_custom_agents(request: Request) -> JSONResponse:
-        current = principal(request, mutable=False, purpose="agents.custom.list")
-        store = _store_for(services)
-        agents = await run_in_threadpool(store.list, current.user_id)
-        return JSONResponse({"agents": agents, "limit": MAX_USER_AGENTS})
+        def _list() -> dict[str, Any]:
+            current = principal(request, mutable=False, purpose="agents.custom.list")
+            store = _store_for(services)
+            agents = store.list(current.user_id)
+            return {"agents": agents, "limit": MAX_USER_AGENTS}
+
+        return JSONResponse(await run_in_threadpool(_list))
 
     @app.post("/v1/custom-agents")
     async def create_custom_agent(request: Request, body: CustomAgentCreate) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="agents.custom.create")
-        store = _store_for(services)
-        name = clean_name(body.name)
-
         def create() -> JSONResponse:
+            current = principal(request, mutable=True, purpose="agents.custom.create")
+            store = _store_for(services)
+            name = clean_name(body.name)
             values, problems = validate(store, current.user_id, name, body)
             if problems:
                 return _rejected("invalid_agent", problems)
@@ -166,11 +168,10 @@ def register_custom_agent_routes(app: FastAPI, services: Any, principal_for: Any
 
     @app.put("/v1/custom-agents/{name}")
     async def update_custom_agent(name: str, request: Request, body: CustomAgentFields) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="agents.custom.update")
-        store = _store_for(services)
-        clean = clean_name(name)
-
         def save() -> JSONResponse:
+            current = principal(request, mutable=True, purpose="agents.custom.update")
+            store = _store_for(services)
+            clean = clean_name(name)
             if store.get(current.user_id, clean) is None:
                 return _not_found(clean)
             values, problems = validate(store, current.user_id, clean, body)
@@ -183,11 +184,14 @@ def register_custom_agent_routes(app: FastAPI, services: Any, principal_for: Any
 
     @app.delete("/v1/custom-agents/{name}")
     async def delete_custom_agent(name: str, request: Request) -> JSONResponse:
-        current = principal(request, mutable=True, purpose="agents.custom.delete")
-        store = _store_for(services)
-        clean = clean_name(name)
-        deleted = await run_in_threadpool(store.delete, current.user_id, clean)
-        return JSONResponse({"deleted": True, "name": clean}) if deleted else _not_found(clean)
+        def _delete() -> JSONResponse:
+            current = principal(request, mutable=True, purpose="agents.custom.delete")
+            store = _store_for(services)
+            clean = clean_name(name)
+            deleted = store.delete(current.user_id, clean)
+            return JSONResponse({"deleted": True, "name": clean}) if deleted else _not_found(clean)
+
+        return await run_in_threadpool(_delete)
 
 
 __all__ = ["CustomAgentCreate", "CustomAgentFields", "register_custom_agent_routes", "validate"]
