@@ -497,11 +497,11 @@ class SessionWatchCoordinator:
                 except Exception:
                     _LOGGER.exception("Failed processing session watch %s", watch.watch_id)
 
-        # Outside _tick_lock: give newly spawned background wakeup tasks a brief slice (up to 750ms)
+        # Outside _tick_lock: give newly spawned background wakeup tasks a brief slice (up to 1.5s)
         # so fast in-memory test turns complete deterministically while slow LLM turns never block tick().
         new_tasks = [t for t in (self._bridge._background_tasks - before_tasks) if not t.done()]
         if new_tasks:
-            await asyncio.wait(new_tasks, timeout=0.75)
+            await asyncio.wait(new_tasks, timeout=1.5)
         return processed
 
     def _discover_blocked_code_sessions_sync(
@@ -1893,6 +1893,7 @@ class DiscordBridgeService:
             res = self._turn_executor(conversation_id, turn_id)
             if asyncio.iscoroutine(res) or isinstance(res, Awaitable):
                 executor_task = asyncio.create_task(res)  # type: ignore[arg-type]
+                await asyncio.wait([executor_task], timeout=0.05)
 
         try:
             published_in_turn_fps: set[str] = set()
