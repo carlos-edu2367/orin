@@ -3461,8 +3461,10 @@ class PostgresChatStore:
                 ).scalar_one()
                 or 0
             )
-            activity = c.execute(
+            raw_activity = c.execute(
                 select(
+                    conversation_activity_events.c.id,
+                    conversation_activity_events.c.user_id,
                     conversation_activity_events.c.event_id,
                     conversation_activity_events.c.event_type,
                     conversation_activity_events.c.agent_id,
@@ -3472,11 +3474,13 @@ class PostgresChatStore:
                 )
                 .where(
                     conversation_activity_events.c.conversation_id == conversation_id,
-                    conversation_activity_events.c.user_id == user_id,
                     conversation_activity_events.c.event_type.in_(overview_event_types),
                 )
-                .order_by(conversation_activity_events.c.id)
             ).mappings().all()
+            activity = sorted(
+                (r for r in raw_activity if r["user_id"] == user_id),
+                key=lambda r: int(r["id"]),
+            )
         pricing_by_model: dict[tuple[str, str], Mapping[str, object]] = {
             (str(r["provider"]), str(r["model_id"])): {
                 "input_per_million": r["input_per_million"],
@@ -3812,15 +3816,12 @@ class PostgresChatStore:
                     )
                     .where(
                         conversation_turns.c.state == "paused",
-                        (
-                            func.coalesce(
-                                conversation_dispatches.c.updated_at,
-                                conversation_turns.c.updated_at,
-                                conversation_turns.c.created_at,
-                            )
-                            < cutoff
+                        func.coalesce(
+                            conversation_dispatches.c.updated_at,
+                            conversation_turns.c.updated_at,
+                            conversation_turns.c.created_at,
                         )
-                        | (conversation_turns.c.updated_at < cutoff),
+                        < cutoff,
                     )
                     .order_by(conversation_turns.c.created_at.asc())
                 )
@@ -3845,6 +3846,114 @@ class PostgresChatStore:
                 or "ABANDONED_PAUSED_TURN_EXPIRED"
             )
             now = datetime.now(UTC)
+
+            try:
+                view = exec_query.get(
+                    {
+                        "resource_id": exec_id,
+                        "user_id": uid,
+                        "purpose": "execution.read",
+                    }
+                )
+                exec_state = str(view.get("state") or "")
+                if exec_state not in {"COMPLETED", "FAILED", "CANCELLED"}:
+                    raw_exec_updated = view.get("updated_at")
+                    exec_updated_at: datetime | None = None
+                    if isinstance(raw_exec_updated, datetime):
+                        exec_updated_at = (
+                            raw_exec_updated
+                            if raw_exec_updated.tzinfo is not None
+                            else raw_exec_updated.replace(tzinfo=UTC)
+                        )
+                    elif isinstance(raw_exec_updated, str) and raw_exec_updated.strip():
+                        try:
+                            parsed_dt = datetime.fromisoformat(
+                                raw_exec_updated.replace("Z", "+00:00")
+                            )
+                            exec_updated_at = (
+                                parsed_dt
+                                if parsed_dt.tzinfo is not None
+                                else parsed_dt.replace(tzinfo=UTC)
+                            )
+                        except ValueError:
+                            exec_updated_at = None
+
+                    is_initial_queued = (
+                        exec_state == "QUEUED"
+                        and int(view.get("state_version") or 1) == 1
+                    )
+                    if (
+                        exec_state != "PAUSED"
+                        and not is_initial_queued
+                        and exec_updated_at is not None
+                        and exec_updated_at >= cutoff
+                    ):
+                        continue
+
+                    if exec_state == "QUEUED":
+                        view = exec_app.transition(
+                            {
+                                "execution_id": exec_id,
+                                "user_id": uid,
+                                "target_state": "STARTING",
+                                "reason_code": "abandoned_paused_turn_expired",
+                                "result_ref": None,
+                                "expected_state_version": int(view["state_version"]),
+                                "idempotency_key": f"expire-paused-start:{tid}",
+                                "requested_at": now,
+                            }
+                        )
+                        exec_state = "STARTING"
+                    if exec_state in {
+                        "PAUSED",
+                        "STARTING",
+                        "RUNNING",
+                        "WAITING_TOOL",
+                        "WAITING_USER",
+                    }:
+                        exec_app.transition(
+                            {
+                                "execution_id": exec_id,
+                                "user_id": uid,
+                                "target_state": "FAILED",
+                                "reason_code": "abandoned_paused_turn_expired",
+                                "result_ref": None,
+                                "expected_state_version": int(view["state_version"]),
+                                "idempotency_key": f"expire-paused-fail:{tid}",
+                                "requested_at": now,
+                            }
+                        )
+            except ApplicationConflictError:
+                try:
+                    view_after = exec_query.get(
+                        {
+                            "resource_id": exec_id,
+                            "user_id": uid,
+                            "purpose": "execution.read",
+                        }
+                    )
+                    if str(view_after.get("state") or "") not in {
+                        "COMPLETED",
+                        "FAILED",
+                        "CANCELLED",
+                    }:
+                        continue
+                except Exception:
+                    continue
+            except (
+                ApplicationNotFoundError,
+                LookupError,
+                ValueError,
+            ):
+                pass
+            except Exception:
+                _LOGGER.debug(
+                    "could not transition execution %s for expired paused turn %s",
+                    exec_id,
+                    tid,
+                    exc_info=True,
+                )
+                continue
 
             with self._engine.begin() as c:
                 changed = c.execute(
@@ -3936,63 +4045,6 @@ class PostgresChatStore:
                     )
                 )
                 expired.append(tid)
-
-            try:
-                view = exec_query.get(
-                    {
-                        "resource_id": exec_id,
-                        "user_id": uid,
-                        "purpose": "execution.read",
-                    }
-                )
-                exec_state = str(view.get("state") or "")
-                if exec_state == "QUEUED":
-                    view = exec_app.transition(
-                        {
-                            "execution_id": exec_id,
-                            "user_id": uid,
-                            "target_state": "STARTING",
-                            "reason_code": "abandoned_paused_turn_expired",
-                            "result_ref": None,
-                            "expected_state_version": int(view["state_version"]),
-                            "idempotency_key": f"expire-paused-start:{tid}",
-                            "requested_at": now,
-                        }
-                    )
-                    exec_state = str(view.get("state") or "")
-                if exec_state in {
-                    "PAUSED",
-                    "STARTING",
-                    "RUNNING",
-                    "WAITING_TOOL",
-                    "WAITING_USER",
-                }:
-                    exec_app.transition(
-                        {
-                            "execution_id": exec_id,
-                            "user_id": uid,
-                            "target_state": "FAILED",
-                            "reason_code": "abandoned_paused_turn_expired",
-                            "result_ref": None,
-                            "expected_state_version": int(view["state_version"]),
-                            "idempotency_key": f"expire-paused-fail:{tid}",
-                            "requested_at": now,
-                        }
-                    )
-            except (
-                ApplicationConflictError,
-                ApplicationNotFoundError,
-                LookupError,
-                ValueError,
-            ):
-                pass
-            except Exception:
-                _LOGGER.debug(
-                    "could not transition execution %s for expired paused turn %s",
-                    exec_id,
-                    tid,
-                    exc_info=True,
-                )
 
         return tuple(expired)
 

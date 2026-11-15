@@ -7,6 +7,7 @@ one thing to handle.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 
@@ -83,11 +84,37 @@ class OllamaEmbedder:
         vectors = body.get("embeddings") if isinstance(body, dict) else None
         if not isinstance(vectors, list) or len(vectors) != len(texts):
             raise EmbeddingUnavailable("ollama returned an unusable embeddings payload")
-        result = [[float(value) for value in vector] for vector in vectors]
+        result: list[list[float]] = []
+        expected_dim: int | None = None
+        for vector in vectors:
+            if (
+                not isinstance(vector, Sequence)
+                or isinstance(vector, (str, bytes, bytearray))
+                or len(vector) == 0
+            ):
+                raise EmbeddingUnavailable("ollama returned an unusable embeddings payload")
+            row: list[float] = []
+            for value in vector:
+                if isinstance(value, bool):
+                    raise EmbeddingUnavailable("ollama returned an unusable embeddings payload")
+                try:
+                    fval = float(value)
+                except (TypeError, ValueError) as error:
+                    raise EmbeddingUnavailable(
+                        "ollama returned an unusable embeddings payload"
+                    ) from error
+                if not math.isfinite(fval):
+                    raise EmbeddingUnavailable("ollama returned an unusable embeddings payload")
+                row.append(fval)
+            if expected_dim is None:
+                expected_dim = len(row)
+            elif len(row) != expected_dim:
+                raise EmbeddingUnavailable("ollama returned an unusable embeddings payload")
+            result.append(row)
         self._unavailable_until = 0.0
         self._last_reason = ""
-        if result and result[0]:
-            self._dim = len(result[0])
+        if expected_dim:
+            self._dim = expected_dim
         return result
 
 

@@ -1036,3 +1036,238 @@ def test_adversarial_permission_resolved_bump_and_missing_execution_paused_expir
     expired = store.expire_abandoned_paused_turns(older_than=timedelta(hours=2))
     assert r1.turn_id in expired
     assert store.get(cid, "u1")["state"] == "failed"
+
+
+def test_overview_sql_uses_conv_type_id_composite_index(engine):
+    activity_store = PostgresAgenticActivityStore(engine, cursor_secret="test-secret")
+    store = PostgresChatStore(engine, activity_store=activity_store)
+    r1 = store.create(
+        user_id="u1",
+        message="index plan check",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="m-idx-plan-1",
+    )
+    cid = r1.conversation_id
+    tid = r1.turn_id
+    now = datetime.now(timezone.utc)
+
+    # Insert cross-user row on same conversation_id to verify Python user_id defense-in-depth
+    with engine.begin() as c:
+        c.execute(
+            insert(conversation_activity_events),
+            [
+                {
+                    "event_id": "idx-u1-err",
+                    "conversation_id": cid,
+                    "user_id": "u1",
+                    "workspace_id": None,
+                    "turn_id": tid,
+                    "execution_id": f"exec-{tid}",
+                    "agent_id": "main",
+                    "parent_agent_id": None,
+                    "event_type": "turn.failed",
+                    "sequence": 20,
+                    "summary": "u1 error",
+                    "payload": {"error_code": "U1_ERR"},
+                    "visibility": "public",
+                    "created_at": now,
+                },
+                {
+                    "event_id": "idx-u2-err",
+                    "conversation_id": cid,
+                    "user_id": "u2",
+                    "workspace_id": None,
+                    "turn_id": tid,
+                    "execution_id": f"exec-{tid}",
+                    "agent_id": "main",
+                    "parent_agent_id": None,
+                    "event_type": "turn.failed",
+                    "sequence": 21,
+                    "summary": "u2 error must be filtered",
+                    "payload": {"error_code": "U2_ERR"},
+                    "visibility": "public",
+                    "created_at": now,
+                },
+            ],
+        )
+
+    executed_activity_selects: list[tuple[str, object]] = []
+
+    def _before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+        norm = " ".join(statement.split())
+        if (
+            "FROM conversation_activity_events" in norm
+            and "count(" not in norm.lower()
+            and "event_type IN" in norm
+        ):
+            executed_activity_selects.append((statement, parameters))
+
+    sa.event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+    try:
+        ov = store.overview(cid, "u1")
+    finally:
+        sa.event.remove(engine, "before_cursor_execute", _before_cursor_execute)
+
+    assert len(executed_activity_selects) == 1
+    stmt, params = executed_activity_selects[0]
+    with engine.connect() as c:
+        plan_rows = c.exec_driver_sql(
+            f"EXPLAIN QUERY PLAN {stmt}",
+            params,
+        ).fetchall()
+    plan_text = " ".join(str(r) for r in plan_rows)
+    assert "ix_conversation_activity_conv_type_id" in plan_text
+    assert len(ov["errors"]) == 1
+    assert ov["errors"][0]["code"] == "U1_ERR"
+
+
+def test_expire_abandoned_paused_turns_queued_execution_and_concurrent_resume(engine):
+    store = PostgresChatStore(engine)
+    exec_queries = ExecutionQueryAdapter(engine)
+    exec_app = ExecutionApplicationAdapter(engine)
+    stale_ts = datetime.now(timezone.utc) - timedelta(hours=4)
+
+    # Case 1: Canonical Execution stayed in initial "QUEUED" state (< cutoff) when turn was paused
+    r_queued = store.create(
+        user_id="u1",
+        message="queued exec paused turn",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="m-queued-paused-1",
+    )
+    t_queued = store.claim(r_queued.turn_id)
+    assert t_queued is not None
+    store.pause_for_reconciliation(t_queued, code="PROCESS_RECONCILE_LOST")
+    with engine.begin() as c:
+        c.execute(
+            update(conversation_turns)
+            .where(conversation_turns.c.turn_id == r_queued.turn_id)
+            .values(created_at=stale_ts, updated_at=stale_ts)
+        )
+        c.execute(
+            update(conversation_dispatches)
+            .where(conversation_dispatches.c.turn_id == r_queued.turn_id)
+            .values(updated_at=stale_ts)
+        )
+
+    # Case 2: Turn has stale conversation_turns.updated_at, but fresh conversation_dispatches.updated_at -> NOT expired
+    r_fresh_disp = store.create(
+        user_id="u1",
+        message="fresh dispatch paused turn",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="m-fresh-disp-1",
+    )
+    t_fresh_disp = store.claim(r_fresh_disp.turn_id)
+    assert t_fresh_disp is not None
+    store.pause_for_reconciliation(t_fresh_disp, code="PROCESS_RECONCILE_LOST")
+    with engine.begin() as c:
+        c.execute(
+            update(conversation_turns)
+            .where(conversation_turns.c.turn_id == r_fresh_disp.turn_id)
+            .values(updated_at=stale_ts)
+        )
+
+    # Case 3: Concurrent resume_paused_turn already transitioned Execution to QUEUED with fresh updated_at
+    r_resumed = store.create(
+        user_id="u1",
+        message="concurrently resumed turn",
+        provider="openrouter",
+        model_id="model-1",
+        idempotency_key="m-conc-resume-1",
+    )
+    t_resumed = store.claim(r_resumed.turn_id)
+    assert t_resumed is not None
+    store.pause_for_reconciliation(t_resumed, code="PROCESS_RECONCILE_LOST")
+    now = datetime.now(timezone.utc)
+    for idx, target in enumerate(("STARTING", "RUNNING", "PAUSED", "QUEUED"), start=1):
+        v = exec_queries.get(
+            {
+                "resource_id": str(t_resumed["execution_id"]),
+                "user_id": "u1",
+                "purpose": "execution.read",
+            }
+        )
+        exec_app.transition(
+            {
+                "execution_id": str(t_resumed["execution_id"]),
+                "user_id": "u1",
+                "target_state": target,
+                "reason_code": "concurrent_user_resume",
+                "result_ref": None,
+                "expected_state_version": int(v["state_version"]),
+                "idempotency_key": f"conc-resume-{idx}",
+                "requested_at": now,
+            }
+        )
+    with engine.begin() as c:
+        c.execute(
+            update(conversation_turns)
+            .where(conversation_turns.c.turn_id == r_resumed.turn_id)
+            .values(updated_at=stale_ts)
+        )
+        c.execute(
+            update(conversation_dispatches)
+            .where(conversation_dispatches.c.turn_id == r_resumed.turn_id)
+            .values(updated_at=stale_ts)
+        )
+
+    expired = store.expire_abandoned_paused_turns(older_than=timedelta(hours=2))
+
+    # Case 1 must be expired AND its canonical Execution must be FAILED (not stranded in STARTING!)
+    assert r_queued.turn_id in expired
+    exec_queued_after = exec_queries.get(
+        {
+            "resource_id": str(t_queued["execution_id"]),
+            "user_id": "u1",
+            "purpose": "execution.read",
+        }
+    )
+    assert exec_queued_after["state"] == "FAILED"
+
+    # Case 2 must NOT be expired (fresh dispatch updated_at)
+    assert r_fresh_disp.turn_id not in expired
+
+    # Case 3 must NOT be expired and its concurrently-resumed Execution must remain QUEUED!
+    assert r_resumed.turn_id not in expired
+    exec_resumed_after = exec_queries.get(
+        {
+            "resource_id": str(t_resumed["execution_id"]),
+            "user_id": "u1",
+            "purpose": "execution.read",
+        }
+    )
+    assert exec_resumed_after["state"] == "QUEUED"
+
+
+@pytest.mark.parametrize(
+    "bad_embeddings",
+    [
+        [None],
+        ["bad-string-instead-of-vector"],
+        [["not-a-float"]],
+        [[float("nan")]],
+        [[float("inf")]],
+        [[True, False]],
+        [[]],
+    ],
+)
+def test_ollama_embedder_translates_malformed_vector_elements_to_embedding_unavailable(
+    bad_embeddings,
+):
+    import json
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raw = json.dumps({"embeddings": bad_embeddings}, allow_nan=True).encode("utf-8")
+        return httpx.Response(200, content=raw, headers={"content-type": "application/json"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    embedder = OllamaEmbedder(
+        base_url="http://localhost:11434",
+        model="nomic-embed-text",
+        client=client,
+    )
+    with pytest.raises(EmbeddingUnavailable):
+        embedder.embed(["hello"])
+    assert embedder.identity.dim == 0
