@@ -593,6 +593,32 @@ class ChatReceipt:
     permission_mode: str = "ask_permissions"
 
 
+_INTERACTIVE_ACTIVITY_EVENT_TYPES: frozenset[str] = frozenset({
+    AgentActivityEventType.TOOL_PERMISSION_REQUIRED.value,
+    "tool.permission_resolved",
+    AgentActivityEventType.CODE_MODE_PLAN_READY.value,
+    AgentActivityEventType.CODE_MODE_DECISION_REQUIRED.value,
+    AgentActivityEventType.WORKSPACE_TRUST_REQUIRED.value,
+    AgentActivityEventType.TURN_WAITING_USER.value,
+})
+
+TRANSIENT_SETTLED_EVENT_TYPES: tuple[str, ...] = (
+    "assistant.delta",
+    "agent.thought_delta",
+    "tool.progressed",
+    "tool.requested",
+    "code_mode.validation_started",
+    "code_mode.validation_finished",
+    "code_mode.stage_changed",
+    "speak.block_started",
+    "speak.delta",
+    "speak.chunk_ready",
+    "speak.filler_triggered",
+    "speak.interrupted",
+    "speak.finished",
+)
+
+
 class PostgresChatStore:
     def __init__(self, engine: Engine, activity_store=None, command_library=None, skill_library=None) -> None:
         self._engine = engine
@@ -604,17 +630,34 @@ class PostgresChatStore:
         self._live_mode_turns: dict[str, bool] = {}
         _ensure_conversation_mode_columns(engine)
 
+    def _bump_conversation_updated_at(self, conversation_id: str, ts: datetime) -> None:
+        try:
+            with self._engine.begin() as c:
+                c.execute(
+                    update(conversations)
+                    .where(conversations.c.conversation_id == conversation_id)
+                    .values(updated_at=ts)
+                )
+        except Exception:
+            pass
+
     def _activity(
         self,
         turn: dict[str, object] | None,
-        event_type: AgentActivityEventType,
+        event_type: AgentActivityEventType | str,
         summary: str,
         payload: dict[str, object] | None = None,
         *,
         agent_id: str | None = None,
         parent_agent_id: str | None = None,
     ) -> None:
-        if self.activity_store is None or turn is None:
+        if turn is None:
+            return
+        event_type_str = str(getattr(event_type, "value", event_type) or "")
+        should_bump_conv = event_type_str in _INTERACTIVE_ACTIVITY_EVENT_TYPES
+        if self.activity_store is None or event_type_str == "tool.permission_resolved":
+            if should_bump_conv and turn.get("conversation_id"):
+                self._bump_conversation_updated_at(str(turn["conversation_id"]), datetime.now(UTC))
             return
         effective_agent_id = agent_id or self.main_agent_id(turn)
         if event_type is AgentActivityEventType.TURN_FAILED:
@@ -667,6 +710,8 @@ class PostgresChatStore:
                         return
                 try:
                     self.activity_store.record_event(event)
+                    if should_bump_conv:
+                        self._bump_conversation_updated_at(str(turn["conversation_id"]), event.created_at)
                     return
                 except ValueError:
                     continue
@@ -3382,6 +3427,12 @@ class PostgresChatStore:
 
     def overview(self, conversation_id: str, user_id: str) -> dict[str, object]:
         """Aggregate one conversation into the shape the overview scene draws."""
+        overview_event_types = (
+            AgentActivityEventType.TOOL_FINISHED.value,
+            AgentActivityEventType.AGENT_MESSAGE_SENT.value,
+            AgentActivityEventType.AGENT_MESSAGE_RECEIVED.value,
+            AgentActivityEventType.TURN_FAILED.value,
+        )
         with self._engine.connect() as c:
             conv = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
             if conv is None: raise ApplicationNotFoundError(conversation_id)
@@ -3399,9 +3450,31 @@ class PostgresChatStore:
                     provider_model_catalog.c.output_per_million,
                 ).where(provider_model_catalog.c.user_id == user_id)
             ).mappings().all()
+            total_activity_count = int(
+                c.execute(
+                    select(func.count())
+                    .select_from(conversation_activity_events)
+                    .where(
+                        conversation_activity_events.c.conversation_id == conversation_id,
+                        conversation_activity_events.c.user_id == user_id,
+                    )
+                ).scalar_one()
+                or 0
+            )
             activity = c.execute(
-                select(conversation_activity_events)
-                .where(conversation_activity_events.c.conversation_id == conversation_id, conversation_activity_events.c.user_id == user_id)
+                select(
+                    conversation_activity_events.c.event_id,
+                    conversation_activity_events.c.event_type,
+                    conversation_activity_events.c.agent_id,
+                    conversation_activity_events.c.summary,
+                    conversation_activity_events.c.payload,
+                    conversation_activity_events.c.created_at,
+                )
+                .where(
+                    conversation_activity_events.c.conversation_id == conversation_id,
+                    conversation_activity_events.c.user_id == user_id,
+                    conversation_activity_events.c.event_type.in_(overview_event_types),
+                )
                 .order_by(conversation_activity_events.c.id)
             ).mappings().all()
         pricing_by_model: dict[tuple[str, str], Mapping[str, object]] = {
@@ -3437,7 +3510,8 @@ class PostgresChatStore:
         messages: list[dict[str, object]] = []
         errors: list[dict[str, object]] = []
         for row in activity:
-            payload = dict(row["payload"] or {})
+            raw_payload = row["payload"]
+            payload = dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
             if row["event_type"] == AgentActivityEventType.TOOL_FINISHED.value:
                 name = str(payload.get("tool_name") or "tool")
                 entry = tools.setdefault(name, {"tool_name": name, "kind": payload.get("tool_kind") or "tool", "count": 0, "failures": 0, "agent_id": row["agent_id"]})
@@ -3455,6 +3529,8 @@ class PostgresChatStore:
                 })
             elif row["event_type"] == AgentActivityEventType.TURN_FAILED.value and payload.get("error_code"):
                 errors.append({"event_id": row["event_id"], "code": str(payload["error_code"]), "summary": row["summary"], "occurred_at": row["created_at"].isoformat()})
+        messages = messages[-200:]
+        errors = errors[-200:]
         started = next((t["started_at"] for t in turns if t["started_at"]), None)
         finished = turns[-1]["finished_at"] if turns and turns[-1]["finished_at"] else None
         duration = (finished - started).total_seconds() if started and finished else None
@@ -3463,10 +3539,56 @@ class PostgresChatStore:
             "provider": conv["provider"], "model_id": conv["model_id"],
             "agents": agents, "tools": list(tools.values()), "messages": messages, "errors": errors,
             "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None} for t in turns],
-            "activity_count": len(activity),
+            "activity_count": total_activity_count,
             "duration_seconds": duration,
             "token_usage": _total_token_usage(usage_by_agent.values()),
         }
+
+    def prune_transient_activity_events(
+        self,
+        *,
+        older_than_days: int = 7,
+        batch_size: int = 2000,
+        max_batches: int = 10,
+    ) -> int:
+        """Delete strictly transient streaming activity rows from settled turns older than ``older_than_days``.
+
+        ``tool.started`` and ``tool.finished`` are intentionally preserved so
+        ``_compact_snapshot_activities`` can continue enriching ``tool.finished``
+        rows with ``command`` / ``path`` metadata from ``tool.started``.
+        """
+        effective_days = max(1, int(older_than_days))
+        effective_batch = max(1, int(batch_size))
+        effective_max_batches = max(1, int(max_batches))
+        cutoff = datetime.now(UTC) - timedelta(days=effective_days)
+        total_deleted = 0
+        for _ in range(effective_max_batches):
+            subq = (
+                select(conversation_activity_events.c.id)
+                .join(
+                    conversation_turns,
+                    conversation_turns.c.turn_id == conversation_activity_events.c.turn_id,
+                )
+                .where(
+                    conversation_turns.c.state.in_(("completed", "failed", "cancelled")),
+                    conversation_turns.c.finished_at.is_not(None),
+                    conversation_turns.c.finished_at < cutoff,
+                    conversation_activity_events.c.event_type.in_(TRANSIENT_SETTLED_EVENT_TYPES),
+                )
+                .order_by(conversation_activity_events.c.id)
+                .limit(effective_batch)
+            )
+            with self._engine.begin() as c:
+                result = c.execute(
+                    delete(conversation_activity_events).where(
+                        conversation_activity_events.c.id.in_(subq)
+                    )
+                )
+                batch_deleted = int(result.rowcount or 0)
+            total_deleted += batch_deleted
+            if batch_deleted < effective_batch:
+                break
+        return total_deleted
 
     def request_cancel(self, conversation_id: str, user_id: str, *, keep_subagents: bool = False) -> dict[str, object]:
         """Mark the conversation's live turns as cancelling.
@@ -3664,6 +3786,215 @@ class PostgresChatStore:
 
     def recent_interrupted_paused_turns(self, *, maximum_age: timedelta = timedelta(minutes=30)) -> tuple[dict[str, object], ...]:
         return _recent_interrupted_paused_turns(self, maximum_age=maximum_age)
+
+    def expire_abandoned_paused_turns(
+        self,
+        *,
+        older_than: timedelta = timedelta(hours=2),
+    ) -> tuple[str, ...]:
+        """Canonically transition abandoned ``paused`` turns older than ``older_than`` to ``failed``."""
+        cutoff = datetime.now(UTC) - older_than
+        with self._engine.connect() as c:
+            rows = (
+                c.execute(
+                    select(
+                        conversation_turns.c.id,
+                        conversation_turns.c.turn_id,
+                        conversation_turns.c.conversation_id,
+                        conversation_turns.c.user_id,
+                        conversation_turns.c.execution_id,
+                        conversation_turns.c.assistant_message_id,
+                        conversation_dispatches.c.last_error.label("dispatch_last_error"),
+                    )
+                    .outerjoin(
+                        conversation_dispatches,
+                        conversation_dispatches.c.turn_id == conversation_turns.c.turn_id,
+                    )
+                    .where(
+                        conversation_turns.c.state == "paused",
+                        (
+                            func.coalesce(
+                                conversation_dispatches.c.updated_at,
+                                conversation_turns.c.updated_at,
+                                conversation_turns.c.created_at,
+                            )
+                            < cutoff
+                        )
+                        | (conversation_turns.c.updated_at < cutoff),
+                    )
+                    .order_by(conversation_turns.c.created_at.asc())
+                )
+                .mappings()
+                .all()
+            )
+        if not rows:
+            return ()
+
+        exec_query = ExecutionQueryAdapter(self._engine)
+        exec_app = ExecutionApplicationAdapter(self._engine)
+        expired: list[str] = []
+
+        for row in rows:
+            tid = str(row["turn_id"])
+            cid = str(row["conversation_id"])
+            uid = str(row["user_id"])
+            exec_id = str(row["execution_id"])
+            aid = str(row["assistant_message_id"])
+            existing_error = (
+                str(row["dispatch_last_error"] or "").strip()
+                or "ABANDONED_PAUSED_TURN_EXPIRED"
+            )
+            now = datetime.now(UTC)
+
+            with self._engine.begin() as c:
+                changed = c.execute(
+                    update(conversation_turns)
+                    .where(
+                        conversation_turns.c.turn_id == tid,
+                        conversation_turns.c.state == "paused",
+                    )
+                    .values(
+                        state="failed",
+                        finished_at=now,
+                        updated_at=now,
+                        cli_options=None,
+                    )
+                )
+                if not changed.rowcount:
+                    continue
+                c.execute(
+                    update(conversation_dispatches)
+                    .where(conversation_dispatches.c.turn_id == tid)
+                    .values(
+                        state="failed",
+                        last_error=existing_error,
+                        updated_at=now,
+                    )
+                )
+                c.execute(
+                    update(conversation_messages)
+                    .where(conversation_messages.c.message_id == aid)
+                    .values(
+                        status="failed",
+                        retryable=True,
+                        updated_at=now,
+                    )
+                )
+                c.execute(
+                    update(code_mode_runs)
+                    .where(code_mode_runs.c.turn_id == tid)
+                    .values(
+                        stage=CodeStage.BLOCKED.value,
+                        completion_kind=None,
+                        caveats=existing_error,
+                        updated_at=now,
+                    )
+                )
+                has_other_live_or_newer_turn = (
+                    c.execute(
+                        select(conversation_turns.c.turn_id).where(
+                            conversation_turns.c.conversation_id == cid,
+                            conversation_turns.c.turn_id != tid,
+                            (
+                                conversation_turns.c.state.in_(
+                                    (
+                                        "queued",
+                                        "starting",
+                                        "running",
+                                        "waiting_user",
+                                        "cancelling",
+                                        "paused",
+                                    )
+                                )
+                                | (conversation_turns.c.id > row["id"])
+                            ),
+                        )
+                    ).first()
+                    is not None
+                )
+                if not has_other_live_or_newer_turn:
+                    c.execute(
+                        update(conversations)
+                        .where(
+                            conversations.c.conversation_id == cid,
+                            conversations.c.state == "paused",
+                        )
+                        .values(state="failed", updated_at=now)
+                    )
+                c.execute(
+                    insert(conversation_events).values(
+                        conversation_id=cid,
+                        user_id=uid,
+                        event_type="turn.failed",
+                        message_id=aid,
+                        payload={
+                            "state": "failed",
+                            "retryable": True,
+                            "reason": "abandoned_paused_turn_expired",
+                        },
+                        created_at=now,
+                    )
+                )
+                expired.append(tid)
+
+            try:
+                view = exec_query.get(
+                    {
+                        "resource_id": exec_id,
+                        "user_id": uid,
+                        "purpose": "execution.read",
+                    }
+                )
+                exec_state = str(view.get("state") or "")
+                if exec_state == "QUEUED":
+                    view = exec_app.transition(
+                        {
+                            "execution_id": exec_id,
+                            "user_id": uid,
+                            "target_state": "STARTING",
+                            "reason_code": "abandoned_paused_turn_expired",
+                            "result_ref": None,
+                            "expected_state_version": int(view["state_version"]),
+                            "idempotency_key": f"expire-paused-start:{tid}",
+                            "requested_at": now,
+                        }
+                    )
+                    exec_state = str(view.get("state") or "")
+                if exec_state in {
+                    "PAUSED",
+                    "STARTING",
+                    "RUNNING",
+                    "WAITING_TOOL",
+                    "WAITING_USER",
+                }:
+                    exec_app.transition(
+                        {
+                            "execution_id": exec_id,
+                            "user_id": uid,
+                            "target_state": "FAILED",
+                            "reason_code": "abandoned_paused_turn_expired",
+                            "result_ref": None,
+                            "expected_state_version": int(view["state_version"]),
+                            "idempotency_key": f"expire-paused-fail:{tid}",
+                            "requested_at": now,
+                        }
+                    )
+            except (
+                ApplicationConflictError,
+                ApplicationNotFoundError,
+                LookupError,
+                ValueError,
+            ):
+                pass
+            except Exception:
+                _LOGGER.debug(
+                    "could not transition execution %s for expired paused turn %s",
+                    exec_id,
+                    tid,
+                    exc_info=True,
+                )
+
+        return tuple(expired)
 
     def resume_turn(self, conversation_id: str, turn_id: str, user_id: str, *, reason: str = "user_resumed") -> dict[str, object]:
         return _resume_paused_turn(self, conversation_id, turn_id, user_id, reason=reason)

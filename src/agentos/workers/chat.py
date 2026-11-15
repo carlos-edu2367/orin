@@ -946,7 +946,7 @@ class ChatWorker:
                     expired.append(str(row["turn_id"]))
         return tuple(expired)
 
-    def recover_stale(self, *, maximum_age: timedelta) -> tuple[str, ...]:
+    def recover_stale(self, *, maximum_age: timedelta = timedelta(seconds=120)) -> tuple[str, ...]:
         """Recover only executions whose journal proves no effect is in doubt."""
         recovered: list[str] = []
         for turn in self.store.stale_turns(maximum_age=maximum_age):
@@ -982,6 +982,14 @@ class ChatWorker:
                         recovered.append(str(paused_turn["turn_id"]))
                     except Exception:
                         _LOGGER.exception("failed to auto-resume interrupted paused turn %s", paused_turn.get("turn_id"))
+        expire_paused_fn = getattr(self.store, "expire_abandoned_paused_turns", None)
+        if callable(expire_paused_fn):
+            try:
+                expired_paused = expire_paused_fn(older_than=timedelta(hours=2))
+                if expired_paused:
+                    recovered.extend(str(tid) for tid in expired_paused)
+            except Exception:
+                _LOGGER.exception("failed to expire abandoned paused turns")
         return tuple(recovered)
 
     def sweep_exited_processes(self) -> tuple[dict[str, object], ...]:

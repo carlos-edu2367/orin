@@ -898,6 +898,7 @@ conversation_activity_events = Table(
     CheckConstraint("sequence > 0", name="ck_conversation_activity_sequence_positive"),
 )
 Index("ix_conversation_activity_conversation_cursor", conversation_activity_events.c.conversation_id, conversation_activity_events.c.id)
+Index("ix_conversation_activity_conv_type_id", conversation_activity_events.c.conversation_id, conversation_activity_events.c.event_type, conversation_activity_events.c.id)
 Index("ix_conversation_activity_user_created", conversation_activity_events.c.user_id, conversation_activity_events.c.created_at)
 Index("ix_conversation_activity_turn_sequence", conversation_activity_events.c.turn_id, conversation_activity_events.c.sequence)
 
