@@ -16,6 +16,9 @@ import threading
 import time
 from typing import Any, Mapping
 
+from agentos.launcher.processes import ProcessGroup
+from agentos.process_identity import kill_verified, process_created
+
 
 _LAUNCH_CONFIG_PATHS = (
     ".orin/launch.json",
@@ -30,6 +33,7 @@ _LOCAL_URL_PORT_RE = re.compile(r"https?://(?:localhost|127\.0\.0\.1|\[::1\]|0\.
 
 _LIVE_PROCESSES_LOCK = threading.Lock()
 _LIVE_PROCESSES: dict[tuple[str, str], subprocess.Popen[bytes]] = {}
+_LIVE_PROCESS_GROUPS: dict[tuple[str, str], ProcessGroup] = {}
 
 
 def _detect_port_from_log(log_path: Path | None, start_offset: int = 0) -> int | None:
@@ -347,6 +351,13 @@ class PreviewServerManager:
                     if os.name == "nt"
                     else 0
                 )
+                old_group = _LIVE_PROCESS_GROUPS.pop(key, None)
+                if old_group is not None:
+                    try:
+                        old_group.close()
+                    except Exception:
+                        pass
+                group = ProcessGroup(allow_breakaway=False)
                 try:
                     proc = subprocess.Popen(
                         config.command_list(),
@@ -359,6 +370,7 @@ class PreviewServerManager:
                         creationflags=creationflags,
                     )
                 except OSError as error:
+                    group.close()
                     log_handle.close()
                     raise PreviewServerError(
                         f"failed to start preview server '{config.name}' ({config.command_string()}): {error}"
@@ -368,7 +380,9 @@ class PreviewServerManager:
                         log_handle.close()
                     except Exception:
                         pass
+                group.adopt(proc.pid)
                 _LIVE_PROCESSES[key] = proc
+                _LIVE_PROCESS_GROUPS[key] = group
 
         effective_port = config.port
         ready = False
@@ -406,6 +420,7 @@ class PreviewServerManager:
         record = {
             "name": config.name,
             "pid": proc.pid,
+            "created": process_created(proc.pid),
             "port": effective_port,
             "url": url,
             "command": config.command_string(),
@@ -460,8 +475,15 @@ class PreviewServerManager:
 
         with _LIVE_PROCESSES_LOCK:
             proc = _LIVE_PROCESSES.pop(key, None)
+            group = _LIVE_PROCESS_GROUPS.pop(key, None)
 
         stopped = False
+        if group is not None:
+            try:
+                group.terminate_all()
+            finally:
+                group.close()
+            stopped = True
         if proc is not None:
             pid = proc.pid
             if proc.poll() is None:
@@ -474,11 +496,15 @@ class PreviewServerManager:
                     pass
             stopped = True
         elif isinstance(pid, int) and pid > 0:
-            try:
-                os.kill(pid, signal.SIGTERM)
-                stopped = True
-            except OSError:
-                stopped = False
+            created = record.get("created")
+            if isinstance(created, int) and created > 0:
+                stopped = kill_verified(pid, created) or stopped
+            elif not stopped:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                    stopped = True
+                except OSError:
+                    stopped = False
 
         if target_name in manifest:
             record["status"] = "stopped"

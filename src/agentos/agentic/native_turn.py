@@ -2645,6 +2645,13 @@ class NativeTurnRunner:
                             0.1,
                             self._remaining_deadline_monotonic() - time.monotonic(),
                         )
+                        if not persistent_stdin and handle is not None:
+                            try:
+                                handle.close()
+                            except Exception:
+                                pass
+                            handle = None
+                            executor.handle = None
                         wait_for_background_work(
                             conv_id,
                             bg_toolset,

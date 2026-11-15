@@ -22,6 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from agentos.installation.paths import orin_paths
+from agentos.process_identity import process_created, same_process
 
 _CONDITION = threading.Condition()
 _TURNS: dict[str, int] = {}
@@ -99,28 +100,39 @@ def _remove(path: Path) -> None:
         pass  # already gone, or left for the next check to find stale
 
 
-def _rewind_holder_alive(path: Path) -> bool:
-    """Whether the process that wrote this rewind marker still runs. An empty marker is trusted until it is old."""
+def _marker_holder_alive(path: Path, *, fallback_pid: int | None = None) -> bool:
+    """Whether the process that wrote this turn or rewind marker still runs. An empty marker is trusted until it is old."""
     try:
         text = path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
         return False
     except OSError:
         return True  # cannot read it: fail closed
-    if text.isdigit():
-        return _pid_alive(int(text))
+    parts = text.split()
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        pid, expected = int(parts[0]), int(parts[1])
+        return same_process(pid, expected)
+    if len(parts) == 1 and parts[0].isdigit():
+        return _pid_alive(int(parts[0]))
     try:
         age = time.time() - path.stat().st_mtime
     except OSError:
         return False
-    return age < _UNWRITTEN_SECONDS
+    if age < _UNWRITTEN_SECONDS:
+        return True
+    if fallback_pid is not None and len(parts) == 0:
+        return False
+    return False
+
+
+_rewind_holder_alive = _marker_holder_alive
 
 
 def _rewind_marker_live(folder: Path, digest: str) -> bool:
     rewind = folder / f"{digest}.rewind"
     if not rewind.exists():
         return False
-    if _rewind_holder_alive(rewind):
+    if _marker_holder_alive(rewind):
         return True
     _remove(rewind)  # stale: its process is gone
     return False
@@ -137,7 +149,7 @@ def _live_turn_marker(folder: Path, digest: str) -> bool:
             pid = None
         if pid is None:
             continue
-        if _pid_alive(pid):
+        if _marker_holder_alive(path, fallback_pid=pid):
             live = True
         else:
             _remove(path)
@@ -146,29 +158,57 @@ def _live_turn_marker(folder: Path, digest: str) -> bool:
 
 def _write_turn_marker(folder: Path, digest: str) -> Path:
     path = folder / f"{digest}.turn.{os.getpid()}.{uuid4().hex}"
+    created = process_created(os.getpid())
+    payload = f"{os.getpid()} {created}" if created is not None else str(os.getpid())
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(str(os.getpid()))
+        handle.write(payload)
     return path
 
 
 def _claim_rewind(folder: Path, digest: str, key: str) -> Path:
     rewind = folder / f"{digest}.rewind"
+    created = process_created(os.getpid())
+    payload = f"{os.getpid()} {created}" if created is not None else str(os.getpid())
     for _attempt in range(2):
         try:
             fd = os.open(rewind, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            if _rewind_holder_alive(rewind):
+            if _marker_holder_alive(rewind):
                 raise WorkspaceBusy(key) from None
             _remove(rewind)  # stale: retry once
             continue
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(str(os.getpid()))
+            handle.write(payload)
         if _live_turn_marker(folder, digest):
             _remove(rewind)
             raise WorkspaceBusy(key)
         return rewind
     raise WorkspaceBusy(key)
+
+
+def sweep_stale_workspace_locks(folder: Path | None = None) -> int:
+    """Remove stale ``*.turn.*`` and ``*.rewind`` markers from ``folder``. Never touches ``.lock`` files."""
+    target = folder if folder is not None else _lock_dir()
+    if not target.is_dir():
+        return 0
+    removed = 0
+    for path in list(target.glob("*.turn.*")):
+        parts = path.name.split(".")
+        try:
+            pid = int(parts[2]) if len(parts) == 4 and parts[1] == "turn" else None
+        except ValueError:
+            pid = None
+        if pid is None:
+            continue
+        if not _marker_holder_alive(path, fallback_pid=pid):
+            _remove(path)
+            removed += 1
+    for path in list(target.glob("*.rewind")):
+        if not _marker_holder_alive(path):
+            _remove(path)
+            removed += 1
+    return removed
 
 
 def enter_turn(root: Path | str) -> TurnToken:
@@ -222,4 +262,12 @@ def exclusive_folder(root: Path | str) -> Iterator[None]:
             _CONDITION.notify_all()
 
 
-__all__ = ["TurnToken", "WorkspaceBusy", "enter_turn", "exclusive_folder", "exit_turn", "folder_key"]
+__all__ = [
+    "TurnToken",
+    "WorkspaceBusy",
+    "enter_turn",
+    "exclusive_folder",
+    "exit_turn",
+    "folder_key",
+    "sweep_stale_workspace_locks",
+]

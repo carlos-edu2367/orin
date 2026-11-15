@@ -15,6 +15,7 @@ MAX_CAPTURE_BYTES = 1_048_576
 _READ_CHUNK = 65_536
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_PROCESS_SET_QUOTA = 0x0100
 _PROCESS_TERMINATE = 0x0001
 _SYNCHRONIZE = 0x00100000
 
@@ -95,13 +96,17 @@ class _WindowsJob:
             raise OSError("SetInformationJobObject failed")
 
     def assign(self, pid: int) -> bool:
-        process = self._kernel32.OpenProcess(0x0100 | 0x0001, False, pid)  # SET_QUOTA | TERMINATE
+        process = self._kernel32.OpenProcess(_PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid)
         if not process:
             return False
+        assigned = False
         try:
-            return bool(self._kernel32.AssignProcessToJobObject(self.handle, process))
+            assigned = bool(self._kernel32.AssignProcessToJobObject(self.handle, process))
         finally:
             self._kernel32.CloseHandle(process)
+        if assigned and self.handle:
+            _assign_descendants_to_job(self._kernel32, self.handle, pid)
+        return assigned
 
     def terminate(self) -> None:
         if self.handle:
@@ -223,7 +228,11 @@ def _orin_ancestors(parents: Mapping[int, int], start: int) -> frozenset[int]:
     return frozenset(chain)
 
 
-def _windows_descendants(process: subprocess.Popen[bytes]) -> dict[int, int]:
+def _windows_descendants(
+    process: subprocess.Popen[bytes] | object,
+    *,
+    access: int = _PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_TERMINATE | _SYNCHRONIZE,
+) -> dict[int, int]:
     """Live descendants of ``process`` as ``{pid: open process handle}``. Terminates nothing.
 
     Only processes that pass ``_descendants_from`` are returned. The handles stay open, so
@@ -269,7 +278,7 @@ def _windows_descendants(process: subprocess.Popen[bytes]) -> dict[int, int]:
     for pid in candidates:
         if pid in protected:
             continue
-        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_TERMINATE | _SYNCHRONIZE, False, pid)
+        handle = kernel32.OpenProcess(access, False, pid)
         if not handle:
             continue
         created = _windows_creation_time(kernel32, handle)
@@ -283,6 +292,30 @@ def _windows_descendants(process: subprocess.Popen[bytes]) -> dict[int, int]:
     for handle in opened.values():
         kernel32.CloseHandle(handle)
     return kept
+
+
+def _assign_descendants_to_job(kernel32, job_handle: int, root_pid: int) -> None:  # noqa: ANN001
+    """Assign any children spawned between ``Popen`` and ``AssignProcessToJobObject`` into ``job_handle``."""
+    from types import SimpleNamespace
+
+    try:
+        descendants = _windows_descendants(
+            SimpleNamespace(pid=root_pid, _handle=None),
+            access=_PROCESS_QUERY_LIMITED_INFORMATION | _PROCESS_SET_QUOTA | _PROCESS_TERMINATE | _SYNCHRONIZE,
+        )
+    except Exception:
+        return
+    try:
+        for child_handle in descendants.values():
+            try:
+                kernel32.AssignProcessToJobObject(job_handle, child_handle)
+            except Exception:
+                pass
+    finally:
+        try:
+            _close_handles(descendants)
+        except Exception:
+            pass
 
 
 def _terminate_handles(handles: Mapping[int, int]) -> None:

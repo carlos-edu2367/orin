@@ -43,7 +43,7 @@ def launch_desktop(
 
     log_path = paths.logs / "desktop.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log = open(log_path, "ab", buffering=0)  # noqa: SIM115 - inherited by the child until it exits
+    log = open(log_path, "ab", buffering=0)  # noqa: SIM115 - inherited by the child on spawn
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         process = subprocess.Popen(  # noqa: S603 - paths come from this installation, never a renderer or CLI string
@@ -55,9 +55,8 @@ def launch_desktop(
             close_fds=True,
             creationflags=creationflags,
         )
-    except Exception:
+    finally:
         log.close()
-        raise
     return DesktopProcess(process, log_path)
 
 

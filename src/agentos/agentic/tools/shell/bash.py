@@ -43,6 +43,7 @@ from agentos.agentic.tools._shared import (
     _schema,
     logger,
     poll_background_popen,
+    register_background_job,
     register_background_popen,
 )
 from agentos.agentic.tools.public_names import public_name
@@ -448,7 +449,9 @@ class BashTools:
                     log_handle.close()
             if background:
                 shell_id = f"bash_{process.pid}"
+                bg_job = _job_for(process)
                 register_background_popen(process.pid, process)
+                register_background_job(process.pid, bg_job)
                 manifest = self._load_process_manifest()
                 manifest[str(process.pid)] = {
                     "command": command[:400],
@@ -632,10 +635,10 @@ class BashTools:
                         or backgrounded_by_time
                     )
                     if should_auto_bg:
-                        # A job meant to finish keeps its Job Object for the timeout watchdog; a server is let go.
+                        # Keep the Job Object registered for both long commands and dev servers so stop_process
+                        # and session teardown can terminate the entire descendant tree.
                         meant_to_finish = bool(backgrounded_by_tool_cap or backgrounded_by_time)
-                        if not meant_to_finish:
-                            _release_job(process_job)
+                        register_background_job(process.pid, process_job)
                         _restore_stashed_orin()
                         auto_log_rel = f"{_PROCESS_LOG_DIR}/{uuid4().hex[:12]}.log"
                         try:

@@ -16,6 +16,7 @@ import signal
 import threading
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -44,6 +45,11 @@ from .ui import Console
 
 BACKEND_READY_TIMEOUT = 60.0
 WORKERS_READY_TIMEOUT = 60.0
+BACKEND_WATCHDOG_INTERVAL = 5.0
+BACKEND_WATCHDOG_TIMEOUT = 3.0
+BACKEND_WATCHDOG_FAILURE_THRESHOLD = 3
+SERVICE_RESTART_MAX_ATTEMPTS = 3
+SERVICE_RESTART_WINDOW = 120.0
 # Short on purpose. A cold OmniRoute can take minutes to serve its first
 # request, and Orin does not need it to work — so the launcher gives it a
 # moment to appear and then gets out of the way, watching for it in the
@@ -90,6 +96,9 @@ class Supervisor:
     omniroute_ready: bool = field(default=False, init=False)
     _omniroute_next_check: float = field(default=0.0, init=False)
     _omniroute_deadline: float = field(default=0.0, init=False)
+    _backend_next_health_check: float = field(default=0.0, init=False)
+    _backend_health_failures: int = field(default=0, init=False)
+    _restart_history: dict[str, list[float]] = field(default_factory=dict, init=False)
     _stop: threading.Event = field(default_factory=threading.Event, init=False)
     desktop_status: DesktopStatusWriter | None = field(default=None, init=False)
     desktop_process: DesktopProcess | None = field(default=None, init=False)
@@ -162,6 +171,12 @@ class Supervisor:
         if self.choice.message:
             self.console.warning(self.choice.message)
         clear_stop_request(self.paths)
+        try:
+            from agentos.code_mode.workspace_lock import sweep_stale_workspace_locks
+
+            sweep_stale_workspace_locks(self.paths.run / "workspace-locks")
+        except Exception as error:
+            self.log.debug("could not sweep stale workspace locks: %s", error)
         try:
             # A fresh token for every run: `orin code` reads it from the run directory (W6, spec §9.1).
             issue_api_token(self.paths.run)
@@ -366,7 +381,7 @@ class Supervisor:
 
     # -- children -------------------------------------------------------
 
-    def _spawn(self, service: str) -> SupervisedProcess:
+    def _spawn(self, service: str, *, replace_at: int | None = None) -> SupervisedProcess:
         assert self.environment is not None
         command = self.profile.service_command(service)
         child = SupervisedProcess(service, command, self.paths.service_log(service))
@@ -378,8 +393,80 @@ class Supervisor:
             cwd=self._child_cwd(),
             group=self.group,
         )
-        self.children.append(child)
+        if replace_at is not None and 0 <= replace_at < len(self.children):
+            self.children[replace_at] = child
+        else:
+            self.children.append(child)
         return child
+
+    def _restart_child(self, service: str, reason: str) -> bool:
+        """Restart a single child in-place without disturbing sibling services."""
+        if self._stop.is_set() or stop_requested(self.paths):
+            return False
+        now = monotonic()
+        history = [
+            ts for ts in self._restart_history.get(service, ()) if now - ts <= SERVICE_RESTART_WINDOW
+        ]
+        self._restart_history[service] = history
+        if len(history) >= SERVICE_RESTART_MAX_ATTEMPTS:
+            self.log.error(
+                "circuit breaker tripped for %s after %d restarts in %.0fs (%s)",
+                service,
+                len(history),
+                SERVICE_RESTART_WINDOW,
+                reason,
+            )
+            return False
+        history.append(now)
+
+        idx: int | None = None
+        old: SupervisedProcess | None = None
+        for i, candidate in enumerate(self.children):
+            if candidate.name == service:
+                idx = i
+                old = candidate
+                break
+
+        if old is not None:
+            self.log.warning("restarting %s (pid %s): %s", service, old.pid, reason)
+            old.stop()
+
+        if self._stop.is_set() or stop_requested(self.paths):
+            return False
+
+        restart_started_at = datetime.now(UTC)
+        new_child = self._spawn(service, replace_at=idx)
+
+        if service == "backend":
+            ready = wait_until(
+                lambda: http_probe(f"{self.base_url}/healthz", timeout=2.0),
+                timeout=BACKEND_READY_TIMEOUT,
+                abort=lambda: self._startup_abort(new_child),
+            )
+            if ready:
+                ready = wait_until(
+                    lambda: http_probe(f"{self.base_url}/readyz", timeout=3.0),
+                    timeout=BACKEND_READY_TIMEOUT,
+                    abort=lambda: self._startup_abort(new_child),
+                )
+            if ready:
+                self._backend_health_failures = 0
+                self._backend_next_health_check = monotonic() + BACKEND_WATCHDOG_INTERVAL
+                return True
+            return False
+
+        if service in {"worker", "scheduler"}:
+            dsn = self.environment.database_url if self.environment is not None else ""
+            components = ("chat-worker",) if service == "worker" else ("scheduled-chat-worker",)
+            ready = wait_until(
+                lambda: heartbeat_probe(dsn, components, minimum_updated_at=restart_started_at),
+                timeout=WORKERS_READY_TIMEOUT,
+                interval=0.5,
+                abort=lambda: self._startup_abort(new_child),
+            )
+            return bool(ready)
+
+        return new_child.exited() is None
 
     def _child_cwd(self) -> Path:
         return self.profile.repository if self.profile.repository is not None else self.paths.data
@@ -400,7 +487,7 @@ class Supervisor:
         return "\n".join(message)
 
     def _startup_abort(self, child: SupervisedProcess | None = None) -> str | None:
-        if stop_requested(self.paths):
+        if self._stop.is_set() or stop_requested(self.paths):
             return "startup canceled by the desktop window"
         return self._child_died(child) if child is not None else None
 
@@ -468,6 +555,8 @@ class Supervisor:
     def _supervise(self, lock: InstanceLock) -> int:
         self._install_signal_handlers()
         exit_code = 0
+        self._backend_next_health_check = monotonic() + BACKEND_WATCHDOG_INTERVAL
+        self._backend_health_failures = 0
         try:
             while not self._stop.is_set():
                 if stop_requested(self.paths):
@@ -476,15 +565,59 @@ class Supervisor:
                 self._watch_omniroute()
                 dead = next((child for child in self.children if child.exited() is not None), None)
                 if dead is not None:
+                    exit_status = dead.exited()
+                    self.log.warning("%s exited with %s; attempting auto-restart", dead.name, exit_status)
+                    if self._restart_child(dead.name, f"process exited with code {exit_status}"):
+                        continue
+                    if self._stop.is_set() or stop_requested(self.paths):
+                        break
                     self._desktop_current_service = {"backend": "backend", "worker": "worker", "scheduler": "scheduler"}.get(dead.name, "backend")
                     self._desktop_failed(f"{_label(dead.name)} parou inesperadamente. Veja os logs para mais detalhes.")
                     self.console.error(
-                        f"{_label(dead.name)} stopped unexpectedly (exit code {dead.exited()}).\n"
+                        f"{_label(dead.name)} stopped unexpectedly (exit code {exit_status}).\n"
                         f"  Log: {dead.log_path}"
                     )
-                    self.log.error("%s exited with %s", dead.name, dead.exited())
+                    self.log.error("%s exited with %s", dead.name, exit_status)
                     exit_code = 1
                     break
+                now = monotonic()
+                if now >= self._backend_next_health_check:
+                    self._backend_next_health_check = now + BACKEND_WATCHDOG_INTERVAL
+                    probe = http_probe(f"{self.base_url}/healthz", timeout=BACKEND_WATCHDOG_TIMEOUT)
+                    if probe.ready:
+                        self._backend_health_failures = 0
+                    else:
+                        self._backend_health_failures += 1
+                        self.log.warning(
+                            "backend /healthz check failed (%d/%d): %s",
+                            self._backend_health_failures,
+                            BACKEND_WATCHDOG_FAILURE_THRESHOLD,
+                            probe.detail,
+                        )
+                        if self._backend_health_failures >= BACKEND_WATCHDOG_FAILURE_THRESHOLD:
+                            if self._restart_child(
+                                "backend",
+                                f"healthz failed {self._backend_health_failures} consecutive times ({probe.detail})",
+                            ):
+                                continue
+                            if self._stop.is_set() or stop_requested(self.paths):
+                                break
+                            backend_child = next(
+                                (c for c in self.children if c.name == "backend"),
+                                self.children[0] if self.children else None,
+                            )
+                            self._desktop_current_service = "backend"
+                            self._desktop_failed(
+                                "Backend parou de responder e não pôde ser recuperado. Veja os logs para mais detalhes."
+                            )
+                            log_path = (
+                                backend_child.log_path
+                                if backend_child is not None
+                                else self.paths.service_log("backend")
+                            )
+                            self.console.error(f"Backend stopped responding to /healthz.\n  Log: {log_path}")
+                            exit_code = 1
+                            break
                 self._stop.wait(0.5)
         except KeyboardInterrupt:
             exit_code = 130
@@ -547,4 +680,15 @@ def wait_for_exit(pid: int, timeout: float) -> bool:
     return not process_is_alive(pid)
 
 
-__all__ = ["LaunchOptions", "StartupFailed", "Supervisor", "attach_to_running", "wait_for_exit"]
+__all__ = [
+    "BACKEND_WATCHDOG_FAILURE_THRESHOLD",
+    "BACKEND_WATCHDOG_INTERVAL",
+    "BACKEND_WATCHDOG_TIMEOUT",
+    "LaunchOptions",
+    "SERVICE_RESTART_MAX_ATTEMPTS",
+    "SERVICE_RESTART_WINDOW",
+    "StartupFailed",
+    "Supervisor",
+    "attach_to_running",
+    "wait_for_exit",
+]

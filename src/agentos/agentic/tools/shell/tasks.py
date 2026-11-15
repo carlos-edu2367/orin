@@ -9,6 +9,7 @@ from typing import Any, Mapping, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.agentic.workspace import WorkspaceError
+from agentos.process_identity import kill_verified
 from agentos.agentic.tools._shared import (
     AgentToolError,
     MAX_PROCESS_LOG_TAIL_CHARS,
@@ -19,12 +20,17 @@ from agentos.agentic.tools._shared import (
     _terminate_pid,
     _schema,
     poll_background_popen,
+    terminate_background_job,
 )
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 # A process that is meant to keep running (a server, a watcher) is never waited for at the end of a turn.
 _LONG_LIVED_CMD_RE = re.compile(r"(--watch\b|\s-w\b|\bwatch\b|\bnodemon\b|tail\s+-f\b|Get-Content\b.*-Wait\b|\bserve\b)", re.IGNORECASE)
+_EXPLICIT_BG_PYTHON_SERVER_RE = re.compile(
+    r"\b(?:python\d*(?:\.exe)?|py(?:\.exe)?)\s+(?:-\S+\s+)*(?:[\w./\\-]*?(?:server|app|main|manage|run|wsgi|asgi)\.py)\b",
+    re.IGNORECASE,
+)
 MAX_PROCESS_WAIT_SECONDS = 600
 PROCESS_NOTICE_TAIL_CHARS = 1_500
 
@@ -72,6 +78,8 @@ class ShellTaskTools:
             return False  # a foreground job that outgrew one tool call: it is meant to finish
         command = str(entry.get("command") or "")
         if entry.get("detected_url") or _DEV_SERVER_CMD_RE.search(command) or _LONG_LIVED_CMD_RE.search(command):
+            return True
+        if not entry.get("auto_backgrounded") and _EXPLICIT_BG_PYTHON_SERVER_RE.search(command):
             return True
         return bool(_SERVER_READY_RE.search(self._background_log_text(str(entry.get("log_path") or ""))[-8_000:]))
 
@@ -356,7 +364,11 @@ class ShellTaskTools:
             pass
         if not isinstance(info, Mapping) and not found_in_shells and preview_stopped_name is None:
             raise AgentToolError(f"No background process with pid {pid} was started in this workspace.")
-        if _process_is_running(pid):
+        job_terminated = terminate_background_job(pid)
+        created = info.get("created") if isinstance(info, Mapping) else None
+        if isinstance(created, int) and created > 0:
+            kill_verified(pid, created)
+        elif not job_terminated and _process_is_running(pid):
             _terminate_pid(pid)
         self._notified_exited_pids.add(pid)
         if isinstance(info, Mapping):

@@ -14,6 +14,8 @@ Two independent mechanisms, because on Windows one is not enough:
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 import os
 import signal
 import subprocess
@@ -26,6 +28,69 @@ from typing import IO, Sequence
 _WINDOWS = os.name == "nt"
 
 
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        (name, ctypes.c_ulonglong)
+        for name in (
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
+        )
+    ]
+
+
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+def _win32_kernel32():  # noqa: ANN202 - ctypes handle
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.GetConsoleProcessList.restype = wintypes.DWORD
+    kernel32.GetConsoleProcessList.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+    return kernel32
+
+
 class ProcessGroup:
     """Owns every process the launcher starts.
 
@@ -33,56 +98,28 @@ class ProcessGroup:
     is the established way to terminate a tree there.
     """
 
-    def __init__(self) -> None:
-        self._job = self._create_job() if _WINDOWS else None
+    def __init__(self, *, allow_breakaway: bool = True) -> None:
+        self._allow_breakaway = allow_breakaway
+        self._job = self._create_job(allow_breakaway=allow_breakaway) if _WINDOWS else None
 
     @staticmethod
-    def _create_job() -> int | None:
+    def _create_job(*, allow_breakaway: bool = True) -> int | None:
         try:
-            import ctypes
-            from ctypes import wintypes
-
-            class IO_COUNTERS(ctypes.Structure):
-                _fields_ = [(name, ctypes.c_ulonglong) for name in (
-                    "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-                    "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
-                )]
-
-            class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-                _fields_ = [
-                    ("PerProcessUserTimeLimit", ctypes.c_int64),
-                    ("PerJobUserTimeLimit", ctypes.c_int64),
-                    ("LimitFlags", wintypes.DWORD),
-                    ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t),
-                    ("ActiveProcessLimit", wintypes.DWORD),
-                    ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
-                    ("PriorityClass", wintypes.DWORD),
-                    ("SchedulingClass", wintypes.DWORD),
-                ]
-
-            class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-                _fields_ = [
-                    ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
-                    ("IoInfo", IO_COUNTERS),
-                    ("ProcessMemoryLimit", ctypes.c_size_t),
-                    ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                    ("PeakJobMemoryUsed", ctypes.c_size_t),
-                ]
-
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = _win32_kernel32()
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
                 return None
             information = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-            information.BasicLimitInformation.LimitFlags = 0x2000 | 0x800  # KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if allow_breakaway:
+                flags |= 0x0800  # JOB_OBJECT_LIMIT_BREAKAWAY_OK
+            information.BasicLimitInformation.LimitFlags = flags
             if not kernel32.SetInformationJobObject(
                 job, 9, ctypes.byref(information), ctypes.sizeof(information)
             ):
                 kernel32.CloseHandle(job)
                 return None
-            return job
+            return int(job)
         except Exception:
             # Losing the job object costs the guarantee, not the launcher. The
             # graceful path still terminates every child it knows about.
@@ -92,17 +129,24 @@ class ProcessGroup:
         if self._job is None:
             return False
         try:
-            import ctypes
-
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = _win32_kernel32()
             # PROCESS_SET_QUOTA | PROCESS_TERMINATE
             handle = kernel32.OpenProcess(0x0100 | 0x0001, False, pid)
             if not handle:
                 return False
+            assigned = False
             try:
-                return bool(kernel32.AssignProcessToJobObject(self._job, handle))
+                assigned = bool(kernel32.AssignProcessToJobObject(self._job, handle))
             finally:
                 kernel32.CloseHandle(handle)
+            if assigned:
+                try:
+                    from agentos.hooks.processes import _assign_descendants_to_job
+
+                    _assign_descendants_to_job(kernel32, self._job, pid)
+                except Exception:
+                    pass
+            return assigned
         except Exception:
             return False
 
@@ -111,9 +155,7 @@ class ProcessGroup:
         if self._job is None:
             return
         try:
-            import ctypes
-
-            ctypes.windll.kernel32.TerminateJobObject(self._job, 1)
+            _win32_kernel32().TerminateJobObject(self._job, 1)
         except Exception:
             pass
 
@@ -121,9 +163,7 @@ class ProcessGroup:
         if self._job is None:
             return
         try:
-            import ctypes
-
-            ctypes.windll.kernel32.CloseHandle(self._job)
+            _win32_kernel32().CloseHandle(self._job)
         except Exception:
             pass
         finally:
@@ -138,10 +178,8 @@ def _attached_to_console() -> bool:
     Any failure answers False, which keeps the flag.
     """
     try:
-        import ctypes
-
-        attached = (ctypes.c_ulong * 2)()
-        return ctypes.windll.kernel32.GetConsoleProcessList(attached, 2) > 0
+        attached = (wintypes.DWORD * 2)()
+        return _win32_kernel32().GetConsoleProcessList(attached, 2) > 0
     except Exception:
         return False
 
@@ -262,6 +300,9 @@ def format_command(command: Sequence[str]) -> str:
 
 
 __all__ = [
+    "IO_COUNTERS",
+    "JOBOBJECT_BASIC_LIMIT_INFORMATION",
+    "JOBOBJECT_EXTENDED_LIMIT_INFORMATION",
     "ProcessGroup",
     "SupervisedProcess",
     "child_environment",

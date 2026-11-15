@@ -106,6 +106,12 @@ def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
     """Requeue turns after a worker crash and fail turns no worker can claim."""
     global _ORPHANS_SWEPT
     if not has_in_flight and not _ORPHANS_SWEPT:
+        try:
+            from agentos.code_mode.workspace_lock import sweep_stale_workspace_locks
+
+            sweep_stale_workspace_locks()
+        except Exception:
+            _LOGGER.debug("could not sweep stale workspace locks", exc_info=True)
         engine = getattr(store, "_engine", None)
         if engine is not None:
             try:
@@ -115,6 +121,8 @@ def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
                 _ORPHANS_SWEPT = True
             except Exception:
                 _LOGGER.debug("could not sweep orphaned running agents", exc_info=True)
+        else:
+            _ORPHANS_SWEPT = True
     recovered = () if has_in_flight else ChatWorker(store).watchdog(maximum_age=UNCLAIMED_AFTER)
     stale = ChatWorker(store).recover_stale(maximum_age=STALE_AFTER)
     if recovered or stale:
@@ -230,6 +238,12 @@ def main() -> None:
             _LOGGER.exception("SessionEnd hooks could not run at shutdown")
         if runner is not None:
             runner.shutdown(wait=True)
+        try:
+            from agentos.agentic.tools._shared import cleanup_session_background_processes
+
+            cleanup_session_background_processes()
+        except Exception:
+            _LOGGER.debug("could not cleanup session background processes", exc_info=True)
 
 
 if __name__ == "__main__":

@@ -198,7 +198,9 @@ def is_verification_command(command: str) -> bool:
 
 _DEV_SERVER_CMD_RE = re.compile(
     r"\b(npm\s+run\s+(dev|start|serve)|pnpm\s+(dev|start)|yarn\s+(dev|start)|"
-    r"vite(\s|$)|next\s+dev|uvicorn\b|flask\s+run|python\d*\s+-m\s+http\.server|"
+    r"vite(\s|$)|next\s+dev|uvicorn\b|gunicorn\b|hypercorn\b|"
+    r"fastapi\s+(?:dev|run)\b|flask\s+run|streamlit\s+run|gradio\b|"
+    r"python\d*(?:\.exe)?\s+-m\s+(?:uvicorn|gunicorn|hypercorn|fastapi|flask|streamlit|http\.server)\b|"
     r"django-admin\s+runserver|manage\.py\s+runserver)\b",
     re.IGNORECASE,
 )
@@ -768,12 +770,12 @@ def _process_is_running(pid: int) -> bool:
     if os.name == "nt":
         try:
             completed = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, timeout=5, check=False,
+                ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, errors="replace", timeout=5, check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except (OSError, subprocess.SubprocessError):
             return False
-        return str(pid) in completed.stdout
+        return str(pid) in (completed.stdout or "")
     try:
         reaped_pid, _ = os.waitpid(pid, 1)  # 1 == os.WNOHANG on Unix systems
         if reaped_pid == pid:
@@ -817,6 +819,7 @@ def _is_zombie(pid: int) -> bool:
 
 _BACKGROUND_POPENS_LOCK = threading.Lock()
 _BACKGROUND_POPENS: dict[int, Any] = {}
+_BACKGROUND_JOBS: dict[int, Any] = {}
 
 
 def register_background_popen(pid: int, process: Any) -> None:
@@ -828,6 +831,78 @@ def register_background_popen(pid: int, process: Any) -> None:
         while len(_BACKGROUND_POPENS) > MAX_TRACKED_PROCESSES * 4:
             oldest = next(iter(_BACKGROUND_POPENS))
             _BACKGROUND_POPENS.pop(oldest, None)
+
+
+def register_background_job(pid: int, job: Any) -> None:
+    """Keep the Windows Job Object for a backgrounded command so ``stop_process`` and session teardown kill its tree."""
+    if not isinstance(pid, int) or pid <= 0 or job is None:
+        return
+    with _BACKGROUND_POPENS_LOCK:
+        old = _BACKGROUND_JOBS.get(pid)
+        if old is not None and old is not job:
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _BACKGROUND_JOBS[pid] = job
+        while len(_BACKGROUND_JOBS) > MAX_TRACKED_PROCESSES * 4:
+            oldest = next(iter(_BACKGROUND_JOBS))
+            evicted = _BACKGROUND_JOBS.pop(oldest, None)
+            if evicted is not None:
+                try:
+                    evicted.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
+def terminate_background_job(pid: int) -> bool:
+    """Terminate and close the tracked Job Object for ``pid``, if any."""
+    with _BACKGROUND_POPENS_LOCK:
+        job = _BACKGROUND_JOBS.pop(pid, None)
+    if job is None:
+        return False
+    try:
+        job.terminate()
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        try:
+            job.close()
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
+def cleanup_session_background_processes() -> int:
+    """Terminate all tracked background jobs and popens on worker/session teardown."""
+    with _BACKGROUND_POPENS_LOCK:
+        jobs = list(_BACKGROUND_JOBS.items())
+        _BACKGROUND_JOBS.clear()
+        popens = list(_BACKGROUND_POPENS.items())
+        _BACKGROUND_POPENS.clear()
+    cleaned = 0
+    seen_pids: set[int] = set()
+    for pid, job in jobs:
+        seen_pids.add(pid)
+        try:
+            job.terminate()
+            cleaned += 1
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            try:
+                job.close()
+            except Exception:  # noqa: BLE001
+                pass
+    for pid, proc in popens:
+        try:
+            if hasattr(proc, "poll") and proc.poll() is None:
+                _terminate_process_tree(proc)
+                if pid not in seen_pids:
+                    cleaned += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return cleaned
 
 
 def poll_background_popen(pid: int) -> tuple[bool, int | None] | None:

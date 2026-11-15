@@ -21,6 +21,10 @@ class ProbeResult:
     ready: bool
     detail: str
 
+    @property
+    def ok(self) -> bool:
+        return self.ready
+
     def __bool__(self) -> bool:
         return self.ready
 
@@ -104,7 +108,13 @@ def sqlite_probe(dsn: str) -> ProbeResult:
         return ProbeResult(False, f"SQLite unavailable ({type(error).__name__})")
 
 
-def heartbeat_probe(dsn: str, components: tuple[str, ...], *, maximum_age: timedelta = timedelta(seconds=30)) -> ProbeResult:
+def heartbeat_probe(
+    dsn: str,
+    components: tuple[str, ...],
+    *,
+    maximum_age: timedelta = timedelta(seconds=30),
+    minimum_updated_at: datetime | None = None,
+) -> ProbeResult:
     """Whether the given runtime components reported in recently.
 
     Each local worker writes ``runtime_heartbeats``. That row is the only signal
@@ -133,6 +143,11 @@ def heartbeat_probe(dsn: str, components: tuple[str, ...], *, maximum_age: timed
         return ProbeResult(False, f"heartbeat table unreadable ({type(error).__name__})")
 
     now = datetime.now(UTC)
+    min_ts = (
+        minimum_updated_at.replace(tzinfo=UTC)
+        if minimum_updated_at is not None and minimum_updated_at.tzinfo is None
+        else minimum_updated_at
+    )
     missing = []
     for component in components:
         updated = rows.get(component)
@@ -141,6 +156,9 @@ def heartbeat_probe(dsn: str, components: tuple[str, ...], *, maximum_age: timed
             continue
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=UTC)
+        if min_ts is not None and updated < min_ts:
+            missing.append(f"{component} has not reported since restart")
+            continue
         if now - updated > maximum_age:
             missing.append(f"{component} last reported {(now - updated).total_seconds():.0f}s ago")
     if missing:
