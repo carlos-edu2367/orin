@@ -259,10 +259,19 @@ class CliTurnRequest:
     # command line or through ``environment(tool_timeout_ms=...)``, whichever its CLI reads.
     tool_timeout_ms: int | None = None
     workspace_root: Path | None = None
+    image_paths: tuple[Path, ...] = ()
     capabilities: CliCapabilities = field(default_factory=CliCapabilities)
     prompt_via_stdin_once: bool = field(init=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.image_paths, tuple) or any(
+            not isinstance(p, Path) for p in self.image_paths
+        ):
+            object.__setattr__(
+                self,
+                "image_paths",
+                tuple(Path(p) for p in (self.image_paths or ())),
+            )
         object.__setattr__(
             self,
             "prompt_via_stdin_once",

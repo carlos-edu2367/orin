@@ -654,3 +654,99 @@ def test_resolve_codex_binary_isolated_env_does_not_leak_host_windows_apps(
     assert resolve_codex_binary({"PATH": str(empty_dir)}) is None
 
 
+def test_build_codex_command_places_image_flags_before_json_in_exec_and_resume(
+    tmp_path: Path,
+) -> None:
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("prompt", encoding="utf-8")
+    img1 = tmp_path / "portfólio" / "Imagem do ChatGPT (2).png"
+    img2 = tmp_path / ".orin" / "uploads" / "image (5).png"
+
+    # New turn with two images
+    req_new = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        image_paths=(img1, img2),
+    )
+    argv_new = build_codex_command(req_new)
+    assert argv_new[:6] == [
+        "codex",
+        "exec",
+        "--image",
+        str(img1),
+        "--image",
+        str(img2),
+    ]
+    assert argv_new[6] == "--json"
+    for idx, tok in enumerate(argv_new):
+        if tok == "--image":
+            next_after_path = argv_new[idx + 2]
+            assert next_after_path.startswith("--")
+    assert argv_new[-1] == "-"
+
+    # Resumed turn with images
+    req_resume = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        resume_session_id="019cfe2a-1111-7222-8333-444455556666",
+        persist_session=True,
+        image_paths=(img1,),
+    )
+    argv_resume = build_codex_command(req_resume)
+    assert argv_resume[:6] == [
+        "codex",
+        "exec",
+        "resume",
+        "019cfe2a-1111-7222-8333-444455556666",
+        "--image",
+        str(img1),
+    ]
+    assert argv_resume[6] == "--json"
+    assert argv_resume[-1] == "-"
+
+    # Empty image_paths emits no --image
+    req_empty = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        image_paths=(),
+    )
+    assert "--image" not in build_codex_command(req_empty)
+
+    # codex-image never emits --image even if image_paths is populated
+    req_img_model = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="openai-codex/codex-image",
+        image_paths=(img1,),
+    )
+    assert "--image" not in build_codex_command(req_img_model)
+
+
+@pytest.mark.parametrize(
+    "bad_img",
+    [
+        "-evil.png",
+        "a,b.png",
+        "bad\nname.png",
+        "bad\x00name.png",
+    ],
+)
+def test_build_codex_command_rejects_invalid_image_path_arg(
+    tmp_path: Path, bad_img: str
+) -> None:
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("prompt", encoding="utf-8")
+    req = CliTurnRequest(
+        binary="codex",
+        system_prompt_file=prompt_file,
+        model="gpt-6.1-sol",
+        image_paths=(Path(bad_img),),
+    )
+    with pytest.raises(ValueError):
+        build_codex_command(req)
+
+
+

@@ -22,54 +22,85 @@ CODEX_IMAGE_MODEL: CliModelInfo = CliModelInfo(
     output_modalities=("image",),
 )
 
+
+def codex_input_modalities(
+    model_id: str | None,
+    raw: Any = None,
+) -> tuple[str, ...]:
+    """Input modalities for a Codex CLI model (`codex-image` is text-only; chat models see images)."""
+    cleaned = model_id.strip().lower() if isinstance(model_id, str) else ""
+    if cleaned.startswith("openai-codex/"):
+        cleaned = cleaned[len("openai-codex/") :].strip()
+    if cleaned == CODEX_IMAGE_MODEL_ID:
+        return ("text",)
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+        found: set[str] = set()
+        for item in raw:
+            if isinstance(item, str):
+                norm = item.strip().lower()
+                if norm in ("text", "image"):
+                    found.add(norm)
+        if found:
+            return ("text", "image") if "image" in found else ("text",)
+    return ("text", "image")
+
+
 FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
     CliModelInfo(
         "gpt-6.1-sol",
         "GPT-6.1-Sol (Assinatura Codex)",
         500_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-6-astra",
         "GPT-6-Astra (Assinatura Codex)",
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-6.1-terra",
         "GPT-6.1 Terra (Assinatura Codex)",
         500_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-6-sol",
         "GPT-6-Sol (Assinatura Codex)",
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-6-luna",
         "GPT-6-Luna (Assinatura Codex)",
         272_000,
         ("low", "medium", "high", "xhigh", "max"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-5.6-sol",
         "GPT-5.6-Sol (Assinatura Codex)",
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-5.6-terra",
         "GPT-5.6-Terra (Assinatura Codex)",
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     ),
     CliModelInfo(
         "gpt-5.6-luna",
         "GPT-5.6-Luna (Assinatura Codex)",
         272_000,
         ("low", "medium", "high", "xhigh", "max"),
+        input_modalities=("text", "image"),
     ),
 )
 
@@ -176,6 +207,9 @@ def discover_codex_models(
                 display_name=display_name,
                 context_window=context_window,
                 supported_efforts=supported_efforts,
+                input_modalities=codex_input_modalities(
+                    slug, entry.get("input_modalities")
+                ),
             )
         )
 
@@ -211,6 +245,7 @@ __all__ = [
     "CODEX_IMAGE_MODEL_ID",
     "DEFAULT_CODEX_CONTEXT_WINDOW",
     "FALLBACK_CODEX_MODELS",
+    "codex_input_modalities",
     "context_window_for",
     "discover_codex_models",
     "resolve_codex_home",

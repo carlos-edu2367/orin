@@ -136,6 +136,21 @@ class McpTools(McpResourceTools):
                     )
         return tuple(docs)
 
+    def _native_tool_descriptor(self, definition: Any) -> dict[str, Any]:
+        schema = definition.schema()
+        if self.name_translator is not None:
+            schema = self.name_translator.schemas_out([schema])[0]
+        fn = schema.get("function") or {}
+        model_name = str(fn.get("name") or definition.name)
+        desc = str(fn.get("description") or definition.description or "")
+        params = dict(fn.get("parameters") or definition.parameters or {"type": "object"})
+        return {
+            "name": model_name,
+            "description": desc,
+            "input_schema": params,
+            "tool_kind": "native",
+        }
+
     def _native_search_documents(self) -> tuple[tuple[Any, ...], dict[str, str]]:
         from agentos.mcp.models import McpToolDescriptor
         from agentos.mcp.search import McpToolSearchDocument
@@ -143,24 +158,19 @@ class McpTools(McpResourceTools):
         self.definitions()
         docs: list[McpToolSearchDocument] = []
         by_qualified: dict[str, str] = {}
-        for internal in sorted(self.deferred_tool_names):
+        deferred = frozenset() if not getattr(self, "_allow_deferral", True) else self.deferred_tool_names
+        for internal in sorted(deferred):
             definition = self._by_name.get(internal)
             if definition is None:
                 continue
-            schema = definition.schema()
-            if self.name_translator is not None:
-                schema = self.name_translator.schemas_out([schema])[0]
-            fn = schema.get("function") or {}
-            model_name = str(fn.get("name") or internal)
-            desc = str(fn.get("description") or definition.description or "")
-            params = dict(fn.get("parameters") or definition.parameters or {"type": "object"})
+            descriptor = self._native_tool_descriptor(definition)
             doc = McpToolSearchDocument.from_descriptor(
                 server_slug="",
                 server_name="",
                 descriptor=McpToolDescriptor(
-                    name=model_name,
-                    description=desc,
-                    input_schema=params,
+                    name=descriptor["name"],
+                    description=descriptor["description"],
+                    input_schema=descriptor["input_schema"],
                 ),
             )
             docs.append(doc)
@@ -176,6 +186,7 @@ class McpTools(McpResourceTools):
     ) -> dict[str, Any]:
         from dataclasses import replace
         from agentos.agentic.tool_deferral import ALWAYS_LOADED_CODE_TOOLS, CODE_MODE_CORE_TOOLS
+        from agentos.agentic.tools.public_names import public_text
         from agentos.mcp.search import McpToolSearchEngine
 
         if self._mcp_provider is None and not self._code_mode_active:
@@ -184,8 +195,15 @@ class McpTools(McpResourceTools):
         native_docs, native_by_qname = self._native_search_documents()
         native_engine = McpToolSearchEngine(native_docs)
         mcp_engine = McpToolSearchEngine(self._mcp_search_documents())
+        is_permitted = getattr(self, "_is_tool_permitted", None)
+        available_defs = {
+            d.name
+            for d in self.definitions()
+            if not callable(is_permitted) or is_permitted(d.name)
+        }
         text = str(query or "").strip()
         already_available: list[str] = []
+        already_available_keys: list[str] = []
         not_found: list[str] = []
         if text.lower().startswith("select:"):
             names = [name.strip() for name in text[len("select:"):].split(",") if name.strip()]
@@ -200,7 +218,6 @@ class McpTools(McpResourceTools):
             for item in mcp_engine.listing(server=server):  # every tool, not only the first 200 (W4-R18)
                 mcp_index.setdefault(item.qualified_name.lower(), item)
                 mcp_index.setdefault(item.tool_name.lower(), item)
-            available_defs = {d.name for d in self.definitions()}
             native_matches: list[Any] = []
             mcp_matches: list[Any] = []
             for name in wanted:
@@ -226,12 +243,15 @@ class McpTools(McpResourceTools):
                                 internal_key in ALWAYS_LOADED_CODE_TOOLS
                                 or internal_key in self.discovered_tool_names
                                 or not self.deferred_tool_names
+                                or not getattr(self, "_allow_deferral", True)
                             )
                         )
                     )
                 )
                 if is_already_available:
                     already_available.append(name)
+                    if internal_key not in already_available_keys:
+                        already_available_keys.append(internal_key)
                 else:
                     not_found.append(name)
             matches = native_matches + mcp_matches
@@ -269,6 +289,7 @@ class McpTools(McpResourceTools):
         tools_payload: list[dict[str, Any]] = []
         match_names: list[str] = []
         activated: list[str] = []
+        external_mcp_activated = False
         for item in matches:
             internal_key = native_by_qname.get(item.qualified_name)
             if internal_key is not None:
@@ -288,16 +309,36 @@ class McpTools(McpResourceTools):
                 if activate and not self._read_only_mode:
                     self._active_mcp_tool_names.add(item.qualified_name)
                     activated.append(item.qualified_name)
-        payload = {
+                    external_mcp_activated = True
+        for internal_key in already_available_keys:
+            definition = self._by_name.get(internal_key)
+            if definition is None:
+                continue
+            descriptor = self._native_tool_descriptor(definition)
+            descriptor["already_available"] = True
+            tools_payload.append(descriptor)
+        payload: dict[str, Any] = {
             "query": str(query or ""),
             "server": server,
             "count": len(tools_payload),
             "activated": activated,
+            "already_available": already_available,
+            "not_found": not_found,
             "tools": tools_payload,
             "servers": list(self.mcp_server_summaries()),
             "tool_kind": "mcp",
             "mcp_action": "search_tools",
         }
+        if (
+            not getattr(self, "_allow_deferral", True)
+            and external_mcp_activated
+            and "call_mcp_tool" in available_defs
+        ):
+            note_text = (
+                "This client cannot reload its tool list during the turn: "
+                "call these tools with call_mcp_tool(server=..., tool=..., arguments={...})."
+            )
+            payload["note"] = public_text(note_text) if self.name_translator is not None else note_text
         return {
             "summary": f"{len(tools_payload)} ferramenta(s) MCP encontrada(s)",
             "content": json.dumps(payload, ensure_ascii=False),

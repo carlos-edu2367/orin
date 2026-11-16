@@ -10,10 +10,18 @@ from collections.abc import Callable, Sequence
 
 from agentos.agentic.provider_content import image_block
 from agentos.agentic.provider_stream import StreamKind
+from agentos.providers.antigravity_cli.command import ANTIGRAVITY_OMITTED_MEDIA_NOTE
+from agentos.providers.codex_cli.command import CODEX_OMITTED_MEDIA_NOTE
 
 from .selection import VisionModel
 
 MAX_TRANSCRIPTION_CHARS = 20_000
+_OMITTED_MEDIA_MARKERS: tuple[str, ...] = (
+    CODEX_OMITTED_MEDIA_NOTE,
+    ANTIGRAVITY_OMITTED_MEDIA_NOTE,
+    "[Imagem/mídia",
+    "omitida pelo wrapper",
+)
 DEFAULT_INSTRUCTION = (
     "Transcreva todo o texto visível desta imagem, preservando a ordem de leitura, "
     "títulos, tabelas e valores. Descreva brevemente elementos não textuais "
@@ -62,6 +70,8 @@ class VisionReader:
         text = "".join(parts).strip()
         if not text:
             raise VisionUnavailable("the visual reading model returned nothing")
+        if any(marker in text for marker in _OMITTED_MEDIA_MARKERS):
+            raise VisionUnavailable("the visual reading model did not receive the image")
         return text[:MAX_TRANSCRIPTION_CHARS]
 
 

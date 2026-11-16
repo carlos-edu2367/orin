@@ -40,9 +40,15 @@ class ConversationReadStates:
 
 def copy_read_state(state: Mapping[str, object]) -> dict[str, object]:
     """Return a shallow copy of ``state`` with each ``ReadFileRecord`` cloned via ``dataclasses.replace``."""
+    while True:
+        try:
+            snapshot = dict(state)
+            break
+        except RuntimeError:
+            continue
     return {
         key: replace(value) if isinstance(value, ReadFileRecord) else value
-        for key, value in state.items()
+        for key, value in snapshot.items()
     }
 
 

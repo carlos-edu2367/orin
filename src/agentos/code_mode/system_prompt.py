@@ -103,7 +103,19 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
         else:
             using.append(f"- {t('search_code')} finds code by meaning; use it before broad text searches.")
     if options.subagents_enabled and has("run_subagent"):
-        using.append(f"- Delegate broad searches or independent parts of a large task with {t('run_subagent')}. A subagent does not see this conversation unless it is a fork, so give it everything it needs.")
+        if has("check_subagent"):
+            using.append(
+                f"- Delegate broad searches or independent parts of a large task with {t('run_subagent')}. "
+                f"Several {t('run_subagent')} calls in the same response run in parallel; to launch them without waiting, "
+                f"pass run_in_background and later wait for all of them with {t('check_subagent')} (agent_ids). "
+                "A subagent does not see this conversation unless it is a fork, so give it everything it needs."
+            )
+        else:
+            using.append(
+                f"- Delegate broad searches or independent parts of a large task with {t('run_subagent')}. "
+                f"Several {t('run_subagent')} calls in the same response run in parallel. "
+                "A subagent does not see this conversation unless it is a fork, so give it everything it needs."
+            )
     if has("ask_user"):
         using.append(f"- Use {t('ask_user')} only when a decision or a missing detail truly blocks progress, then stop and wait for the answer.")
     if has("search_mcp_tools"):

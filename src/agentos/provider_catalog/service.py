@@ -368,11 +368,23 @@ class ProviderModelCatalogService:
             elif normalized_provider == "google-antigravity":
                 if current and not _antigravity_modalities_are_stale(current):
                     return True
+            elif normalized_provider == "openai-codex":
+                if current and not _codex_modalities_are_stale(current):
+                    return True
             elif current:
                 return True
             try:
                 self.refresh(context, normalized_provider)
                 self._auto_refresh_backoff.pop(key, None)
+                refreshed = self._repository.list(context, normalized_provider, False)
+                if (
+                    normalized_provider == "google-antigravity"
+                    and (not refreshed or _antigravity_modalities_are_stale(refreshed))
+                ) or (
+                    normalized_provider == "openai-codex"
+                    and (not refreshed or _codex_modalities_are_stale(refreshed))
+                ):
+                    self._auto_refresh_backoff[key] = time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
                 return True
             except Exception:
                 self._auto_refresh_backoff[key] = time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
@@ -396,6 +408,17 @@ class ProviderModelCatalogService:
             # pictures to another model. The catalog is static, so refresh it.
             if self._try_auto_refresh(context, normalized_provider):
                 items = self._repository.list(context, normalized_provider, favorites_only)
+                if items and _antigravity_modalities_are_stale(items):
+                    self._auto_refresh_backoff[(context.user_id, normalized_provider)] = (
+                        time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
+                    )
+        if normalized_provider == "openai-codex" and items and _codex_modalities_are_stale(items):
+            if self._try_auto_refresh(context, normalized_provider):
+                items = self._repository.list(context, normalized_provider, favorites_only)
+                if items and _codex_modalities_are_stale(items):
+                    self._auto_refresh_backoff[(context.user_id, normalized_provider)] = (
+                        time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
+                    )
         if normalized_provider in {"openai-codex", "google-antigravity"} and not items and not favorites_only:
             credential = self._repository.credential(context, normalized_provider)
             if isinstance(credential, Mapping) and credential.get("enabled") is True:
@@ -443,6 +466,10 @@ class ProviderModelCatalogService:
             from agentos.providers.antigravity_cli.catalog import antigravity_input_modalities
 
             resolved_input = antigravity_input_modalities(normalized_id)
+        elif normalized_provider == "openai-codex":
+            from agentos.providers.codex_cli.catalog import codex_input_modalities
+
+            resolved_input = codex_input_modalities(normalized_id)
         return self._repository.add_custom(
             context,
             normalized_provider,
@@ -470,6 +497,32 @@ def _antigravity_modalities_are_stale(items: Sequence[ProviderModelRecord]) -> b
         for item in items
         if not item.is_custom and "text" in item.output_modalities
     )
+
+
+def _codex_modalities_are_stale(items: Sequence[ProviderModelRecord]) -> bool:
+    """True when stored Codex rows have legacy text-only modalities instead of the current catalog."""
+    from agentos.providers.codex_cli.catalog import CODEX_IMAGE_MODEL_ID, FALLBACK_CODEX_MODELS
+
+    known_multimodal_slugs = frozenset(
+        m.id for m in FALLBACK_CODEX_MODELS if "image" in (m.input_modalities or ())
+    )
+    # A refresh never rewrites a custom row, so a custom row must not count:
+    # it would ask for a refresh on every listing.
+    chat_items = [
+        item
+        for item in items
+        if not item.is_custom
+        and "text" in item.output_modalities
+        and item.model_id != CODEX_IMAGE_MODEL_ID
+    ]
+    if not chat_items:
+        return False
+    if any(
+        item.model_id in known_multimodal_slugs and "image" not in item.input_modalities
+        for item in chat_items
+    ):
+        return True
+    return not any("image" in item.input_modalities for item in chat_items)
 
 
 def _provider(value: str) -> str:

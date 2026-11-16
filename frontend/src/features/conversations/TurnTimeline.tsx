@@ -9,7 +9,12 @@ import type { CodePermissionMode } from '../../api/codeMode'
 import { rewindTurn, type ConversationMode } from '../../api/conversations'
 import type { ProviderModel, ProviderName } from '../../api/providers'
 import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
-import { formatTurnWorkDuration, isWaitingModelEvent, summarizeActivities } from './activitySummary'
+import {
+  formatTurnWorkDuration,
+  isSubagentCoordinationOrWaitEvent,
+  isWaitingModelEvent,
+  summarizeActivities,
+} from './activitySummary'
 import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimelineFold'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
@@ -659,15 +664,46 @@ export function TurnTimeline({
     if (items) return items
     if (!events) return []
     const enriched = enrichEventsWithStartedMetadata(events)
-    return summarizeActivities(enriched).map((group) => {
+    const groups = summarizeActivities(enriched)
+    return groups.map((group, groupIdx) => {
       const firstEv = group.events[0]
+      if (
+        firstEv &&
+        (firstEv.type === 'agent.thought_delta' || firstEv.type === 'AGENT_THOUGHT_DELTA')
+      ) {
+        const content = group.events
+          .map((ev) => {
+            const detail = ev.detail && ev.detail !== 'Pensando' ? ev.detail : undefined
+            return String(
+              ev.payload?.delta ?? ev.delta ?? ev.content ?? ev.payload?.content ?? detail ?? '',
+            )
+          })
+          .join('')
+        const lastEv = group.events[group.events.length - 1] ?? firstEv
+        const thoughtId = `thought:${firstEv.originEventId ?? firstEv.eventId ?? group.id}`
+        const isCompletedThought =
+          turnCompleted || groupIdx < groups.length - 1 || group.state === 'completed'
+        return {
+          id: thoughtId,
+          kind: 'thought' as const,
+          thought: {
+            id: thoughtId,
+            turnId: firstEv.turnId,
+            content,
+            status: (isCompletedThought ? 'completed' : 'streaming') as 'streaming' | 'completed',
+            startedAt: firstEv.occurredAt,
+            endedAt: lastEv.endedAt ?? lastEv.occurredAt,
+          },
+          group,
+        }
+      }
       return {
         id: `activity:${group.id}:${firstEv?.originEventId ?? firstEv?.eventId ?? '0'}`,
         kind: 'activity' as const,
         group,
       }
     })
-  }, [items, events])
+  }, [items, events, turnCompleted])
 
   const primaryAgentId = useMemo(() => {
     // The main agent is the root of the delegation tree: some event names it
@@ -912,6 +948,7 @@ export function TurnTimeline({
     ).length
     const isSubagentRunning =
       !turnCompleted &&
+      !group.failed &&
       group.events.some((ev) => resolveVisualStatus(ev) === 'running')
 
     return (
@@ -1154,9 +1191,29 @@ export function TurnTimeline({
 
   const workDurationLabel = turnCompleted ? formatTurnWorkDuration(turnStartedAt, turnFinishedAt) : null
 
-  function isInterstitialSubagentWaveItem(candidate: TimelineRenderItem): boolean {
+  function isInterstitialSubagentWaveItem(
+    candidate: TimelineRenderItem,
+    hasRunningSubagentInWave = true,
+  ): boolean {
     if (candidate.kind === 'activity') {
+      if (isSubagentActivityGroup(candidate.group)) return false
+      const firstEv = candidate.group.events[0]
+      const isThoughtActivity =
+        firstEv?.type === 'agent.thought_delta' || firstEv?.type === 'AGENT_THOUGHT_DELTA'
+      const isMainAgentGroup =
+        !candidate.group.agentId ||
+        !primaryAgentId ||
+        candidate.group.agentId === primaryAgentId
+      if (isThoughtActivity && isMainAgentGroup && !hasRunningSubagentInWave) {
+        return false
+      }
       if (candidate.group.kind === 'agent') return true
+      if (
+        candidate.group.events.length > 0 &&
+        candidate.group.events.every((ev) => isSubagentCoordinationOrWaitEvent(ev))
+      ) {
+        return true
+      }
       if (
         candidate.group.kind === 'lifecycle' &&
         (candidate.group.events.some((ev) => Boolean(ev.parentAgentId)) ||
@@ -1165,10 +1222,14 @@ export function TurnTimeline({
         return true
       }
     }
-    if (
-      candidate.kind === 'thought' &&
-      Boolean(primaryAgentId && candidate.group?.agentId && candidate.group.agentId !== primaryAgentId)
-    ) {
+    if (candidate.kind === 'thought') {
+      const isMainThought =
+        !candidate.group?.agentId ||
+        !primaryAgentId ||
+        candidate.group.agentId === primaryAgentId
+      if (isMainThought && !hasRunningSubagentInWave) {
+        return false
+      }
       return true
     }
     return false
@@ -1255,15 +1316,39 @@ export function TurnTimeline({
                 lookahead += 1
                 continue
               }
+              const candidateStartMs =
+                candidate.kind === 'thought' && candidate.thought.startedAt
+                  ? typeof candidate.thought.startedAt === 'number'
+                    ? candidate.thought.startedAt
+                    : Date.parse(candidate.thought.startedAt)
+                  : Number.NaN
+              const hasRunningSubagentInWave =
+                subagentWave.length === 0 ||
+                subagentWave.some(
+                  (entry) =>
+                    (!entry.group.failed &&
+                      entry.group.events.some((ev) => resolveVisualStatus(ev) === 'running')) ||
+                    (Number.isFinite(candidateStartMs) &&
+                      entry.group.events.some((ev) => {
+                        const evMs = ev.occurredAt ? Date.parse(ev.occurredAt) : Number.NaN
+                        return Number.isFinite(evMs) && evMs > candidateStartMs
+                      })),
+                )
               if (
-                isInterstitialSubagentWaveItem(candidate) &&
+                isInterstitialSubagentWaveItem(candidate, hasRunningSubagentInWave) &&
                 lookahead + 1 < resolvedItems.length
               ) {
                 const nextNonInterstitial = resolvedItems
                   .slice(lookahead + 1)
-                  .find((nextItem) => !isInterstitialSubagentWaveItem(nextItem))
+                  .find((nextItem) => !isInterstitialSubagentWaveItem(nextItem, hasRunningSubagentInWave))
                 if (nextNonInterstitial && nextNonInterstitial.kind === 'activity' && isSubagentActivityGroup(nextNonInterstitial.group)) {
-                  if (candidate.kind === 'activity' && candidate.group.kind === 'agent') {
+                  if (candidate.kind === 'thought') {
+                    interstitialAgentNodes.push(
+                      <div key={candidate.id} className="turn-timeline__thought">
+                        <ThoughtBlock thought={candidate.thought} turnCompleted={turnCompleted} />
+                      </div>,
+                    )
+                  } else if (candidate.kind === 'activity' && candidate.group.kind === 'agent') {
                     const renderedAgent = renderTimelineGroup(candidate.group)
                     if (renderedAgent !== null) {
                       interstitialAgentNodes.push(
@@ -1288,8 +1373,10 @@ export function TurnTimeline({
             if (waveAgentCount >= 2) {
               const anyRunning =
                 !turnCompleted &&
-                subagentWave.some((entry) =>
-                  entry.group.events.some((ev) => resolveVisualStatus(ev) === 'running'),
+                subagentWave.some(
+                  (entry) =>
+                    !entry.group.failed &&
+                    entry.group.events.some((ev) => resolveVisualStatus(ev) === 'running'),
                 )
               timelineNodes.push(
                 <ParallelSubagentsGroup

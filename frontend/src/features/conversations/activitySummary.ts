@@ -15,7 +15,15 @@ import type { ActivityGroup, ActivityState, ConversationActivityEvent } from './
  * trail. Interactive approvals and browser captures stay separate because they
  * need their own controls and preview.
  */
+export function isSubagentSpawnPlaceholderEvent(event: ConversationActivityEvent): boolean {
+  const phase = event.payload?.phase ?? event.phase
+  return phase === 'spawning_subagent'
+}
+
 export function isWaitingModelEvent(event: ConversationActivityEvent): boolean {
+  if (isSubagentSpawnPlaceholderEvent(event)) {
+    return true
+  }
   const phase = event.payload?.phase ?? event.phase
   if (phase === 'waiting_model' || event.payload?.waiting_model === true) {
     return true
@@ -32,6 +40,101 @@ export function isWaitingModelEvent(event: ConversationActivityEvent): boolean {
   return false
 }
 
+export function isSubagentCoordinationToolName(rawName: unknown): boolean {
+  if (typeof rawName !== 'string') return false
+  const clean = rawName.trim()
+  if (!clean) return false
+  return /^(?:mcp__[^_]+__)?(?:check_?subagent|run_?subagent|agent|ask_?agents?|list_?agents)$/i.test(clean)
+}
+
+export function isWaitingSubagentsEvent(event: ConversationActivityEvent): boolean {
+  return (
+    event.waitingSubagents === true ||
+    event.payload?.waiting_subagents === true ||
+    event.state === 'waiting_agent' ||
+    event.payload?.state === 'waiting_subagents' ||
+    event.phase === 'waiting_subagents' ||
+    event.payload?.phase === 'waiting_subagents' ||
+    event.type === 'waiting_subagents' ||
+    event.type === 'delegation.waiting'
+  )
+}
+
+export function isSubagentCoordinationOrWaitEvent(event: ConversationActivityEvent): boolean {
+  if (event.kind === 'agent' || event.toolKind === 'agent') return true
+  if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') return true
+  if (
+    event.type.startsWith('context.') ||
+    event.type === 'CONTEXT_UPDATED' ||
+    event.type === 'CONTEXT_COMPACTED'
+  ) {
+    return true
+  }
+  if (isWaitingModelEvent(event) || isWaitingSubagentsEvent(event)) return true
+  const toolName = event.toolName ?? event.tool ?? event.payload?.tool_name
+  if (isSubagentCoordinationToolName(toolName)) return true
+  return false
+}
+
+export type SubagentSpawnTarget = {
+  agentId: string
+  agentName: string
+}
+
+export function extractSubagentSpawnTarget(
+  event: ConversationActivityEvent,
+  primaryAgentId?: string | null,
+): SubagentSpawnTarget | null {
+  if (
+    (event.type === 'agent.message_sent' || event.type === 'AGENT_MESSAGE_SENT') &&
+    event.payload?.source !== 'user'
+  ) {
+    const rawTo =
+      event.payload?.to_agent_id ??
+      event.payload?.toAgentId ??
+      (event as { to_agent_id?: unknown; toAgentId?: unknown }).to_agent_id ??
+      (event as { to_agent_id?: unknown; toAgentId?: unknown }).toAgentId
+    if (typeof rawTo === 'string' && rawTo.trim()) {
+      const targetAgentId = rawTo.trim()
+      if (primaryAgentId && targetAgentId === primaryAgentId) return null
+      const payloadName =
+        (typeof event.payload?.agent_name === 'string' && event.payload.agent_name.trim()) ||
+        (typeof event.payload?.recipient_name === 'string' && event.payload.recipient_name.trim()) ||
+        ''
+      const eventAgentName =
+        event.agentName && event.agentName.trim() && event.agentName !== 'Main'
+          ? event.agentName.trim()
+          : ''
+      const labelName =
+        (event.label && event.label.trim()) ||
+        (typeof event.payload?.label === 'string' && event.payload.label.trim()) ||
+        ''
+      const targetAgentName =
+        payloadName ||
+        eventAgentName ||
+        labelName ||
+        targetAgentId.replace(/^agent:/, '') ||
+        targetAgentId
+      return { agentId: targetAgentId, agentName: targetAgentName }
+    }
+  }
+  if (
+    (event.type === 'turn.started' || event.type === 'TURN_STARTED') &&
+    Boolean(event.parentAgentId || event.payload?.parent_agent_id)
+  ) {
+    const targetAgentId = (event.agentId ?? '').trim()
+    if (!targetAgentId || (primaryAgentId && targetAgentId === primaryAgentId)) return null
+    const targetAgentName =
+      (event.agentName && event.agentName.trim()) ||
+      (typeof event.payload?.agent_name === 'string' && event.payload.agent_name.trim()) ||
+      (event.label && event.label.trim()) ||
+      targetAgentId.replace(/^agent:/, '') ||
+      targetAgentId
+    return { agentId: targetAgentId, agentName: targetAgentName }
+  }
+  return null
+}
+
 export function computeSubagentDelegationStatus(
   events: ConversationActivityEvent[],
 ): Map<string, 'completed' | 'failed'> {
@@ -42,14 +145,29 @@ export function computeSubagentDelegationStatus(
     if (!clean) return
     statusByTarget.set(clean, status)
   }
+  const clearTarget = (target: unknown) => {
+    if (typeof target !== 'string') return
+    const clean = target.trim()
+    if (!clean) return
+    statusByTarget.delete(clean)
+  }
   for (const event of events) {
     const turnKey = event.turnId ?? ''
+    const spawnTarget = extractSubagentSpawnTarget(event)
+    if (spawnTarget) {
+      clearTarget(`${turnKey}:${spawnTarget.agentId}`)
+      clearTarget(spawnTarget.agentId)
+      clearTarget(`${turnKey}:${spawnTarget.agentName}`)
+      clearTarget(spawnTarget.agentName)
+    }
     const recordForEvent = (status: 'completed' | 'failed') => {
+      const includeEventAgent =
+        Boolean(event.parentAgentId || event.payload?.parent_agent_id) ||
+        (!event.payload?.from_agent_id && !event.payload?.agent_id)
       const candidates = [
-        event.agentId,
+        ...(includeEventAgent ? [event.agentId, event.agentName] : []),
         event.payload?.from_agent_id,
         event.payload?.agent_id,
-        event.agentName,
         event.label,
         event.payload?.agent_name,
         event.payload?.sender_name,
@@ -65,7 +183,11 @@ export function computeSubagentDelegationStatus(
     if (
       event.type === 'delegation.failed' ||
       event.type === 'DELEGATION_FAILED' ||
-      (event.type === 'turn.failed' && Boolean(event.parentAgentId))
+      ((event.type === 'turn.failed' ||
+        event.type === 'TURN_FAILED' ||
+        event.type === 'turn.cancelled' ||
+        event.type === 'TURN_CANCELLED') &&
+        Boolean(event.parentAgentId || event.payload?.parent_agent_id))
     ) {
       recordForEvent('failed')
     } else if (
@@ -73,20 +195,58 @@ export function computeSubagentDelegationStatus(
       event.type === 'DELEGATION_COMPLETED' ||
       event.type === 'agent.message_received' ||
       event.type === 'AGENT_MESSAGE_RECEIVED' ||
-      (event.type === 'turn.completed' && Boolean(event.parentAgentId))
+      ((event.type === 'turn.completed' || event.type === 'TURN_COMPLETED') &&
+        Boolean(event.parentAgentId || event.payload?.parent_agent_id))
     ) {
       recordForEvent('completed')
+    } else if (
+      (event.type === 'tool.finished' ||
+        event.type === 'tool.completed' ||
+        event.type === 'tool.failed') &&
+      typeof event.payload?.agent_id === 'string' &&
+      event.payload.agent_id.trim()
+    ) {
+      const isFailed =
+        event.type === 'tool.failed' ||
+        event.status === 'failed' ||
+        event.state === 'failed' ||
+        Boolean(event.errorCode) ||
+        event.payload?.status === 'failed' ||
+        event.payload?.state === 'failed'
+      const isStillRunning =
+        !isFailed &&
+        (event.payload?.status === 'running' ||
+          event.payload?.state === 'running' ||
+          event.payload?.run_in_background === true ||
+          event.payload?.background === true)
+      if (!isStillRunning) {
+        const outcome: 'completed' | 'failed' = isFailed ? 'failed' : 'completed'
+        const payloadCandidates = [
+          event.payload.agent_id,
+          event.payload.from_agent_id,
+          event.payload.agent_name,
+          event.payload.recipient_name,
+          event.payload.sender_name,
+          event.payload.label,
+        ]
+        for (const candidate of payloadCandidates) {
+          if (typeof candidate === 'string' && candidate.trim()) {
+            setTarget(`${turnKey}:${candidate.trim()}`, outcome)
+            setTarget(candidate.trim(), outcome)
+          }
+        }
+      }
     }
   }
   return statusByTarget
 }
 
-export function isSubagentDelegationFailed(
+export function resolveSubagentDelegationOutcome(
   statusByTarget: Map<string, 'completed' | 'failed'>,
   agentId?: string,
   agentName?: string,
   turnId?: string,
-): boolean {
+): 'completed' | 'failed' | null {
   const turnKey = turnId ?? ''
   const keys = [
     agentId ? `${turnKey}:${agentId}` : '',
@@ -96,10 +256,74 @@ export function isSubagentDelegationFailed(
   ].filter(Boolean)
   for (const key of keys) {
     const status = statusByTarget.get(key)
-    if (status === 'completed') return false
-    if (status === 'failed') return true
+    if (status === 'completed') return 'completed'
+    if (status === 'failed') return 'failed'
   }
-  return false
+  return null
+}
+
+export function isSubagentDelegationFailed(
+  statusByTarget: Map<string, 'completed' | 'failed'>,
+  agentId?: string,
+  agentName?: string,
+  turnId?: string,
+): boolean {
+  return resolveSubagentDelegationOutcome(statusByTarget, agentId, agentName, turnId) === 'failed'
+}
+
+export function createSubagentSpawnPlaceholderEvent(
+  event: ConversationActivityEvent,
+  target: SubagentSpawnTarget,
+  primaryAgentId: string | undefined | null,
+  subagentDelegationStatus: Map<string, 'completed' | 'failed'>,
+  turnCompleted = false,
+): ConversationActivityEvent {
+  const delegationOutcome = resolveSubagentDelegationOutcome(
+    subagentDelegationStatus,
+    target.agentId,
+    target.agentName,
+    event.turnId,
+  )
+  const isSettled = turnCompleted || delegationOutcome !== null
+  const state: ActivityState =
+    delegationOutcome === 'failed'
+      ? 'failed'
+      : isSettled
+        ? 'completed'
+        : 'working'
+  const status =
+    delegationOutcome === 'failed'
+      ? 'failed'
+      : isSettled
+        ? 'succeeded'
+        : 'running'
+  const summary =
+    delegationOutcome === 'failed'
+      ? 'Subagente não concluiu a tarefa'
+      : isSettled
+        ? 'Concluído'
+        : 'Iniciando subagente…'
+  const parentId =
+    event.parentAgentId ||
+    (typeof event.payload?.parent_agent_id === 'string' ? event.payload.parent_agent_id : undefined) ||
+    primaryAgentId ||
+    event.agentId ||
+    'agent:main'
+  return {
+    ...event,
+    eventId: `spawn:${target.agentId}:${event.originEventId ?? event.eventId}`,
+    originEventId: event.originEventId ?? event.eventId,
+    kind: 'tool',
+    type: 'tool.progressed',
+    state,
+    status,
+    agentId: target.agentId,
+    agentName: target.agentName,
+    parentAgentId: parentId,
+    phase: 'spawning_subagent',
+    payload: { ...(event.payload ?? {}), phase: 'spawning_subagent' },
+    summary,
+  }
 }
 
 export function normalizeGeneratingArgumentsEvent(
@@ -145,6 +369,15 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       primaryAgentByTurn.set(turnKey, event.agentId)
     }
   }
+  for (const event of events) {
+    const turnKey = event.turnId ?? ''
+    if (!primaryAgentByTurn.has(turnKey) && event.parentAgentId) {
+      primaryAgentByTurn.set(turnKey, event.parentAgentId)
+    }
+  }
+  const hasTerminalTurnEvent = events.some(
+    (ev) => !ev.parentAgentId && TERMINAL_TURN_TYPES.has(ev.type),
+  )
 
   const isSubagentEvent = (event: ConversationActivityEvent): boolean => {
     if (event.parentAgentId) return true
@@ -153,10 +386,79 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
   }
 
   const subagentWaveGroups = new Map<string, ActivityGroup>()
+  const settledWaveSubagents = new Set<string>()
   const openToolOriginsByScope = new Map<string, ConversationActivityEvent[]>()
+
+  const isWaveGroupSettled = (group: ActivityGroup): boolean => {
+    if (
+      (group.agentId && settledWaveSubagents.has(group.agentId)) ||
+      (group.agentName && settledWaveSubagents.has(group.agentName))
+    ) {
+      return true
+    }
+    const realTools = group.events.filter((ev) => ev.kind === 'tool' && !isWaitingModelEvent(ev))
+    if (realTools.length === 0) return false
+    return group.events.every(
+      (ev) =>
+        (ev.state === 'completed' || ev.state === 'failed' || ev.state === 'cancelled') &&
+        ev.status !== 'running' &&
+        ev.status !== 'in_progress' &&
+        ev.status !== 'started',
+    )
+  }
 
   for (const rawEvent of events) {
     let event = normalizeGeneratingArgumentsEvent(rawEvent)
+    if (
+      event.type === 'delegation.failed' ||
+      event.type === 'DELEGATION_FAILED' ||
+      event.type === 'delegation.completed' ||
+      event.type === 'DELEGATION_COMPLETED' ||
+      event.type === 'agent.message_received' ||
+      event.type === 'AGENT_MESSAGE_RECEIVED' ||
+      (TERMINAL_TURN_TYPES.has(event.type) &&
+        Boolean(event.parentAgentId || event.payload?.parent_agent_id))
+    ) {
+      for (const candidate of [
+        event.agentId,
+        event.agentName,
+        event.label,
+        event.payload?.from_agent_id,
+        event.payload?.agent_id,
+        event.payload?.agent_name,
+        event.payload?.sender_name,
+      ]) {
+        if (typeof candidate === 'string' && candidate.trim()) {
+          settledWaveSubagents.add(candidate.trim())
+        }
+      }
+    } else if (
+      (event.type === 'tool.finished' ||
+        event.type === 'tool.completed' ||
+        event.type === 'tool.failed') &&
+      typeof event.payload?.agent_id === 'string' &&
+      event.payload.agent_id.trim()
+    ) {
+      const isFailed =
+        event.type === 'tool.failed' ||
+        event.status === 'failed' ||
+        event.state === 'failed' ||
+        Boolean(event.errorCode) ||
+        event.payload?.status === 'failed' ||
+        event.payload?.state === 'failed'
+      const isStillRunning =
+        !isFailed &&
+        (event.payload?.status === 'running' ||
+          event.payload?.state === 'running' ||
+          event.payload?.run_in_background === true ||
+          event.payload?.background === true)
+      if (!isStillRunning) {
+        settledWaveSubagents.add(event.payload.agent_id.trim())
+        if (typeof event.payload.agent_name === 'string' && event.payload.agent_name.trim()) {
+          settledWaveSubagents.add(event.payload.agent_name.trim())
+        }
+      }
+    }
     const toolScope = `${event.agentId}:${event.turnId ?? ''}`
     if (event.type === 'tool.started' || event.type === 'tool.progressed') {
       const openList = openToolOriginsByScope.get(toolScope) ?? []
@@ -215,6 +517,53 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
         )
       }
     }
+    const subagentEvent = isSubagentEvent(event)
+    if (!subagentEvent && event.kind === 'message' && event.content && event.content.trim()) {
+      subagentWaveGroups.clear()
+      settledWaveSubagents.clear()
+    }
+    if (
+      !subagentEvent &&
+      (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') &&
+      subagentWaveGroups.size > 0 &&
+      [...subagentWaveGroups.values()].every(isWaveGroupSettled)
+    ) {
+      subagentWaveGroups.clear()
+      settledWaveSubagents.clear()
+    }
+    const spawnTarget = extractSubagentSpawnTarget(
+      event,
+      primaryAgentByTurn.get(event.turnId ?? ''),
+    )
+    if (spawnTarget) {
+      settledWaveSubagents.delete(spawnTarget.agentId)
+      settledWaveSubagents.delete(spawnTarget.agentName)
+      const key = `tool:${spawnTarget.agentId}:${event.turnId ?? ''}`
+      const existingWaveGroup = subagentWaveGroups.get(key)
+      if (existingWaveGroup) {
+        if (!existingWaveGroup.agentName && spawnTarget.agentName) {
+          existingWaveGroup.agentName = spawnTarget.agentName
+        }
+        continue
+      }
+      const spawnEvent = createSubagentSpawnPlaceholderEvent(
+        event,
+        spawnTarget,
+        primaryAgentByTurn.get(event.turnId ?? ''),
+        subagentDelegationStatus,
+        hasTerminalTurnEvent,
+      )
+      const created = soloGroup(spawnEvent)
+      created.failed = isSubagentDelegationFailed(
+        subagentDelegationStatus,
+        spawnTarget.agentId,
+        spawnTarget.agentName,
+        event.turnId,
+      )
+      groups.push(created)
+      subagentWaveGroups.set(key, created)
+      continue
+    }
     if (!isRenderable(event, settled)) continue
     if (event.turnId && firstCodeEventByTurn.has(event.turnId)) {
       const anchor = firstCodeEventByTurn.get(event.turnId)!
@@ -234,8 +583,7 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       groups.push(codeModeRunGroup(events, event))
       continue
     }
-    const subagentEvent = isSubagentEvent(event)
-    if (!subagentEvent && event.kind !== 'agent') {
+    if (!subagentEvent && !isSubagentCoordinationOrWaitEvent(event)) {
       subagentWaveGroups.clear()
     }
     if (event.kind === 'artifact') {
@@ -275,6 +623,9 @@ export function summarizeActivities(events: ConversationActivityEvent[]): Activi
       const existingWaveGroup = subagentWaveGroups.get(key)
       if (existingWaveGroup) {
         applyEventToGroup(existingWaveGroup, event)
+        if (event.agentName) {
+          existingWaveGroup.agentName = event.agentName
+        }
         existingWaveGroup.failed = delegationFailed
         continue
       }
@@ -395,7 +746,13 @@ function findLastOpenToolIndex(events: ConversationActivityEvent[], toolName?: s
 
 const TERMINAL_TURN_TYPES = new Set([
   'turn.completed',
+  'TURN_COMPLETED',
   'turn.failed',
+  'TURN_FAILED',
+  'turn.cancelled',
+  'TURN_CANCELLED',
+  'execution.canceled',
+  'EXECUTION_CANCELED',
   'code_mode.completed',
   'code_mode.completed_with_caveats',
   'code_mode.blocked',
@@ -478,6 +835,34 @@ export function computeSettledEventIds(
       continue
     }
     if (event.type === 'tool.finished' || event.type === 'tool.completed' || event.type === 'tool.failed') {
+      const payloadAgentId =
+        typeof event.payload?.agent_id === 'string' ? event.payload.agent_id.trim() : ''
+      if (payloadAgentId) {
+        const isFailed =
+          event.type === 'tool.failed' ||
+          event.status === 'failed' ||
+          event.state === 'failed' ||
+          Boolean(event.errorCode) ||
+          event.payload?.status === 'failed' ||
+          event.payload?.state === 'failed'
+        const isStillRunning =
+          !isFailed &&
+          (event.payload?.status === 'running' ||
+            event.payload?.state === 'running' ||
+            event.payload?.run_in_background === true ||
+            event.payload?.background === true)
+        if (!isStillRunning) {
+          for (const [scope, subList] of openByTurn.entries()) {
+            const [scopeAgentId] = scope.split(':', 1)
+            if (scopeAgentId === payloadAgentId) {
+              for (const openEvent of subList) {
+                if (openEvent.eventId) settled.add(openEvent.eventId)
+              }
+              openByTurn.set(scope, [])
+            }
+          }
+        }
+      }
       const list = openByTurn.get(turnScope)
       if (!list || list.length === 0) continue
       const remaining: ConversationActivityEvent[] = []
@@ -513,31 +898,53 @@ export function computeSettledEventIds(
       event.type === 'agent.message_received' ||
       event.type === 'AGENT_MESSAGE_RECEIVED'
     ) {
+      const isMessageReceived =
+        event.type === 'agent.message_received' || event.type === 'AGENT_MESSAGE_RECEIVED'
+      const includeEventAgentId =
+        !isMessageReceived ||
+        Boolean(event.parentAgentId || event.payload?.parent_agent_id) ||
+        (!event.payload?.from_agent_id && !event.payload?.agent_id)
       const targetIds = new Set(
         [
-          event.agentId,
+          includeEventAgentId ? event.agentId : undefined,
           typeof event.payload?.from_agent_id === 'string' ? event.payload.from_agent_id : undefined,
           typeof event.payload?.agent_id === 'string' ? event.payload.agent_id : undefined,
         ].filter((id): id is string => Boolean(id)),
       )
+      const targetNames = new Set(
+        [
+          includeEventAgentId ? event.agentName : undefined,
+          event.label,
+          typeof event.payload?.agent_name === 'string' ? event.payload.agent_name : undefined,
+          typeof event.payload?.sender_name === 'string' ? event.payload.sender_name : undefined,
+          typeof event.payload?.label === 'string' ? event.payload.label : undefined,
+        ]
+          .map((name) => (typeof name === 'string' ? name.trim() : ''))
+          .filter(Boolean),
+      )
       for (const [scope, list] of openByTurn.entries()) {
         const [scopeAgentId] = scope.split(':', 1)
-        if (targetIds.has(scopeAgentId)) {
-          const remaining: ConversationActivityEvent[] = []
+        const matchesAgent =
+          targetIds.has(scopeAgentId) ||
+          list.some((openEvent) =>
+            Boolean(openEvent.agentName && targetNames.has(openEvent.agentName.trim())),
+          )
+        if (matchesAgent) {
           for (const openEvent of list) {
-            if (isWaitingModelEvent(openEvent)) {
-              if (openEvent.eventId) settled.add(openEvent.eventId)
-            } else {
-              remaining.push(openEvent)
-            }
+            if (openEvent.eventId) settled.add(openEvent.eventId)
           }
-          openByTurn.set(scope, remaining)
+          openByTurn.set(scope, [])
         }
       }
     }
-    if (TERMINAL_TURN_TYPES.has(event.type) && !event.parentAgentId) {
+    if (TERMINAL_TURN_TYPES.has(event.type)) {
+      const isSubagentTerminal = Boolean(event.parentAgentId || event.payload?.parent_agent_id)
       for (const [scope, list] of openByTurn.entries()) {
-        if (scope === turnScope || (event.turnId && scope.endsWith(`:${event.turnId}`))) {
+        const [scopeAgentId] = scope.split(':', 1)
+        const matchesScope = isSubagentTerminal
+          ? Boolean(event.agentId && scopeAgentId === event.agentId)
+          : scope === turnScope || Boolean(event.turnId && scope.endsWith(`:${event.turnId}`))
+        if (matchesScope) {
           for (const openEvent of list) {
             if (openEvent.eventId) settled.add(openEvent.eventId)
           }

@@ -5,8 +5,10 @@ from pathlib import Path
 
 from agentos.providers.cli_adapter import CliModelInfo
 from agentos.providers.codex_cli.catalog import (
+    CODEX_IMAGE_MODEL,
     DEFAULT_CODEX_CONTEXT_WINDOW,
     FALLBACK_CODEX_MODELS,
+    codex_input_modalities,
     context_window_for,
     discover_codex_models,
     resolve_codex_home,
@@ -123,12 +125,14 @@ def test_discover_codex_models_filters_visible_and_formats_display_name(
         display_name="GPT-6.1-Sol (Assinatura Codex)",
         context_window=500_000,
         supported_efforts=("low", "medium", "high", "xhigh", "max", "ultra"),
+        input_modalities=("text", "image"),
     )
     assert models[4] == CliModelInfo(
         id="gpt-6-luna",
         display_name="GPT-6-Luna (Assinatura Codex)",
         context_window=272_000,
         supported_efforts=("low", "medium", "high", "xhigh", "max"),
+        input_modalities=("text", "image"),
     )
 
 
@@ -263,5 +267,60 @@ def test_discover_codex_models_handles_adversarial_and_edge_case_entries(
         display_name="GPT-6.1-Sol (Assinatura Codex)",
         context_window=DEFAULT_CODEX_CONTEXT_WINDOW,
         supported_efforts=("low", "high"),
+        input_modalities=("text", "image"),
     )
+
+
+def test_codex_input_modalities_normalization_and_image_model() -> None:
+    assert codex_input_modalities("codex-image") == ("text",)
+    assert codex_input_modalities("openai-codex/codex-image", ["text", "image"]) == ("text",)
+    assert CODEX_IMAGE_MODEL.input_modalities == ("text",)
+    assert codex_input_modalities("gpt-6.1-sol") == ("text", "image")
+    assert codex_input_modalities("gpt-6.1-sol", ["IMAGE", " text ", "audio"]) == ("text", "image")
+    assert codex_input_modalities("gpt-6.1-sol", ["image"]) == ("text", "image")
+    assert codex_input_modalities("gpt-6.1-sol", ["text"]) == ("text",)
+    assert codex_input_modalities("gpt-6.1-sol", []) == ("text", "image")
+    assert codex_input_modalities("gpt-6.1-sol", "text") == ("text", "image")
+
+
+def test_fallback_codex_models_all_see_images() -> None:
+    assert FALLBACK_CODEX_MODELS
+    assert all(m.input_modalities == ("text", "image") for m in FALLBACK_CODEX_MODELS)
+
+
+def test_discover_codex_models_reads_explicit_and_missing_input_modalities(
+    tmp_path: Path,
+) -> None:
+    cache_file = tmp_path / "models_cache.json"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-6.1-sol",
+                        "display_name": "GPT-6.1-Sol",
+                        "visibility": "list",
+                        "input_modalities": ["text", "image"],
+                    },
+                    {
+                        "slug": "gpt-6-terra",
+                        "display_name": "GPT-6-Terra",
+                        "visibility": "list",
+                    },
+                    {
+                        "slug": "codex-image",
+                        "display_name": "Codex Image",
+                        "visibility": "list",
+                        "input_modalities": ["text", "image"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    by_id = {m.id: m.input_modalities for m in discover_codex_models(tmp_path)}
+    assert by_id["gpt-6.1-sol"] == ("text", "image")
+    assert by_id["gpt-6-terra"] == ("text", "image")
+    assert by_id["codex-image"] == ("text",)
 

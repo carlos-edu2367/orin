@@ -76,3 +76,19 @@ def test_a_transport_exception_becomes_a_safe_unavailable_result_and_is_closed()
     with pytest.raises(VisionUnavailable):
         _reader(transport).transcribe([("QUJD", "image/png")])
     assert transport.closed == 1
+
+
+@pytest.mark.parametrize(
+    "omitted_reply",
+    [
+        "[Imagem/mídia omitida: o Codex CLI não recebe imagens na mensagem. Para ver um arquivo visual, chame a ferramenta de leitura de arquivos do Orin com o caminho dele.]",
+        "[Imagem/mídia omitida: o Antigravity CLI não recebe imagens na mensagem. Para ver um arquivo visual, chame sua ferramenta nativa read_file com o caminho ABSOLUTO dele (a ferramenta view_file do Orin informa esse caminho).]",
+        "[Imagem/mídia no arquivo: foto.png — o Codex CLI não recebe imagens na mensagem.]",
+        "A imagem foi omitida pelo wrapper antes de chegar aqui.",
+    ],
+)
+def test_omitted_media_note_in_reply_raises_vision_unavailable(omitted_reply):
+    transport = _Transport([NormalizedStreamItem(StreamKind.TEXT, 1, text=omitted_reply)])
+    with pytest.raises(VisionUnavailable, match="did not receive the image"):
+        _reader(transport).transcribe([("QUJD", "image/png")])
+    assert transport.closed == 1

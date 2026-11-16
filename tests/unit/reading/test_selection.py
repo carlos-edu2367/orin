@@ -1,4 +1,8 @@
-from agentos.reading.selection import VisionModel, choose_vision_model
+from agentos.reading.selection import (
+    PROVIDERS_WITHOUT_INLINE_IMAGES,
+    VisionModel,
+    choose_vision_model,
+)
 
 CANDIDATES = (
     VisionModel("openrouter", "gpt-4o"),
@@ -31,3 +35,25 @@ def test_any_remaining_candidate_is_used_as_a_last_resort():
 
 def test_no_candidate_returns_none():
     assert choose_vision_model((), turn_provider="anthropic") is None
+
+
+def test_cli_providers_without_inline_images_are_excluded_from_selection():
+    assert "google-antigravity" in PROVIDERS_WITHOUT_INLINE_IMAGES
+    assert "openai-codex" in PROVIDERS_WITHOUT_INLINE_IMAGES
+    mixed = (
+        VisionModel("google-antigravity", "gemini-4-argon-high"),
+        VisionModel("openai-codex", "gpt-6.1-sol"),
+        VisionModel("ollama", "qwen2.5-vl"),
+    )
+    assert choose_vision_model(
+        mixed,
+        turn_provider="openai-codex",
+        override=VisionModel("google-antigravity", "gemini-4-argon-high"),
+    ) == VisionModel("ollama", "qwen2.5-vl")
+    assert choose_vision_model(
+        (
+            VisionModel("google-antigravity", "gemini-4-argon-high"),
+            VisionModel("openai-codex", "gpt-6.1-sol"),
+        ),
+        turn_provider="openai-codex",
+    ) is None

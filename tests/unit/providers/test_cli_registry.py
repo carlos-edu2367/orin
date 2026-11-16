@@ -675,7 +675,16 @@ def test_passo1_final_review_fixes(
 
     codex_models = service.list(ctx, "openai-codex")
     agy_models = service.list(ctx, "google-antigravity")
-    assert codex_models and all(m.input_modalities == ("text",) for m in codex_models)
+    # Codex CLI accepts images via --image and MCP tool results (ViewFile/Read),
+    # so chat models are catalogued as seeing images, while codex-image stays text-only.
+    assert codex_models
+    codex_by_id = {m.model_id: m.input_modalities for m in codex_models}
+    assert codex_by_id.get("codex-image") == ("text",)
+    assert all(
+        mods == ("text", "image")
+        for mid, mods in codex_by_id.items()
+        if mid != "codex-image"
+    )
     # agy's stream-json input is text-only, but an image in an MCP tool result
     # reaches the model, so Gemini and Claude are catalogued as seeing images.
     agy_by_id = {m.model_id: m.input_modalities for m in agy_models}

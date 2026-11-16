@@ -181,3 +181,73 @@ def test_a_vision_model_transport_fails_closed_without_its_own_credential(monkey
 
     assert isinstance(reader, VisionReader)
     assert reader._transport_factory(reader.model) is None
+
+
+def test_override_pointing_to_cli_provider_without_inline_images_is_ignored(monkeypatch) -> None:
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", ENCRYPTION_KEY)
+    engine = _engine()
+    _catalog_rows(
+        engine,
+        {"user_id": "user-1", "provider": "google-antigravity", "model_id": "gemini-4-argon-high",
+         "display_name": "Gemini Argon", "input_modalities": ["text", "image"]},
+        {"user_id": "user-1", "provider": "openai-codex", "model_id": "gpt-6.1-sol",
+         "display_name": "GPT-6.1-Sol", "input_modalities": ["text", "image"]},
+        {"user_id": "user-1", "provider": "ollama", "model_id": "qwen2.5-vl",
+         "display_name": "qwen2.5-vl", "input_modalities": ["text", "image"]},
+    )
+    _override(engine, user_id="user-1", provider="google-antigravity", model_id="gemini-4-argon-high")
+    worker = ChatWorker(Store(engine))
+
+    reader = worker._vision_reader_factory(dict(TURN))()
+    assert isinstance(reader, VisionReader)
+    assert reader.model.provider == "ollama"
+    assert reader.model.model_id == "qwen2.5-vl"
+
+    engine2 = _engine()
+    _catalog_rows(
+        engine2,
+        {"user_id": "user-1", "provider": "openai-codex", "model_id": "gpt-6.1-sol",
+         "display_name": "GPT-6.1-Sol", "input_modalities": ["text", "image"]},
+        {"user_id": "user-1", "provider": "anthropic", "model_id": "claude-opus-5-vision",
+         "display_name": "Opus Vision", "input_modalities": ["text", "image"]},
+    )
+    _override(engine2, user_id="user-1", provider="openai-codex", model_id="gpt-6.1-sol")
+    worker2 = ChatWorker(Store(engine2))
+
+    reader2 = worker2._vision_reader_factory(dict(TURN))()
+    assert isinstance(reader2, VisionReader)
+    assert reader2.model.provider == "anthropic"
+    assert reader2.model.model_id == "claude-opus-5-vision"
+
+
+def test_factory_returns_none_when_only_cli_providers_without_inline_images_have_vision(monkeypatch) -> None:
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", ENCRYPTION_KEY)
+    engine = _engine()
+    _catalog_rows(
+        engine,
+        {"user_id": "user-1", "provider": "google-antigravity", "model_id": "gemini-4-argon-high",
+         "display_name": "Gemini Argon", "input_modalities": ["text", "image"]},
+        {"user_id": "user-1", "provider": "openai-codex", "model_id": "gpt-6.1-sol",
+         "display_name": "GPT-6.1-Sol", "input_modalities": ["text", "image"]},
+    )
+    _override(engine, user_id="user-1", provider="openai-codex", model_id="gpt-6.1-sol")
+    worker = ChatWorker(Store(engine))
+
+    assert worker._vision_reader_factory(dict(TURN))() is None
+
+
+def test_codex_model_sees_images_handles_stale_rows_and_codex_image(monkeypatch) -> None:
+    monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", ENCRYPTION_KEY)
+    engine = _engine()
+    _catalog_rows(
+        engine,
+        {"user_id": "user-1", "provider": "openai-codex", "model_id": "gpt-6.1-sol",
+         "display_name": "GPT-6.1-Sol", "input_modalities": ["text"]},
+        {"user_id": "user-1", "provider": "openai-codex", "model_id": "codex-image",
+         "display_name": "Imagem (Codex)", "input_modalities": ["text"], "output_modalities": ["image"]},
+    )
+    worker = ChatWorker(Store(engine))
+
+    assert worker._model_sees_images({"user_id": "user-1", "provider": "openai-codex", "model_id": "gpt-6.1-sol"}) is True
+    assert worker._model_sees_images({"user_id": "user-1", "provider": "openai-codex", "model_id": "codex-image"}) is False
+    assert worker._model_sees_images({"user_id": "user-1", "provider": "openai-codex", "model_id": "openai-codex/codex-image"}) is False

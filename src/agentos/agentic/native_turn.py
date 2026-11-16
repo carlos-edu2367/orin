@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -10,7 +11,7 @@ from pathlib import Path
 import re
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
 from agentos.installation.paths import orin_paths
@@ -42,7 +43,10 @@ from agentos.providers.claude_cli.text_protocol import (
     strip_residual_tool_protocol_blocks,
 )
 from agentos.agentic.tool_media import save_tool_images, tool_media_note
-from agentos.agentic.tools.public_names import public_name as _public_tool_name
+from agentos.agentic.tools.public_names import (
+    internal_name as _internal_tool_name,
+    public_name as _public_tool_name,
+)
 from agentos.providers.cli_tools_mcp import (
     McpToolSpec,
     ToolCallRequest,
@@ -90,6 +94,10 @@ MAX_NATIVE_PRIOR_HISTORY_CHARS: int = 120_000
 # How many times one turn resumes after the CLI called a harmless built-in tool (agy's manage_task, list_dir...)
 # before it fails as it did before: a model that keeps calling it would otherwise restart the CLI forever.
 MAX_BUILTIN_TOOL_DETOURS: int = 2
+_DELEGATION_TOOLS: frozenset[str] = frozenset(
+    {"run_subagent", "ask_agent", "ask_agents", "check_subagent"}
+)
+_USER_WAIT_TOOLS: frozenset[str] = frozenset({"ask_user", "exit_plan_mode"})
 
 
 def builtin_tool_reminder(tool_name: str, alternatives: Sequence[str], *, prefix: str = "mcp_orin_") -> str:
@@ -284,6 +292,84 @@ class _OpenReadBatch:
         self.cond = threading.Condition()
 
 
+_RUNNING_ENTRIES: contextvars.ContextVar[tuple[_BatchEntry, ...] | None] = (
+    contextvars.ContextVar("_RUNNING_ENTRIES", default=None)
+)
+
+
+class _LaneGate:
+    """Reader/writer-style gate with writer preference for tool batch lanes."""
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._exclusive_active: bool = False
+        self._shared_active: int = 0
+        self._exclusive_waiting: int = 0
+
+    def acquire_shared(
+        self,
+        timeout: float = EXEC_WAIT_POLL_SECONDS,
+        *,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> bool:
+        step = max(0.0, float(timeout))
+        deadline = None if should_abort is not None else (time.monotonic() + step)
+        with self._cond:
+            while self._exclusive_active or self._exclusive_waiting > 0:
+                if should_abort is not None:
+                    if should_abort():
+                        return False
+                    self._cond.wait(timeout=step)
+                else:
+                    assert deadline is not None
+                    rem = deadline - time.monotonic()
+                    if rem <= 0:
+                        return False
+                    self._cond.wait(timeout=rem)
+            self._shared_active += 1
+            return True
+
+    def release_shared(self) -> None:
+        with self._cond:
+            if self._shared_active > 0:
+                self._shared_active -= 1
+            self._cond.notify_all()
+
+    def acquire_exclusive(
+        self,
+        timeout: float = EXEC_WAIT_POLL_SECONDS,
+        *,
+        should_abort: Callable[[], bool] | None = None,
+    ) -> bool:
+        step = max(0.0, float(timeout))
+        deadline = None if should_abort is not None else (time.monotonic() + step)
+        with self._cond:
+            self._exclusive_waiting += 1
+            try:
+                while self._exclusive_active or self._shared_active > 0:
+                    if should_abort is not None:
+                        if should_abort():
+                            return False
+                        self._cond.wait(timeout=step)
+                    else:
+                        assert deadline is not None
+                        rem = deadline - time.monotonic()
+                        if rem <= 0:
+                            return False
+                        self._cond.wait(timeout=rem)
+                self._exclusive_active = True
+                return True
+            finally:
+                self._exclusive_waiting -= 1
+                if not self._exclusive_active:
+                    self._cond.notify_all()
+
+    def release_exclusive(self) -> None:
+        with self._cond:
+            self._exclusive_active = False
+            self._cond.notify_all()
+
+
 class ToolBatchCollector:
     """Gathers concurrent read-only MCP calls from the same assistant message into one `_run_toolset` batch."""
 
@@ -298,7 +384,8 @@ class ToolBatchCollector:
         self._gather_seconds = max(0.0, float(gather_seconds))
         self._clock = clock
         self._state_lock = threading.Lock()
-        self._exec_lock = threading.Lock()
+        self._gate = _LaneGate()
+        self._read_mutex = threading.Lock()
         self._open_batches: dict[str, _OpenReadBatch] = {}
         self._in_flight_reads: dict[str, list[_BatchEntry]] = {}
         self._closed_read_batches: dict[str, tuple[list[_BatchEntry], float]] = {}
@@ -311,28 +398,81 @@ class ToolBatchCollector:
         The CLI stops waiting after its MCP tool timeout but the tool keeps
         running here and holds the turn's tools; a long tool checks this to stop itself.
         """
+        ctx_entries = _RUNNING_ENTRIES.get()
+        if ctx_entries is not None:
+            return bool(ctx_entries) and all(entry.abandoned() for entry in ctx_entries)
         with self._state_lock:
             running = list(self._running)
         return bool(running) and all(entry.abandoned() for entry in running)
 
-    def _run_exclusive(self, entries: list[_BatchEntry], msg_key: str) -> list[ToolCallResult]:
-        """Run one batch at a time; a call its client already gave up on is never run late."""
-        while not self._exec_lock.acquire(timeout=EXEC_WAIT_POLL_SECONDS):
-            if all(entry.abandoned() for entry in entries):
-                return [ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True) for _ in entries]
+    def _run_gated(
+        self,
+        entries: list[_BatchEntry],
+        msg_key: str,
+        mode: Literal["read", "write", "agent"],
+    ) -> list[ToolCallResult]:
+        """Run a batch in its compatibility lane; a call its client already gave up on is never run late."""
+        all_abandoned = lambda: all(entry.abandoned() for entry in entries)
+        if all_abandoned():
+            return [ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True) for _ in entries]
+
+        if mode == "write":
+            if not self._gate.acquire_exclusive(
+                timeout=EXEC_WAIT_POLL_SECONDS, should_abort=all_abandoned
+            ):
+                return [
+                    ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True)
+                    for _ in entries
+                ]
+        elif mode == "read":
+            while not self._read_mutex.acquire(timeout=EXEC_WAIT_POLL_SECONDS):
+                if all_abandoned():
+                    return [
+                        ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True)
+                        for _ in entries
+                    ]
+            if not self._gate.acquire_shared(
+                timeout=EXEC_WAIT_POLL_SECONDS, should_abort=all_abandoned
+            ):
+                self._read_mutex.release()
+                return [
+                    ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True)
+                    for _ in entries
+                ]
+        else:
+            if not self._gate.acquire_shared(
+                timeout=EXEC_WAIT_POLL_SECONDS, should_abort=all_abandoned
+            ):
+                return [
+                    ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True)
+                    for _ in entries
+                ]
+
         try:
             live = [entry for entry in entries if not entry.abandoned()]
             if not live:
                 return [ToolCallResult(text=ABANDONED_BEFORE_START, is_error=True) for _ in entries]
             with self._state_lock:
-                self._running = live
+                self._running.extend(live)
+            token = _RUNNING_ENTRIES.set(tuple(live))
             try:
                 live_results = self._run_batch(live, msg_key)
             finally:
+                _RUNNING_ENTRIES.reset(token)
                 with self._state_lock:
-                    self._running = []
+                    live_ids = {id(e) for e in live}
+                    self._running = [e for e in self._running if id(e) not in live_ids]
         finally:
-            self._exec_lock.release()
+            if mode == "write":
+                self._gate.release_exclusive()
+            elif mode == "read":
+                try:
+                    self._gate.release_shared()
+                finally:
+                    self._read_mutex.release()
+            else:
+                self._gate.release_shared()
+
         if len(live) == len(entries):
             return live_results
         if len(live_results) != len(live):
@@ -351,6 +491,7 @@ class ToolBatchCollector:
         *,
         message_id: str = "default",
         read_only: bool = False,
+        lane: str | None = None,
         cancelled: threading.Event | None = None,
     ) -> ToolCallResult:
         msg_key = str(message_id or "default")
@@ -362,8 +503,34 @@ class ToolBatchCollector:
             read_only=bool(read_only),
             cancelled=cancelled,
         )
+        effective_lane = lane if lane is not None else ("read" if entry.read_only else "write")
 
-        if not entry.read_only:
+        if effective_lane == "agent":
+            if not entry.read_only:
+                with self._state_lock:
+                    open_batch = self._open_batches.pop(msg_key, None)
+                    if open_batch is not None and not open_batch.closed:
+                        open_batch.closed = True
+                        with open_batch.cond:
+                            open_batch.cond.notify_all()
+                    prior_entries = list(self._in_flight_reads.get(msg_key, ()))
+                    if prior_entries and open_batch is not None:
+                        self._closed_read_batches[msg_key] = (
+                            prior_entries,
+                            open_batch.deadline,
+                        )
+                for prior in prior_entries:
+                    while not prior.done.wait(EXEC_WAIT_POLL_SECONDS):
+                        if entry.abandoned():
+                            break
+                if prior_entries and prior_entries[-1].batch_key:
+                    entry.batch_key = prior_entries[-1].batch_key
+            results = self._run_gated([entry], msg_key, "agent")
+            if not results:
+                return ToolCallResult(text="", is_error=True)
+            return results[0]
+
+        if effective_lane == "write":
             with self._state_lock:
                 open_batch = self._open_batches.pop(msg_key, None)
                 if open_batch is not None and not open_batch.closed:
@@ -388,7 +555,7 @@ class ToolBatchCollector:
                 entry.batch_key = prior_entries[-1].batch_key
 
             try:
-                results = self._run_exclusive([entry], msg_key)
+                results = self._run_gated([entry], msg_key, "write")
             finally:
                 with self._state_lock:
                     rem_writes = self._in_flight_writes.get(msg_key, 1) - 1
@@ -438,7 +605,7 @@ class ToolBatchCollector:
             entries = list(batch.entries)
 
         try:
-            results = self._run_exclusive(entries, msg_key)
+            results = self._run_gated(entries, msg_key, "read")
             if len(results) != len(entries):
                 raise RuntimeError(
                     f"ToolBatchCollector expected {len(entries)} results, got {len(results)}"
@@ -497,6 +664,12 @@ class RuntimeToolExecutor(ToolExecutor):
         self._explicit_tool_schemas: list[dict[str, object]] | None = (
             list(tool_schemas) if tool_schemas is not None else None
         )
+        sync_restrictions = getattr(runtime.toolset, "set_tool_restrictions", None)
+        if callable(sync_restrictions):
+            sync_restrictions(
+                offered_tools=getattr(runtime, "offered_tools", None),
+                withheld_tools=getattr(runtime, "withheld_tools", ()),
+            )
         self._last_discovered_snapshot: tuple[frozenset[str], frozenset[str], bool] = (
             self._snapshot_discovered()
         )
@@ -510,6 +683,7 @@ class RuntimeToolExecutor(ToolExecutor):
         self._deferred_queued_records: list[tuple[str, str]] | None = None
         self.stop_reason: str | None = None
         self.action_count: int = 0
+        self._reserved_actions: int = 0
         self.tool_rounds: int = 0
         self.handle: NativeTurnHandle | Any | None = None
         self.speak_state: _SpeakState | None = None
@@ -523,6 +697,10 @@ class RuntimeToolExecutor(ToolExecutor):
         self._adapter_message_ids: bool = False
         self._batch_seq: int = 0
         self._in_flight: int = 0
+        self._in_flight_lock = threading.Lock()
+        self._commit_lock = threading.RLock()
+        self._active_batches: int = 0
+        self._active_wave_batch_key: str = ""
         self._closed = threading.Event()
         self._first_read_keys_by_message_id: dict[str, set[str]] = {}
         # When each first-read result was handed back to the model, and which assistant
@@ -574,7 +752,24 @@ class RuntimeToolExecutor(ToolExecutor):
             return False
         internal_name = self._resolve_internal_name(raw_name)
         toolset = self.runtime.toolset
+        sync_restrictions = getattr(toolset, "set_tool_restrictions", None)
+        if callable(sync_restrictions):
+            sync_restrictions(
+                offered_tools=getattr(self.runtime, "offered_tools", None),
+                withheld_tools=getattr(self.runtime, "withheld_tools", ()),
+            )
         active_mcp = set(getattr(toolset, "active_mcp_tool_names", ()) or ())
+        withheld = getattr(self.runtime, "withheld_tools", ()) or ()
+        offered = getattr(self.runtime, "offered_tools", None)
+        if internal_name in withheld or raw_name in withheld:
+            return False
+        if (
+            offered is not None
+            and internal_name not in offered
+            and raw_name not in offered
+            and internal_name not in active_mcp
+        ):
+            return False
         deferred = set(getattr(toolset, "deferred_tool_names", ()) or ())
         discovered = set(getattr(toolset, "discovered_tool_names", ()) or ())
         return (
@@ -608,6 +803,60 @@ class RuntimeToolExecutor(ToolExecutor):
             pass
         return False
 
+    def _is_concurrency_safe(self, public_name: str, internal_name: str) -> bool:
+        if self._is_read_only(public_name, internal_name):
+            return True
+        toolset = getattr(self.runtime, "toolset", None)
+        is_cs = getattr(toolset, "is_concurrency_safe", None)
+        if callable(is_cs):
+            try:
+                if is_cs(internal_name):
+                    return True
+                if public_name != internal_name and is_cs(public_name):
+                    return True
+            except Exception:
+                pass
+        return internal_name in _DELEGATION_TOOLS
+
+    def _is_parallel_delegation(self, internal_name: str) -> bool:
+        toolset = getattr(self.runtime, "toolset", None)
+        is_pd = getattr(toolset, "is_parallel_delegation", None)
+        if callable(is_pd):
+            try:
+                if is_pd(internal_name):
+                    return True
+            except Exception:
+                pass
+        return internal_name in _DELEGATION_TOOLS
+
+    def releases_cli_slot(self, request: ToolCallRequest) -> bool:
+        """Whether the parent CLI should release its process slot while this tool runs."""
+        raw_name = _strip_mcp_prefix(request.name)
+        internal_name = self._resolve_internal_name(raw_name)
+        if internal_name == raw_name:
+            internal_name = _internal_tool_name(raw_name)
+        args = request.arguments if isinstance(request.arguments, Mapping) else {}
+        if internal_name == "run_subagent":
+            if bool(args.get("run_in_background")):
+                return False
+            teammate = args.get("teammate_name") or args.get("name")
+            if isinstance(teammate, str) and teammate.strip():
+                return False
+            return True
+        if internal_name in {"ask_agent", "ask_agents"}:
+            return True
+        if internal_name == "check_subagent":
+            raw_wait = args.get("wait_seconds", 0)
+            if isinstance(raw_wait, bool):
+                return False
+            try:
+                return int(raw_wait or 0) > 0
+            except (TypeError, ValueError):
+                return False
+        if internal_name in _USER_WAIT_TOOLS:
+            return True
+        return False
+
     def _build_specs(self) -> None:
         specs: list[McpToolSpec] = []
         pub_names: set[str] = set()
@@ -631,12 +880,14 @@ class RuntimeToolExecutor(ToolExecutor):
             )
             int_name = self._resolve_internal_name(pub_name)
             ro = self._is_read_only(pub_name, int_name)
+            ps = ro or self._is_concurrency_safe(pub_name, int_name)
             specs.append(
                 McpToolSpec(
                     name=pub_name,
                     description=desc,
                     input_schema=params,
                     read_only=ro,
+                    parallel_safe=ps,
                 )
             )
             pub_names.add(pub_name)
@@ -804,18 +1055,43 @@ class RuntimeToolExecutor(ToolExecutor):
         raw_name = _strip_mcp_prefix(request.name)
         internal_name = self._resolve_internal_name(raw_name)
         toolset = self.runtime.toolset
+        sync_restrictions = getattr(toolset, "set_tool_restrictions", None)
+        if callable(sync_restrictions):
+            sync_restrictions(
+                offered_tools=getattr(self.runtime, "offered_tools", None),
+                withheld_tools=getattr(self.runtime, "withheld_tools", ()),
+            )
         active_mcp = set(getattr(toolset, "active_mcp_tool_names", ()) or ())
+        withheld = getattr(self.runtime, "withheld_tools", ()) or ()
+        offered = getattr(self.runtime, "offered_tools", None)
         deferred = set(getattr(toolset, "deferred_tool_names", ()) or ())
         discovered = set(getattr(toolset, "discovered_tool_names", ()) or ())
 
         if (
-            internal_name not in self._valid_internal_names
-            and raw_name not in self._valid_public_names
-            and internal_name not in active_mcp
-            and internal_name not in deferred
-            and internal_name not in discovered
+            internal_name in withheld
+            or raw_name in withheld
+            or (
+                offered is not None
+                and internal_name not in offered
+                and raw_name not in offered
+                and internal_name not in active_mcp
+            )
+            or (
+                internal_name not in self._valid_internal_names
+                and raw_name not in self._valid_public_names
+                and internal_name not in active_mcp
+                and internal_name not in deferred
+                and internal_name not in discovered
+            )
         ):
-            valid_list = ", ".join(sorted(self._valid_public_names))
+            valid_list = ", ".join(
+                sorted(
+                    pub
+                    for pub in self._valid_public_names
+                    if self._resolve_internal_name(pub) not in withheld
+                    and (offered is None or self._resolve_internal_name(pub) in offered)
+                )
+            )
             return ToolCallResult(
                 text=f"Unknown tool '{request.name}'. Valid tools: {valid_list}",
                 is_error=True,
@@ -862,6 +1138,7 @@ class RuntimeToolExecutor(ToolExecutor):
                 )
 
         read_only = self._is_read_only(raw_name, internal_name)
+        lane = "agent" if self._is_parallel_delegation(internal_name) else None
         extra: dict[str, Any] = {}
         cancelled = getattr(request, "cancelled", None)
         if cancelled is not None:
@@ -872,15 +1149,18 @@ class RuntimeToolExecutor(ToolExecutor):
             request.arguments,
             message_id=message_id,
             read_only=read_only,
+            lane=lane,
             **extra,
         )
 
     def _call_collector(self, *args: Any, **kwargs: Any) -> ToolCallResult:
-        self._in_flight += 1
+        with self._in_flight_lock:
+            self._in_flight += 1
         try:
             return self.collector.submit(*args, **kwargs)
         finally:
-            self._in_flight = max(0, self._in_flight - 1)
+            with self._in_flight_lock:
+                self._in_flight = max(0, self._in_flight - 1)
 
     def _deadline_exceeded(self) -> bool:
         if self.deadline is None:
@@ -948,6 +1228,28 @@ class RuntimeToolExecutor(ToolExecutor):
                 queue_id=queue_id,
             )
             claimed.append(content)
+        if claimed:
+            notify = getattr(self.runtime, "_notify_queued_input_claimed", None)
+            if callable(notify):
+                notify(claimed)
+            else:
+                for target in (
+                    self.runtime,
+                    getattr(self.runtime, "toolset", None),
+                    getattr(self.runtime, "store", None),
+                ):
+                    hook = getattr(target, "on_queued_input_claimed", None) if target is not None else None
+                    if callable(hook):
+                        try:
+                            hook(claimed)
+                        except TypeError:
+                            try:
+                                hook()
+                            except Exception:  # noqa: BLE001
+                                pass
+                        except Exception:  # noqa: BLE001
+                            pass
+                        break
         return claimed
 
     def _record_queued_input(self, content: str, text: str) -> None:
@@ -1061,15 +1363,76 @@ class RuntimeToolExecutor(ToolExecutor):
         entries: list[_BatchEntry],
         message_id: str,
     ) -> list[ToolCallResult]:
-        if self.abort_code is not None:
-            return [
-                ToolCallResult(text=refusal_message(self.abort_code), is_error=True)
-                for _ in entries
-            ]
+        is_delegation_batch = bool(entries) and all(
+            self._is_parallel_delegation(ent.internal_name) for ent in entries
+        )
+        refuse_action_limit = False
+        reserved_count = 0
+        with self._commit_lock:
+            if self.abort_code is not None:
+                return [
+                    ToolCallResult(text=refusal_message(self.abort_code), is_error=True)
+                    for _ in entries
+                ]
 
-        max_actions = self.runtime.limits.max_actions
-        if max_actions is not None and self.action_count + len(entries) > max_actions:
-            self.abort_code = "ACTION_LIMIT"
+            max_actions = self.runtime.limits.max_actions
+            if (
+                max_actions is not None
+                and self.action_count + self._reserved_actions + len(entries) > max_actions
+            ):
+                self.abort_code = "ACTION_LIMIT"
+                refuse_action_limit = True
+            else:
+                reserved_count = len(entries)
+                self._reserved_actions += reserved_count
+                if self._deferred_queued_records is not None:  # an earlier batch broke off before recording them
+                    leftover, self._deferred_queued_records = self._deferred_queued_records, None
+                    for content, text in leftover:
+                        self._record_queued_input(content, text)
+                self._active_batches += 1
+                if self._active_batches == 1:
+                    if entries and entries[0].batch_key:
+                        self._active_wave_batch_key = entries[0].batch_key
+                    else:
+                        self._batch_seq += 1
+                        self._active_wave_batch_key = f"batch:{self._batch_seq}"
+                    self.runtime._life(self.turn, "waiting_tool", count=len(entries))
+
+                calls_dict: dict[str, dict[str, str]] = {}
+                raw_calls: list[dict[str, str]] = []
+                for ent in entries:
+                    arg_json = json.dumps(ent.arguments, ensure_ascii=False, default=str)
+                    call_obj = {
+                        "id": ent.call_id,
+                        "name": ent.internal_name,
+                        "arguments": arg_json,
+                    }
+                    calls_dict[ent.call_id] = call_obj
+                    raw_calls.append(call_obj)
+
+                if self._adapter_message_ids:
+                    batch_key = str(message_id or "default")
+                elif entries and entries[0].batch_key:
+                    batch_key = entries[0].batch_key
+                elif self._active_wave_batch_key:
+                    batch_key = self._active_wave_batch_key
+                else:
+                    self._batch_seq += 1
+                    batch_key = f"batch:{self._batch_seq}"
+                for ent in entries:
+                    ent.batch_key = batch_key
+                msg_first_reads: set[str] | None = None
+                reads_before: set[str] = set()
+                if not is_delegation_batch:
+                    msg_first_reads = self._first_read_keys_by_message_id.setdefault(
+                        batch_key, set()
+                    )
+                    self._forget_reads_already_seen(msg_first_reads, entries)
+                    reads_before = set(msg_first_reads)
+                    self.runtime._native_message_first_read_keys = msg_first_reads
+                before_discovered = self._snapshot_discovered()
+
+        if refuse_action_limit:
             if self.handle is not None:
                 try:
                     self.handle.refuse_tools(refusal_message("ACTION_LIMIT"))
@@ -1080,237 +1443,261 @@ class RuntimeToolExecutor(ToolExecutor):
                 for _ in entries
             ]
 
-        if self._deferred_queued_records is not None:  # an earlier batch broke off before recording them
-            leftover, self._deferred_queued_records = self._deferred_queued_records, None
-            for content, text in leftover:
-                self._record_queued_input(content, text)
-        self.runtime._life(self.turn, "waiting_tool", count=len(entries))
-
-        calls_dict: dict[str, dict[str, str]] = {}
-        raw_calls: list[dict[str, str]] = []
-        for ent in entries:
-            arg_json = json.dumps(ent.arguments, ensure_ascii=False, default=str)
-            call_obj = {
-                "id": ent.call_id,
-                "name": ent.internal_name,
-                "arguments": arg_json,
-            }
-            calls_dict[ent.call_id] = call_obj
-            raw_calls.append(call_obj)
-
-        if self._adapter_message_ids:
-            batch_key = str(message_id or "default")
-        elif entries and entries[0].batch_key:
-            batch_key = entries[0].batch_key
-        else:
-            self._batch_seq += 1
-            batch_key = f"batch:{self._batch_seq}"
-        for ent in entries:
-            ent.batch_key = batch_key
-        msg_first_reads = self._first_read_keys_by_message_id.setdefault(
-            batch_key, set()
-        )
-        self._forget_reads_already_seen(msg_first_reads, entries)
-        reads_before = set(msg_first_reads)
-        before_discovered = self._snapshot_discovered()
-        self.runtime._native_message_first_read_keys = msg_first_reads
+        abort_to_refuse: str | None = None
         try:
-            results = self.runtime._run_toolset(self.turn, raw_calls)
+            try:
+                results = self.runtime._run_toolset(self.turn, raw_calls)
+            finally:
+                with self._commit_lock:
+                    if not is_delegation_batch and msg_first_reads is not None:
+                        self.runtime._native_message_first_read_keys = None
+                        new_reads = msg_first_reads - reads_before
+                        if new_reads:
+                            delivered = self._clock()
+                            read_msg = self._stream_message_id_of(
+                                e for e in entries if e.read_only
+                            )
+                            for key in new_reads:
+                                self._read_delivered_at[key] = delivered
+                                self._read_stream_message_id[key] = read_msg
+
+            with self._commit_lock:
+                after_discovered = self._snapshot_discovered()
+                tools_changed = after_discovered != before_discovered
+                if tools_changed:
+                    self._tool_schemas = self._compute_live_schemas()
+                    self._last_discovered_snapshot = after_discovered
+                    self._build_specs()
+
+                if reserved_count:
+                    self._reserved_actions = max(0, self._reserved_actions - reserved_count)
+                    reserved_count = 0
+                self.action_count += len(results)
+                msg_round_key = (
+                    str(message_id or "").strip() if self._adapter_message_ids else batch_key
+                )
+                if not msg_round_key or msg_round_key == "default":
+                    msg_round_key = self._active_wave_batch_key or batch_key
+                if not msg_round_key or msg_round_key == "default":
+                    self.tool_rounds += 1
+                    self.runtime._note_tool_round()
+                elif msg_round_key not in self._seen_tool_round_message_ids:
+                    self._seen_tool_round_message_ids.add(msg_round_key)
+                    self.tool_rounds += 1
+                    self.runtime._note_tool_round()
+
+                prev_phase = (
+                    self.runtime.phases.current if self.runtime.phases is not None else None
+                )
+                self.runtime._advance_phase(self.turn, results)
+                if (
+                    self.runtime.phases is not None
+                    and self.runtime.phases.current != prev_phase
+                    and self.runtime.phases.current != phases.Phase.RESPOND
+                    and not getattr(self.runtime, "_phase_transition_note", None)
+                ):
+                    self.runtime._phase_transition_note = phases.PHASE_INSTRUCTIONS[
+                        self.runtime.phases.current
+                    ]
+
+                ask_user_cancelled = False
+                had_ask_user_wait = False
+                pre_ask_user_queued: list[str] = []
+                if any(
+                    bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user"
+                    for res in results
+                ):
+                    self._deferred_queued_records = []
+                for res in results:
+                    if bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user":
+                        had_ask_user_wait = True
+                        pre_claimed = self._claim_queued_texts()
+                        direct_answers = [
+                            item
+                            for item in pre_claimed
+                            if item.lstrip().startswith("Respostas às perguntas do agente:")
+                        ]
+                        for item in pre_claimed:
+                            if not item.lstrip().startswith("Respostas às perguntas do agente:"):
+                                pre_ask_user_queued.append(item)
+                        self.runtime._life(self.turn, "waiting_user_in_turn")
+                        answer = (
+                            "\n\n".join(direct_answers)
+                            if direct_answers
+                            else self._wait_for_answer()
+                        )
+                        if answer is None:
+                            ask_user_cancelled = True
+                            res["status"] = "failed"
+                            res["content"] = INTERRUPTED_TOOL_RESULT
+                            res["wait_for_user"] = False
+                        else:
+                            res["status"] = "succeeded"
+                            res["content"] = f"Resposta da pessoa:\n{answer}"
+                            res["wait_for_user"] = False
+                            # The answer may approve a production action later in this turn (tools/shell/confirmation.py).
+                            note_answer = getattr(
+                                getattr(self.runtime, "toolset", None), "note_user_answer", None
+                            )
+                            if callable(note_answer):
+                                try:
+                                    note_answer(
+                                        str(
+                                            calls_dict.get(str(res.get("id") or ""), {}).get(
+                                                "arguments"
+                                            )
+                                            or ""
+                                        ),
+                                        answer,
+                                    )
+                                except Exception:  # noqa: BLE001 - recording an approval never breaks the turn
+                                    pass
+
+                round_text_parts, round_thinking_parts = (
+                    self.consume_round_buffers()
+                    if callable(self.consume_round_buffers)
+                    else ([], [])
+                )
+                self.messages.append(
+                    self.runtime._assistant_tool_message(
+                        self.turn,
+                        round_text_parts,
+                        calls_dict,
+                        round_thinking_parts,
+                    )
+                )
+                self.runtime._record_step(
+                    self.turn,
+                    kind=transcript.STEP_ASSISTANT_TOOL_CALL,
+                    payload=transcript.assistant_tool_call_payload(
+                        "".join(round_text_parts),
+                        calls_dict.values(),
+                    ),
+                )
+                for res in results:
+                    self.runtime._record_step(
+                        self.turn,
+                        kind=transcript.STEP_TOOL_RESULT,
+                        payload=transcript.tool_result_payload(
+                            call_id=str(res.get("id") or ""),
+                            name=str(res.get("name") or ""),
+                            status=str(res.get("status") or ""),
+                            content=str(res.get("content") or ""),
+                        ),
+                        tool_name=str(res.get("name") or ""),
+                        tool_call_id=str(res.get("id") or ""),
+                    )
+                    self.messages.extend(self.runtime._tool_result_messages(self.turn, res))
+                deferred_records, self._deferred_queued_records = (
+                    self._deferred_queued_records,
+                    None,
+                )
+                for content, text in deferred_records or ():
+                    self._record_queued_input(content, text)
+
+                if self.on_batch_finished is not None:
+                    try:
+                        self.on_batch_finished(results)
+                    except Exception:
+                        pass
+
+                stop_reason = getattr(self.runtime.toolset, "stop_requested", None)
+                if ask_user_cancelled:
+                    self.abort_code = "TURN_CANCELLED"
+                elif stop_reason:
+                    self.stop_reason = str(stop_reason)
+                    self.abort_code = "HOOK_STOPPED"
+                elif max(self.runtime._consecutive_tool_failures.values(), default=0) >= 3:
+                    self.abort_code = "REPEATED_TOOL_FAILURE"
+                elif self.runtime.reconciliation_required(self.turn):
+                    self.abort_code = "EFFECT_RECONCILIATION_REQUIRED"
+                elif max_actions is not None and self.action_count > max_actions:
+                    self.abort_code = "ACTION_LIMIT"
+                elif (
+                    self.runtime.limits.safety_max_tool_rounds is not None
+                    and self.tool_rounds >= self.runtime.limits.safety_max_tool_rounds
+                ):
+                    self.abort_code = "SAFETY_TOOL_ROUNDS"
+                elif any(bool(r.get("wait_for_user")) for r in results):
+                    self.abort_code = "WAITING_USER"
+
+                if self.abort_code is not None and self.handle is not None:
+                    abort_to_refuse = self.abort_code
+
+                trailing_notes = (
+                    self._turn_notes(
+                        claim_queue=(not had_ask_user_wait and self._active_batches <= 1)
+                    )
+                    if self.abort_code is None
+                    else ""
+                )
+                if pre_ask_user_queued and self.abort_code is None:
+                    pre_note = system_reminder(
+                        "The user sent a message while you were working:\n"
+                        + "\n\n".join(pre_ask_user_queued)
+                    )
+                    trailing_notes = (
+                        f"{trailing_notes}\n\n{pre_note}" if trailing_notes else pre_note
+                    )
+
+                out_results: list[ToolCallResult] = []
+                batch_exceeded_action_limit = (
+                    self.abort_code == "ACTION_LIMIT"
+                    and max_actions is not None
+                    and self.action_count > max_actions
+                )
+                for idx, res in enumerate(results):
+                    status = str(res.get("status") or "failed")
+                    is_err = status != "succeeded"
+                    text = str(res.get("content") or "")
+                    if (
+                        self.abort_code is not None
+                        and self.abort_code
+                        not in {
+                            "WAITING_USER",
+                            "TURN_CANCELLED",
+                            "ACTION_LIMIT",
+                        }
+                    ) or batch_exceeded_action_limit:
+                        is_err = True
+                        stop_suffix = refusal_message(self.abort_code or "ACTION_LIMIT")
+                        text = f"{text}\n{stop_suffix}".strip() if text else stop_suffix
+                    elif self.abort_code == "TURN_CANCELLED":
+                        is_err = True
+                        text = INTERRUPTED_TOOL_RESULT
+                    elif trailing_notes and idx == len(results) - 1:
+                        text = f"{text}\n\n{trailing_notes}" if text else trailing_notes
+                    images = _convert_tool_images(res.get("images"))
+                    if images and self.offload_tool_images:
+                        note = self._offload_tool_images(
+                            str(res.get("id") or f"call_{idx}"), images
+                        )
+                        if note:
+                            text = f"{text}\n\n{note}" if text else note
+                    out_results.append(
+                        ToolCallResult(
+                            text=text,
+                            is_error=is_err,
+                            images=images,
+                            tools_changed=tools_changed,
+                        )
+                    )
         finally:
-            self.runtime._native_message_first_read_keys = None
-            new_reads = msg_first_reads - reads_before
-            if new_reads:
-                delivered = self._clock()
-                read_msg = self._stream_message_id_of(e for e in entries if e.read_only)
-                for key in new_reads:
-                    self._read_delivered_at[key] = delivered
-                    self._read_stream_message_id[key] = read_msg
-        after_discovered = self._snapshot_discovered()
-        tools_changed = after_discovered != before_discovered
-        if tools_changed:
-            self._tool_schemas = self._compute_live_schemas()
-            self._last_discovered_snapshot = after_discovered
-            self._build_specs()
+            with self._commit_lock:
+                if reserved_count:
+                    self._reserved_actions = max(0, self._reserved_actions - reserved_count)
+                    reserved_count = 0
+                self._active_batches = max(0, self._active_batches - 1)
+                if self._active_batches == 0:
+                    self._active_wave_batch_key = ""
+                    if self.abort_code is None:
+                        self.runtime._life(self.turn, "running")
 
-        self.action_count += len(results)
-        msg_round_key = str(message_id or "").strip() if self._adapter_message_ids else batch_key
-        if not msg_round_key or msg_round_key == "default":
-            self.tool_rounds += 1
-            self.runtime._note_tool_round()
-        elif msg_round_key not in self._seen_tool_round_message_ids:
-            self._seen_tool_round_message_ids.add(msg_round_key)
-            self.tool_rounds += 1
-            self.runtime._note_tool_round()
-
-        prev_phase = (
-            self.runtime.phases.current if self.runtime.phases is not None else None
-        )
-        self.runtime._advance_phase(self.turn, results)
-        if (
-            self.runtime.phases is not None
-            and self.runtime.phases.current != prev_phase
-            and self.runtime.phases.current != phases.Phase.RESPOND
-            and not getattr(self.runtime, "_phase_transition_note", None)
-        ):
-            self.runtime._phase_transition_note = phases.PHASE_INSTRUCTIONS[
-                self.runtime.phases.current
-            ]
-
-        ask_user_cancelled = False
-        had_ask_user_wait = False
-        pre_ask_user_queued: list[str] = []
-        if any(bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user" for res in results):
-            self._deferred_queued_records = []
-        for res in results:
-            if bool(res.get("wait_for_user")) and str(res.get("name") or "") == "ask_user":
-                had_ask_user_wait = True
-                pre_claimed = self._claim_queued_texts()
-                direct_answers = [
-                    item
-                    for item in pre_claimed
-                    if item.lstrip().startswith("Respostas às perguntas do agente:")
-                ]
-                for item in pre_claimed:
-                    if not item.lstrip().startswith("Respostas às perguntas do agente:"):
-                        pre_ask_user_queued.append(item)
-                self.runtime._life(self.turn, "waiting_user_in_turn")
-                answer = (
-                    "\n\n".join(direct_answers)
-                    if direct_answers
-                    else self._wait_for_answer()
-                )
-                if answer is None:
-                    ask_user_cancelled = True
-                    res["status"] = "failed"
-                    res["content"] = INTERRUPTED_TOOL_RESULT
-                    res["wait_for_user"] = False
-                else:
-                    res["status"] = "succeeded"
-                    res["content"] = f"Resposta da pessoa:\n{answer}"
-                    res["wait_for_user"] = False
-                    # The answer may approve a production action later in this turn (tools/shell/confirmation.py).
-                    note_answer = getattr(getattr(self.runtime, "toolset", None), "note_user_answer", None)
-                    if callable(note_answer):
-                        try:
-                            note_answer(str(calls_dict.get(str(res.get("id") or ""), {}).get("arguments") or ""), answer)
-                        except Exception:  # noqa: BLE001 - recording an approval never breaks the turn
-                            pass
-
-        round_text_parts, round_thinking_parts = (
-            self.consume_round_buffers()
-            if callable(self.consume_round_buffers)
-            else ([], [])
-        )
-        self.messages.append(
-            self.runtime._assistant_tool_message(
-                self.turn,
-                round_text_parts,
-                calls_dict,
-                round_thinking_parts,
-            )
-        )
-        self.runtime._record_step(
-            self.turn,
-            kind=transcript.STEP_ASSISTANT_TOOL_CALL,
-            payload=transcript.assistant_tool_call_payload(
-                "".join(round_text_parts),
-                calls_dict.values(),
-            ),
-        )
-        for res in results:
-            self.runtime._record_step(
-                self.turn,
-                kind=transcript.STEP_TOOL_RESULT,
-                payload=transcript.tool_result_payload(
-                    call_id=str(res.get("id") or ""),
-                    name=str(res.get("name") or ""),
-                    status=str(res.get("status") or ""),
-                    content=str(res.get("content") or ""),
-                ),
-                tool_name=str(res.get("name") or ""),
-                tool_call_id=str(res.get("id") or ""),
-            )
-            self.messages.extend(self.runtime._tool_result_messages(self.turn, res))
-        deferred_records, self._deferred_queued_records = self._deferred_queued_records, None
-        for content, text in deferred_records or ():
-            self._record_queued_input(content, text)
-
-        if self.on_batch_finished is not None:
+        if abort_to_refuse is not None and self.handle is not None:
             try:
-                self.on_batch_finished(results)
+                self.handle.refuse_tools(refusal_message(abort_to_refuse))
             except Exception:
                 pass
-
-        stop_reason = getattr(self.runtime.toolset, "stop_requested", None)
-        if ask_user_cancelled:
-            self.abort_code = "TURN_CANCELLED"
-        elif stop_reason:
-            self.stop_reason = str(stop_reason)
-            self.abort_code = "HOOK_STOPPED"
-        elif max(self.runtime._consecutive_tool_failures.values(), default=0) >= 3:
-            self.abort_code = "REPEATED_TOOL_FAILURE"
-        elif self.runtime.reconciliation_required(self.turn):
-            self.abort_code = "EFFECT_RECONCILIATION_REQUIRED"
-        elif max_actions is not None and self.action_count > max_actions:
-            self.abort_code = "ACTION_LIMIT"
-        elif (
-            self.runtime.limits.safety_max_tool_rounds is not None
-            and self.tool_rounds >= self.runtime.limits.safety_max_tool_rounds
-        ):
-            self.abort_code = "SAFETY_TOOL_ROUNDS"
-        elif any(bool(r.get("wait_for_user")) for r in results):
-            self.abort_code = "WAITING_USER"
-
-        if self.abort_code is not None and self.handle is not None:
-            try:
-                self.handle.refuse_tools(refusal_message(self.abort_code))
-            except Exception:
-                pass
-
-        trailing_notes = (
-            self._turn_notes(claim_queue=not had_ask_user_wait)
-            if self.abort_code is None
-            else ""
-        )
-        if pre_ask_user_queued and self.abort_code is None:
-            pre_note = system_reminder(
-                "The user sent a message while you were working:\n"
-                + "\n\n".join(pre_ask_user_queued)
-            )
-            trailing_notes = (
-                f"{trailing_notes}\n\n{pre_note}" if trailing_notes else pre_note
-            )
-
-        out_results: list[ToolCallResult] = []
-        for idx, res in enumerate(results):
-            status = str(res.get("status") or "failed")
-            is_err = status != "succeeded"
-            text = str(res.get("content") or "")
-            if self.abort_code is not None and self.abort_code not in {"WAITING_USER", "TURN_CANCELLED"}:
-                is_err = True
-                stop_suffix = refusal_message(self.abort_code)
-                text = f"{text}\n{stop_suffix}".strip() if text else stop_suffix
-            elif self.abort_code == "TURN_CANCELLED":
-                is_err = True
-                text = INTERRUPTED_TOOL_RESULT
-            elif trailing_notes and idx == len(results) - 1:
-                text = f"{text}\n\n{trailing_notes}" if text else trailing_notes
-            images = _convert_tool_images(res.get("images"))
-            if images and self.offload_tool_images:
-                note = self._offload_tool_images(str(res.get("id") or f"call_{idx}"), images)
-                if note:
-                    text = f"{text}\n\n{note}" if text else note
-            out_results.append(
-                ToolCallResult(
-                    text=text,
-                    is_error=is_err,
-                    images=images,
-                    tools_changed=tools_changed,
-                )
-            )
-
-        if self.abort_code is None:
-            self.runtime._life(self.turn, "running")
 
         return out_results
 
@@ -1353,6 +1740,7 @@ class _RunnerSink:
         # Model calls of the whole turn (one per assistant message id), across every follow-up message:
         # --max-turns only caps one message of the live process.
         self.model_calls: int = 0
+        self._last_tool_rounds: int = 0
         self._is_live_or_friend = bool(
             runner.runtime._is_live_or_friend(runner.turn)
         )
@@ -1506,7 +1894,9 @@ class _RunnerSink:
                 live_voice_enabled=self._live_fallback_enabled
                 and not self.speak_state.pending_retraction
             )
-        self._runner.iteration += 1
+        if self._executor.tool_rounds > self._last_tool_rounds:
+            self._last_tool_rounds = self._executor.tool_rounds
+            self._runner.iteration += 1
         self._reset_model_heartbeat()
 
     def finish_speak(self) -> None:
@@ -1859,6 +2249,52 @@ class NativeTurnRunner:
             return "plan_mode"
         value = getattr(getattr(toolset, "_permission_mode", None), "value", None)
         return value if isinstance(value, str) and value.strip() else None
+
+    def _initial_user_image_paths(
+        self,
+        user_content: Sequence[Mapping[str, Any]],
+    ) -> tuple[str, ...]:
+        """Collect image attachment paths belonging to the turn's new user message."""
+        collected: list[str] = []
+        seen: set[str] = set()
+
+        def _add(raw_val: object) -> None:
+            if not isinstance(raw_val, (str, Path)):
+                return
+            text = str(raw_val).strip()
+            if text and text not in seen:
+                seen.add(text)
+                collected.append(text)
+
+        attachments_reader = getattr(self.runtime.store, "attachments_for_turn", None)
+        if callable(attachments_reader):
+            try:
+                raw_attachments = attachments_reader(self.turn)
+            except Exception:
+                raw_attachments = ()
+            if isinstance(raw_attachments, Sequence) and not isinstance(
+                raw_attachments, (str, bytes, bytearray)
+            ):
+                for item in raw_attachments:
+                    if (
+                        isinstance(item, Mapping)
+                        and str(item.get("kind") or "").strip().lower() == "image"
+                    ):
+                        _add(item.get("path"))
+
+        from agentos.providers.codex_cli.command import _media_block_path
+
+        for block in user_content:
+            if not isinstance(block, Mapping):
+                continue
+            btype = str(block.get("type") or "text").strip().lower()
+            if btype in ("text", "input_text"):
+                continue
+            block_path = _media_block_path(block)
+            if block_path is not None:
+                _add(block_path)
+
+        return tuple(collected)
 
     def _stop_code_after_stream_error(self, exc: BaseException, executor: RuntimeToolExecutor) -> str | None:
         """Why the turn really stopped when the CLI stream ended in an error: a limit that fired, or the deadline."""
@@ -2248,6 +2684,7 @@ class NativeTurnRunner:
         user_content = self._build_initial_user_content(
             tool_schemas, window=window
         )
+        initial_user_image_paths = self._initial_user_image_paths(user_content)
         executor = RuntimeToolExecutor(
             self.runtime,
             self.turn,
@@ -2296,6 +2733,7 @@ class NativeTurnRunner:
         verify_gate_attempts = 0
         closing_sent = False
         resume_session_id: str | None = None
+        initial_user_images_pending = bool(initial_user_image_paths)
 
         while True:
             self.runtime.counters.note_iteration()
@@ -2358,6 +2796,11 @@ class NativeTurnRunner:
                 conversation_id=str(self.turn.get("conversation_id") or ""),
                 on_waiting_slot=_on_waiting_slot,
                 permission_mode=self._effective_permission_mode(),
+                user_image_paths=(
+                    initial_user_image_paths
+                    if initial_user_images_pending
+                    else ()
+                ),
             )
 
             handle: NativeTurnHandle | Any | None = None
@@ -2370,6 +2813,7 @@ class NativeTurnRunner:
                     try:
                         outcome: NativeTurnOutcome = handle.run_until_result(sink)
                         sink._note_cli_event()
+                        initial_user_images_pending = False
                     except ProviderTransportError as stream_exc:
                         if closing_sent and self._stop_code_after_stream_error(stream_exc, executor) is None:
                             self.runtime._effect_finished(
@@ -2817,6 +3261,7 @@ class NativeTurnRunner:
                     executor=executor,
                     sink=sink,
                 ):
+                    initial_user_images_pending = False
                     resume_session_id = None
                     user_content = self._build_initial_user_content(tool_schemas)
                     sink.reset_for_new_message()
@@ -2833,6 +3278,7 @@ class NativeTurnRunner:
                         sink=sink,
                     )
                     if resumed:
+                        initial_user_images_pending = False
                         resume_session_id = None
                         user_content = self._build_initial_user_content(tool_schemas)
                         sink.reset_for_new_message()

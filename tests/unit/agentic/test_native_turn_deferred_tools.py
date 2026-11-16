@@ -75,3 +75,71 @@ def test_list_tools_contains_all_tools_when_deferral_disabled(
 def test_claude_cli_adapter_advertises_tool_list_changed() -> None:
     adapter = ClaudeCliAdapter()
     assert adapter.capabilities.tool_list_changed is True
+
+
+def test_withheld_and_offered_tools_cannot_be_bypassed_via_deferred_or_tool_search(
+    tmp_path: Path,
+) -> None:
+    """Regression test for Red Team #3:
+    withheld_tools and offered_tools must block deferred_tool_names, ToolSearch, is_known_tool, and call_tool.
+    """
+    import json
+
+    rt, turn = _make_runtime(tmp_path)
+    rt.withheld_tools = {"notebook_edit"}
+    ex = RuntimeToolExecutor(rt, turn, allow_deferral=True)
+
+    assert ex.is_known_tool("NotebookEdit") is False
+    assert ex.is_known_tool("notebook_edit") is False
+
+    direct = ex.call_tool(
+        ToolCallRequest(
+            name="NotebookEdit",
+            arguments={"notebook_path": "a.ipynb", "new_source": "x=1"},
+        )
+    )
+    assert direct.is_error is True
+    assert "Unknown tool" in direct.text
+
+    search_res = ex.call_tool(
+        ToolCallRequest(
+            name="ToolSearch",
+            arguments={"query": "select:NotebookEdit"},
+        )
+    )
+    assert not search_res.is_error
+    payload = json.loads(search_res.text)
+    assert payload["count"] == 0
+    assert payload["activated"] == []
+    assert payload["already_available"] == []
+    assert "NotebookEdit" in payload["not_found"]
+    assert "notebook_edit" not in rt.toolset.deferred_tool_names
+    assert "notebook_edit" not in rt.toolset.discovered_tool_names
+
+    # Now test offered_tools whitelist
+    rt2, turn2 = _make_runtime(tmp_path)
+    rt2.offered_tools = {"read_file", "search_mcp_tools"}
+    ex2 = RuntimeToolExecutor(rt2, turn2, allow_deferral=True)
+    assert ex2.is_known_tool("Write") is False
+    assert ex2.is_known_tool("NotebookEdit") is False
+    assert ex2.is_known_tool("Read") is True
+
+    direct_write = ex2.call_tool(
+        ToolCallRequest(
+            name="Write",
+            arguments={"file_path": "x.txt", "content": "hi"},
+        )
+    )
+    assert direct_write.is_error is True
+    assert "Unknown tool" in direct_write.text
+
+    search_write = ex2.call_tool(
+        ToolCallRequest(
+            name="ToolSearch",
+            arguments={"query": "select:Write,NotebookEdit"},
+        )
+    )
+    payload2 = json.loads(search_write.text)
+    assert payload2["count"] == 0
+    assert set(payload2["not_found"]) == {"Write", "NotebookEdit"}
+

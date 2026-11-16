@@ -332,3 +332,45 @@ def test_code_prompt_and_subagent_prompt_include_preview_and_tool_rules(tmp_path
     )
 
 
+def test_code_prompt_subagent_parallel_and_check_subagent_guidance() -> None:
+    public_with_check = render_code_system_prompt(
+        CodePromptOptions(
+            tool_names=frozenset({"read_file", "run_subagent", "check_subagent"}),
+            public_names=True,
+        )
+    )
+    assert (
+        "- Delegate broad searches or independent parts of a large task with `Agent`. "
+        "Several `Agent` calls in the same response run in parallel; to launch them without waiting, "
+        "pass run_in_background and later wait for all of them with `CheckSubagent` (agent_ids). "
+        "A subagent does not see this conversation unless it is a fork, so give it everything it needs."
+        in public_with_check
+    )
+
+    internal_with_check = render_code_system_prompt(
+        CodePromptOptions(
+            tool_names=frozenset({"read_file", "run_subagent", "check_subagent"}),
+            public_names=False,
+        )
+    )
+    assert (
+        "- Delegate broad searches or independent parts of a large task with `run_subagent`. "
+        "Several `run_subagent` calls in the same response run in parallel; to launch them without waiting, "
+        "pass run_in_background and later wait for all of them with `check_subagent` (agent_ids). "
+        "A subagent does not see this conversation unless it is a fork, so give it everything it needs."
+        in internal_with_check
+    )
+
+    without_check = render_code_system_prompt(
+        CodePromptOptions(
+            tool_names=frozenset({"read_file", "run_subagent"}),
+            public_names=True,
+        )
+    )
+    assert "Several `Agent` calls in the same response run in parallel." in without_check
+    assert "CheckSubagent" not in without_check
+    assert "check_subagent" not in without_check
+    assert "agent_ids" not in without_check
+
+
+

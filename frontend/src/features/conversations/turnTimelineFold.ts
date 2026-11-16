@@ -5,10 +5,13 @@ import {
   codeModeRunKey,
   computeSettledEventIds,
   computeSubagentDelegationStatus,
+  createSubagentSpawnPlaceholderEvent,
+  extractSubagentSpawnTarget,
   groupLabel,
   groupingKey,
   isCodeModeEvent,
   isRenderable,
+  isSubagentCoordinationOrWaitEvent,
   isSubagentDelegationFailed,
   isWaitingModelEvent,
   normalizeGeneratingArgumentsEvent,
@@ -316,9 +319,12 @@ export function buildTurnTimeline(
   const settled = computeSettledEventIds(turnEvents, isTurnCompleted, { keepOpenToolProgress: true })
   const subagentDelegationStatus = computeSubagentDelegationStatus(turnEvents)
 
-  const primaryAgentId = turnEvents.find(
-    (event) => !event.parentAgentId && event.type !== 'agent.created' && event.agentId,
-  )?.agentId
+  const primaryAgentId =
+    turnEvents.find(
+      (event) => !event.parentAgentId && event.type !== 'agent.created' && event.agentId,
+    )?.agentId ??
+    turnEvents.find((event) => Boolean(event.parentAgentId))?.parentAgentId ??
+    undefined
 
   const isSubagentEvent = (event: ConversationActivityEvent): boolean => {
     if (event.parentAgentId) return true
@@ -340,6 +346,26 @@ export function buildTurnTimeline(
   } | null = null
   const renderedCodeRuns = new Set<string>()
   const subagentWaveItems = new Map<string, TimelineActivityItem>()
+  const settledWaveSubagents = new Set<string>()
+
+  const isWaveItemSettled = (waveItem: TimelineActivityItem): boolean => {
+    const group = waveItem.group
+    if (
+      (group.agentId && settledWaveSubagents.has(group.agentId)) ||
+      (group.agentName && settledWaveSubagents.has(group.agentName))
+    ) {
+      return true
+    }
+    const realTools = group.events.filter((ev) => ev.kind === 'tool' && !isWaitingModelEvent(ev))
+    if (realTools.length === 0) return false
+    return group.events.every(
+      (ev) =>
+        (ev.state === 'completed' || ev.state === 'failed' || ev.state === 'cancelled') &&
+        ev.status !== 'running' &&
+        ev.status !== 'in_progress' &&
+        ev.status !== 'started',
+    )
+  }
 
   const flushGroup = () => {
     if (!group) return
@@ -398,11 +424,66 @@ export function buildTurnTimeline(
 
   for (const rawEvent of turnEvents) {
     const event = isTurnCompleted ? settleEventForCompletedTurn(rawEvent) : rawEvent
+    if (
+      event.type === 'delegation.failed' ||
+      event.type === 'DELEGATION_FAILED' ||
+      event.type === 'delegation.completed' ||
+      event.type === 'DELEGATION_COMPLETED' ||
+      event.type === 'agent.message_received' ||
+      event.type === 'AGENT_MESSAGE_RECEIVED' ||
+      (TERMINAL_TURN_EVENT_TYPES.has(event.type) &&
+        Boolean(event.parentAgentId || event.payload?.parent_agent_id))
+    ) {
+      for (const candidate of [
+        event.agentId,
+        event.agentName,
+        event.label,
+        event.payload?.from_agent_id,
+        event.payload?.agent_id,
+        event.payload?.agent_name,
+        event.payload?.sender_name,
+      ]) {
+        if (typeof candidate === 'string' && candidate.trim()) {
+          settledWaveSubagents.add(candidate.trim())
+        }
+      }
+    } else if (
+      (event.type === 'tool.finished' ||
+        event.type === 'tool.completed' ||
+        event.type === 'tool.failed') &&
+      typeof event.payload?.agent_id === 'string' &&
+      event.payload.agent_id.trim()
+    ) {
+      const isFailed =
+        event.type === 'tool.failed' ||
+        event.status === 'failed' ||
+        event.state === 'failed' ||
+        Boolean(event.errorCode) ||
+        event.payload?.status === 'failed' ||
+        event.payload?.state === 'failed'
+      const isStillRunning =
+        !isFailed &&
+        (event.payload?.status === 'running' ||
+          event.payload?.state === 'running' ||
+          event.payload?.run_in_background === true ||
+          event.payload?.background === true)
+      if (!isStillRunning) {
+        settledWaveSubagents.add(event.payload.agent_id.trim())
+        if (typeof event.payload.agent_name === 'string' && event.payload.agent_name.trim()) {
+          settledWaveSubagents.add(event.payload.agent_name.trim())
+        }
+      }
+    }
     if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') {
       flushGroup()
       flushText()
-      if (!isSubagentEvent(event)) {
+      if (
+        !isSubagentEvent(event) &&
+        subagentWaveItems.size > 0 &&
+        [...subagentWaveItems.values()].every(isWaveItemSettled)
+      ) {
         subagentWaveItems.clear()
+        settledWaveSubagents.clear()
       }
       if (thoughtBuffer && thoughtBuffer.agentId !== event.agentId) {
         flushThought(true, event.occurredAt)
@@ -432,10 +513,13 @@ export function buildTurnTimeline(
     }
     if (event.kind === 'message') {
       if (messageId && event.messageId && event.messageId !== messageId) continue
+      if (!event.content) continue
       flushThought(true, event.occurredAt)
       flushGroup()
-      subagentWaveItems.clear()
-      if (!event.content) continue
+      if (!isSubagentEvent(event) && event.content.trim()) {
+        subagentWaveItems.clear()
+        settledWaveSubagents.clear()
+      }
       if (!textBuffer) textId = `text:${event.originEventId ?? event.eventId}`
       textBuffer += event.content
       continue
@@ -463,6 +547,57 @@ export function buildTurnTimeline(
     if (TERMINAL_TURN_EVENT_TYPES.has(event.type) && !event.parentAgentId) {
       flushThought(true, event.occurredAt)
     }
+    const spawnTarget = extractSubagentSpawnTarget(event, primaryAgentId)
+    if (spawnTarget) {
+      settledWaveSubagents.delete(spawnTarget.agentId)
+      settledWaveSubagents.delete(spawnTarget.agentName)
+      flushThought(true, event.occurredAt)
+      flushText()
+      flushGroup()
+      const key = `tool:${spawnTarget.agentId}:${event.turnId ?? ''}`
+      const existingWaveItem = subagentWaveItems.get(key)
+      if (existingWaveItem) {
+        if (!existingWaveItem.group.agentName && spawnTarget.agentName) {
+          existingWaveItem.group.agentName = spawnTarget.agentName
+        }
+        continue
+      }
+      const spawnEvent = createSubagentSpawnPlaceholderEvent(
+        event,
+        spawnTarget,
+        primaryAgentId,
+        subagentDelegationStatus,
+        isTurnCompleted,
+      )
+      const delegationFailed = isSubagentDelegationFailed(
+        subagentDelegationStatus,
+        spawnTarget.agentId,
+        spawnTarget.agentName,
+        event.turnId,
+      )
+      const createdGroup: ActivityGroup = {
+        id: key,
+        kind: 'tool',
+        state: spawnEvent.state,
+        label: '',
+        count: 0,
+        events: [spawnEvent],
+        agentId: spawnTarget.agentId,
+        agentName: spawnTarget.agentName,
+        failed: delegationFailed,
+      }
+      createdGroup.label = groupLabel(createdGroup)
+      const waveItem: TimelineActivityItem = {
+        id: `activity:${createdGroup.id}:${event.originEventId ?? event.eventId}`,
+        kind: 'activity',
+        group: createdGroup,
+        toolCall: spawnEvent,
+        event: spawnEvent,
+      }
+      items.push(waveItem)
+      subagentWaveItems.set(key, waveItem)
+      continue
+    }
     if (!isRenderable(rawEvent, settled)) {
       if (event.type.startsWith('tool.')) {
         flushThought(true, event.occurredAt)
@@ -472,7 +607,7 @@ export function buildTurnTimeline(
     flushThought(true, event.occurredAt)
     flushText()
     const subagentEvent = isSubagentEvent(event)
-    if (!subagentEvent && event.kind !== 'agent') {
+    if (!subagentEvent && !isSubagentCoordinationOrWaitEvent(event)) {
       subagentWaveItems.clear()
     }
     if (event.kind === 'artifact') {
@@ -502,6 +637,9 @@ export function buildTurnTimeline(
       const existingWaveItem = subagentWaveItems.get(key)
       if (existingWaveItem) {
         applyEventToGroup(existingWaveItem.group, event)
+        if (event.agentName) {
+          existingWaveItem.group.agentName = event.agentName
+        }
         existingWaveItem.group.failed = delegationFailed
         existingWaveItem.toolCall = event
         existingWaveItem.event = event

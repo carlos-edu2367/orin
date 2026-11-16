@@ -144,3 +144,83 @@ def test_history_marker_of_a_local_workspace_uses_its_root(tmp_path):
     content = store.history_for_turn(turn)[0]["content"]
     assert f"{(tmp_path.resolve() / '.orin/uploads/fala.wav').as_posix()} (áudio, 4 KB)" in content
     assert "áudio" in content and "ferramenta nativa read_file" in content
+
+
+def test_history_marker_on_codex_marks_supported_image_as_inline_with_view_file_fallback():
+    store = _store()
+    image = {
+        "path": ".orin/uploads/foto.png",
+        "original_name": "foto.png",
+        "media_type": "image/png",
+        "kind": "image",
+        "bytes": 4096,
+    }
+    receipt = store.create(
+        user_id="user-1",
+        message="descreva",
+        provider="openai-codex",
+        model_id="gpt-6.1-sol",
+        idempotency_key="k-codex-img",
+        attachments=[image],
+    )
+    turn = store.claim(receipt.turn_id)
+    content = store.history_for_turn(turn)[0]["content"]
+    assert "já acompanha esta mensagem" in content
+    assert "fallback" in content and "view_file" in content
+    assert "para ler o conteúdo de um anexo visual" not in content
+
+
+def test_history_marker_on_codex_keeps_view_file_for_unsupported_or_comma_images_and_mixed_files():
+    store = _store()
+    comma_img = {
+        "path": ".orin/uploads/with,comma.png",
+        "original_name": "with,comma.png",
+        "media_type": "image/png",
+        "kind": "image",
+        "bytes": 2048,
+    }
+    svg_img = {
+        "path": ".orin/uploads/vector.svg",
+        "original_name": "vector.svg",
+        "media_type": "image/svg+xml",
+        "kind": "image",
+        "bytes": 2048,
+    }
+    receipt_unsup = store.create(
+        user_id="user-1",
+        message="leia",
+        provider="openai-codex",
+        model_id="gpt-6.1-sol",
+        idempotency_key="k-codex-unsup",
+        attachments=[comma_img, svg_img],
+    )
+    content_unsup = store.history_for_turn(store.claim(receipt_unsup.turn_id))[0]["content"]
+    assert "já acompanha" not in content_unsup
+    assert "Use view_file(path=\"…\") para ler o conteúdo de um anexo visual" in content_unsup
+
+    ok_img = {
+        "path": ".orin/uploads/foto.png",
+        "original_name": "foto.png",
+        "media_type": "image/png",
+        "kind": "image",
+        "bytes": 4096,
+    }
+    audio = {
+        "path": ".orin/uploads/fala.mp3",
+        "original_name": "fala.mp3",
+        "media_type": "audio/mpeg",
+        "kind": "audio",
+        "bytes": 2048,
+    }
+    receipt_mixed = store.create(
+        user_id="user-1",
+        message="analise tudo",
+        provider="openai-codex",
+        model_id="gpt-6.1-sol",
+        idempotency_key="k-codex-mixed",
+        attachments=[ok_img, ATTACHMENT, audio],
+    )
+    content_mixed = store.history_for_turn(store.claim(receipt_mixed.turn_id))[0]["content"]
+    assert "já acompanha esta mensagem" in content_mixed
+    assert "Para outros anexos, use view_file" in content_mixed
+    assert "transcrição" in content_mixed

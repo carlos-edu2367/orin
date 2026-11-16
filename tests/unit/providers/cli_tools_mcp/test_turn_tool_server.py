@@ -50,6 +50,41 @@ class _FakeExecutor:
                 },
                 read_only=False,
             ),
+            McpToolSpec(
+                name="Agent",
+                description="Delegate a task to a subagent",
+                input_schema={
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}},
+                    "required": ["prompt"],
+                },
+                read_only=False,
+                parallel_safe=True,
+            ),
+            McpToolSpec(
+                name="CheckSubagent",
+                description="Inspect a background subagent",
+                input_schema={
+                    "type": "object",
+                    "properties": {"agent_id": {"type": "string"}},
+                },
+                read_only=True,
+                parallel_safe=True,
+            ),
+            McpToolSpec(
+                name="Edit",
+                description="Edit a file",
+                input_schema={"type": "object", "properties": {}},
+                read_only=False,
+                parallel_safe=False,
+            ),
+            McpToolSpec(
+                name="Bash",
+                description="Run a shell command",
+                input_schema={"type": "object", "properties": {}},
+                read_only=False,
+                parallel_safe=False,
+            ),
         ]
 
     def call_tool(self, request: ToolCallRequest) -> ToolCallResult:
@@ -114,7 +149,11 @@ def test_initialize_list_and_call_round_trip() -> None:
         assert "Read" in by_name and "Write" in by_name
         assert by_name["Read"]["inputSchema"]["required"] == ["file_path"]
         assert by_name["Read"]["annotations"]["readOnlyHint"] is True
+        assert by_name["Agent"]["annotations"]["readOnlyHint"] is True
+        assert by_name["CheckSubagent"]["annotations"]["readOnlyHint"] is True
         assert by_name["Write"]["annotations"]["readOnlyHint"] is False
+        assert by_name["Edit"]["annotations"]["readOnlyHint"] is False
+        assert by_name["Bash"]["annotations"]["readOnlyHint"] is False
 
         call_resp = httpx.post(
             url,

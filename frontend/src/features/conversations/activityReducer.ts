@@ -172,6 +172,10 @@ export function createActivityState(cursor = '0'): ActivityStoreState {
 
 export const initialActivityState = createActivityState
 
+function isSubagentActivityEvent(event: ConversationActivityEvent): boolean {
+  return Boolean(event.parentAgentId || event.payload?.parent_agent_id)
+}
+
 export function applyActivityEvent(state: ActivityStoreState, event: ConversationActivityEvent): ActivityStoreState {
   // Identity is the real duplicate guard. The cursor comparison only blocks a
   // genuine regression: if a cursor cannot be ordered at all, dropping the event
@@ -211,11 +215,14 @@ export function applyActivityEvent(state: ActivityStoreState, event: Conversatio
     }
   }
 
-  const outcome = resolveTurnOutcome(event, state.events)
+  const isSubagent = isSubagentActivityEvent(event)
+  const outcome = isSubagent ? null : resolveTurnOutcome(event, state.events)
   const baseEvents = outcome ? settleTurnEvents(state.events, event.turnId, outcome) : state.events
-  const rawTodos = event.todos && event.todos.length > 0 ? event.todos : state.todos
-  const nextTodos = outcome ? settleTodos(rawTodos, outcome) : rawTodos
-  const { activePhase, status } = derivePhaseAndStatus(state.activePhase, state.status, event, outcome)
+  const rawTodos = !isSubagent && event.todos && event.todos.length > 0 ? event.todos : state.todos
+  const nextTodos = outcome && !isSubagent ? settleTodos(rawTodos, outcome) : rawTodos
+  const { activePhase, status } = isSubagent
+    ? { activePhase: state.activePhase, status: state.status }
+    : derivePhaseAndStatus(state.activePhase, state.status, event, outcome)
   const nextConnection =
     state.connection === 'connecting' || state.connection === 'degraded'
       ? 'live'
@@ -245,18 +252,21 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
       let activePhase: string | null = null
       let status: TurnLifecycleStatus = 'idle'
       for (const item of deduped) {
-        if (item.todos && item.todos.length > 0) {
+        const isSubagent = isSubagentActivityEvent(item)
+        if (!isSubagent && item.todos && item.todos.length > 0) {
           todos = item.todos
         }
-        const outcome = resolveTurnOutcome(item, settled)
+        const outcome = isSubagent ? null : resolveTurnOutcome(item, settled)
         if (outcome) {
           settled = settleTurnEvents(settled, item.turnId, outcome)
           todos = settleTodos(todos, outcome)
         }
         settled.push(item)
-        const derived = derivePhaseAndStatus(activePhase, status, item, outcome)
-        activePhase = derived.activePhase
-        status = derived.status
+        if (!isSubagent) {
+          const derived = derivePhaseAndStatus(activePhase, status, item, outcome)
+          activePhase = derived.activePhase
+          status = derived.status
+        }
       }
       return {
         events: trimActivityEvents(settled, EVENT_LIMIT),
@@ -275,18 +285,21 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
       let activePhase: string | null = state.activePhase
       let status: TurnLifecycleStatus = state.status
       for (const item of mergedEvents) {
-        if (item.todos && item.todos.length > 0) {
+        const isSubagent = isSubagentActivityEvent(item)
+        if (!isSubagent && item.todos && item.todos.length > 0) {
           todos = item.todos
         }
-        const outcome = resolveTurnOutcome(item, settled)
+        const outcome = isSubagent ? null : resolveTurnOutcome(item, settled)
         if (outcome) {
           settled = settleTurnEvents(settled, item.turnId, outcome)
           todos = settleTodos(todos, outcome)
         }
         settled.push(item)
-        const derived = derivePhaseAndStatus(activePhase, status, item, outcome)
-        activePhase = derived.activePhase
-        status = derived.status
+        if (!isSubagent) {
+          const derived = derivePhaseAndStatus(activePhase, status, item, outcome)
+          activePhase = derived.activePhase
+          status = derived.status
+        }
       }
       const convState = action.conversationState
       const terminalConvOutcome: 'completed' | 'failed' | 'cancelled' | null =
@@ -322,10 +335,11 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
       let settled: ConversationActivityEvent[] = []
       let todos: TodoItem[] = state.todos
       for (const item of combined) {
-        if (todos.length === 0 && item.todos && item.todos.length > 0) {
+        const isSubagent = isSubagentActivityEvent(item)
+        if (!isSubagent && todos.length === 0 && item.todos && item.todos.length > 0) {
           todos = item.todos
         }
-        const outcome = resolveTurnOutcome(item, settled)
+        const outcome = isSubagent ? null : resolveTurnOutcome(item, settled)
         if (outcome) {
           settled = settleTurnEvents(settled, item.turnId, outcome)
           todos = settleTodos(todos, outcome)

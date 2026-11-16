@@ -635,7 +635,7 @@ def build_system_prompt(
             "- Omit `model_id` to use the current model. If you supply `model_id`, copy the exact identifier from the favorite model IDs listed below (including the leading `~` when present).",
             "- When two or more delegated parts do not depend on each other, send them together with `ask_agents` or parallel `run_subagent` calls; they run at the same time.",
             "- Every `run_subagent` result includes an `agent_id`. Pass `agent_id` on a follow-up `run_subagent` call to resume that subagent with its full prior context preserved.",
-            "- Set `run_in_background=true` on `run_subagent` to launch long-running work asynchronously and inspect or await it later with `check_subagent(agent_id=\"...\", wait_seconds=...)`.",
+            "- Set `run_in_background=true` on `run_subagent` to launch long-running work asynchronously (several independent `run_subagent` calls in the same response also run in parallel) and inspect or await one with `check_subagent(agent_id=\"...\", wait_seconds=...)` or several at once with `check_subagent(agent_ids=[...], wait_seconds=...)`.",
             "- A subagent cannot see this conversation unless `subagent_type=\"fork\"` is used. Put everything it needs in the task text.",
             "- Do not create a subagent for something you can finish yourself in a step or two.",
         ]
@@ -1543,6 +1543,8 @@ class TurnSession:
             except Exception:
                 pass
         self._todos_state: list[dict[str, str]] = []
+        self._fg_promotion_seq: int = 0
+        self.on_queued_input_claimed = self._note_queued_input_claimed
         raw_perm = str(turn.get("permission_mode") or "").strip()
         raw_perm = known_permission_mode(raw_perm)
         self.permission_mode: str = (
@@ -1866,6 +1868,7 @@ class TurnSession:
                             f"{artifact_verb} {path}",
                             artifact_payload,
                             agent_id=actor,
+                            parent_agent_id=self._parent_of(actor) if is_subagent else None,
                         )
             if self.turn.get("code_mode") == "code":
                 if (extra.get("code_approval") or extra.get("plan_approval")) and extra.get("wait_for_user"):
@@ -1879,6 +1882,7 @@ class TurnSession:
                         "Plano pronto para aprovação",
                         decision_payload,
                         agent_id=actor,
+                        parent_agent_id=self._parent_of(actor) if is_subagent else None,
                     )
                 elif name in {"write_file", "edit_file", "notebook_edit"} and status == "succeeded":
                     self._code_mode_edit_succeeded = True
@@ -1889,15 +1893,17 @@ class TurnSession:
                             "Implementando alteração",
                             {"stage": "implementing"},
                             agent_id=actor,
+                            parent_agent_id=self._parent_of(actor) if is_subagent else None,
                         )
                 elif name in {"todo_write", "task_create", "task_update"} and status == "succeeded":
-                    self._code_mode_stage = "implementing"
-                    self._record(
-                        AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
-                        summary,
-                        {"stage": "implementing", "todos": extra.get("todos") or list(self._todos_state)},
-                        agent_id=actor,
-                    )
+                    if actor == self.main_agent_id:
+                        self._code_mode_stage = "implementing"
+                        self._record(
+                            AgentActivityEventType.CODE_MODE_STAGE_CHANGED,
+                            summary,
+                            {"stage": "implementing", "todos": extra.get("todos") or list(self._todos_state)},
+                            agent_id=actor,
+                        )
                 elif name == "verify_project" and extra.get("scaffold"):
                     cmd_failed = status != "succeeded" or extra.get("all_passed") is False
                     stage = "fixing" if cmd_failed else "implementing"
@@ -3057,6 +3063,12 @@ class TurnSession:
                 **routing,
             )
 
+    def _note_queued_input_claimed(self, claimed: object = None) -> None:
+        if isinstance(claimed, (list, tuple, set)) and not claimed:
+            return
+        with self._subagent_lock:
+            self._fg_promotion_seq = getattr(self, "_fg_promotion_seq", 0) + 1
+
     def _can_watch_queued_user_input(self) -> bool:
         for candidate in (getattr(self, "store", None), getattr(self, "chat_store", None)):
             if candidate is None:
@@ -3204,99 +3216,75 @@ class TurnSession:
                 )
             future = self._bg_subagent_executor.submit(_worker)
 
+        start_seq = getattr(self, "_fg_promotion_seq", 0)
+
+        def _promote(extra_text: str = "") -> ToolOutcome:
+            promoted.set()
+            reg_entry = BackgroundAgentEntry(
+                agent_id=agent_id,
+                conversation_id=conv_id,
+                name=clean,
+                output_file=output_file,
+                status="running",
+                started_at=time.monotonic(),
+                finished_at=None,
+                summary="",
+                cancel=cancel,
+                future=future,
+            )
+            BACKGROUND_AGENTS.register(reg_entry)
+            with self._subagent_lock:
+                self._background_subagents[agent_id] = {
+                    "future": future,
+                    "agent_id": agent_id,
+                    "agent_name": clean,
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "cancel": cancel,
+                    "output_file": output_file,
+                }
+            return ToolOutcome(
+                "succeeded",
+                f"{clean} continua em segundo plano",
+                f"{clean} continues in the background (agent_id={agent_id}).{extra_text}",
+                {
+                    "agent_id": agent_id,
+                    "agent_name": clean,
+                    "subagent_type": builtin_key if builtin_spec is not None else clean,
+                    "status": "running",
+                    "output_file": output_file,
+                    "background": True,
+                    "promoted_to_background": True,
+                    "resumed": bool(resumed_agent_id),
+                    "label": clean,
+                    "tool_kind": "agent",
+                },
+            )
+
         while not future.done():
             if self.cancelled(self.turn):
                 if self._keep_subagents_requested():
                     with promote_lock:
                         if not completed_unpromoted and not future.done():
-                            promoted.set()
-                            reg_entry = BackgroundAgentEntry(
-                                agent_id=agent_id,
-                                conversation_id=conv_id,
-                                name=clean,
-                                output_file=output_file,
-                                status="running",
-                                started_at=time.monotonic(),
-                                finished_at=None,
-                                summary="",
-                                cancel=cancel,
-                                future=future,
-                            )
-                            BACKGROUND_AGENTS.register(reg_entry)
-                            with self._subagent_lock:
-                                self._background_subagents[agent_id] = {
-                                    "future": future,
-                                    "agent_id": agent_id,
-                                    "agent_name": clean,
-                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
-                                    "cancel": cancel,
-                                    "output_file": output_file,
-                                }
-                            return ToolOutcome(
-                                "succeeded",
-                                f"{clean} continua em segundo plano",
-                                f"{clean} continues in the background (agent_id={agent_id}).",
-                                {
-                                    "agent_id": agent_id,
-                                    "agent_name": clean,
-                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
-                                    "status": "running",
-                                    "output_file": output_file,
-                                    "background": True,
-                                    "promoted_to_background": True,
-                                    "resumed": bool(resumed_agent_id),
-                                    "label": clean,
-                                    "tool_kind": "agent",
-                                },
-                            )
+                            return _promote()
                 cancel.set()
                 break
+            if getattr(self, "_fg_promotion_seq", 0) != start_seq:
+                with promote_lock:
+                    if not completed_unpromoted and not future.done():
+                        return _promote(" The user sent a message; it was delivered with another subagent's result.")
             if self._has_queued_user_input():
                 with promote_lock:
                     if not completed_unpromoted and not future.done():
+                        if getattr(self, "_fg_promotion_seq", 0) != start_seq:
+                            return _promote(" The user sent a message; it was delivered with another subagent's result.")
                         texts = self._claim_queued_user_inputs()
                         if texts:
-                            promoted.set()
-                            reg_entry = BackgroundAgentEntry(
-                                agent_id=agent_id,
-                                conversation_id=conv_id,
-                                name=clean,
-                                output_file=output_file,
-                                status="running",
-                                started_at=time.monotonic(),
-                                finished_at=None,
-                                summary="",
-                                cancel=cancel,
-                                future=future,
-                            )
-                            BACKGROUND_AGENTS.register(reg_entry)
                             with self._subagent_lock:
-                                self._background_subagents[agent_id] = {
-                                    "future": future,
-                                    "agent_id": agent_id,
-                                    "agent_name": clean,
-                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
-                                    "cancel": cancel,
-                                    "output_file": output_file,
-                                }
+                                self._fg_promotion_seq = getattr(self, "_fg_promotion_seq", 0) + 1
                             user_text = "\n\n".join(texts)
-                            return ToolOutcome(
-                                "succeeded",
-                                f"{clean} continua em segundo plano",
-                                f"{clean} continues in the background (agent_id={agent_id}). The user wrote: {user_text}",
-                                {
-                                    "agent_id": agent_id,
-                                    "agent_name": clean,
-                                    "subagent_type": builtin_key if builtin_spec is not None else clean,
-                                    "status": "running",
-                                    "output_file": output_file,
-                                    "background": True,
-                                    "promoted_to_background": True,
-                                    "resumed": bool(resumed_agent_id),
-                                    "label": clean,
-                                    "tool_kind": "agent",
-                                },
-                            )
+                            return _promote(f" The user wrote: {user_text}")
+                        if getattr(self, "_fg_promotion_seq", 0) != start_seq:
+                            return _promote(" The user sent a message; it was delivered with another subagent's result.")
             time.sleep(0.05)
 
         return future.result()
@@ -3669,7 +3657,9 @@ class TurnSession:
                 non_interactive_ask=self._non_interactive_ask(),
                 # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
                 reminders=sub_reminders,
+                todos_state=[],
             )
+            subagent_tools.set_allow_deferral(self._tool_deferral_allowed(provider_name))
             child_caller.toolset = subagent_tools
             if can_delegate:
                 self._announce_defined_agents(sub_reminders)
@@ -4223,13 +4213,12 @@ class TurnSession:
         output["message"] = f"Asked {name} to stop; it stops at its next step."
         return ToolOutcome("succeeded", f"Parou {name}", output["message"], {"agent_id": agent_id, "status": "stopping", "tool_kind": "agent"}, data={"tool_output": output})
 
-    def _check_subagent(self, agent_id: str, *, wait_seconds: int = 0, caller: SubagentCaller | None = None) -> ToolOutcome:
-        refusal = self._ownership_refusal(str(agent_id), caller)
-        if refusal is not None:
-            return refusal
+    def _resolve_subagent_entry(self, agent_id: str, caller: SubagentCaller | None = None) -> dict[str, Any] | None:
+        if self._ownership_refusal(str(agent_id), caller) is not None:
+            return None
         conv_id = str(self.turn.get("conversation_id") or "")
         with self._subagent_lock:
-            entry = self._background_subagents.get(agent_id)
+            entry = self._background_subagents.get(str(agent_id))
         if entry is None:
             reg_entry = BACKGROUND_AGENTS.get(conv_id, str(agent_id))
             if reg_entry is not None and reg_entry.future is not None:
@@ -4240,36 +4229,43 @@ class TurnSession:
                     "cancel": reg_entry.cancel,
                     "output_file": reg_entry.output_file,
                 }
+        if entry is not None:
+            return entry
+        record = self._find_subagent_record_by_id(str(agent_id))
+        output_file = self._agent_output_file(str(agent_id))
+        report_path = self.workspace.root / output_file
+        if record is not None or report_path.is_file():
+            agent_name = str((record or {}).get("name") or agent_id)
+            db_state = str((record or {}).get("state") or ("completed" if report_path.is_file() else "failed")).strip().lower()
+            report_text = ""
+            if report_path.is_file():
+                try:
+                    report_text = report_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    report_text = ""
+            if db_state in {"running", "working"}:
+                status = "running"
+            elif db_state in {"idle", "completed", "succeeded"}:
+                status = "completed"
+            else:
+                status = "failed"
+            return {
+                "future": None,
+                "agent_id": str(agent_id),
+                "agent_name": agent_name,
+                "status": status,
+                "output_file": output_file,
+                "report_text": report_text,
+            }
+        return None
+
+    def _check_subagent_one(self, agent_id: str, *, wait_seconds: int = 0, caller: SubagentCaller | None = None) -> ToolOutcome:
+        refusal = self._ownership_refusal(str(agent_id), caller)
+        if refusal is not None:
+            return refusal
+        conv_id = str(self.turn.get("conversation_id") or "")
+        entry = self._resolve_subagent_entry(str(agent_id), caller)
         if entry is None:
-            record = self._find_subagent_record_by_id(str(agent_id))
-            output_file = self._agent_output_file(str(agent_id))
-            report_path = self.workspace.root / output_file
-            if record is not None or report_path.is_file():
-                agent_name = str((record or {}).get("name") or agent_id)
-                db_state = str((record or {}).get("state") or ("completed" if report_path.is_file() else "failed")).strip().lower()
-                report_text = report_path.read_text(encoding="utf-8") if report_path.is_file() else ""
-                if db_state in {"running", "working"}:
-                    status = "running"
-                elif db_state in {"idle", "completed", "succeeded"}:
-                    status = "completed"
-                else:
-                    status = "failed"
-                outcome_status = "succeeded" if status != "failed" else "failed"
-                return ToolOutcome(
-                    outcome_status,
-                    f"Relatório de {agent_name}",
-                    report_text or f"Subagent '{agent_name}' (agent_id=\"{agent_id}\") status: {status}.",
-                    {
-                        "agent_id": agent_id,
-                        "agent_name": agent_name,
-                        "status": status,
-                        "output_file": output_file,
-                        "background": True,
-                        "label": agent_name,
-                        "tool_kind": "agent",
-                    },
-                    None if outcome_status == "succeeded" else "SUBAGENT_FAILED",
-                )
             return ToolOutcome(
                 "failed",
                 f"Subagente {agent_id} não encontrado",
@@ -4277,14 +4273,30 @@ class TurnSession:
                 {"agent_id": agent_id, "tool_kind": "agent"},
                 "AGENT_NOT_FOUND",
             )
-        future = entry["future"]
+        future = entry.get("future")
         agent_name = str(entry.get("agent_name") or agent_id)
+        if future is None:
+            status = str(entry.get("status") or "completed")
+            output_file = str(entry.get("output_file") or self._agent_output_file(str(agent_id)))
+            report_text = str(entry.get("report_text") or "")
+            outcome_status = "succeeded" if status != "failed" else "failed"
+            return ToolOutcome(
+                outcome_status,
+                f"Relatório de {agent_name}",
+                report_text or f"Subagent '{agent_name}' (agent_id=\"{agent_id}\") status: {status}.",
+                {
+                    "agent_id": agent_id,
+                    "agent_name": agent_name,
+                    "status": status,
+                    "output_file": output_file,
+                    "background": True,
+                    "label": agent_name,
+                    "tool_kind": "agent",
+                },
+                None if outcome_status == "succeeded" else "SUBAGENT_FAILED",
+            )
         if not future.done() and wait_seconds > 0:
-            with self._lend_slot(caller):
-                try:
-                    future.result(timeout=float(wait_seconds))
-                except Exception:
-                    pass
+            self._wait_subagent_futures([future], float(wait_seconds), caller)
         if not future.done():
             return ToolOutcome(
                 "succeeded",
@@ -4332,6 +4344,91 @@ class TurnSession:
             outcome.error_code,
             images=outcome.images,
         )
+
+    def _check_subagent(
+        self,
+        agent_id: str = "",
+        *,
+        wait_seconds: int = 0,
+        caller: SubagentCaller | None = None,
+        agent_ids: Sequence[str] | None = None,
+    ) -> ToolOutcome:
+        if agent_ids is not None:
+            raw_list = [agent_id, *agent_ids] if (agent_id and str(agent_id).strip()) else list(agent_ids)
+            ids = list(dict.fromkeys(str(item).strip() for item in raw_list if str(item).strip()))[:16]
+            if not ids:
+                return ToolOutcome(
+                    "failed",
+                    "ID de subagente ausente",
+                    "Pass agent_id or agent_ids.",
+                    {"tool_kind": "agent"},
+                    "INVALID_ARGUMENTS",
+                )
+            from agentos.agentic.tools.agents.agent import format_multi_subagent_check
+
+            live_futures = []
+            for aid in ids:
+                entry = self._resolve_subagent_entry(aid, caller)
+                fut = entry.get("future") if entry is not None else None
+                if fut is not None and not fut.done():
+                    live_futures.append(fut)
+            if live_futures and wait_seconds > 0:
+                self._wait_subagent_futures(live_futures, float(wait_seconds), caller)
+            outcomes = [self._check_subagent_one(aid, wait_seconds=0, caller=caller) for aid in ids]
+            return format_multi_subagent_check(ids, outcomes)
+        return self._check_subagent_one(agent_id, wait_seconds=wait_seconds, caller=caller)
+
+    def _subagent_wait_aborted(self, caller: SubagentCaller | None = None) -> bool:
+        try:
+            if self.cancelled(self.turn):
+                return True
+        except Exception:
+            pass
+        if caller is not None and callable(getattr(caller, "cancelled", None)):
+            try:
+                if caller.cancelled(self.turn):
+                    return True
+            except Exception:
+                pass
+        toolset = getattr(self, "toolset", None)
+        if toolset is not None:
+            cancel_req = getattr(toolset, "_cancel_requested", None)
+            if callable(cancel_req):
+                try:
+                    if cancel_req():
+                        return True
+                except Exception:
+                    pass
+        return False
+
+    def _wait_subagent_futures(
+        self,
+        futures: Sequence[Any],
+        wait_seconds: float,
+        caller: SubagentCaller | None = None,
+    ) -> None:
+        pending = [fut for fut in futures if fut is not None and not fut.done()]
+        if not pending or wait_seconds <= 0:
+            return
+        deadline = time.monotonic() + float(wait_seconds)
+        with self._lend_slot(caller):
+            while True:
+                if self._subagent_wait_aborted(caller):
+                    break
+                pending = [fut for fut in pending if not fut.done()]
+                if not pending:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                slice_timeout = min(0.25, remaining)
+                try:
+                    wait_futures(pending, timeout=slice_timeout)
+                except (AttributeError, TypeError):
+                    try:
+                        pending[0].result(timeout=slice_timeout)
+                    except Exception:
+                        pass
 
     def _lsp_manager(self):
         """This turn's language servers (W5), from the active plugins whose code the person allowed to run; None
@@ -4906,6 +5003,26 @@ class TurnSession:
                 pass
         return getattr(self, "model_sees_images", False)
 
+    @staticmethod
+    def _tool_deferral_allowed(provider: str | None) -> bool:
+        """Whether this provider can reload its tool list during a turn when deferred tools are discovered."""
+        normalized = str(provider or "").strip().lower()
+        if not normalized:
+            return True
+        from agentos.providers.cli_registry import CLI_PROVIDERS
+
+        factory = CLI_PROVIDERS.get(normalized)
+        if not callable(factory):
+            return True
+        try:
+            adapter = factory()
+        except Exception:  # noqa: BLE001
+            return True
+        caps = getattr(adapter, "capabilities", None)
+        if caps is None:
+            return True
+        return not (bool(getattr(caps, "native_tool_loop", False)) and not bool(getattr(caps, "tool_list_changed", True)))
+
     def _toolset(
         self,
         *,
@@ -4926,6 +5043,7 @@ class TurnSession:
         reminders: ReminderQueue | None = None,
         non_interactive_ask: str = "allow",
         share_read_state: bool | None = None,
+        todos_state: list[dict[str, Any]] | None = None,
         caller: SubagentCaller | None = None,
         cancel_check: Callable[[], bool] | None = None,
         model_sees_images: bool | None = None,
@@ -5016,7 +5134,7 @@ class TurnSession:
                 if (is_main_toolset if share_read_state is None else share_read_state)
                 else (copy_read_state(self._read_file_state) if inherit_context else {})
             ),
-            todos_state=self._todos_state,
+            todos_state=self._todos_state if todos_state is None else todos_state,
             read_only_mode=read_only_mode,
             default_provider=str(self.turn.get("provider") or "").strip() or None,
             default_model_id=str(self.turn.get("model_id") or "").strip() or None,
@@ -5045,6 +5163,7 @@ class TurnSession:
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
             toolset._team_sender = "lead"  # W5: the lead of any agent team this turn starts
             toolset._send_team_message = self._send_team_message
+            toolset.on_queued_input_claimed = self._note_queued_input_claimed
         elif subagents:
             # A delegating subagent stops only what it started; agent teams stay with the main agent (v1).
             toolset._stop_subagent = partial(self._stop_background_subagent, caller=caller)
@@ -6440,6 +6559,7 @@ class TurnSession:
             reminders=self._reminders,
         )
         # This turn's reminders now receive the conversation's running monitors' output (W4).
+        toolset.set_allow_deferral(self._tool_deferral_allowed(str(self.turn.get("provider") or "")))
         self.toolset = toolset
         toolset._attach_monitors()
         agents = self.agents_store.list() if self.agents_store is not None else []
@@ -6659,11 +6779,16 @@ class TurnSession:
             shell_command=self._shell_request(task),
             effort=self._effort(),
             on_completed=self._after_completed_turn,
+            on_queued_input_claimed=self._note_queued_input_claimed,
         )
         if self.cli_options is not None:
             from .cli_turn import tool_selection
 
             runtime.offered_tools, runtime.withheld_tools = tool_selection(self.cli_options, CODE_MODE_CORE_TOOLS)
+            toolset.set_tool_restrictions(
+                offered_tools=runtime.offered_tools,
+                withheld_tools=runtime.withheld_tools,
+            )
         if resumed is not None:
             runtime.contract = resumed
         return runtime

@@ -11,6 +11,7 @@ class McpToolSpec:
     description: str
     input_schema: Mapping[str, Any]
     read_only: bool = False
+    parallel_safe: bool = False
 
 
 @dataclass(frozen=True, slots=True)

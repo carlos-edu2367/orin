@@ -60,6 +60,9 @@ POLICY_REFUSAL_CODES = frozenset({
 
 MAX_PARALLEL_TOOLS = 8
 MAX_PARALLEL_SUBAGENT_TOOLS = max(8, int(os.environ.get("ORIN_MAX_CONCURRENT_SUBAGENTS", "16") or "16"))
+_DELEGATION_TOOLS: frozenset[str] = frozenset(
+    {"run_subagent", "ask_agent", "ask_agents", "check_subagent"}
+)
 AGED_TOOL_RESULT_CHARS = 1600
 RECENT_UNAGED_TOOL_RESULTS = 8
 MAX_STREAM_KEEPALIVE_STALL_SECONDS = 180.0
@@ -370,6 +373,7 @@ class AgenticTurnRuntime:
         model_switched: Callable[[str], None] | None = None,
         budget_meter: BudgetMeter | None = None,
         on_completed: Callable[[], None] | None = None,
+        on_queued_input_claimed: Callable[..., None] | None = None,
         config_block_reason: str | None = None,
         provider_timeout_seconds: float | None = None,
     ) -> None:
@@ -382,6 +386,7 @@ class AgenticTurnRuntime:
         self._effort_supported = effort_supported
         self._model_switched = model_switched
         self._on_completed = on_completed
+        self.on_queued_input_claimed = on_queued_input_claimed
         self.lifecycle = lifecycle
         self.prompt_block_reason = prompt_block_reason
         self.config_block_reason = config_block_reason
@@ -446,6 +451,7 @@ class AgenticTurnRuntime:
         self._consecutive_tool_failures: dict[str, int] = {}
         self._succeeded_reads: dict[str, tuple[str, int]] = {}
         self._writes = 0
+        self._toolset_state_lock = threading.RLock()
 
     def close(self) -> None:
         if self._closed:
@@ -555,6 +561,7 @@ class AgenticTurnRuntime:
             items = list(claim(turn) or ())
         except Exception:  # noqa: BLE001 - the queue never breaks a turn
             return
+        claimed_texts: list[str] = []
         for item in items:
             text = str((item or {}).get("content") or "").strip()
             queue_id = str((item or {}).get("queue_id") or "")
@@ -577,6 +584,26 @@ class AgenticTurnRuntime:
             self._queued_turn_count += 1
             self._record_step(turn, kind=transcript.STEP_QUEUED_INPUT, payload={"content": text})
             self._life(turn, "queued_input", queued_text=text[:2000], queue_id=queue_id)
+            claimed_texts.append(content)
+        if claimed_texts:
+            self._notify_queued_input_claimed(claimed_texts)
+
+    def _notify_queued_input_claimed(self, claimed: list[str]) -> None:
+        if not claimed:
+            return
+        for target in (self, getattr(self, "toolset", None), getattr(self, "store", None)):
+            hook = getattr(target, "on_queued_input_claimed", None) if target is not None else None
+            if callable(hook):
+                try:
+                    hook(claimed)
+                except TypeError:
+                    try:
+                        hook()
+                    except Exception:  # noqa: BLE001
+                        pass
+                except Exception:  # noqa: BLE001
+                    pass
+                break
 
     def _check_external_changes(self, turn: dict[str, object]) -> None:
         """FileChanged for files the turn read that changed outside it; the model hears about it in a reminder."""
@@ -1626,6 +1653,12 @@ class AgenticTurnRuntime:
     def _tool_schemas(self, turn: Mapping[str, object], *, allow_deferral: bool = True) -> list[dict[str, object]]:
         if self.toolset is None:
             return self.actions.tool_schemas(turn)
+        sync_restrictions = getattr(self.toolset, "set_tool_restrictions", None)
+        if callable(sync_restrictions):
+            sync_restrictions(
+                offered_tools=self.offered_tools,
+                withheld_tools=self.withheld_tools,
+            )
         if self.phases is None:
             if getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code":
                 if allow_deferral and tool_search_enabled() and self.offered_tools is None:
@@ -2578,73 +2611,30 @@ class AgenticTurnRuntime:
         """
         from .agent_tools import AgentToolError, ToolOutcome, parse_arguments
 
-        prepared: list[tuple[str, str, dict[str, object] | None, str | None]] = []
-        for call in calls:
-            name = str(call.get("name") or "")
-            call_id = str(call.get("id") or "")
-            argument_names = getattr(self.toolset, "argument_names", None)
-            parsed_args: dict[str, object] | None = None
-            parse_err: str | None = None
-            names_translator = getattr(self, "_names", None)
-            known_keys = names_translator.argument_names(name) if names_translator is not None else None
-            if known_keys is None and callable(argument_names):
-                known_keys = argument_names(name)
-            try:
-                parsed_args = parse_arguments(call.get("arguments") or "{}", known_keys)
-                if names_translator is not None and isinstance(parsed_args, dict):
-                    parsed_args = names_translator.arguments_in(name, parsed_args)
-            except AgentToolError as error:
-                parse_err = str(error)
-                if name in {"write_file", "edit_file"} and "truncated at max_tokens" not in parse_err:
-                    parse_err = (
-                        f"{parse_err} Hint: Ensure 'path' is provided first; if you are writing a large file, "
-                        "your output may have been truncated at max_tokens — write smaller modular "
-                        f"files or use {self._label('edit_file')} in chunks."
-                    )
-            except Exception as error:  # noqa: BLE001 - model-chosen values must never crash the turn
-                parsed_args = None
-                parse_err = f"Invalid arguments for {name}: {type(error).__name__}"
-            started_meta: dict[str, object] = {}
-            if isinstance(parsed_args, Mapping):
-                desc = parsed_args.get("description") or parsed_args.get("subject")
-                if isinstance(desc, str) and desc.strip():
-                    started_meta["description"] = desc.strip()[:200]
-                t_path = (
-                    parsed_args.get("path")
-                    or parsed_args.get("file_path")
-                    or parsed_args.get("notebook_path")
-                    or parsed_args.get("plan_path")
-                    or parsed_args.get("pattern")
-                )
-                if isinstance(t_path, str) and t_path.strip():
-                    started_meta["target_path"] = t_path.strip()[:240]
-                    started_meta["path"] = t_path.strip()[:240]
-                cmd_val = parsed_args.get("command")
-                if isinstance(cmd_val, str) and cmd_val.strip():
-                    started_meta["command"] = cmd_val.strip()[:240]
-            self._life(
-                turn, "tool_started", tool_name=name, invocation_id=call_id,
-                tool_input=dict(parsed_args) if isinstance(parsed_args, Mapping) else {}, **started_meta,
-            )
-            prepared.append((call_id, name, parsed_args, parse_err))
-
-        # A call whose exact (name, arguments) signature already failed
-        # earlier in this turn is never invoked again — neither in the pool
-        # nor sequentially — it is short-circuited with the earlier error.
-        duplicate = [error is None and self._signature(name, arguments) in self._failed_signatures for _, name, arguments, error in prepared]
-
-        def duplicate_outcome(name: str, arguments: Mapping[str, object]) -> ToolOutcome:
-            previous = self._failed_signatures[self._signature(name, arguments)]
-            content = (
-                f"{previous}\n\n[this exact call already failed in this turn and nothing has changed since, "
-                "so it was not run again. Change the arguments (path, pattern, old_string...), fix the cause "
-                "named in the error above, or run any other successful tool call first (e.g. Read the file, "
-                "list the directory) — an identical retry is allowed once something has succeeded in between]"
-            )
-            return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
-
         is_read_only = getattr(self.toolset, "is_read_only", None)
         is_mutating = getattr(self.toolset, "is_mutating", None)
+        is_concurrency_safe_fn = getattr(self.toolset, "is_concurrency_safe", None)
+        is_parallel_delegation_fn = getattr(self.toolset, "is_parallel_delegation", None)
+
+        def is_concurrency_safe(tool_name: str) -> bool:
+            if callable(is_read_only) and is_read_only(tool_name):
+                return True
+            if callable(is_concurrency_safe_fn):
+                try:
+                    if is_concurrency_safe_fn(tool_name):
+                        return True
+                except Exception:
+                    pass
+            return tool_name in _DELEGATION_TOOLS
+
+        def is_subagent_delegation(tool_name: str) -> bool:
+            if callable(is_parallel_delegation_fn):
+                try:
+                    if is_parallel_delegation_fn(tool_name):
+                        return True
+                except Exception:
+                    pass
+            return tool_name in _DELEGATION_TOOLS
 
         def cached_read(name: str, arguments: Mapping[str, object]) -> ToolOutcome | None:
             """The earlier result of this exact read, if nothing can have changed it.
@@ -2668,75 +2658,153 @@ class AgenticTurnRuntime:
             )
             return ToolOutcome("succeeded", f"{name} reaproveitado da chamada anterior", content, {})
 
-        repeated: list[ToolOutcome | None] = [
-            None if error is not None or duplicate[i] else cached_read(name, arguments)
-            for i, (_, name, arguments, error) in enumerate(prepared)
-        ]
+        with self._toolset_state_lock:
+            sync_restrictions = getattr(self.toolset, "set_tool_restrictions", None)
+            if callable(sync_restrictions):
+                sync_restrictions(
+                    offered_tools=self.offered_tools,
+                    withheld_tools=self.withheld_tools,
+                )
+            prepared: list[tuple[str, str, dict[str, object] | None, str | None]] = []
+            for call in calls:
+                name = str(call.get("name") or "")
+                call_id = str(call.get("id") or "")
+                argument_names = getattr(self.toolset, "argument_names", None)
+                parsed_args: dict[str, object] | None = None
+                parse_err: str | None = None
+                names_translator = getattr(self, "_names", None)
+                known_keys = names_translator.argument_names(name) if names_translator is not None else None
+                if known_keys is None and callable(argument_names):
+                    known_keys = argument_names(name)
+                try:
+                    parsed_args = parse_arguments(call.get("arguments") or "{}", known_keys)
+                    if names_translator is not None and isinstance(parsed_args, dict):
+                        parsed_args = names_translator.arguments_in(name, parsed_args)
+                except AgentToolError as error:
+                    parse_err = str(error)
+                    if name in {"write_file", "edit_file"} and "truncated at max_tokens" not in parse_err:
+                        parse_err = (
+                            f"{parse_err} Hint: Ensure 'path' is provided first; if you are writing a large file, "
+                            "your output may have been truncated at max_tokens — write smaller modular "
+                            f"files or use {self._label('edit_file')} in chunks."
+                        )
+                except Exception as error:  # noqa: BLE001 - model-chosen values must never crash the turn
+                    parsed_args = None
+                    parse_err = f"Invalid arguments for {name}: {type(error).__name__}"
+                started_meta: dict[str, object] = {}
+                if isinstance(parsed_args, Mapping):
+                    desc = parsed_args.get("description") or parsed_args.get("subject")
+                    if isinstance(desc, str) and desc.strip():
+                        started_meta["description"] = desc.strip()[:200]
+                    t_path = (
+                        parsed_args.get("path")
+                        or parsed_args.get("file_path")
+                        or parsed_args.get("notebook_path")
+                        or parsed_args.get("plan_path")
+                        or parsed_args.get("pattern")
+                    )
+                    if isinstance(t_path, str) and t_path.strip():
+                        started_meta["target_path"] = t_path.strip()[:240]
+                        started_meta["path"] = t_path.strip()[:240]
+                    cmd_val = parsed_args.get("command")
+                    if isinstance(cmd_val, str) and cmd_val.strip():
+                        started_meta["command"] = cmd_val.strip()[:240]
+                self._life(
+                    turn, "tool_started", tool_name=name, invocation_id=call_id,
+                    tool_input=dict(parsed_args) if isinstance(parsed_args, Mapping) else {}, **started_meta,
+                )
+                prepared.append((call_id, name, parsed_args, parse_err))
 
-        # A remembered read was valid when the batch started; once a
-        # write-capable call precedes it in this batch, it may be stale.
-        write_seen = False
-        for i, (_, name, _, error) in enumerate(prepared):
-            if write_seen:
-                repeated[i] = None
-            if error is None and not (callable(is_read_only) and is_read_only(name)):
-                write_seen = True
+            # A call whose exact (name, arguments) signature already failed
+            # earlier in this turn is never invoked again — neither in the pool
+            # nor sequentially — it is short-circuited with the earlier error.
+            duplicate_prev: list[str | None] = [
+                self._failed_signatures.get(self._signature(name, arguments))
+                if error is None and arguments is not None
+                else None
+                for _, name, arguments, error in prepared
+            ]
+            duplicate = [prev is not None for prev in duplicate_prev]
 
-        # An identical call later in the same batch runs once: the later copy
-        # shares the first one's result. Polling tools are never merged.
-        first_index: list[int | None] = [None] * len(prepared)
-        first_seen: dict[str, int] = {}
-        for i, (_, name, arguments, error) in enumerate(prepared):
-            if error is not None or arguments is None:
-                continue
-            sig = self._signature(name, arguments)
-            if name in {"check_subagent", "read_process_output", "preview_logs", "preview_open"}:
-                continue
-            if sig in first_seen and not duplicate[i] and repeated[i] is None:
-                first_index[i] = first_seen[sig]
-                continue
-            if not (callable(is_read_only) and is_read_only(name)):
-                # Write barrier: nothing before a write-capable call may be reused after it.
-                first_seen.clear()
-            first_seen[sig] = i
+            repeated: list[ToolOutcome | None] = [
+                None if error is not None or duplicate[i] else cached_read(name, arguments)
+                for i, (_, name, arguments, error) in enumerate(prepared)
+            ]
 
-        # An edit of a file that was only read earlier in this same batch
-        # would run blind (the model has not seen the read result yet).
-        # Decided before anything runs, from the state at the start of the batch.
-        same_batch_read = [False] * len(prepared)
-        read_key = getattr(self.toolset, "read_key", None)
-        has_read = getattr(self.toolset, "has_read", None)
-        if callable(read_key) and callable(has_read):
-            native_msg_keys = getattr(self, "_native_message_first_read_keys", None)
-            batch_read_keys: set[str] = (
-                set(native_msg_keys) if isinstance(native_msg_keys, set) else set()
-            )
+            # A remembered read was valid when the batch started; once a
+            # write-capable call precedes it in this batch, it may be stale.
+            write_seen = False
+            for i, (_, name, _, error) in enumerate(prepared):
+                if write_seen:
+                    repeated[i] = None
+                if error is None and not (callable(is_read_only) and is_read_only(name)):
+                    write_seen = True
+
+            # An identical call later in the same batch runs once: the later copy
+            # shares the first one's result. Polling tools are never merged.
+            first_index: list[int | None] = [None] * len(prepared)
+            first_seen: dict[str, int] = {}
             for i, (_, name, arguments, error) in enumerate(prepared):
-                if error is not None or not isinstance(arguments, Mapping):
+                if error is not None or arguments is None:
                     continue
-                path = arguments.get("path")
-                if not isinstance(path, str) or not path:
+                sig = self._signature(name, arguments)
+                if name in {"check_subagent", "read_process_output", "preview_logs", "preview_open"}:
                     continue
-                if name == "read_file":
-                    key = read_key(path)
-                    if key is not None and not has_read(path) and _exists_in_workspace(self.toolset, path):
-                        batch_read_keys.add(key)
-                        if isinstance(native_msg_keys, set):
-                            native_msg_keys.add(key)
-                elif name in {"edit_file", "notebook_edit"} or (name == "write_file" and arguments.get("mode") != "append"):
-                    key = read_key(path)
-                    if key is not None and key in batch_read_keys:
-                        same_batch_read[i] = True
+                if sig in first_seen and not duplicate[i] and repeated[i] is None:
+                    first_index[i] = first_seen[sig]
+                    continue
+                if not (callable(is_read_only) and is_read_only(name)):
+                    # Write barrier: nothing before a write-capable call may be reused after it.
+                    first_seen.clear()
+                first_seen[sig] = i
 
-        eligible = [
-            error is None
-            and not duplicate[i]
-            and repeated[i] is None
-            and first_index[i] is None
-            and not same_batch_read[i]
-            and ((callable(is_read_only) and is_read_only(name)) or name in {"run_subagent", "ask_agent", "check_subagent"})
-            for i, (_, name, _, error) in enumerate(prepared)
-        ]
+            # An edit of a file that was only read earlier in this same batch
+            # would run blind (the model has not seen the read result yet).
+            # Decided before anything runs, from the state at the start of the batch.
+            same_batch_read = [False] * len(prepared)
+            read_key = getattr(self.toolset, "read_key", None)
+            has_read = getattr(self.toolset, "has_read", None)
+            if callable(read_key) and callable(has_read):
+                native_msg_keys = getattr(self, "_native_message_first_read_keys", None)
+                batch_read_keys: set[str] = (
+                    set(native_msg_keys) if isinstance(native_msg_keys, set) else set()
+                )
+                for i, (_, name, arguments, error) in enumerate(prepared):
+                    if error is not None or not isinstance(arguments, Mapping):
+                        continue
+                    path = arguments.get("path")
+                    if not isinstance(path, str) or not path:
+                        continue
+                    if name == "read_file":
+                        key = read_key(path)
+                        if key is not None and not has_read(path) and _exists_in_workspace(self.toolset, path):
+                            batch_read_keys.add(key)
+                            if isinstance(native_msg_keys, set):
+                                native_msg_keys.add(key)
+                    elif name in {"edit_file", "notebook_edit"} or (name == "write_file" and arguments.get("mode") != "append"):
+                        key = read_key(path)
+                        if key is not None and key in batch_read_keys:
+                            same_batch_read[i] = True
+
+            eligible = [
+                error is None
+                and not duplicate[i]
+                and repeated[i] is None
+                and first_index[i] is None
+                and not same_batch_read[i]
+                and is_concurrency_safe(name)
+                for i, (_, name, _, error) in enumerate(prepared)
+            ]
+
+        def duplicate_outcome(idx: int) -> ToolOutcome:
+            previous = duplicate_prev[idx] or ""
+            content = (
+                f"{previous}\n\n[this exact call already failed in this turn and nothing has changed since, "
+                "so it was not run again. Change the arguments (path, pattern, old_string...), fix the cause "
+                "named in the error above, or run any other successful tool call first (e.g. Read the file, "
+                "list the directory) — an identical retry is allowed once something has succeeded in between]"
+            )
+            return ToolOutcome("failed", "Chamada repetida ignorada", content, {}, "DUPLICATE_TOOL_CALL")
 
         # Walk the batch once, in the model's order. Each maximal run of
         # consecutive read-only calls is dispatched to the pool together;
@@ -2746,7 +2814,7 @@ class AgenticTurnRuntime:
         # ever starting before an earlier call finishes, or from blocking a
         # later independent read.
         outcomes: dict[int, object] = {}
-        checkpoint_lock = threading.Lock()
+        checkpoint_lock = self._toolset_state_lock
 
         def is_persistence_error(exc: BaseException) -> bool:
             raw = f"{type(exc).__module__}.{type(exc).__name__}: {exc}".lower()
@@ -2785,7 +2853,7 @@ class AgenticTurnRuntime:
             mutating = (
                 bool(is_mutating(name))
                 if callable(is_mutating)
-                else (not read_only and name not in {"run_subagent", "ask_agent", "check_subagent"})
+                else (not read_only and name not in _DELEGATION_TOOLS)
             )
             with checkpoint_lock:
                 effect_id = self._effect_started(
@@ -2799,6 +2867,7 @@ class AgenticTurnRuntime:
                     # still have changed something, so a later read must not be
                     # served from a result taken before it.
                     self._writes += 1
+                writes_at_start = self._writes
             try:
                 try:
                     setattr(self.toolset, "_active_invocation_id", call_id)
@@ -2812,6 +2881,8 @@ class AgenticTurnRuntime:
             except Exception as exc:
                 if is_persistence_error(exc):
                     with checkpoint_lock:
+                        if mutating:
+                            self._writes += 1
                         try:
                             self._effect_finished(
                                 turn,
@@ -2823,13 +2894,23 @@ class AgenticTurnRuntime:
                             pass
                     return transient_persistence_outcome(name)
                 with checkpoint_lock:
+                    if mutating:
+                        self._writes += 1
                     self._effect_finished(turn, effect_id, state="UNKNOWN", error_code="TOOL_INTERRUPTED")
                 raise
             with checkpoint_lock:
+                if mutating:
+                    self._writes += 1
                 # The "unchanged" stub points at an earlier result that aging may
                 # have shrunk since, so serving it again could hide the content.
-                if read_only and outcome.status == "succeeded" and not outcome.images and not outcome.payload.get("unchanged"):
-                    self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, self._writes)
+                if (
+                    read_only
+                    and self._writes == writes_at_start
+                    and outcome.status == "succeeded"
+                    and not outcome.images
+                    and not outcome.payload.get("unchanged")
+                ):
+                    self._succeeded_reads[self._signature(name, arguments)] = (outcome.content, writes_at_start)
                 state = "APPLIED" if outcome.status == "succeeded" else "NOT_APPLIED"
                 # A normal failed ToolOutcome is a definite response from the
                 # adapter: the model can read it and choose a different action.
@@ -2874,7 +2955,7 @@ class AgenticTurnRuntime:
                             dict(first.payload), first.error_code,
                         )
                 elif duplicate[index]:
-                    outcomes[index] = duplicate_outcome(name, arguments)
+                    outcomes[index] = duplicate_outcome(index)
                 elif repeated[index] is not None:
                     outcomes[index] = repeated[index]
                 elif error is None:
@@ -2887,7 +2968,11 @@ class AgenticTurnRuntime:
             run_indexes = list(range(index, run_end))
             if len(run_indexes) > 1:
                 has_subagent_calls = any(
-                    prepared[i][1] in {"run_subagent", "ask_agent", "check_subagent"}
+                    is_subagent_delegation(prepared[i][1])
+                    or (
+                        not (callable(is_read_only) and is_read_only(prepared[i][1]))
+                        and is_concurrency_safe(prepared[i][1])
+                    )
                     for i in run_indexes
                 )
                 batch_max_workers = MAX_PARALLEL_SUBAGENT_TOOLS if has_subagent_calls else MAX_PARALLEL_TOOLS
@@ -2909,132 +2994,133 @@ class AgenticTurnRuntime:
                 outcomes[index] = invoke(index)
             index = run_end
 
-        results: list[dict[str, object]] = []
-        for index, (call_id, name, arguments, error) in enumerate(prepared):
-            if error is not None:
-                self.counters.note_call(name, {}, "failed")
-                sig = f"{name}:<invalid_json>"
-                self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
-                self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
-                results.append({"id": call_id, "name": name, "status": "failed", "content": error, "error_code": "INVALID_ARGUMENTS"})
-                continue
-            outcome = outcomes[index]
-            self.counters.note_call(name, arguments, outcome.status)
-            try:
-                self.ledger.note_tool_outcome(name, arguments, outcome.status)
-            except Exception:  # noqa: BLE001 - observation never breaks a turn
-                pass
-            self._absorb_contract(outcome)
-            self._absorb_verification(name, outcome)
-            sig = self._signature(name, arguments)
-            if outcome.status == "succeeded":
-                self._consecutive_tool_failures.clear()
-            elif first_index[index] is None and outcome.error_code not in POLICY_REFUSAL_CODES:
-                # A refusal that waits on a person (production confirmation, a denied permission, plan mode) is not a
-                # broken tool: counting it ended the turn and took every tool away from the model mid-answer.
-                self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
-            if outcome.status == "succeeded":
-                # Any successful call (a Read of the path, a write, a command...)
-                # changes the state the earlier failure depended on, so an
-                # identical retry is allowed again; only back-to-back repeats of
-                # a failing call are short-circuited.
-                self._failed_signatures.clear()
-            elif outcome.status == "failed" and not duplicate[index] and not outcome.payload.get("transient") and outcome.error_code != "READ_IN_SAME_BATCH":
-                self._failed_signatures[sig] = outcome.content
-            self._life(
-                turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
-                summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
-                tool_arguments=dict(arguments), tool_content=outcome.content,
-            )
-            self._hooks(turn, "PostToolUse", tool_name=name, status=outcome.status)
-            outcome_data = getattr(outcome, "data", None)
-            read_path = (
-                str(outcome_data["path"])
-                if name == "read_file"
-                and outcome.status == "succeeded"
-                and isinstance(outcome_data, Mapping)
-                and not outcome_data.get("unchanged")
-                and outcome_data.get("path")
-                else None
-            )
-            read_key_meta: tuple[object, object, object] | None = None
-            read_full_meta: bool | None = None
-            read_sha_meta: str | None = None
-            mutated_path_meta: str | None = None
-            if name == "read_file" and outcome.status == "succeeded":
-                raw_r_path = str(
-                    read_path
-                    or (outcome_data.get("path") if isinstance(outcome_data, Mapping) else None)
-                    or outcome.payload.get("path")
-                    or arguments.get("path")
-                    or arguments.get("file_path")
-                    or ""
+        with self._toolset_state_lock:
+            results: list[dict[str, object]] = []
+            for index, (call_id, name, arguments, error) in enumerate(prepared):
+                if error is not None:
+                    self.counters.note_call(name, {}, "failed")
+                    sig = f"{name}:<invalid_json>"
+                    self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
+                    self._life(turn, "tool_finished", tool_name=name, invocation_id=call_id, status="failed", summary=error, error_code="INVALID_ARGUMENTS", tool_arguments={})
+                    results.append({"id": call_id, "name": name, "status": "failed", "content": error, "error_code": "INVALID_ARGUMENTS"})
+                    continue
+                outcome = outcomes[index]
+                self.counters.note_call(name, arguments, outcome.status)
+                try:
+                    self.ledger.note_tool_outcome(name, arguments, outcome.status)
+                except Exception:  # noqa: BLE001 - observation never breaks a turn
+                    pass
+                self._absorb_contract(outcome)
+                self._absorb_verification(name, outcome)
+                sig = self._signature(name, arguments)
+                if outcome.status == "succeeded":
+                    self._consecutive_tool_failures.clear()
+                elif first_index[index] is None and outcome.error_code not in POLICY_REFUSAL_CODES:
+                    # A refusal that waits on a person (production confirmation, a denied permission, plan mode) is not a
+                    # broken tool: counting it ended the turn and took every tool away from the model mid-answer.
+                    self._consecutive_tool_failures[sig] = self._consecutive_tool_failures.get(sig, 0) + 1
+                if outcome.status == "succeeded":
+                    # Any successful call (a Read of the path, a write, a command...)
+                    # changes the state the earlier failure depended on, so an
+                    # identical retry is allowed again; only back-to-back repeats of
+                    # a failing call are short-circuited.
+                    self._failed_signatures.clear()
+                elif outcome.status == "failed" and not duplicate[index] and not outcome.payload.get("transient") and outcome.error_code != "READ_IN_SAME_BATCH":
+                    self._failed_signatures[sig] = outcome.content
+                self._life(
+                    turn, "tool_finished", tool_name=name, invocation_id=call_id, status=outcome.status,
+                    summary=outcome.summary, error_code=outcome.error_code, tool_payload=dict(outcome.payload),
+                    tool_arguments=dict(arguments), tool_content=outcome.content,
                 )
-                norm_fn = getattr(self.toolset, "read_key", None)
-                norm_r_path = (norm_fn(raw_r_path) if callable(norm_fn) and raw_r_path else None) or raw_r_path
-                norm_r_path = str(norm_r_path).replace("\\", "/")
-                if norm_r_path:
-                    if not read_path and not (isinstance(outcome_data, Mapping) and outcome_data.get("unchanged")):
-                        read_path = norm_r_path
-                    arg_off = arguments.get("offset")
-                    arg_lim = arguments.get("limit")
-                    eff_off = (
-                        int(arg_off)
-                        if isinstance(arg_off, int) and not isinstance(arg_off, bool)
-                        else int(outcome.payload.get("first_line") or 1)
-                    )
-                    eff_lim = (
-                        int(arg_lim)
-                        if isinstance(arg_lim, int) and not isinstance(arg_lim, bool)
-                        else (int(outcome.payload.get("returned_lines") or outcome.payload.get("lines_read") or 0) or None)
-                    )
-                    read_key_meta = (norm_r_path, eff_off, eff_lim)
-                    first_ln = int(outcome.payload.get("first_line") or outcome.payload.get("start_line") or eff_off or 1)
-                    last_ln = int(outcome.payload.get("end_line") or outcome.payload.get("last_line") or 0)
-                    total_ln = int(outcome.payload.get("total_lines") or outcome.payload.get("line_count") or 0)
-                    trunc = bool(outcome.payload.get("truncated") or outcome.payload.get("truncated_by_chars"))
-                    if not trunc and first_ln <= 1 and (total_ln <= 0 or last_ln >= total_ln) and arg_lim is None:
-                        read_full_meta = True
-                    elif not trunc and first_ln <= 1 and total_ln > 0 and last_ln >= total_ln and isinstance(arg_lim, int) and arg_lim >= total_ln:
-                        read_full_meta = True
-                    else:
-                        read_full_meta = False
-                    read_sha_meta = hashlib.sha256(str(outcome.content or "").encode("utf-8")).hexdigest()
-            elif name in {"edit_file", "write_file", "notebook_edit"} and outcome.status == "succeeded":
-                raw_m_path = str(
-                    outcome.payload.get("path")
-                    or arguments.get("path")
-                    or arguments.get("file_path")
-                    or arguments.get("notebook_path")
-                    or ""
+                self._hooks(turn, "PostToolUse", tool_name=name, status=outcome.status)
+                outcome_data = getattr(outcome, "data", None)
+                read_path = (
+                    str(outcome_data["path"])
+                    if name == "read_file"
+                    and outcome.status == "succeeded"
+                    and isinstance(outcome_data, Mapping)
+                    and not outcome_data.get("unchanged")
+                    and outcome_data.get("path")
+                    else None
                 )
-                norm_fn = getattr(self.toolset, "read_key", None)
-                norm_m_path = (norm_fn(raw_m_path) if callable(norm_fn) and raw_m_path else None) or raw_m_path
-                norm_m_path = str(norm_m_path).replace("\\", "/")
-                if norm_m_path:
-                    mutated_path_meta = norm_m_path
-            res_entry: dict[str, object] = {
-                "id": call_id, "name": name, "status": outcome.status,
-                "content": outcome.content, "images": list(outcome.images or []),
-                "wait_for_user": bool(outcome.payload.get("wait_for_user")),
-                "error_code": outcome.error_code,
-                "read_path": read_path,
-            }
-            if read_key_meta is not None:
-                res_entry["read_key"] = read_key_meta
-                res_entry["read_full"] = bool(read_full_meta)
-                res_entry["read_sha"] = read_sha_meta
-            if mutated_path_meta is not None:
-                res_entry["mutated_path"] = mutated_path_meta
-            results.append(res_entry)
-        self._emit(
-            HookEvent.POST_TOOL_BATCH,
-            tool_calls=[
-                {"tool_name": _public_tool_name(str(item.get("name") or "")), "tool_use_id": str(item.get("id") or ""), "status": str(item.get("status") or "")}
-                for item in results
-            ],
-        )
-        return results
+                read_key_meta: tuple[object, object, object] | None = None
+                read_full_meta: bool | None = None
+                read_sha_meta: str | None = None
+                mutated_path_meta: str | None = None
+                if name == "read_file" and outcome.status == "succeeded":
+                    raw_r_path = str(
+                        read_path
+                        or (outcome_data.get("path") if isinstance(outcome_data, Mapping) else None)
+                        or outcome.payload.get("path")
+                        or arguments.get("path")
+                        or arguments.get("file_path")
+                        or ""
+                    )
+                    norm_fn = getattr(self.toolset, "read_key", None)
+                    norm_r_path = (norm_fn(raw_r_path) if callable(norm_fn) and raw_r_path else None) or raw_r_path
+                    norm_r_path = str(norm_r_path).replace("\\", "/")
+                    if norm_r_path:
+                        if not read_path and not (isinstance(outcome_data, Mapping) and outcome_data.get("unchanged")):
+                            read_path = norm_r_path
+                        arg_off = arguments.get("offset")
+                        arg_lim = arguments.get("limit")
+                        eff_off = (
+                            int(arg_off)
+                            if isinstance(arg_off, int) and not isinstance(arg_off, bool)
+                            else int(outcome.payload.get("first_line") or 1)
+                        )
+                        eff_lim = (
+                            int(arg_lim)
+                            if isinstance(arg_lim, int) and not isinstance(arg_lim, bool)
+                            else (int(outcome.payload.get("returned_lines") or outcome.payload.get("lines_read") or 0) or None)
+                        )
+                        read_key_meta = (norm_r_path, eff_off, eff_lim)
+                        first_ln = int(outcome.payload.get("first_line") or outcome.payload.get("start_line") or eff_off or 1)
+                        last_ln = int(outcome.payload.get("end_line") or outcome.payload.get("last_line") or 0)
+                        total_ln = int(outcome.payload.get("total_lines") or outcome.payload.get("line_count") or 0)
+                        trunc = bool(outcome.payload.get("truncated") or outcome.payload.get("truncated_by_chars"))
+                        if not trunc and first_ln <= 1 and (total_ln <= 0 or last_ln >= total_ln) and arg_lim is None:
+                            read_full_meta = True
+                        elif not trunc and first_ln <= 1 and total_ln > 0 and last_ln >= total_ln and isinstance(arg_lim, int) and arg_lim >= total_ln:
+                            read_full_meta = True
+                        else:
+                            read_full_meta = False
+                        read_sha_meta = hashlib.sha256(str(outcome.content or "").encode("utf-8")).hexdigest()
+                elif name in {"edit_file", "write_file", "notebook_edit"} and outcome.status == "succeeded":
+                    raw_m_path = str(
+                        outcome.payload.get("path")
+                        or arguments.get("path")
+                        or arguments.get("file_path")
+                        or arguments.get("notebook_path")
+                        or ""
+                    )
+                    norm_fn = getattr(self.toolset, "read_key", None)
+                    norm_m_path = (norm_fn(raw_m_path) if callable(norm_fn) and raw_m_path else None) or raw_m_path
+                    norm_m_path = str(norm_m_path).replace("\\", "/")
+                    if norm_m_path:
+                        mutated_path_meta = norm_m_path
+                res_entry: dict[str, object] = {
+                    "id": call_id, "name": name, "status": outcome.status,
+                    "content": outcome.content, "images": list(outcome.images or []),
+                    "wait_for_user": bool(outcome.payload.get("wait_for_user")),
+                    "error_code": outcome.error_code,
+                    "read_path": read_path,
+                }
+                if read_key_meta is not None:
+                    res_entry["read_key"] = read_key_meta
+                    res_entry["read_full"] = bool(read_full_meta)
+                    res_entry["read_sha"] = read_sha_meta
+                if mutated_path_meta is not None:
+                    res_entry["mutated_path"] = mutated_path_meta
+                results.append(res_entry)
+            self._emit(
+                HookEvent.POST_TOOL_BATCH,
+                tool_calls=[
+                    {"tool_name": _public_tool_name(str(item.get("name") or "")), "tool_use_id": str(item.get("id") or ""), "status": str(item.get("status") or "")}
+                    for item in results
+                ],
+            )
+            return results
 
     def _load(self, turn_id: str) -> dict[str, object]:
         if hasattr(self.store, "load"):

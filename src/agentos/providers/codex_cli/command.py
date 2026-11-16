@@ -95,6 +95,8 @@ def _validate_path_arg(value: str | Path, label: str) -> str:
     text = raw.strip()
     if not text or text.startswith("-"):
         raise ValueError(f"Invalid {label} path")
+    if label == "image" and "," in text:
+        raise ValueError("Invalid image path: commas are not permitted")
     return text
 
 
@@ -488,6 +490,10 @@ def build_codex_command(
                 f"Invalid resume_session_id for Codex CLI: {request.resume_session_id!r}"
             )
         cmd.extend(["resume", resume_id])
+
+    if cleaned_model != "codex-image" and request.image_paths:
+        for img_path in request.image_paths:
+            cmd.extend(["--image", _validate_path_arg(img_path, "image")])
 
     cmd.extend(
         [

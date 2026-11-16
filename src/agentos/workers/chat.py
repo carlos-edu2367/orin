@@ -122,7 +122,11 @@ from agentos.persistence.postgres.schema import (
 )
 from agentos.persistence.provider_secrets import ProviderSecretCipher
 from agentos.persistence.postgres.skills import PostgresSkillLibraryService
-from agentos.reading.selection import VisionModel, choose_vision_model
+from agentos.reading.selection import (
+    PROVIDERS_WITHOUT_INLINE_IMAGES,
+    VisionModel,
+    choose_vision_model,
+)
 from agentos.reading.vision import VisionReader
 from agentos.persistence.sqlite import create_local_engine
 
@@ -1063,8 +1067,13 @@ class ChatWorker:
         row = self._catalog_row_for(turn) or {}
         modalities = row.get("input_modalities") or ()
         if isinstance(modalities, str):
-            modalities = [item.strip() for item in modalities.split(",")]
-        names = {str(item).lower() for item in modalities}
+            modalities = [item.strip() for item in modalities.split(",") if item.strip()]
+        names = {str(item).strip().lower() for item in modalities if str(item).strip()}
+        provider = str(turn.get("provider") or "").strip().lower()
+        if provider == "openai-codex":
+            from agentos.providers.codex_cli.catalog import codex_input_modalities
+
+            names.update(codex_input_modalities(str(turn.get("model_id") or "")))
         # An unrefreshed catalog must not silently disable image reading (a
         # browser screenshot, an attached photo): only an explicit modality
         # list that omits "image" counts as "cannot see images". Mirrors
@@ -1167,10 +1176,16 @@ class ChatWorker:
         def build() -> VisionReader | None:
             user_id = str(turn["user_id"])
             turn_provider = str(turn["provider"])
-            candidates = self._vision_candidates(user_id)
+            candidates = [
+                item for item in self._vision_candidates(user_id)
+                if item.provider.strip().lower() not in PROVIDERS_WITHOUT_INLINE_IMAGES
+            ]
             if not candidates:
                 return None
-            chosen = choose_vision_model(candidates, turn_provider=turn_provider, override=self._vision_override(user_id))
+            override = self._vision_override(user_id)
+            if override is not None and override.provider.strip().lower() in PROVIDERS_WITHOUT_INLINE_IMAGES:
+                override = None
+            chosen = choose_vision_model(candidates, turn_provider=turn_provider, override=override)
             if chosen is None:
                 return None
 

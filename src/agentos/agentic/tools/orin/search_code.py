@@ -5,6 +5,7 @@ import os
 from typing import Any, Mapping
 
 from agentos.agentic.tools._shared import AgentToolError, logger, _TEXT, _schema
+from agentos.agentic.tools.public_names import public_text
 from agentos.agentic.tools.spec import ToolSpec
 
 
@@ -27,7 +28,11 @@ class CodeSearchTools:
             )
         if result.mode == "lexical":
             body = f"[lexical mode: no embedder available, results are keyword-based]\n\n{body}"
-        building = _index_building_note(self._retrieval, result.status.files)
+        building = _index_building_note(
+            self._retrieval,
+            result.status.files,
+            use_public_names=self.name_translator is not None,
+        )
         if building:
             body = f"{building}\n\n{body}"
         return {
@@ -104,7 +109,22 @@ class CodeSearchTools:
         except Exception as error:  # noqa: BLE001
             raise AgentToolError(f"the project map is unavailable: {error}") from error
         if not entries:
-            body = "[the project index is empty]"
+            fallback_entries: list[dict[str, Any]] = []
+            workspace = getattr(self, "workspace", None)
+            if workspace is not None and hasattr(workspace, "list_entries"):
+                try:
+                    fallback_entries = list(workspace.list_entries("", depth=2))[:40]
+                except Exception:  # noqa: BLE001
+                    fallback_entries = []
+            listing = "\n".join(
+                f"{str(item.get('kind', ''))[:1]} {item.get('path', '')}"
+                for item in fallback_entries
+                if item.get("path")
+            )
+            if listing:
+                body = f"[the project index is empty; workspace top-level entries]\n{listing}"
+            else:
+                body = "[the project index is empty]"
         else:
             lines: list[str] = []
             for entry in entries:
@@ -118,7 +138,11 @@ class CodeSearchTools:
                     sym_text = ", ".join(str(item) for item in syms)
                 lines.append(f"{entry['path']} (imported by {entry['imported_by']}): {sym_text or '—'}")
             body = "\n".join(lines)
-        building = _index_building_note(self._retrieval, None)
+        building = _index_building_note(
+            self._retrieval,
+            None,
+            use_public_names=self.name_translator is not None,
+        )
         if building:
             body = f"{building}\n\n{body}"
         return {
@@ -155,7 +179,12 @@ class CodeSearchTools:
             logger.exception("could not queue a reindex for %s", paths)
 
 
-def _index_building_note(retrieval: Any, files: int | None) -> str:
+def _index_building_note(
+    retrieval: Any,
+    files: int | None,
+    *,
+    use_public_names: bool = False,
+) -> str:
     """Say so when results come from an index the background scan is still filling."""
     try:
         if getattr(retrieval, "indexing", False) is not True:
@@ -164,10 +193,14 @@ def _index_building_note(retrieval: Any, files: int | None) -> str:
             files = int(retrieval.status().files)
     except Exception:  # noqa: BLE001
         return ""
-    return (
+    note = (
         f"[the project index is still being built in the background ({files} files so far); "
         "results may be partial — use glob_files/search_files for anything missing]"
     )
+    if not use_public_names:
+        return note
+    tools_hint = f"{public_text('glob_files')}/{public_text('search_files')}"
+    return public_text(note.replace("glob_files/search_files", "__TOOLS_HINT__")).replace("__TOOLS_HINT__", tools_hint)
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).

@@ -840,14 +840,14 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="filesystem",
         input_model=ReadInput,
         output_model=ReadOutput,
-        public_description="Read a file from the workspace. Text comes back line-numbered and returns up to 2000 lines by default, bounded by a token budget; use offset and limit to page through a long file, and pages (e.g. '1-5') for a PDF. Read a file before you edit or overwrite it.",
+        public_description='Read a file from the workspace. Text comes back line-numbered and returns up to 2000 lines by default, bounded by a token budget; use offset and limit to page through a long file, and pages (e.g. \'1-5\') for a PDF. Read a file before you edit or overwrite it. For an image the result\'s content holds an image block (type "image").',
         read_only=True,
         max_result_chars=LARGE_READ_RESULT_CHARS,
         order=10,
     ),
     ToolSpec(
         key="view_file",
-        description="Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, a picture, or an audio/video file (returned as a transcription when your model cannot listen). Use this instead of read_file whenever the file is not plain text.",
+        description='Read a document or an image from the conversation workspace: PDF, Word, Excel, PowerPoint, plain text, a picture, or an audio/video file (returned as a transcription when your model cannot listen). Use this instead of read_file whenever the file is not plain text. For an image the result\'s content holds an image block (type "image").',
         legacy_schema=_schema({
             "path": {**_TEXT, "description": "Workspace-relative path, e.g. .orin/uploads/nota.pdf"},
             "question": {**_TEXT, "description": "What you need from the file. Guides the visual reading of an image or a scanned page."},

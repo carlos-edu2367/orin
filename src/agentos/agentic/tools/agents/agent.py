@@ -1,6 +1,9 @@
 """Agent tools: methods of AgentToolset that live in their own module (W4 split)."""
 from __future__ import annotations
 
+from collections.abc import Sequence
+import threading
+import time
 from typing import Any, Mapping, Literal
 
 from pydantic import Field
@@ -12,6 +15,7 @@ from agentos.agentic.tools.spec import ToolSpec, ToolInput
 CHARACTER_NAME_MAX_LEN = 32
 CHARACTER_NAME_DESCRIPTION = "Optional character name shown for this subagent in the Cena, e.g. a fun short name"
 _SUBAGENT_CHARACTER_NAMES: dict[tuple[str, str], str] = {}
+_CHARACTER_NAMES_LOCK = threading.Lock()
 
 
 def sanitize_character_name(raw: object) -> str | None:
@@ -35,12 +39,15 @@ def remember_subagent_character_name(
 ) -> str | None:
     """Sanitize and persist character_name on the subagent record (preserving prior on resume)."""
     conv_key = (str(conversation_id or ""), str(agent_id or ""))
+    with _CHARACTER_NAMES_LOCK:
+        remembered = _SUBAGENT_CHARACTER_NAMES.get(conv_key)
     resolved = sanitize_character_name(character_name) or sanitize_character_name(
-        record.get("character_name") or prior or _SUBAGENT_CHARACTER_NAMES.get(conv_key)
+        record.get("character_name") or prior or remembered
     )
     if resolved:
         record["character_name"] = resolved
-        _SUBAGENT_CHARACTER_NAMES[conv_key] = resolved
+        with _CHARACTER_NAMES_LOCK:
+            _SUBAGENT_CHARACTER_NAMES[conv_key] = resolved
     return resolved
 
 
@@ -67,7 +74,8 @@ def resolve_subagent_character_name(
             cname = sanitize_character_name(rec.get("character_name"))
             if cname:
                 return cname
-        remembered = _SUBAGENT_CHARACTER_NAMES.get((conv_id, cid))
+        with _CHARACTER_NAMES_LOCK:
+            remembered = _SUBAGENT_CHARACTER_NAMES.get((conv_id, cid))
         if remembered:
             return remembered
     if isinstance(payload, Mapping):
@@ -80,6 +88,65 @@ def resolve_subagent_character_name(
                     if cname:
                         return cname
     return None
+
+
+def format_multi_subagent_check(ids: Sequence[str], outcomes: Sequence[ToolOutcome]) -> ToolOutcome:
+    """Combine per-subagent check outcomes into one multi-agent report and payload."""
+    sections: list[str] = []
+    agents_list: list[dict[str, object]] = []
+    images: list[dict[str, Any]] = []
+    for aid, outcome in zip(ids, outcomes):
+        agent_name = str(outcome.payload.get("agent_name") or aid)
+        item_status = str(
+            outcome.payload.get("status")
+            or ("completed" if outcome.status == "succeeded" else "failed")
+        )
+        sections.append(f'## {agent_name} (agent_id="{aid}") — {item_status}\n{outcome.content}')
+        agent_entry: dict[str, object] = {
+            "agent_id": aid,
+            "agent_name": agent_name,
+            "status": item_status,
+        }
+        if "output_file" in outcome.payload:
+            agent_entry["output_file"] = outcome.payload["output_file"]
+        if outcome.error_code:
+            agent_entry["error_code"] = outcome.error_code
+        agents_list.append(agent_entry)
+        if outcome.images:
+            images.extend(outcome.images)
+
+    any_running = any(item["status"] == "running" for item in agents_list)
+    all_failed = bool(outcomes) and all(o.status == "failed" for o in outcomes)
+    payload_status = "running" if any_running else "completed"
+    outcome_status = "failed" if all_failed else "succeeded"
+    error_code = (
+        next((o.error_code for o in outcomes if o.error_code), "SUBAGENT_FAILED")
+        if all_failed
+        else None
+    )
+    if any_running:
+        running_count = sum(1 for item in agents_list if item["status"] == "running")
+        done_count = len(agents_list) - running_count
+        summary = f"{done_count}/{len(agents_list)} subagentes concluídos ({running_count} em execução)"
+    elif all_failed:
+        summary = f"Falha ao verificar {len(agents_list)} subagentes"
+    else:
+        summary = f"Relatório de {len(agents_list)} subagentes"
+
+    return ToolOutcome(
+        outcome_status,
+        summary,
+        "\n\n".join(sections),
+        {
+            "agents": agents_list,
+            "agent_ids": list(ids),
+            "status": payload_status,
+            "tool_kind": "agent",
+            "background": True,
+        },
+        error_code,
+        images=images or None,
+    )
 
 
 class AgentTools:
@@ -164,19 +231,58 @@ class AgentTools:
 
     def check_subagent(
         self,
-        agent_id: str,
+        agent_id: str | None = None,
         wait_seconds: int = 0,
+        agent_ids: list[str] | None = None,
     ) -> ToolOutcome:
-        if not isinstance(agent_id, str) or not agent_id.strip():
-            raise AgentToolError("agent_id must be a non-blank string.")
         if self._check_subagent is None:
             raise AgentToolError("Subagent inspection is not available.")
+        if agent_id is not None and not isinstance(agent_id, str):
+            raise AgentToolError("agent_id must be a non-blank string.")
+        if agent_ids is not None and not isinstance(agent_ids, (list, tuple)):
+            raise AgentToolError("agent_ids must be a list of non-blank strings.")
+        raw_ids: list[str] = []
+        if isinstance(agent_id, str) and agent_id.strip():
+            raw_ids.append(agent_id.strip())
+        for item in agent_ids or ():
+            if item is not None and not isinstance(item, str):
+                raise AgentToolError("agent_ids must be a list of non-blank strings.")
+            if isinstance(item, str) and item.strip():
+                raw_ids.append(item.strip())
+        ids = list(dict.fromkeys(raw_ids))[:16]
+        if not ids:
+            raise AgentToolError("Pass agent_id or agent_ids.")
         try:
             raw_wait = int(wait_seconds or 0)
         except (TypeError, ValueError) as exc:
             raise AgentToolError("wait_seconds must be an integer between 0 and 60.") from exc
         wait = max(0, min(raw_wait, 60))
-        return self._check_subagent(agent_id.strip(), wait_seconds=wait)
+        if agent_ids is None:
+            return self._check_subagent(ids[0], wait_seconds=wait)
+        try:
+            return self._check_subagent(ids[0], wait_seconds=wait, agent_ids=ids)
+        except TypeError:
+            if len(ids) == 1:
+                return format_multi_subagent_check(
+                    ids, [self._check_subagent(ids[0], wait_seconds=wait)]
+                )
+            deadline = time.monotonic() + float(wait)
+            outcomes: dict[str, ToolOutcome] = {}
+            cancel_check = getattr(self, "_cancel_requested", None)
+            while True:
+                for aid in ids:
+                    prev = outcomes.get(aid)
+                    if prev is None or prev.payload.get("status") == "running":
+                        outcomes[aid] = self._check_subagent(aid, wait_seconds=0)
+                if not any(o.payload.get("status") == "running" for o in outcomes.values()):
+                    break
+                if callable(cancel_check) and cancel_check():
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            return format_multi_subagent_check(ids, [outcomes[aid] for aid in ids])
 
 
 class AgentInput(ToolInput):
@@ -214,6 +320,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="ask_agent",
         kind="agent",
         policy_tags=("mutates",),
+        concurrency_safe=True,
         available=lambda self: (self._delegate is not None),
         order=360,
     ),
@@ -229,6 +336,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="ask_agents",
         kind="agent",
         policy_tags=("mutates",),
+        concurrency_safe=True,
         available=lambda self: (self._delegate_batch is not None),
         order=370,
     ),
@@ -244,7 +352,7 @@ SPECS: tuple[ToolSpec, ...] = (
             "description": {**_TEXT, "description": "Short 3-5 word summary of what the subagent will do."},
             "model_id": {**_TEXT, "description": "Optional. For an agent that lists its own models, one of them (required when it lists several); otherwise a favorite model ID of the current provider."},
             "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
-            "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent to inspect or await its output."},
+            "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent (or check_subagent(agent_ids=[...]) for several) to inspect or await its output."},
             "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},
             "team_name": {**_TEXT, "description": "Optional team of the named teammate."},
             "character_name": {**_TEXT, "description": CHARACTER_NAME_DESCRIPTION},
@@ -254,24 +362,32 @@ SPECS: tuple[ToolSpec, ...] = (
         input_model=AgentInput,
         public_description="Delegate a self-contained task to a subagent. Types: 'Explore' (fast read-only search), 'Plan' (read-only design), 'general-purpose' (full toolset), 'fork' (inherits this conversation).",
         policy_tags=("mutates",),
+        concurrency_safe=True,
         available=lambda self: (self._run_subagent is not None or self._delegate is not None),
         order=380,
     ),
     ToolSpec(
         key="check_subagent",
-        description="Inspect or await a background subagent started with run_subagent(run_in_background=true).",
+        description="Inspect or await one or more background subagents started with run_subagent(run_in_background=true).",
         legacy_schema=_schema({
             "agent_id": {**_TEXT, "description": "The agent_id returned by run_subagent."},
+            "agent_ids": {
+                "type": "array",
+                "items": _TEXT,
+                "maxItems": 16,
+                "description": "Several background subagents to inspect or await together (wait_seconds waits until all finish).",
+            },
             "wait_seconds": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 60,
                 "description": "Optional seconds to wait for completion (0 polls immediately).",
             },
-        }, ("agent_id",)),
+        }, ()),
         handler="check_subagent",
         kind="agent",
         read_only=True,
+        concurrency_safe=True,
         available=lambda self: (self._check_subagent is not None or self._run_subagent is not None),
         order=390,
     ),

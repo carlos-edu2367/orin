@@ -139,6 +139,28 @@ def _attachment_label(record: Mapping[str, object], workspace_root: Path | str |
     return f"{_attachment_path(record, workspace_root)} ({kind}, {max(1, round(size / 1024))} KB)"
 
 
+def _is_codex_inline_image(
+    record: Mapping[str, object],
+    allowed_extensions: frozenset[str],
+    *,
+    workspace_root: Path | str | None = None,
+    max_bytes: int = 20 * 1024 * 1024,
+) -> bool:
+    if str(record.get("kind") or "") != "image":
+        return False
+    raw_path = str(record.get("path") or "").strip()
+    if not raw_path or raw_path.startswith("-") or "," in raw_path:
+        return False
+    if workspace_root is not None and "," in str(workspace_root):
+        return False
+    if any(seg.startswith("-") for seg in re.split(r"[\\/]+", raw_path) if seg):
+        return False
+    size = record.get("bytes")
+    if isinstance(size, int) and not isinstance(size, bool) and (size <= 0 or size > max_bytes):
+        return False
+    return Path(raw_path).suffix.lower() in allowed_extensions
+
+
 def _attachment_marker(
     records: Sequence[Mapping[str, object]],
     *,
@@ -150,12 +172,72 @@ def _attachment_marker(
 
     On the Antigravity CLI the CLI drops most images a tool returns, so its own ``read_file`` (absolute path)
     opens images, and audio/video for Gemini; Orin's ``view_file`` is for PDF, Office and, for a model that
-    cannot listen, the transcription of audio and video. Everywhere else ``view_file`` reads every kind.
+    cannot listen, the transcription of audio and video. On the Codex CLI, supported workspace images are
+    attached directly via ``--image`` for vision-capable models, while ``view_file`` remains as fallback and
+    for non-inline attachments. Everywhere else ``view_file`` reads every kind.
     """
     listed = ", ".join(_attachment_label(record, workspace_root) for record in records)
     head = f"\n\n[anexos enviados pela pessoa: {listed}]\n"
     kinds = {str(record.get("kind") or "") for record in records}
-    if str(provider or "") != "google-antigravity":
+    provider_name = str(provider or "")
+    if provider_name != "google-antigravity":
+        if provider_name == "openai-codex":
+            try:
+                from agentos.providers.codex_cli.attachments import (
+                    ALLOWED_CODEX_IMAGE_EXTENSIONS,
+                    DEFAULT_MAX_CODEX_IMAGE_BYTES,
+                )
+                from agentos.providers.codex_cli.catalog import codex_input_modalities
+
+                codex_sees_images = "image" in codex_input_modalities(str(model_id or ""))
+            except Exception:  # noqa: BLE001 - conservative fallback to view_file
+                ALLOWED_CODEX_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
+                DEFAULT_MAX_CODEX_IMAGE_BYTES = 20 * 1024 * 1024
+                codex_sees_images = False
+            if codex_sees_images:
+                inline_images = [
+                    record
+                    for record in records
+                    if _is_codex_inline_image(
+                        record,
+                        ALLOWED_CODEX_IMAGE_EXTENSIONS,
+                        workspace_root=workspace_root,
+                        max_bytes=DEFAULT_MAX_CODEX_IMAGE_BYTES,
+                    )
+                ]
+                if inline_images:
+                    other_records = [
+                        record
+                        for record in records
+                        if not _is_codex_inline_image(
+                            record,
+                            ALLOWED_CODEX_IMAGE_EXTENSIONS,
+                            workspace_root=workspace_root,
+                            max_bytes=DEFAULT_MAX_CODEX_IMAGE_BYTES,
+                        )
+                    ]
+                    image_note = (
+                        "A imagem já acompanha esta mensagem"
+                        if len(inline_images) == 1
+                        else "As imagens já acompanham esta mensagem"
+                    )
+                    tail = (
+                        f"{image_note} "
+                        "(use view_file(path=\"…\") apenas como fallback se precisar reler)."
+                    )
+                    if other_records:
+                        other_kinds = {str(record.get("kind") or "") for record in other_records}
+                        if other_kinds & {"image", "pdf", "office", "audio", "video"} or "text" in other_kinds:
+                            tail += (
+                                " Para outros anexos, use view_file(path=\"…\") para conteúdo visual/documentos, "
+                                "ou read_file para texto."
+                            )
+                        if other_kinds & {"audio", "video"}:
+                            tail += (
+                                " Para áudio ou vídeo use view_file: ele devolve a transcrição "
+                                "(feita pelo Orin, porque este modelo não ouve)."
+                            )
+                    return head + tail
         tail = (
             "Use view_file(path=\"…\") para ler o conteúdo de um anexo visual, "
             "ou read_file para texto."

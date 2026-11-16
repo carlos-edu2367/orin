@@ -1039,7 +1039,10 @@ def test_batches_of_different_messages_never_mix() -> None:
 def test_tools_list_marks_read_only_tools_with_read_only_hint(tmp_path: Path) -> None:
     store = FakeStore()
     workspace = ConversationWorkspace(tmp_path, "c1")
-    toolset = _make_toolset(workspace)
+    toolset = _make_toolset(
+        workspace,
+        run_subagent=lambda *_a, **_kw: ToolOutcome("succeeded", "ok", "ok", {}),
+    )
     runtime = AgenticTurnRuntime(
         store=store,
         provider=FakeNativeProvider(),
@@ -1078,8 +1081,13 @@ def test_tools_list_marks_read_only_tools_with_read_only_hint(tmp_path: Path) ->
     listed = resp["result"]["tools"]
     by_name = {item["name"]: item for item in listed}
     for item in listed:
-        assert item["annotations"]["readOnlyHint"] == toolset.is_read_only(item["name"])
+        name = item["name"]
+        int_name = executor._resolve_internal_name(name)
+        assert item["annotations"]["readOnlyHint"] == (
+            toolset.is_read_only(name) or executor._is_concurrency_safe(name, int_name)
+        )
     assert by_name["Read"]["annotations"]["readOnlyHint"] is True
+    assert by_name["Agent"]["annotations"]["readOnlyHint"] is True
     assert by_name["Edit"]["annotations"]["readOnlyHint"] is False
 
 
@@ -3038,3 +3046,374 @@ def test_cli_dying_while_a_tool_runs_waits_for_it_and_resumes_without_running_it
         str(b.get("text") or "") for b in fake_provider.requests[1].user_content if isinstance(b, Mapping)
     )
     assert "TOOL_DONE" in resumed_text
+
+
+def test_releases_cli_slot_only_for_blocking_agent_or_user_waits(tmp_path: Path) -> None:
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(
+        workspace,
+        run_subagent=lambda *_a, **_kw: ToolOutcome("succeeded", "ok", "ok", {}),
+        check_subagent=lambda *_a, **_kw: ToolOutcome("succeeded", "ok", "ok", {}),
+    )
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    executor = RuntimeToolExecutor(runtime, store.turn)
+
+    # True cases: foreground run_subagent, ask_agent(s), check_subagent(wait_seconds>0), user wait tools
+    assert executor.releases_cli_slot(
+        ToolCallRequest("Agent", {"description": "d", "prompt": "p"})
+    ) is True
+    assert executor.releases_cli_slot(
+        ToolCallRequest("run_subagent", {"subagent_type": "explore", "task": "p", "run_in_background": False})
+    ) is True
+    assert executor.releases_cli_slot(
+        ToolCallRequest("ask_agent", {"name": "explore", "task": "p"})
+    ) is True
+    assert executor.releases_cli_slot(
+        ToolCallRequest("ask_agents", {"tasks": [{"name": "explore", "task": "p"}]})
+    ) is True
+    assert executor.releases_cli_slot(
+        ToolCallRequest("CheckSubagent", {"agent_id": "a1", "wait_seconds": 15})
+    ) is True
+    assert executor.releases_cli_slot(
+        ToolCallRequest("AskUserQuestion", {"questions": []})
+    ) is True
+    assert executor.releases_cli_slot(
+        ToolCallRequest("ExitPlanMode", {"plan": "done"})
+    ) is True
+
+    # False cases: background subagent, teammate, check_subagent(wait_seconds=0), Read, Bash
+    assert executor.releases_cli_slot(
+        ToolCallRequest("Agent", {"description": "d", "prompt": "p", "run_in_background": True})
+    ) is False
+    assert executor.releases_cli_slot(
+        ToolCallRequest("Agent", {"description": "d", "prompt": "p", "name": "teammate_1"})
+    ) is False
+    assert executor.releases_cli_slot(
+        ToolCallRequest("run_subagent", {"subagent_type": "general", "task": "p", "teammate_name": "teammate_1"})
+    ) is False
+    assert executor.releases_cli_slot(
+        ToolCallRequest("CheckSubagent", {"agent_id": "a1", "wait_seconds": 0})
+    ) is False
+    assert executor.releases_cli_slot(
+        ToolCallRequest("CheckSubagent", {"agent_id": "a1"})
+    ) is False
+    assert executor.releases_cli_slot(
+        ToolCallRequest("Read", {"file_path": "a.py"})
+    ) is False
+    assert executor.releases_cli_slot(
+        ToolCallRequest("Bash", {"command": "echo hi"})
+    ) is False
+
+
+def test_concurrent_agent_batches_keep_assistant_and_tool_messages_adjacent_and_emit_running_once(
+    tmp_path: Path,
+) -> None:
+    import threading
+
+    all_three = threading.Barrier(3, timeout=3.0)
+
+    def _fake_subagent(subagent_type: str, task: str, **_kw: Any) -> ToolOutcome:
+        all_three.wait(timeout=3.0)
+        return ToolOutcome("succeeded", f"done {task}", f"report:{task}", {})
+
+    store = FakeStore()
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    toolset = _make_toolset(workspace, run_subagent=_fake_subagent)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=10, max_actions=10, context_window_tokens=1_000_000),
+    )
+    executor = RuntimeToolExecutor(runtime, store.turn, gather_seconds=0.05)
+
+    def _call(idx: int) -> ToolCallResult:
+        return executor.call_tool(
+            ToolCallRequest(
+                name="Agent",
+                arguments={"description": f"sub {idx}", "prompt": f"task_{idx}"},
+                meta={TOOL_USE_ID_META_KEY: f"tu_sub_{idx}", "message_id": "msg_parallel_1"},
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(_call, i) for i in (1, 2, 3)]
+        results = [f.result(timeout=3.0) for f in futures]
+
+    assert all(not r.is_error for r in results)
+    assert len(executor.messages) == 6
+    for i in range(0, 6, 2):
+        assistant_msg = executor.messages[i]
+        tool_msg = executor.messages[i + 1]
+        assert assistant_msg["role"] == "assistant"
+        a_blocks = assistant_msg.get("content")
+        assert isinstance(a_blocks, list) and len(a_blocks) == 1
+        assert a_blocks[0]["type"] == "tool_use"
+        assert tool_msg["role"] == "user"
+        t_blocks = tool_msg.get("content")
+        assert isinstance(t_blocks, list) and len(t_blocks) == 1
+        assert t_blocks[0]["type"] == "tool_result"
+        assert t_blocks[0]["tool_use_id"] == a_blocks[0]["id"]
+
+    lifecycle_names = [state for state, _ in store.states]
+    assert lifecycle_names.count("waiting_tool") == 1
+    assert lifecycle_names.count("running") == 1
+
+
+def test_user_image_paths_plumbed_only_on_first_process_not_post_barrier_or_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+    from agentos.agentic import background_wait
+    from agentos.providers.cli_adapter import CliCapabilities
+
+    store = FakeStore(model_id="openai-codex/gpt-6.1-sol")
+    store.turn["provider"] = "openai-codex"
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    img_rel = ".orin/uploads/image (5).png"
+    img_abs = workspace.root / img_rel
+    img_abs.parent.mkdir(parents=True, exist_ok=True)
+    img_abs.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+
+    doc_rel = ".orin/uploads/notes.txt"
+    doc_abs = workspace.root / doc_rel
+    doc_abs.write_text("hello", encoding="utf-8")
+
+    store.attachments_for_turn = lambda _turn: [  # type: ignore[attr-defined]
+        {
+            "path": img_rel,
+            "original_name": "image (5).png",
+            "media_type": "image/png",
+            "kind": "image",
+            "bytes": 12,
+        },
+        {
+            "path": doc_rel,
+            "original_name": "notes.txt",
+            "media_type": "text/plain",
+            "kind": "text",
+            "bytes": 5,
+        },
+    ]
+
+    pending_checks = [True, False]
+    monkeypatch.setattr(
+        background_wait,
+        "has_pending_background_work",
+        lambda *_a, **_kw: pending_checks.pop(0) if pending_checks else False,
+    )
+    monkeypatch.setattr(
+        background_wait,
+        "waiting_labels",
+        lambda *_a, **_kw: ["sub-1"],
+    )
+    monkeypatch.setattr(
+        background_wait,
+        "wait_for_background_work",
+        lambda *_a, **_kw: None,
+    )
+    monkeypatch.setattr(
+        background_wait,
+        "take_background_notifications",
+        lambda *_a, **_kw: "<task-notification>sub-1 finished</task-notification>",
+    )
+
+    provider = FakeNativeProvider()
+    provider.adapter = SimpleNamespace(  # type: ignore[attr-defined]
+        name="codex",
+        capabilities=CliCapabilities(
+            native_tool_loop=True,
+            tool_list_changed=False,
+            images_in_tool_results=True,
+            persistent_stdin=False,
+        ),
+    )
+
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=toolset,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            context_window_tokens=1_000_000,
+        ),
+    )
+    res = runtime.run("t1")
+    assert res.state == "completed"
+    assert len(provider.requests) == 2
+    assert provider.requests[0].user_image_paths == (img_rel,)
+    assert provider.requests[1].user_image_paths == ()
+
+
+def test_start_native_turn_for_provider_validates_codex_images_into_cli_turn_request(
+    tmp_path: Path,
+) -> None:
+    from agentos.providers.claude_cli.native_loop import start_native_turn_for_provider
+    from agentos.providers.claude_cli.provider import ClaudeCliProvider
+    from agentos.providers.cli_adapter import CliTurnRequest
+    from agentos.providers.codex_cli.adapter import CodexCliAdapter
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    valid_img = ws / "portfólio" / "Imagem do ChatGPT (2).png"
+    valid_img.parent.mkdir(parents=True, exist_ok=True)
+    valid_img.write_bytes(b"\x89PNG\r\n\x1a\nok")
+
+    captured_requests: list[CliTurnRequest] = []
+    real_adapter = CodexCliAdapter()
+
+    class _SpyCodexAdapter(CodexCliAdapter):
+        def resolve_binary(self, env=None):
+            return ("codex", (0, 167, 0))
+
+        def build_command(self, request: CliTurnRequest, wiring=None) -> list[str]:
+            captured_requests.append(request)
+            return real_adapter.build_command(request, wiring)
+
+    class _DummyProc:
+        pid = 12345
+
+        def __init__(self) -> None:
+            import io
+
+            self.stdin = io.StringIO()
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    provider = ClaudeCliProvider(
+        binary="codex",
+        adapter=_SpyCodexAdapter(),
+        popen_factory=lambda *_a, **_kw: _DummyProc(),
+    )
+
+    store = FakeStore(model_id="openai-codex/gpt-6.1-sol")
+    workspace = ConversationWorkspace(ws, "c1")
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=FakeNativeProvider(),
+        toolset=toolset,
+        limits=AgenticLimits(max_iterations=5, max_actions=5, context_window_tokens=1_000_000),
+    )
+    executor = RuntimeToolExecutor(runtime, store.turn)
+
+    req = NativeTurnRequest(
+        model="openai-codex/gpt-6.1-sol",
+        system_prompt="You are a coding assistant.",
+        user_content=[{"type": "text", "text": "Descreva a imagem"}],
+        executor=executor,
+        cancel_check=lambda: False,
+        deadline_monotonic=time.monotonic() + 60.0,
+        max_turns=5,
+        cwd=tmp_path / "isolated_cwd",
+        workspace_root=ws,
+        user_image_paths=(
+            "portfólio/Imagem do ChatGPT (2).png",
+            "../outside.png",
+            "bad,comma.png",
+        ),
+    )
+    (tmp_path / "isolated_cwd").mkdir(parents=True, exist_ok=True)
+    handle = start_native_turn_for_provider(provider, req)
+    try:
+        assert len(captured_requests) == 1
+        assert captured_requests[0].image_paths == (valid_img.resolve(),)
+        assert handle._cmd[:5] == [
+            "codex",
+            "exec",
+            "--image",
+            str(valid_img.resolve()),
+            "--json",
+        ]
+    finally:
+        handle.close()
+        executor.close()
+
+
+def test_codex_native_turn_preserves_user_image_paths_across_transient_retry_before_work(
+    tmp_path: Path,
+) -> None:
+    """Regression test for Red Team #9:
+    If the 1st native turn invocation fails transiently before doing any work (recovery == 'retry'),
+    the retry invocation still receives initial_user_image_paths.
+    """
+    from types import SimpleNamespace
+    from agentos.providers.cli_adapter import CliCapabilities
+    from agentos.providers.claude_cli.errors import ProviderTransportError
+
+    store = FakeStore(model_id="openai-codex/gpt-6.1-sol")
+    store.turn["provider"] = "openai-codex"
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    img_rel = ".orin/uploads/diagram.png"
+    img_file = workspace.root / img_rel
+    img_file.parent.mkdir(parents=True, exist_ok=True)
+    img_file.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    store.attachments_for_turn = lambda _turn: [  # type: ignore[attr-defined]
+        {
+            "attachment_id": "att-1",
+            "name": "diagram.png",
+            "media_type": "image/png",
+            "path": img_rel,
+            "kind": "image",
+            "bytes": 8,
+        }
+    ]
+
+    def _transient_fail(r: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        raise ProviderTransportError("transient spawn error", retryable=True)
+
+    def _succeeds(r: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(r.model)
+        sink.on_init(init)
+        sink.on_text("done")
+        return NativeTurnOutcome(result=_make_result(text="done"), init=init, final_text="done", exit_code=0)
+
+    rounds = [_transient_fail, _succeeds]
+    provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [rounds.pop(0)]))
+    provider.adapter = SimpleNamespace(  # type: ignore[attr-defined]
+        name="codex",
+        capabilities=CliCapabilities(
+            native_tool_loop=True,
+            tool_list_changed=False,
+            images_in_tool_results=True,
+            persistent_stdin=False,
+        ),
+    )
+
+    toolset = _make_toolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=toolset,
+        sleep=lambda _s: None,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=2,
+            context_window_tokens=1_000_000,
+        ),
+    )
+    res = runtime.run("t1")
+    assert res.state == "completed"
+    assert len(provider.requests) == 2
+    assert provider.requests[0].user_image_paths == (img_rel,)
+    assert provider.requests[1].user_image_paths == (img_rel,)
+
+
+
+

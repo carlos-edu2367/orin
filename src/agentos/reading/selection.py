@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 LOCAL_PROVIDER = "ollama"
+PROVIDERS_WITHOUT_INLINE_IMAGES: frozenset[str] = frozenset({"google-antigravity", "openai-codex"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,10 +21,17 @@ class VisionModel:
 
 def choose_vision_model(candidates: Sequence[VisionModel], *, turn_provider: str, override: VisionModel | None = None) -> VisionModel | None:
     """The model that will transcribe, or None when nothing can."""
-    available = list(candidates)
+    available = [
+        item for item in candidates
+        if item.provider.strip().lower() not in PROVIDERS_WITHOUT_INLINE_IMAGES
+    ]
     if not available:
         return None
-    if override is not None and override in available:
+    if (
+        override is not None
+        and override.provider.strip().lower() not in PROVIDERS_WITHOUT_INLINE_IMAGES
+        and override in available
+    ):
         return override
     provider = str(turn_provider or "").lower()
     for item in available:
@@ -35,4 +43,4 @@ def choose_vision_model(candidates: Sequence[VisionModel], *, turn_provider: str
     return available[0]
 
 
-__all__ = ["LOCAL_PROVIDER", "VisionModel", "choose_vision_model"]
+__all__ = ["LOCAL_PROVIDER", "PROVIDERS_WITHOUT_INLINE_IMAGES", "VisionModel", "choose_vision_model"]

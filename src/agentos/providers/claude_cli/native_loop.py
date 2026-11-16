@@ -101,6 +101,7 @@ def isolated_cli_note(
     permission_mode: str | None = None,
     workspace_root: Path | str | None = None,
     read_only: bool = False,
+    adapter_name: str | None = None,
 ) -> str:
     """Tells the model that the CLI's own sandbox/cwd notes do not limit it, and what Orin's tools may do.
 
@@ -125,18 +126,43 @@ def isolated_cli_note(
     label = _public_permission_label(permission_mode)
     root = str(workspace_root).strip() if workspace_root is not None else ""
     if label is None and not root and not read_only:
-        return note
-    lines = [note, "", "## Orin session"]
-    if read_only:
-        lines.append(
-            "- Orin permission mode: read-only agent. Inspect and report; never change files or run commands that "
-            "change state."
+        base_note = note
+    else:
+        lines = [note, "", "## Orin session"]
+        if read_only:
+            lines.append(
+                "- Orin permission mode: read-only agent. Inspect and report; never change files or run commands that "
+                "change state."
+            )
+        elif label is not None:
+            lines.append(f"- Orin permission mode: {label}. {_PERMISSION_MODE_SUMMARY.get(label, '')}".rstrip())
+        if root:
+            lines.append(f"- Workspace (where the `{srv}` tools act): {root}")
+        base_note = "\n".join(lines)
+
+    adapter_slug = str(adapter_name or "").strip().lower()
+    if adapter_slug == "codex":
+        adapter_section = (
+            "## Codex functions.exec\n"
+            f"- Orin's tools are already loaded: call them as tools.mcp__{srv}__<Name>(args) and list them with ALL_TOOLS. "
+            "Do not call ToolSearch for Read, Glob, Grep, ListFiles, ViewFile, Bash, Edit, Write, Agent or Skill.\n"
+            "- To see an image returned by ViewFile or Read, hand its blocks to the model: "
+            'for (const b of r.content ?? []) { if (b.type === "image") image(b); else if (b.type === "text") text(b.text); } '
+            "(or content(r.content)). Never text(r): that turns the picture into truncated base64 text.\n"
+            "- Independent calls run in parallel only when awaited together: await Promise.all([...]) — "
+            "for example several Agent subagents or several reads."
         )
-    elif label is not None:
-        lines.append(f"- Orin permission mode: {label}. {_PERMISSION_MODE_SUMMARY.get(label, '')}".rstrip())
-    if root:
-        lines.append(f"- Workspace (where the `{srv}` tools act): {root}")
-    return "\n".join(lines)
+        return f"{base_note}\n\n{adapter_section}"
+    if adapter_slug == "antigravity":
+        adapter_section = (
+            "## Parallel subagents on this CLI\n"
+            "This CLI runs tool calls one at a time, so two Agent (run_subagent) calls in one response still run one after the other. "
+            "To run subagents at the same time, call Agent with run_in_background=true for each one (each returns at once with an agent_id), "
+            "then wait for all of them with CheckSubagent (check_subagent) passing agent_ids=[...] and wait_seconds, or, as the main agent, "
+            "end your message: Orin waits for background subagents and gives you their reports in this same turn."
+        )
+        return f"{base_note}\n\n{adapter_section}"
+    return base_note
 
 
 def with_isolated_cli_note(
@@ -146,9 +172,14 @@ def with_isolated_cli_note(
     permission_mode: str | None = None,
     workspace_root: Path | str | None = None,
     read_only: bool = False,
+    adapter_name: str | None = None,
 ) -> str:
     note = isolated_cli_note(
-        server_name, permission_mode=permission_mode, workspace_root=workspace_root, read_only=read_only
+        server_name,
+        permission_mode=permission_mode,
+        workspace_root=workspace_root,
+        read_only=read_only,
+        adapter_name=adapter_name,
     )
     base = str(system_prompt or "").rstrip()
     if note in base:
@@ -344,6 +375,7 @@ class NativeTurnRequest:
     workspace_root: Path | None = None
     # Orin's effective permission mode for the turn (internal id or public name), told to the model in the system prompt.
     permission_mode: str | None = None
+    user_image_paths: tuple[str | Path, ...] = ()
 
 
 class NativeTurnSink(Protocol):
@@ -402,7 +434,9 @@ class _SlotReleasingExecutor:
     def call_tool(self, request: ToolCallRequest) -> ToolCallResult:
         handle = self.handle
         if handle is not None:
-            handle._before_tool_call()
+            release = getattr(self._inner, "releases_cli_slot", None)
+            should_release = bool(release(request)) if callable(release) else True
+            handle._before_tool_call(release=should_release)
         try:
             return self._inner.call_tool(request)
         finally:
@@ -508,10 +542,10 @@ class NativeTurnHandle:
     def is_process_alive(self) -> bool:
         return self._proc.poll() is None
 
-    def _before_tool_call(self) -> None:
+    def _before_tool_call(self, release: bool = True) -> None:
         with self._slot_cond:
             self._active_tool_calls += 1
-            if self._holds_slot:
+            if release and self._holds_slot:
                 if self._ticket is not None:
                     self._ticket.release()
                     self._ticket = None
@@ -1438,6 +1472,7 @@ def start_native_turn_for_provider(
                 permission_mode=effective_permission_mode,
                 workspace_root=workspace_root,
                 read_only=effective_read_only,
+                adapter_name=str(getattr(adapter, "name", "") or ""),
             ),
             prefix="orin-claude-sys-",
             suffix=".txt",
@@ -1480,6 +1515,25 @@ def start_native_turn_for_provider(
             )
         )
 
+        codex_image_paths: tuple[Path, ...] = ()
+        if (
+            getattr(adapter, "name", "") == "codex"
+            and workspace_root is not None
+            and request.user_image_paths
+        ):
+            from agentos.providers.codex_cli.attachments import (
+                validated_codex_images,
+            )
+            from agentos.providers.codex_cli.catalog import (
+                codex_input_modalities,
+            )
+
+            if "image" in codex_input_modalities(effective_model):
+                codex_image_paths = validated_codex_images(
+                    request.user_image_paths,
+                    Path(workspace_root),
+                )
+
         cmd = adapter.build_command(
             CliTurnRequest(
                 binary=resolved_binary,
@@ -1493,6 +1547,7 @@ def start_native_turn_for_provider(
                 tool_server_wiring=wiring,
                 tool_timeout_ms=mcp_tool_timeout_ms,
                 workspace_root=workspace_root,
+                image_paths=codex_image_paths,
                 capabilities=adapter.capabilities,
                 autocompact=request.autocompact,
                 session_id=session_kwargs.get("session_id"),
