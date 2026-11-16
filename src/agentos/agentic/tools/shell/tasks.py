@@ -373,7 +373,7 @@ class ShellTaskTools:
         ) or (isinstance(created, str) and bool(created.strip()))
         if valid_created:
             kill_verified(pid, created)
-        elif not job_terminated and preview_stopped_name is None and _process_is_running(pid):
+        elif (created is None or created == "") and not job_terminated and preview_stopped_name is None and _process_is_running(pid):
             _terminate_pid(pid)
         self._notified_exited_pids.add(pid)
         if isinstance(info, Mapping) and str(pid) in manifest:

@@ -1295,13 +1295,15 @@ def test_gateway_anthropic_test_and_configure_endpoints() -> None:
     assert save_local.status_code == 200
     assert save_local.json()["base_url"] == DEFAULT_CLAUDE_CLI_BRIDGE_URL
 
-    # 3. PUT /v1/providers/anthropic without api_key and without local bridge URL raises ValueError
-    with pytest.raises(ValueError, match="API key is required"):
-        client.put(
-            "/v1/providers/anthropic",
-            headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "ant-3"},
-            json={"enabled": True},
-        )
+    # 3. PUT /v1/providers/anthropic without api_key and without local bridge URL returns 422 validation error
+    missing_key_resp = client.put(
+        "/v1/providers/anthropic",
+        headers={"Authorization": "Bearer pat-test", "Idempotency-Key": "ant-3"},
+        json={"enabled": True},
+    )
+    assert missing_key_resp.status_code == 422
+    assert missing_key_resp.json()["error"]["code"] == "invalid_request"
+    assert len(fake_cfg.configured) == 1
 
 
 

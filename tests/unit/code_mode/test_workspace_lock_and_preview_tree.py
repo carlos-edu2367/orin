@@ -132,6 +132,8 @@ def test_python_server_detection_preserves_foreground_scripts_and_recognizes_exp
 
 
 def test_background_job_registry_and_stop_process_pid_verification(tmp_path: Path) -> None:
+    cleanup_session_background_processes()
+
     fake_job = MagicMock()
     register_background_job(777777, fake_job)
     assert terminate_background_job(777777) is True
@@ -150,7 +152,7 @@ def test_background_job_registry_and_stop_process_pid_verification(tmp_path: Pat
     orin_dir.mkdir(parents=True, exist_ok=True)
     my_pid = os.getpid()
     real_ct = process_created(my_pid)
-    stale_ct = (real_ct - 36_000_000_000) if isinstance(real_ct, int) else f"{real_ct}-stale"
+    stale_ct = (real_ct + 36_000) if isinstance(real_ct, int) else f"{real_ct}-stale"
     manifest_file = orin_dir / "preview_servers.json"
     manifest_file.write_text(
         json.dumps(
@@ -341,7 +343,7 @@ def test_stop_process_does_not_kill_reused_pid_on_preview_or_shell_created_misma
     orin_dir.mkdir(parents=True, exist_ok=True)
     my_pid = os.getpid()
     real_ct = process_created(my_pid)
-    stale_ct = (real_ct - 36_000_000_000) if isinstance(real_ct, int) else f"{real_ct}-stale"
+    stale_ct = (real_ct + 36_000) if isinstance(real_ct, int) else f"{real_ct}-stale"
     manifest_file = orin_dir / "preview_servers.json"
     manifest_file.write_text(
         json.dumps(

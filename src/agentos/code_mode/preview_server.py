@@ -535,7 +535,7 @@ class PreviewServerManager:
             created = record.get("created")
             if _valid_created(created):
                 stopped = kill_verified(pid, created) or stopped
-            elif not stopped:
+            elif (created is None or created == "") and not stopped:
                 try:
                     os.kill(pid, signal.SIGTERM)
                     stopped = True
