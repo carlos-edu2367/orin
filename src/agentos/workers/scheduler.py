@@ -10,6 +10,7 @@ from agentos.persistence.sqlite import create_local_engine
 from agentos.scheduler.scheduled_chats import ScheduledChatService
 
 POLL_SECONDS = 1.0
+HEARTBEAT_REFRESH_SECONDS = 10.0
 ACTIVITY_PRUNE_BATCH_SIZE = 2000
 ACTIVITY_PRUNE_MAX_BATCHES = 10
 ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS = 60.0
@@ -47,9 +48,13 @@ def main() -> None:
     service = ScheduledChatService(engine)
     chat_store = PostgresChatStore(engine)
     next_prune_mono = 0.0
+    last_heartbeat_mono: float | None = None
     while True:
         try:
-            service.heartbeat("scheduled-chat-worker")
+            now_mono = time.monotonic()
+            if last_heartbeat_mono is None or now_mono - last_heartbeat_mono >= HEARTBEAT_REFRESH_SECONDS:
+                service.heartbeat("scheduled-chat-worker")
+                last_heartbeat_mono = now_mono
             service.run_due(worker_id="scheduled-chat-worker", due_before=datetime.now(UTC))
             next_prune_mono = _maybe_prune_activity_events(
                 chat_store,

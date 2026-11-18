@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -371,6 +372,16 @@ def _extract_stable_system_text(messages: Sequence[Mapping[str, Any]]) -> str:
     return str(raw or "").strip() or "You are a helpful assistant."
 
 
+def _cleanup_prompt_holder(holder: list[Path | None]) -> None:
+    path = holder[0]
+    holder[0] = None
+    if path is not None:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 class ClaudeCliProvider:
     """First-class Orin provider for local subscription CLI adapters."""
 
@@ -403,9 +414,17 @@ class ClaudeCliProvider:
         self._transcript = TranscriptState()
         self._union_declarations: list[dict[str, Any]] = []
         self._union_tool_names: set[str] = set()
-        self._prompt_file_path: Path | None = None
+        self._prompt_holder: list[Path | None] = [None]
         self._last_system_prompt: str | None = None
-        atexit.register(self.close)
+        self._finalizer = weakref.finalize(self, _cleanup_prompt_holder, self._prompt_holder)
+
+    @property
+    def _prompt_file_path(self) -> Path | None:
+        return self._prompt_holder[0]
+
+    @_prompt_file_path.setter
+    def _prompt_file_path(self, value: Path | None) -> None:
+        self._prompt_holder[0] = value
 
     def _ensure_prompt_file(self, system_prompt: str) -> Path:
         content = system_prompt or "You are a helpful assistant."
@@ -494,16 +513,11 @@ class ClaudeCliProvider:
 
     def close(self) -> None:
         try:
-            atexit.unregister(self.close)
+            self._finalizer.detach()
         except Exception:
             pass
-        if self._prompt_file_path is not None:
-            try:
-                self._prompt_file_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            self._prompt_file_path = None
-            self._last_system_prompt = None
+        _cleanup_prompt_holder(self._prompt_holder)
+        self._last_system_prompt = None
         self._union_declarations.clear()
         self._union_tool_names.clear()
         self._transcript = TranscriptState()
@@ -600,6 +614,7 @@ class ClaudeCliProvider:
         conv_id = str(request.get("conversation_id") or request.get("turn_id") or "")
         ticket: CliSlotTicket | None = None
         proc: Any = None
+        win_job: Any = None
         cmd: list[str] = []
         stderr_chunks: list[str] = []
         stdout_thread: threading.Thread | None = None
@@ -744,6 +759,23 @@ class ClaudeCliProvider:
                     errors="replace",
                     creationflags=creationflags,
                 )
+                if os.name == "nt" and isinstance(getattr(proc, "pid", None), int) and proc.pid > 0:
+                    try:
+                        from agentos.hooks.processes import _WindowsJob
+
+                        win_job = _WindowsJob(kill_on_close=True)
+                        raw_handle = getattr(proc, "_handle", None)
+                        win_job.assign(
+                            proc.pid,
+                            root_handle=int(raw_handle) if raw_handle is not None else None,
+                        )
+                    except Exception:
+                        if win_job is not None:
+                            try:
+                                win_job.close()
+                            except Exception:
+                                pass
+                            win_job = None
 
             line_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -1060,6 +1092,16 @@ class ClaudeCliProvider:
                         except Exception:
                             pass
                 exit_code_final = proc.poll()
+            if win_job is not None:
+                try:
+                    win_job.terminate()
+                except Exception:
+                    pass
+                try:
+                    win_job.close()
+                except Exception:
+                    pass
+                win_job = None
             if stdout_thread is not None:
                 try:
                     stdout_thread.join(timeout=0.5)

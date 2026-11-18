@@ -11,9 +11,11 @@ from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from hashlib import blake2b
+import os
 from pathlib import Path
 import re
 
+from agentos.ignore import DENIED_SEGMENTS
 from agentos.pathsafety import resolve_contained
 
 from .filters import GitignoreFilter, IndexFilter
@@ -89,16 +91,40 @@ class ProjectIndexer:
         if only is not None:
             return [path for path in only if not index_filter.rejects(path) and self._resolve(path) is not None]
         found: list[str] = []
-        for item in self.root.rglob("*"):
-            resolved = self._resolve_absolute(item)
-            if resolved is None:
-                continue
-            relative = resolved.relative_to(self.root).as_posix()
-            if index_filter.rejects(relative):
-                continue
-            found.append(relative)
-            if len(found) >= MAX_CHUNKS:
-                break
+        gitignore = index_filter._gitignore
+        has_negations = any(p.negated for p in gitignore._patterns)
+        for current_root, dirs, files in os.walk(self.root, topdown=True, followlinks=False):
+            current_path = Path(current_root)
+            rel_dir_prefix = (
+                ""
+                if current_path == self.root
+                else current_path.relative_to(self.root).as_posix()
+            )
+            kept_dirs: list[str] = []
+            for dname in sorted(dirs):
+                if dname in DENIED_SEGMENTS:
+                    continue
+                dir_item = current_path / dname
+                if dir_item.is_symlink():
+                    resolved_dir = resolve_contained(dir_item, self.root)
+                    if resolved_dir is None or not resolved_dir.is_dir():
+                        continue
+                rel_dir = f"{rel_dir_prefix}/{dname}" if rel_dir_prefix else dname
+                if not has_negations and gitignore.ignores(rel_dir, is_dir=True):
+                    continue
+                kept_dirs.append(dname)
+            dirs[:] = kept_dirs
+
+            for fname in sorted(files):
+                rel_file = f"{rel_dir_prefix}/{fname}" if rel_dir_prefix else fname
+                if index_filter.rejects(rel_file):
+                    continue
+                resolved = self._resolve_absolute(current_path / fname)
+                if resolved is None:
+                    continue
+                found.append(resolved.relative_to(self.root).as_posix())
+                if len(found) >= MAX_CHUNKS:
+                    return found
         return found
 
     def _resolve(self, relative_path: str) -> Path | None:

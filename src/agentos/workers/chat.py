@@ -481,13 +481,16 @@ class ChatWorker:
         self._capabilities = capabilities or InstanceCapabilities.for_mode(current_mode())
         self._hook_engine = HookEngine(enabled=self._capabilities.plugin_hooks)
         self._state_lock = threading.Lock()
-        self._last_heartbeat_mono: float = 0.0
+        self._last_heartbeat_mono: float | None = None
         self._read_states = ConversationReadStates()
 
     def _refresh_heartbeat_if_due(self) -> None:
         now_mono = time.monotonic()
         with self._state_lock:
-            due = now_mono - self._last_heartbeat_mono >= HEARTBEAT_REFRESH_SECONDS
+            due = (
+                self._last_heartbeat_mono is None
+                or now_mono - self._last_heartbeat_mono >= HEARTBEAT_REFRESH_SECONDS
+            )
             if due:
                 self._last_heartbeat_mono = now_mono
         if due:

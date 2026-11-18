@@ -474,10 +474,12 @@ class NativeTurnHandle:
         process_cwd: Path | None = None,
         allowed_media_root: Path | None = None,
         media_policy: Any | None = None,
+        win_job: Any | None = None,
     ) -> None:
         self._process_cwd = process_cwd
         self._allowed_media_root = allowed_media_root
         self._media_policy = media_policy
+        self._win_job = win_job
         self._adapter: CliAgentAdapter = (
             adapter if adapter is not None else ClaudeCliAdapter()
         )
@@ -1155,6 +1157,17 @@ class NativeTurnHandle:
                             pass
             except Exception:
                 pass
+            finally:
+                if self._win_job is not None:
+                    try:
+                        self._win_job.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        self._win_job.close()
+                    except Exception:
+                        pass
+                    self._win_job = None
 
             try:
                 self._stdout_thread.join(timeout=0.5)
@@ -1409,6 +1422,7 @@ def start_native_turn_for_provider(
     temp_files: list[Path] = []
     proc: Any | None = None
     process_cwd: Path | None = None
+    win_job: Any | None = None
 
     try:
         bg_server = BackgroundTurnToolServer.start(
@@ -1600,6 +1614,28 @@ def start_native_turn_for_provider(
             bufsize=1,
             creationflags=creationflags,
         )
+        if (
+            os.name == "nt"
+            and provider._popen_factory is None
+            and isinstance(getattr(proc, "pid", None), int)
+            and proc.pid > 0
+        ):
+            try:
+                from agentos.hooks.processes import _WindowsJob
+
+                win_job = _WindowsJob(kill_on_close=True)
+                raw_handle = getattr(proc, "_handle", None)
+                win_job.assign(
+                    proc.pid,
+                    root_handle=int(raw_handle) if raw_handle is not None else None,
+                )
+            except Exception:
+                if win_job is not None:
+                    try:
+                        win_job.close()
+                    except Exception:
+                        pass
+                    win_job = None
 
         stdout_queue: queue.Queue[str | None] = queue.Queue()
         stderr_chunks: list[str] = []
@@ -1667,11 +1703,21 @@ def start_native_turn_for_provider(
             process_cwd=process_cwd,
             allowed_media_root=allowed_media_root,
             media_policy=media_policy,
+            win_job=win_job,
         )
         wrapped_executor.handle = handle
         return handle
 
     except Exception as exc:
+        if win_job is not None:
+            try:
+                win_job.terminate()
+            except Exception:
+                pass
+            try:
+                win_job.close()
+            except Exception:
+                pass
         if proc is not None:
             try:
                 from agentos.providers.claude_cli.provider import kill_process_tree

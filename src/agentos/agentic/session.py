@@ -2957,14 +2957,6 @@ class TurnSession:
                 else caller
             )
             with self._subagent_lock:
-                if self._bg_subagent_executor is None:
-                    # A background agent holds a worker while it waits for a concurrency slot, and may wait for
-                    # background agents it started: a small pool could leave those queued forever. Threads are
-                    # created on demand, so a generous pool costs nothing; the semaphore bounds how many run.
-                    self._bg_subagent_executor = BACKGROUND_AGENTS.executor_for(
-                        conv_id,
-                        max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
-                    )
                 cancel = threading.Event()
                 output_file = self._agent_output_file(agent_id)
                 reg_entry = BackgroundAgentEntry(
@@ -2980,6 +2972,13 @@ class TurnSession:
                     future=None,
                 )
                 BACKGROUND_AGENTS.register(reg_entry)
+                # A background agent holds a worker while it waits for a concurrency slot, and may wait for
+                # background agents it started: a small pool could leave those queued forever. Threads are
+                # created on demand, so a generous pool costs nothing; the semaphore bounds how many run.
+                self._bg_subagent_executor = BACKGROUND_AGENTS.executor_for(
+                    conv_id,
+                    max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
+                )
                 future = self._bg_subagent_executor.submit(
                     self._run_background_agent,
                     output_file,
@@ -3209,12 +3208,11 @@ class TurnSession:
                     BACKGROUND_AGENTS.finish(agent_id, bg_status, bg_summary, conversation_id=conv_id)
 
         with self._subagent_lock:
-            if self._bg_subagent_executor is None:
-                self._bg_subagent_executor = BACKGROUND_AGENTS.executor_for(
-                    conv_id,
-                    max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
-                )
-            future = self._bg_subagent_executor.submit(_worker)
+            self._bg_subagent_executor, future = BACKGROUND_AGENTS.submit_for(
+                conv_id,
+                _worker,
+                max_workers=max(MAX_BACKGROUND_SUBAGENT_THREADS, self._max_concurrent_subagents * max_depth * 4),
+            )
 
         start_seq = getattr(self, "_fg_promotion_seq", 0)
 

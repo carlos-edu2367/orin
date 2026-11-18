@@ -256,11 +256,6 @@ class PostgresAgenticActivityStore:
             "created_at": event.created_at,
         }
         with self._engine.begin() as connection:
-            existing = self._existing_by_event_id(connection, event.event_id)
-            if existing is not None:
-                if not _matches(existing, event):
-                    raise ValueError("event_id already exists with a different event")
-                return False
             try:
                 with connection.begin_nested():
                     connection.execute(insert(conversation_activity_events).values(**values))
@@ -268,7 +263,7 @@ class PostgresAgenticActivityStore:
                 existing = self._existing_by_event_id(connection, event.event_id)
                 if existing is not None:
                     if not _matches(existing, event):
-                        raise ValueError("event_id already exists with a different event")
+                        raise ValueError("event_id already exists with a different event") from None
                     return False
                 raise ValueError("conversation turn sequence already exists") from None
             return True

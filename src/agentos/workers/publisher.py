@@ -144,20 +144,28 @@ def renew_leases(runner: ConcurrentTurnRunner) -> None:
         _LOGGER.exception("could not renew the leases of %d running turns", len(ids))
 
 
+def _heartbeat_worker(worker: ChatWorker) -> None:
+    refresh = getattr(worker, "_refresh_heartbeat_if_due", None)
+    if callable(refresh):
+        refresh()
+    else:
+        worker.store.heartbeat("chat-worker")
+
+
 def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: float) -> tuple[bool, float]:
     """Run one polling tick: claim pending turns before running watchdog sweeps."""
     has_in_flight = False
     if isinstance(worker_or_runner, ConcurrentTurnRunner):
         runner = worker_or_runner
         worker = runner.worker
-        worker.store.heartbeat("chat-worker")
+        _heartbeat_worker(worker)
         submitted = runner.submit_pending()
         has_in_flight = runner.active_count() > 0
         if submitted:
             return True, next_sweep
     else:
         worker = worker_or_runner
-        worker.store.heartbeat("chat-worker")
+        _heartbeat_worker(worker)
         pending = worker.store.pending()
         if pending:
             if len(pending) == 1:

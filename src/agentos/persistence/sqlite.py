@@ -38,6 +38,10 @@ def create_local_engine(database_url: str) -> Engine:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA wal_autocheckpoint=4000")
+            cursor.execute("PRAGMA journal_size_limit=67108864")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("PRAGMA cache_size=-32768")
         finally:
             cursor.close()
 

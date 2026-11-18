@@ -3549,22 +3549,47 @@ class PostgresChatStore:
                 ).scalar_one()
                 or 0
             )
-            raw_activity = c.execute(
-                select(
-                    conversation_activity_events.c.id,
-                    conversation_activity_events.c.user_id,
-                    conversation_activity_events.c.event_id,
-                    conversation_activity_events.c.event_type,
-                    conversation_activity_events.c.agent_id,
-                    conversation_activity_events.c.summary,
-                    conversation_activity_events.c.payload,
-                    conversation_activity_events.c.created_at,
-                )
-                .where(
-                    conversation_activity_events.c.conversation_id == conversation_id,
-                    conversation_activity_events.c.event_type.in_(overview_event_types),
-                )
-            ).mappings().all()
+            is_sqlite = c.dialect.name == "sqlite"
+            if is_sqlite:
+                raw_activity = c.execute(
+                    select(
+                        conversation_activity_events.c.id,
+                        conversation_activity_events.c.user_id,
+                        conversation_activity_events.c.event_id,
+                        conversation_activity_events.c.event_type,
+                        conversation_activity_events.c.agent_id,
+                        conversation_activity_events.c.summary,
+                        conversation_activity_events.c.created_at,
+                        func.json_extract(conversation_activity_events.c.payload, "$.tool_name").label("tool_name"),
+                        func.json_extract(conversation_activity_events.c.payload, "$.tool_kind").label("tool_kind"),
+                        func.json_extract(conversation_activity_events.c.payload, "$.status").label("status"),
+                        func.json_extract(conversation_activity_events.c.payload, "$.from_agent_id").label("from_agent_id"),
+                        func.json_extract(conversation_activity_events.c.payload, "$.to_agent_id").label("to_agent_id"),
+                        func.substr(func.json_extract(conversation_activity_events.c.payload, "$.content"), 1, 400).label("content_preview"),
+                        func.json_extract(conversation_activity_events.c.payload, "$.error_code").label("error_code"),
+                    )
+                    .where(
+                        conversation_activity_events.c.conversation_id == conversation_id,
+                        conversation_activity_events.c.event_type.in_(overview_event_types),
+                    )
+                ).mappings().all()
+            else:
+                raw_activity = c.execute(
+                    select(
+                        conversation_activity_events.c.id,
+                        conversation_activity_events.c.user_id,
+                        conversation_activity_events.c.event_id,
+                        conversation_activity_events.c.event_type,
+                        conversation_activity_events.c.agent_id,
+                        conversation_activity_events.c.summary,
+                        conversation_activity_events.c.payload,
+                        conversation_activity_events.c.created_at,
+                    )
+                    .where(
+                        conversation_activity_events.c.conversation_id == conversation_id,
+                        conversation_activity_events.c.event_type.in_(overview_event_types),
+                    )
+                ).mappings().all()
             activity = sorted(
                 (r for r in raw_activity if r["user_id"] == user_id),
                 key=lambda r: int(r["id"]),
@@ -3602,6 +3627,26 @@ class PostgresChatStore:
         messages: list[dict[str, object]] = []
         errors: list[dict[str, object]] = []
         for row in activity:
+            if is_sqlite:
+                ev_type = row["event_type"]
+                if ev_type == AgentActivityEventType.TOOL_FINISHED.value:
+                    name = str(row["tool_name"] or "tool")
+                    entry = tools.setdefault(name, {"tool_name": name, "kind": row["tool_kind"] or "tool", "count": 0, "failures": 0, "agent_id": row["agent_id"]})
+                    entry["count"] = int(entry["count"]) + 1
+                    if row["status"] != "succeeded":
+                        entry["failures"] = int(entry["failures"]) + 1
+                elif ev_type in (AgentActivityEventType.AGENT_MESSAGE_SENT.value, AgentActivityEventType.AGENT_MESSAGE_RECEIVED.value):
+                    sent = ev_type == AgentActivityEventType.AGENT_MESSAGE_SENT.value
+                    messages.append({
+                        "event_id": row["event_id"],
+                        "from_agent_id": main_id if sent else str(row["from_agent_id"] or row["agent_id"]),
+                        "to_agent_id": str(row["to_agent_id"] or row["agent_id"]) if sent else main_id,
+                        "preview": str(row["content_preview"] or "")[:400],
+                        "occurred_at": row["created_at"].isoformat(),
+                    })
+                elif ev_type == AgentActivityEventType.TURN_FAILED.value and row["error_code"]:
+                    errors.append({"event_id": row["event_id"], "code": str(row["error_code"]), "summary": row["summary"], "occurred_at": row["created_at"].isoformat()})
+                continue
             raw_payload = row["payload"]
             payload = dict(raw_payload) if isinstance(raw_payload, Mapping) else {}
             if row["event_type"] == AgentActivityEventType.TOOL_FINISHED.value:
@@ -4151,9 +4196,21 @@ class PostgresChatStore:
     def heartbeat(self, component: str) -> None:
         now = datetime.now(UTC)
         with self._engine.begin() as c:
-            exists = c.execute(select(runtime_heartbeats.c.component).where(runtime_heartbeats.c.component == component)).scalar()
-            if exists: c.execute(update(runtime_heartbeats).where(runtime_heartbeats.c.component == component).values(updated_at=now))
-            else: c.execute(insert(runtime_heartbeats).values(component=component, updated_at=now))
+            updated = c.execute(
+                update(runtime_heartbeats)
+                .where(runtime_heartbeats.c.component == component)
+                .values(updated_at=now)
+            )
+            if not updated.rowcount:
+                try:
+                    with c.begin_nested():
+                        c.execute(insert(runtime_heartbeats).values(component=component, updated_at=now))
+                except IntegrityError:
+                    c.execute(
+                        update(runtime_heartbeats)
+                        .where(runtime_heartbeats.c.component == component)
+                        .values(updated_at=now)
+                    )
 
     @staticmethod
     def execution_id_for(turn_id: str) -> str:
@@ -4163,11 +4220,13 @@ class PostgresChatStore:
 def _forget_runtime_state(conversation_id: str) -> None:
     """Best effort after a delete: drop the in-process registries that still name the conversation."""
     try:
+        from agentos.agentic.background_agents import get_background_agent_registry
         from agentos.conversations.code_milestone_watcher import get_milestone_watcher_registry
         from agentos.hooks.session_end import forget_session
 
         get_milestone_watcher_registry().remove(conversation_id)
         forget_session(conversation_id)
+        get_background_agent_registry().remove_conversation(conversation_id)
     except Exception:  # noqa: BLE001 - the rows are already gone; a stale cache entry is harmless
         _LOGGER.debug("could not drop runtime state of %s", conversation_id, exc_info=True)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import threading
 
 from agentos.installation.paths import orin_paths
 from agentos.provider_catalog.ollama import DEFAULT_OLLAMA_BASE_URL, normalize_ollama_base_url
@@ -30,6 +31,8 @@ BASE_URL_VARIABLE = "ORIN_RETRIEVAL_BASE_URL"
 API_KEY_VARIABLE = "ORIN_RETRIEVAL_API_KEY"
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+_OLLAMA_CACHE_LOCK = threading.Lock()
+_OLLAMA_EMBEDDER_CACHE: dict[tuple[str, str], OllamaEmbedder] = {}
 
 
 def build_embedder() -> EmbeddingPort:
@@ -44,10 +47,14 @@ def build_embedder() -> EmbeddingPort:
             base_url = normalize_ollama_base_url(os.getenv(BASE_URL_VARIABLE, "").strip() or DEFAULT_OLLAMA_BASE_URL)
         except ValueError:
             return LexicalOnlyEmbedder()
-        return OllamaEmbedder(
-            base_url=base_url,
-            model=os.getenv(MODEL_VARIABLE, "").strip() or OLLAMA_MODEL,
-        )
+        model = os.getenv(MODEL_VARIABLE, "").strip() or OLLAMA_MODEL
+        cache_key = (base_url, model)
+        with _OLLAMA_CACHE_LOCK:
+            cached = _OLLAMA_EMBEDDER_CACHE.get(cache_key)
+            if cached is None:
+                cached = OllamaEmbedder(base_url=base_url, model=model)
+                _OLLAMA_EMBEDDER_CACHE[cache_key] = cached
+            return cached
     if choice == "remote":
         key = os.getenv(API_KEY_VARIABLE, "").strip()
         if not key:

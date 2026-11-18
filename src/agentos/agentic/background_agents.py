@@ -120,13 +120,33 @@ class BackgroundAgentRegistry:
         conv_key = str(conversation_id or "_default")
         with self._lock:
             pool = self._executors.get(conv_key)
-            if pool is None:
+            if pool is None or getattr(pool, "_shutdown", False):
                 pool = ThreadPoolExecutor(
                     max_workers=max(4, int(max_workers)),
                     thread_name_prefix=f"orin-bg-{conv_key[:12]}",
                 )
                 self._executors[conv_key] = pool
             return pool
+
+    def submit_for(
+        self,
+        conversation_id: str,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        max_workers: int = 32,
+        **kwargs: Any,
+    ) -> tuple[ThreadPoolExecutor, Future]:
+        conv_key = str(conversation_id or "_default")
+        with self._lock:
+            pool = self._executors.get(conv_key)
+            if pool is None or getattr(pool, "_shutdown", False):
+                pool = ThreadPoolExecutor(
+                    max_workers=max(4, int(max_workers)),
+                    thread_name_prefix=f"orin-bg-{conv_key[:12]}",
+                )
+                self._executors[conv_key] = pool
+            return pool, pool.submit(fn, *args, **kwargs)
 
     def begin_turn(self, conversation_id: str) -> None:
         conv_id = str(conversation_id or "")
@@ -136,16 +156,48 @@ class BackgroundAgentRegistry:
             self._active_turns[conv_id] = self._active_turns.get(conv_id, 0) + 1
             self._callbacks.pop(conv_id, None)
 
+    def _maybe_retire_executor_locked(self, conv_id: str) -> ThreadPoolExecutor | None:
+        if not conv_id:
+            return None
+        if self._active_turns.get(conv_id, 0) > 0:
+            return None
+        conv_map = self._by_conv.get(conv_id)
+        if conv_map and any(entry.status == "running" for entry in conv_map.values()):
+            return None
+        return self._executors.pop(conv_id, None)
+
     def end_turn(self, conversation_id: str) -> None:
         conv_id = str(conversation_id or "")
         if not conv_id:
             return
+        retired: ThreadPoolExecutor | None = None
         with self._cond:
             cur = self._active_turns.get(conv_id, 0)
             if cur <= 1:
                 self._active_turns.pop(conv_id, None)
+                retired = self._maybe_retire_executor_locked(conv_id)
             else:
                 self._active_turns[conv_id] = cur - 1
+        if retired is not None:
+            retired.shutdown(wait=False)
+
+    def remove_conversation(self, conversation_id: str) -> None:
+        conv_id = str(conversation_id or "")
+        if not conv_id:
+            return
+        self.cancel_conversation(conv_id)
+        retired: ThreadPoolExecutor | None = None
+        with self._cond:
+            self._active_turns.pop(conv_id, None)
+            self._callbacks.pop(conv_id, None)
+            self._active_waiters.pop(conv_id, None)
+            entries = self._by_conv.pop(conv_id, {})
+            for aid in entries:
+                self._by_id.pop(aid, None)
+                self._histories.pop((conv_id, aid), None)
+            retired = self._executors.pop(conv_id, None)
+        if retired is not None:
+            retired.shutdown(wait=False)
 
     def turn_active(self, conversation_id: str) -> bool:
         """Whether a leader turn of this conversation is running now (between begin_turn and end_turn)."""
@@ -193,6 +245,7 @@ class BackgroundAgentRegistry:
             entry.status = _normalize_status(status)
             entry.finished_at = time.monotonic()
             entry.summary = extract_report_summary(summary)
+            retired_pool = self._maybe_retire_executor_locked(entry.conversation_id)
             if (
                 not entry.callback_fired
                 and not entry.notified
@@ -204,6 +257,8 @@ class BackgroundAgentRegistry:
                     entry.callback_fired = True
                     entry.notified = True
             self._cond.notify_all()
+        if retired_pool is not None:
+            retired_pool.shutdown(wait=False)
         for cb in callbacks_to_run:
             try:
                 cb(entry)
@@ -369,10 +424,18 @@ class BackgroundAgentRegistry:
             self._active_waiters.clear()
             self._active_turns.clear()
             self._histories.clear()
+            pools = list(self._executors.values())
+            self._executors.clear()
             self._cond.notify_all()
+        for pool in pools:
+            pool.shutdown(wait=False)
 
 
 BACKGROUND_AGENTS = BackgroundAgentRegistry()
+
+
+def get_background_agent_registry() -> BackgroundAgentRegistry:
+    return BACKGROUND_AGENTS
 
 
 def fail_orphaned_running_agents(
