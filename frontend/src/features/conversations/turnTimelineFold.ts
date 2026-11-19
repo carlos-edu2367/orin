@@ -754,6 +754,29 @@ function reconcileCompleteText(items: TurnTimelineItem[], completeContent: strin
   return next
 }
 
+const EMPTY_TURN_EVENTS: ConversationActivityEvent[] = []
+const DEFAULT_TIMELINE_CACHE = new Map<string, MessageTimelineCacheEntry>()
+const MAX_DEFAULT_CACHE_ENTRIES = 512
+
+export type MessageTimelineCacheEntry = {
+  events: ConversationActivityEvent[]
+  content: string
+  isMsgCompleted: boolean
+  timeline: TurnTimelineItem[]
+}
+
+function shallowEqualEventList(
+  a: ConversationActivityEvent[],
+  b: ConversationActivityEvent[],
+): boolean {
+  if (a === b) return true
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
 /**
  * Every assistant message paired with its own interleaved timeline, plus the
  * set of turn ids those timelines account for. A turn that no message could
@@ -764,18 +787,85 @@ function reconcileCompleteText(items: TurnTimelineItem[], completeContent: strin
 export function buildMessageTimelines(
   messages: { message_id: string; role: string; content?: string; turn_id?: string | null; status?: string }[],
   events: ConversationActivityEvent[],
+  cache: Map<string, MessageTimelineCacheEntry> = DEFAULT_TIMELINE_CACHE,
 ): { timelines: Map<string, TurnTimelineItem[]>; claimedTurnIds: Set<string> } {
   const timelines = new Map<string, TurnTimelineItem[]>()
   const claimedTurnIds = new Set<string>()
+  const eventsByTurn = new Map<string, ConversationActivityEvent[]>()
+  const ownerTurnByMessageId = new Map<string, string>()
+  let hasAnyTurnId = false
+
+  for (const event of events) {
+    if (event.turnId) {
+      hasAnyTurnId = true
+      let list = eventsByTurn.get(event.turnId)
+      if (!list) {
+        list = []
+        eventsByTurn.set(event.turnId, list)
+      }
+      list.push(event)
+      if (
+        event.messageId &&
+        !ownerTurnByMessageId.has(event.messageId) &&
+        (event.kind === 'message' || event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA')
+      ) {
+        ownerTurnByMessageId.set(event.messageId, event.turnId)
+      }
+    }
+  }
+
+  const seenMessageIds = cache ? new Set<string>() : null
+
   for (const message of messages) {
     if (message.role !== 'assistant') continue
-    const turnId = (typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : null) ?? resolveTurnId(events, message.message_id)
+    const turnId =
+      (typeof message.turn_id === 'string' && message.turn_id ? message.turn_id : null) ??
+      ownerTurnByMessageId.get(message.message_id) ??
+      null
     if (!turnId) continue
-    const isMsgCompleted = message.status === 'completed' || message.status === 'failed' || message.status === 'cancelled'
-    const timeline = buildTurnTimeline(events, turnId, message.message_id, message.content ?? '', isMsgCompleted)
+    const content = message.content ?? ''
+    const isMsgCompleted =
+      message.status === 'completed' || message.status === 'failed' || message.status === 'cancelled'
+    const rawTurnEvents = hasAnyTurnId ? (eventsByTurn.get(turnId) ?? EMPTY_TURN_EVENTS) : events
+
+    seenMessageIds?.add(message.message_id)
+    const cached = cache?.get(message.message_id)
+    let timeline: TurnTimelineItem[]
+    if (
+      cached &&
+      cached.content === content &&
+      cached.isMsgCompleted === isMsgCompleted &&
+      shallowEqualEventList(cached.events, rawTurnEvents)
+    ) {
+      timeline = cached.timeline
+    } else {
+      timeline = buildTurnTimeline(rawTurnEvents, turnId, message.message_id, content, isMsgCompleted)
+      cache?.set(message.message_id, {
+        events: rawTurnEvents,
+        content,
+        isMsgCompleted,
+        timeline,
+      })
+    }
+
     if (timeline.length === 0) continue
     timelines.set(message.message_id, timeline)
     claimedTurnIds.add(turnId)
   }
+
+  if (cache === DEFAULT_TIMELINE_CACHE) {
+    while (cache.size > MAX_DEFAULT_CACHE_ENTRIES) {
+      const oldestKey = cache.keys().next().value
+      if (oldestKey === undefined) break
+      cache.delete(oldestKey)
+    }
+  } else if (cache && seenMessageIds && cache.size > seenMessageIds.size + 64) {
+    for (const key of cache.keys()) {
+      if (!seenMessageIds.has(key)) {
+        cache.delete(key)
+      }
+    }
+  }
+
   return { timelines, claimedTurnIds }
 }

@@ -37,6 +37,14 @@ from agentos.agentic.compaction import (
     attach_retained_user_requests,
     compaction_message,
 )
+from agentos.conversations.snapshot_queries import (
+    compact_snapshot_activities as _compact_snapshot_activities_impl,
+    query_activity_window as _query_activity_window_impl,
+    query_conversation_header as _query_conversation_header_impl,
+    query_conversation_snapshot as _query_conversation_snapshot_impl,
+    query_older_activities as _query_older_activities_impl,
+    query_older_messages as _query_older_messages_impl,
+)
 from agentos.conversations.resume import (
     append_resumed_turn_history,
     recent_interrupted_paused_turns as _recent_interrupted_paused_turns,
@@ -2027,135 +2035,42 @@ class PostgresChatStore:
             rows = c.execute(stmt.order_by(conversations.c.updated_at.desc())).mappings().all()
         return {"items": [{"conversation_id": r["conversation_id"], "title": r["title"], "state": r["state"], "mode": str(r.get("mode") or "chat"), "permission_mode": str(r.get("permission_mode") or "ask_permissions"), "updated_at": r["updated_at"].isoformat()} for r in rows]}
 
-    def get(self, conversation_id: str, user_id: str) -> dict[str, object]:
-        with self._engine.connect() as c:
-            conv = c.execute(select(conversations).where(conversations.c.conversation_id == conversation_id, conversations.c.user_id == user_id)).mappings().first()
-            if conv is None: raise ApplicationNotFoundError(conversation_id)
-            project_id = conv.get("project_id")
-            project_name: str | None = None
-            if project_id:
-                project_name = c.execute(
-                    select(projects.c.name).where(
-                        projects.c.project_id == project_id,
-                        projects.c.user_id == user_id,
-                        projects.c.archived_at.is_(None),
-                    )
-                ).scalar_one_or_none()
-            messages = c.execute(select(conversation_messages).where(conversation_messages.c.conversation_id == conversation_id).order_by(conversation_messages.c.sequence)).mappings().all()
-            turns = c.execute(select(conversation_turns).where(conversation_turns.c.conversation_id == conversation_id).order_by(conversation_turns.c.created_at)).mappings().all()
-            attachment_rows = c.execute(select(conversation_message_attachments).where(conversation_message_attachments.c.conversation_id == conversation_id).order_by(conversation_message_attachments.c.id)).mappings().all()
-            command_rows = c.execute(select(conversation_message_commands).where(conversation_message_commands.c.conversation_id == conversation_id)).mappings().all()
-        attachments_by_message: dict[str, list[dict[str, object]]] = {}
-        for row in attachment_rows:
-            attachments_by_message.setdefault(str(row["message_id"]), []).append({
-                "path": str(row["path"]), "original_name": str(row["original_name"]),
-                "media_type": str(row["media_type"]), "kind": str(row["kind"]), "bytes": int(row["bytes"]),
-            })
-        command_by_message: dict[str, dict[str, object]] = {
-            str(row["message_id"]): {
-                "command_id": str(row["command_id"]), "slug": str(row["command_id"]).split(":", 1)[-1],
-                "arguments": str(row["arguments"]),
-            }
-            for row in command_rows
-        }
-        activities: list[dict[str, object]] = []
-        activity_cursor = "0"
-        has_older_activities = False
-        oldest_activity_id: int | None = None
-        context_usage: dict[str, object] | None = None
-        if self.activity_store is not None:
-            if hasattr(self.activity_store, "_encode_cursor"):
-                with self._engine.connect() as c:
-                    max_id = c.execute(
-                        select(func.max(conversation_activity_events.c.id)).where(
-                            conversation_activity_events.c.user_id == user_id,
-                            conversation_activity_events.c.conversation_id == conversation_id,
-                        )
-                    ).scalar()
-                    if max_id is not None:
-                        activity_cursor = self.activity_store._encode_cursor(
-                            user_id, conversation_id, int(max_id)
-                        )
-                        encode_fn = lambda pos: self.activity_store._encode_cursor(
-                            user_id, conversation_id, int(pos)
-                        )
-                        activities, has_older_activities, oldest_activity_id = self._query_activity_window(
-                            c,
-                            user_id=user_id,
-                            conversation_id=conversation_id,
-                            turns=turns,
-                            limit=300,
-                            before_id=None,
-                            encode_cursor=encode_fn,
-                        )
-                        ctx_rows = c.execute(
-                            select(conversation_activity_events.c.payload)
-                            .where(
-                                conversation_activity_events.c.user_id == user_id,
-                                conversation_activity_events.c.conversation_id == conversation_id,
-                                conversation_activity_events.c.event_type.in_((
-                                    AgentActivityEventType.CONTEXT_UPDATED.value,
-                                    AgentActivityEventType.CONTEXT_COMPACTED.value,
-                                )),
-                            )
-                            .order_by(conversation_activity_events.c.id.desc())
-                            .limit(5)
-                        ).scalars().all()
-                        for raw_ctx in ctx_rows:
-                            plain_ctx = _plain(raw_ctx)
-                            if isinstance(plain_ctx, dict) and "used_tokens" in plain_ctx:
-                                context_usage = _repair_context_usage(plain_ctx)
-                                break
-            else:
-                cursor: str = "0"
-                while True:
-                    page = self.activity_store.replay(user_id, conversation_id, cursor=cursor, limit=500)
-                    if not page.events:
-                        break
-                    cursors = page.cursors or tuple(str(item.sequence) for item in page.events)
-                    activities.extend(
-                        self._public_activity(item, item_cursor)
-                        for item, item_cursor in zip(page.events, cursors)
-                    )
-                    cursor = page.next_cursor or cursor
-                    activity_cursor = cursor
-                    if len(page.events) < 500:
-                        break
-                activities = self._compact_snapshot_activities(
-                    [
-                        {
-                            "id": int(item.get("sequence", idx + 1)),
-                            "event_id": item["event_id"],
-                            "event_type": item["event_type"],
-                            "sequence": int(item["sequence"]),
-                            "summary": item["summary"],
-                            "payload": item.get("payload") or {},
-                            "created_at": item["occurred_at"],
-                            "turn_id": item["turn_id"],
-                            "execution_id": item["execution_id"],
-                            "agent_id": item["agent_id"],
-                            "parent_agent_id": item.get("parent_agent_id"),
-                        }
-                        for idx, item in enumerate(activities)
-                    ],
-                    turns,
-                )
-        if context_usage is None:
-            context_usage = next(
-                (dict(item.get("payload") or {}) for item in reversed(activities) if item.get("event_type") in {AgentActivityEventType.CONTEXT_UPDATED.value, AgentActivityEventType.CONTEXT_COMPACTED.value} and isinstance(item.get("payload"), Mapping) and "used_tokens" in item["payload"]),
-                None,
-            )
-        raw_conv_mode = str(conv.get("mode") or "chat").strip().lower()
-        conv_mode = raw_conv_mode if raw_conv_mode in {"chat", "code", "friend"} else "chat"
-        conv_perm = str(conv.get("permission_mode") or ("accept_edits" if conv_mode == "code" else "ask_permissions"))
-        turn_by_message: dict[str, str] = {}
-        for t in turns:
-            t_id_str = str(t["turn_id"])
-            if t.get("user_message_id"):
-                turn_by_message[str(t["user_message_id"])] = t_id_str
-            if t.get("assistant_message_id"):
-                turn_by_message[str(t["assistant_message_id"])] = t_id_str
-        return {"conversation_id": conv["conversation_id"], "title": conv["title"], "state": conv["state"], "mode": conv_mode, "permission_mode": conv_perm, "provider": conv["provider"], "model_id": conv["model_id"], "project_id": str(project_id) if project_id else None, "project_name": str(project_name) if project_name else None, "messages": [{"message_id": m["message_id"], "role": m["role"], "content": m["content"], "status": m["status"], "retryable": bool(m["retryable"]), "attachments": attachments_by_message.get(str(m["message_id"]), []), "command": command_by_message.get(str(m["message_id"])), "turn_id": turn_by_message.get(str(m["message_id"]))} for m in messages], "turns": [{"turn_id": t["turn_id"], "state": t["state"], "created_at": t["created_at"].isoformat(), "started_at": t["started_at"].isoformat() if t["started_at"] else None, "finished_at": t["finished_at"].isoformat() if t["finished_at"] else None, "scheduled_by_schedule_id": t["scheduled_by_schedule_id"], "code_mode": t.get("code_mode")} for t in turns], "activities": activities, "activity_cursor": activity_cursor, "has_older_activities": has_older_activities, "oldest_activity_id": oldest_activity_id, "context_usage": context_usage}
+    def get_header(self, conversation_id: str, user_id: str) -> dict[str, object]:
+        return _query_conversation_header_impl(self._engine, conversation_id, user_id)
+
+    def get(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        message_limit: int | None = None,
+        activity_limit: int = 300,
+    ) -> dict[str, object]:
+        return _query_conversation_snapshot_impl(
+            self._engine,
+            self.activity_store,
+            conversation_id,
+            user_id,
+            message_limit=message_limit,
+            activity_limit=activity_limit,
+            public_activity_fn=self._public_activity,
+        )
+
+    def list_older_messages(
+        self,
+        conversation_id: str,
+        user_id: str,
+        *,
+        before_sequence: int,
+        limit: int = 50,
+    ) -> dict[str, object]:
+        return _query_older_messages_impl(
+            self._engine,
+            conversation_id,
+            user_id,
+            before_sequence=before_sequence,
+            limit=limit,
+        )
 
     def list_older_activities(
         self,
@@ -2165,40 +2080,14 @@ class PostgresChatStore:
         before_id: int,
         limit: int = 150,
     ) -> dict[str, object]:
-        bounded_limit = min(max(int(limit), 1), 300)
-        with self._engine.connect() as c:
-            conv = c.execute(
-                select(conversations.c.conversation_id).where(
-                    conversations.c.conversation_id == conversation_id,
-                    conversations.c.user_id == user_id,
-                )
-            ).first()
-            if conv is None:
-                raise ApplicationNotFoundError(conversation_id)
-            turns = c.execute(
-                select(conversation_turns)
-                .where(conversation_turns.c.conversation_id == conversation_id)
-                .order_by(conversation_turns.c.created_at)
-            ).mappings().all()
-            encode_fn = (
-                (lambda pos: self.activity_store._encode_cursor(user_id, conversation_id, int(pos)))
-                if self.activity_store is not None and hasattr(self.activity_store, "_encode_cursor")
-                else None
-            )
-            activities, has_older, oldest_id = self._query_activity_window(
-                c,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                turns=turns,
-                limit=bounded_limit,
-                before_id=int(before_id),
-                encode_cursor=encode_fn,
-            )
-        return {
-            "activities": activities,
-            "has_older_activities": has_older,
-            "oldest_activity_id": oldest_id,
-        }
+        return _query_older_activities_impl(
+            self._engine,
+            self.activity_store,
+            conversation_id,
+            user_id,
+            before_id=before_id,
+            limit=limit,
+        )
 
     @classmethod
     def _query_activity_window(
@@ -2212,78 +2101,15 @@ class PostgresChatStore:
         before_id: int | None = None,
         encode_cursor: Callable[[int], str] | None = None,
     ) -> tuple[list[dict[str, object]], bool, int | None]:
-        settled_turns = [
-            str(t["turn_id"])
-            for t in turns
-            if str(t.get("state") or "") in {"completed", "failed", "cancelled"}
-        ]
-        stmt = select(conversation_activity_events).where(
-            conversation_activity_events.c.user_id == user_id,
-            conversation_activity_events.c.conversation_id == conversation_id,
+        return _query_activity_window_impl(
+            c,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            turns=turns,
+            limit=limit,
+            before_id=before_id,
+            encode_cursor=encode_cursor,
         )
-        if settled_turns:
-            stmt = stmt.where(
-                ~(
-                    conversation_activity_events.c.turn_id.in_(settled_turns)
-                    & conversation_activity_events.c.event_type.in_((
-                        "tool.requested",
-                        "tool.progressed",
-                        "code_mode.validation_started",
-                        "code_mode.validation_finished",
-                        "code_mode.stage_changed",
-                        "speak.block_started",
-                        "speak.delta",
-                        "speak.chunk_ready",
-                        "speak.filler_triggered",
-                        "speak.interrupted",
-                        "speak.finished",
-                    ))
-                )
-            )
-        fetch_limit = max(limit * 3, 250)
-        collected_rows: list[Mapping[str, object]] = []
-        cursor_before = before_id
-        reached_start = False
-        compacted: list[dict[str, object]] = []
-        while True:
-            batch_stmt = stmt
-            if cursor_before is not None:
-                batch_stmt = batch_stmt.where(conversation_activity_events.c.id < cursor_before)
-            desc_batch = c.execute(
-                batch_stmt.order_by(conversation_activity_events.c.id.desc()).limit(fetch_limit)
-            ).mappings().all()
-            if not desc_batch:
-                reached_start = True
-                break
-            collected_rows = list(reversed(desc_batch)) + collected_rows
-            cursor_before = int(desc_batch[-1]["id"])
-            if len(desc_batch) < fetch_limit:
-                reached_start = True
-            compacted = cls._compact_snapshot_activities(
-                collected_rows,
-                turns,
-                keep_db_id=True,
-                encode_cursor=encode_cursor,
-            )
-            if len(compacted) > limit or reached_start:
-                break
-        if not compacted:
-            return [], False, None
-        has_older = len(compacted) > limit
-        window = compacted[-limit:]
-        if has_older:
-            boundary_ids = [int(window[0]["_db_id"])]
-            for item in window:
-                absorbed = item.get("_absorbed_started_db_id")
-                if isinstance(absorbed, int):
-                    boundary_ids.append(absorbed)
-            oldest_id: int | None = min(boundary_ids)
-        else:
-            oldest_id = None
-        for item in window:
-            item.pop("_db_id", None)
-            item.pop("_absorbed_started_db_id", None)
-        return window, has_older, oldest_id
 
     @classmethod
     def _compact_snapshot_activities(
@@ -2294,233 +2120,12 @@ class PostgresChatStore:
         keep_db_id: bool = False,
         encode_cursor: Callable[[int], str] | None = None,
     ) -> list[dict[str, object]]:
-        settled_turns = {
-            str(t["turn_id"])
-            for t in turns
-            if str(t.get("state") or "") in {"completed", "failed", "cancelled"}
-        }
-        last_context_id_by_turn: dict[str, int] = {}
-        context_count_by_turn: dict[str, int] = {}
-        last_validation_id_by_turn: dict[str, int] = {}
-        for row in rows:
-            ev_type = str(row["event_type"])
-            t_id = str(row["turn_id"])
-            r_id = int(row["id"])
-            if ev_type == AgentActivityEventType.CONTEXT_UPDATED.value:
-                last_context_id_by_turn[t_id] = r_id
-                context_count_by_turn[t_id] = context_count_by_turn.get(t_id, 0) + 1
-            elif ev_type == AgentActivityEventType.CODE_MODE_VALIDATION_STARTED.value:
-                last_validation_id_by_turn[t_id] = r_id
-
-        settled_skip_events = {
-            "tool.requested",
-            "tool.progressed",
-            "code_mode.validation_started",
-            "code_mode.validation_finished",
-            "code_mode.stage_changed",
-            "speak.block_started",
-            "speak.delta",
-            "speak.chunk_ready",
-            "speak.filler_triggered",
-            "speak.interrupted",
-            "speak.finished",
-        }
-        non_breaking_delta_events = {
-            "context.updated",
-            "context.compacted",
-            "code_mode.validation_started",
-            "code_mode.validation_finished",
-            "code_mode.stage_changed",
-            "speak.block_started",
-            "speak.delta",
-            "speak.chunk_ready",
-            "speak.filler_triggered",
-            "speak.interrupted",
-            "speak.finished",
-        }
-        tool_completion_events = {
-            "tool.finished",
-            "tool.completed",
-            "tool.failed",
-        }
-        tool_enrich_keys = (
-            "path",
-            "file_path",
-            "target_path",
-            "command",
-            "description",
-            "tool_name",
-            "tool_kind",
-            "invocation_id",
-            "call_id",
+        return _compact_snapshot_activities_impl(
+            rows,
+            turns,
+            keep_db_id=keep_db_id,
+            encode_cursor=encode_cursor,
         )
-
-        compacted: list[dict[str, object]] = []
-        last_assistant_delta_idx: dict[tuple[str, str], int] = {}
-        last_thought_delta_idx: dict[tuple[str, str], int] = {}
-        open_tool_started_by_turn: dict[tuple[str, str], list[int]] = {}
-        seen_artifacts_by_turn: dict[str, set[str]] = {}
-        artifact_count_by_turn: dict[str, int] = {}
-
-        for row in rows:
-            ev_type = str(row["event_type"])
-            t_id = str(row["turn_id"])
-            r_id = int(row["id"])
-            raw_payload = row["payload"]
-            payload = dict(_plain(raw_payload)) if isinstance(raw_payload, Mapping) else {}
-            if t_id in settled_turns and ev_type in settled_skip_events:
-                continue
-            if ev_type == AgentActivityEventType.ARTIFACT_CREATED.value:
-                raw_art_path = str(payload.get("path") or payload.get("file_path") or "").replace("\\", "/").strip()
-                if raw_art_path.startswith(".orin/") or "/.orin/" in raw_art_path:
-                    continue
-                if t_id in settled_turns:
-                    seen_paths = seen_artifacts_by_turn.setdefault(t_id, set())
-                    if raw_art_path and raw_art_path in seen_paths:
-                        continue
-                    if artifact_count_by_turn.get(t_id, 0) >= 10:
-                        continue
-                    if raw_art_path:
-                        seen_paths.add(raw_art_path)
-                    artifact_count_by_turn[t_id] = artifact_count_by_turn.get(t_id, 0) + 1
-            if (
-                ev_type == AgentActivityEventType.CONTEXT_UPDATED.value
-                and context_count_by_turn.get(t_id, 0) > 3
-                and r_id != last_context_id_by_turn.get(t_id)
-            ):
-                continue
-            if (
-                ev_type in {"code_mode.validation_started", "code_mode.validation_finished"}
-                and r_id < last_validation_id_by_turn.get(t_id, 0)
-            ):
-                continue
-            if ev_type in {
-                AgentActivityEventType.CONTEXT_UPDATED.value,
-                AgentActivityEventType.CONTEXT_COMPACTED.value,
-            } and isinstance(payload, dict):
-                payload = _repair_context_usage(payload)
-
-            created_at = row["created_at"]
-            occurred_at = (
-                (created_at.replace(tzinfo=UTC) if created_at.tzinfo is None else created_at).isoformat()
-                if isinstance(created_at, datetime)
-                else str(created_at)
-            )
-            agent_id = str(row["agent_id"])
-            stream_key = (t_id, agent_id)
-            item_cursor = encode_cursor(r_id) if callable(encode_cursor) else str(row["sequence"])
-
-            if ev_type == AgentActivityEventType.ASSISTANT_DELTA.value:
-                last_thought_delta_idx.pop(stream_key, None)
-                prev_idx = last_assistant_delta_idx.get(stream_key)
-                if prev_idx is not None:
-                    prev_entry = compacted[prev_idx]
-                    prev_payload = prev_entry.get("payload")
-                    if isinstance(prev_payload, dict) and isinstance(payload, dict):
-                        prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
-                        chunk_content = str(payload.get("content") or payload.get("delta") or "")
-                        prev_payload["content"] = prev_content + chunk_content
-                        if prev_idx == len(compacted) - 1:
-                            prev_entry["sequence"] = int(row["sequence"])
-                            prev_entry["cursor"] = item_cursor
-                        prev_entry["occurred_at"] = occurred_at
-                        continue
-
-            elif ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value:
-                last_assistant_delta_idx.pop(stream_key, None)
-                prev_idx = last_thought_delta_idx.get(stream_key)
-                if prev_idx is not None:
-                    prev_entry = compacted[prev_idx]
-                    prev_payload = prev_entry.get("payload")
-                    if isinstance(prev_payload, dict) and isinstance(payload, dict):
-                        prev_content = str(prev_payload.get("content") or prev_payload.get("delta") or "")
-                        chunk_content = str(payload.get("content") or payload.get("delta") or "")
-                        merged = prev_content + chunk_content
-                        prev_payload["content"] = merged
-                        prev_payload["delta"] = merged
-                        if prev_idx == len(compacted) - 1:
-                            prev_entry["sequence"] = int(row["sequence"])
-                            prev_entry["cursor"] = item_cursor
-                        prev_entry["occurred_at"] = occurred_at
-                        continue
-
-            elif ev_type not in non_breaking_delta_events:
-                last_assistant_delta_idx.pop(stream_key, None)
-                last_thought_delta_idx.pop(stream_key, None)
-
-            absorbed_started_db_id: int | None = None
-            if t_id in settled_turns and ev_type in tool_completion_events:
-                open_list = open_tool_started_by_turn.get(stream_key)
-                if open_list:
-                    inv_id = str(payload.get("invocation_id") or payload.get("call_id") or "")
-                    t_name = str(payload.get("tool_name") or "")
-                    matched_pos = None
-                    if inv_id:
-                        for pos, idx in enumerate(open_list):
-                            sp = compacted[idx].get("payload")
-                            if isinstance(sp, dict) and str(sp.get("invocation_id") or sp.get("call_id") or "") == inv_id:
-                                matched_pos = pos
-                                break
-                    if matched_pos is None and t_name:
-                        for pos, idx in enumerate(open_list):
-                            sp = compacted[idx].get("payload")
-                            if not isinstance(sp, dict):
-                                continue
-                            sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "")
-                            sp_t_name = str(sp.get("tool_name") or "")
-                            if inv_id and sp_inv_id and inv_id != sp_inv_id:
-                                continue
-                            if sp_t_name == t_name:
-                                matched_pos = pos
-                                break
-                    if matched_pos is None and not inv_id and not t_name:
-                        for pos, idx in enumerate(open_list):
-                            sp = compacted[idx].get("payload")
-                            sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "") if isinstance(sp, dict) else ""
-                            sp_t_name = str(sp.get("tool_name") or "") if isinstance(sp, dict) else ""
-                            if not sp_inv_id and not sp_t_name:
-                                matched_pos = pos
-                                break
-                    if matched_pos is not None:
-                        matched_idx = open_list.pop(matched_pos)
-                        started_entry = compacted[matched_idx]
-                        started_payload = started_entry.get("payload")
-                        if isinstance(started_payload, dict):
-                            for k in tool_enrich_keys:
-                                if not payload.get(k) and started_payload.get(k):
-                                    payload[k] = started_payload[k]
-                        started_entry["_drop_settled_started"] = True
-                        raw_started_db_id = started_entry.get("_db_id")
-                        if isinstance(raw_started_db_id, int):
-                            absorbed_started_db_id = raw_started_db_id
-
-            entry: dict[str, object] = {
-                "event_id": str(row["event_id"]),
-                "event_type": ev_type,
-                "sequence": int(row["sequence"]),
-                "summary": str(row["summary"]),
-                "payload": payload,
-                "occurred_at": occurred_at,
-                "turn_id": t_id,
-                "execution_id": str(row["execution_id"]),
-                "agent_id": agent_id,
-                "parent_agent_id": row["parent_agent_id"],
-                "cursor": item_cursor,
-            }
-            if keep_db_id:
-                entry["_db_id"] = r_id
-                if absorbed_started_db_id is not None:
-                    entry["_absorbed_started_db_id"] = absorbed_started_db_id
-            compacted.append(entry)
-            new_idx = len(compacted) - 1
-            if ev_type == AgentActivityEventType.ASSISTANT_DELTA.value:
-                last_assistant_delta_idx[stream_key] = new_idx
-            elif ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value:
-                last_thought_delta_idx[stream_key] = new_idx
-            elif t_id in settled_turns and ev_type == AgentActivityEventType.TOOL_STARTED.value:
-                open_tool_started_by_turn.setdefault(stream_key, []).append(new_idx)
-
-        return [item for item in compacted if not item.pop("_drop_settled_started", False)]
 
     @staticmethod
     def _public_activity(event: AgentActivityEvent, cursor: str | None = None) -> dict[str, object]:
@@ -4343,7 +3948,14 @@ class ChatApplication:
     def list(self, user_id: str, *, mode: str | None = None):
         return self.store.list(user_id, mode=mode)
     def quality_summary(self, user_id: str, *, days: int = 30): return {"items": self.store.quality_summary(user_id, days=days), "window_days": days}
-    def get(self, conversation_id: str, user_id: str): return self.store.get(conversation_id, user_id)
+    def get_header(self, conversation_id: str, user_id: str):
+        return self.store.get_header(conversation_id, user_id)
+    def get(self, conversation_id: str, user_id: str, *, message_limit: int | None = None, activity_limit: int = 300):
+        if message_limit is None and activity_limit == 300:
+            return self.store.get(conversation_id, user_id)
+        return self.store.get(conversation_id, user_id, message_limit=message_limit, activity_limit=activity_limit)
+    def list_older_messages(self, conversation_id: str, user_id: str, *, before_sequence: int, limit: int = 50):
+        return self.store.list_older_messages(conversation_id, user_id, before_sequence=before_sequence, limit=limit)
     def list_older_activities(self, conversation_id: str, user_id: str, *, before_id: int, limit: int = 100):
         return self.store.list_older_activities(conversation_id, user_id, before_id=before_id, limit=limit)
     def events(self, conversation_id: str, user_id: str, after: int): return self.store.events(conversation_id, user_id, after)
