@@ -2842,6 +2842,13 @@ class NativeTurnRunner:
                 resume_session_id=resume_session_id,
                 conversation_id=str(self.turn.get("conversation_id") or ""),
                 on_waiting_slot=_on_waiting_slot,
+                on_effort_adjusted=lambda adj, mdl=None: self.runtime._emit_effort_adjusted(
+                    self.turn,
+                    requested=str(getattr(adj, "requested", "")),
+                    applied=getattr(adj, "applied", None),
+                    reason=str(getattr(adj, "reason", "")),
+                    model=str(mdl or self.turn.get("model_id") or ""),
+                ),
                 permission_mode=self._effective_permission_mode(),
                 user_image_paths=(
                     initial_user_image_paths

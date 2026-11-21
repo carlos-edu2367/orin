@@ -689,17 +689,23 @@ class ClaudeCliProvider:
                     )
                 )
             else:
-                cmd = self.adapter.build_command(
-                    CliTurnRequest(
-                        binary=resolved_binary,
-                        system_prompt_file=prompt_file,
-                        model=req_model or None,
-                        effort=effort,
-                        max_turns=1,
-                        tool_server_wiring=fallback_wiring,
-                        capabilities=self.adapter.capabilities,
-                    )
+                turn_req = CliTurnRequest(
+                    binary=resolved_binary,
+                    system_prompt_file=prompt_file,
+                    model=req_model or None,
+                    effort=effort,
+                    max_turns=1,
+                    tool_server_wiring=fallback_wiring,
+                    capabilities=self.adapter.capabilities,
                 )
+                cmd = self.adapter.build_command(turn_req)
+                if turn_req.effort_adjustment is not None:
+                    notify_adj = request.get("on_effort_adjusted") if isinstance(request, Mapping) else None
+                    if callable(notify_adj):
+                        try:
+                            notify_adj(turn_req.effort_adjustment, req_model or self.model)
+                        except Exception:  # noqa: BLE001
+                            pass
             isolated_env = self.adapter.environment(
                 merge_with_system_env(self._env),
                 max_output_tokens=max_output_tokens,

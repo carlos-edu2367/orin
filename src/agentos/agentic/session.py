@@ -1655,14 +1655,22 @@ class TurnSession:
         recorder(self.turn, event_type, summary, effective_payload, agent_id=agent_id or self.main_agent_id, parent_agent_id=parent_agent_id)
 
     def record_usage(self, turn: dict[str, object], *, input_tokens: int | None, output_tokens: int | None, total_tokens: int | None, agent_id: str | None = None) -> None:
-        self.agents_store.record_usage(
-            agent_id or self.main_agent_id,
-            str(turn.get("provider") or ""),
-            str(turn.get("model_id") or ""),
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens,
+        kwargs: dict[str, Any] = dict(
+            input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens,
         )
+        try:
+            self.agents_store.record_usage(
+                agent_id or self.main_agent_id,
+                str(turn.get("provider") or ""),
+                str(turn.get("model_id") or ""),
+                effort=getattr(self, "_active_effort", None),
+                effort_source=getattr(self, "_active_effort_source", None),
+                **kwargs,
+            )
+        except TypeError:
+            self.agents_store.record_usage(
+                agent_id or self.main_agent_id, str(turn.get("provider") or ""), str(turn.get("model_id") or ""), **kwargs,
+            )
 
     def emit_lifecycle(
         self,
@@ -2381,15 +2389,24 @@ class TurnSession:
             }
         return _BUILTIN_SUBAGENT_SPECS.get(str(key or "").strip().lower())
 
-    def _definition_effort(self, definition: object, model_id: str, provider: str | None = None) -> str | None:
-        """W5 deviation 9: an agent file's ``effort``, when its model takes a reasoning control (else nothing)."""
-        from .effort import normalize_effort, reasoning_supported
+    def _definition_effort(
+        self, definition: object, model_id: str, provider: str | None = None, *,
+        call_effort: str | None = None, subagent_type: str | None = None, agent_id: str | None = None,
+    ) -> str | None:
+        """Resolve subagent effort (call param > agent file > role/byType > parent policy), clamped to model."""
+        from .effort_resolver import EffortContext, emit_effort_events, resolve_effort
 
-        level = normalize_effort(getattr(definition, "effort", None)) if definition is not None else None
-        if level is None:
-            return None
-        provider = provider or str(self.turn.get("provider") or "")
-        return level if reasoning_supported(provider, str(model_id or ""), self.model_capabilities) else None
+        eff_provider = provider or str(self.turn.get("provider") or "")
+        caps = self.model_capabilities if str(model_id or "") == str(self.turn.get("model_id") or "") else ()
+        resolved = resolve_effort(EffortContext(
+            provider=eff_provider, model_id=str(model_id or ""), capabilities=caps,
+            call_effort=call_effort, definition_effort=getattr(definition, "effort", None) if definition is not None else None,
+            parent_effort=getattr(self, "_active_effort", None), is_subagent=True,
+            subagent_type=subagent_type, is_verifier=(str(subagent_type or "").lower() == "verifier"),
+            settings=getattr(self, "effective_settings", None),
+        ))
+        emit_effort_events(self._record, resolved, str(model_id or ""), emit_turn_started=False, agent_id=agent_id)
+        return resolved.level
 
     def _definition_model(self, spec: Mapping[str, object] | None) -> str | None:
         """The model a definition asks for, when it is one this person allows; otherwise None (the parent's model)."""
@@ -2653,6 +2670,7 @@ class TurnSession:
         *,
         description: str = "",
         model_id: str | None = None,
+        effort: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
         hook_cancel: threading.Event | None = None,
@@ -2669,7 +2687,7 @@ class TurnSession:
             )
         if not teammate_name:
             return self._start_subagent(
-                subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+                subagent_type, task, description=description, model_id=model_id, effort=effort, agent_id=agent_id,
                 run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
@@ -2678,7 +2696,7 @@ class TurnSession:
         clean_name = str(teammate_name).strip().lower()
         try:
             outcome = self._start_subagent(
-                subagent_type, task, description=description, model_id=model_id, agent_id=agent_id,
+                subagent_type, task, description=description, model_id=model_id, effort=effort, agent_id=agent_id,
                 run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
             )
         except BaseException:
@@ -2695,6 +2713,7 @@ class TurnSession:
         *,
         description: str = "",
         model_id: str | None = None,
+        effort: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
         hook_cancel: threading.Event | None = None,
@@ -2728,6 +2747,7 @@ class TurnSession:
             clean_type,
             task,
             requested_model_id=model_id,
+            requested_effort=effort,
             description=description,
             resumed_agent_id=clean_agent_id,
             run_in_background=bool(run_in_background),
@@ -2744,6 +2764,7 @@ class TurnSession:
         task: str,
         *,
         requested_model_id: str | None = None,
+        requested_effort: str | None = None,
         description: str = "",
         resumed_agent_id: str | None = None,
         run_in_background: bool = False,
@@ -2926,6 +2947,8 @@ class TurnSession:
             {"child_provider": pinned.provider, "model_chain": pinned_choice[1]}
             if pinned is not None and pinned_choice is not None else {}
         )
+        if requested_effort is not None:
+            routing["requested_effort"] = requested_effort
         with self._subagent_lock:
             if self._max_subagents_per_turn is not None and self._subagent_runs >= self._max_subagents_per_turn:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
@@ -3341,6 +3364,7 @@ class TurnSession:
         caller: SubagentCaller | None = None,
         child_provider: str | None = None,
         model_chain: tuple[str, ...] = (),
+        requested_effort: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         if hook_cancel is None:
@@ -3409,6 +3433,7 @@ class TurnSession:
                 slot=slot,
                 child_provider=child_provider,
                 model_chain=model_chain,
+                requested_effort=requested_effort,
             )
         finally:
             try:
@@ -3516,6 +3541,7 @@ class TurnSession:
         slot: _SubagentSlot | None = None,
         child_provider: str | None = None,
         model_chain: tuple[str, ...] = (),
+        requested_effort: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         parent_agent_id = caller.agent_id
@@ -3700,7 +3726,7 @@ class TurnSession:
                 phase_controller=None,
                 reminders=sub_reminders,
                 cancelled=sub_cancelled,
-                effort=self._definition_effort(definition, active_model_id, provider_name),
+                effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
             )
             with bind_agent_id(agent_id):
@@ -3755,7 +3781,7 @@ class TurnSession:
                     phase_controller=None,
                     reminders=sub_reminders,
                     cancelled=sub_cancelled,
-                    effort=self._definition_effort(definition, active_model_id, provider_name),
+                    effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                     **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
                 )
                 result = runtime.run(str(self.turn["turn_id"]), turn=subagent_turn)
@@ -6226,30 +6252,23 @@ class TurnSession:
         text = str(task or "").strip()
         return text[len("/compact"):].strip() if text.startswith("/compact") else ""
 
-    def _effort(self) -> str | None:
-        """The turn's effort (turn value, else the user's ``effort``/``effortLevel``), if this model can use it."""
+    def _effort(self, task: str = "") -> str | None:
+        """Resolve the main turn's effort via rules 1..9, clamping to the model and emitting events."""
         if bool(self.turn.get("live_mode")):
             return None
-        from .effort import normalize_effort, reasoning_supported
-        from .loop_settings import operator_value
+        from .effort_resolver import EffortContext, emit_effort_events, resolve_effort
 
-        level = normalize_effort(self.turn.get("effort")) or normalize_effort(
-            operator_value(self.effective_settings, "effort") or operator_value(self.effective_settings, "effortLevel")
-        )
-        if level is None:
-            return None
         provider, model = str(self.turn.get("provider") or ""), str(self.turn.get("model_id") or "")
-        if reasoning_supported(provider, model, self.model_capabilities):
-            return level
-        try:
-            self._record(
-                AgentActivityEventType.TURN_STARTED,
-                f"Esforço '{level}' ignorado: o modelo {model} não aceita controle de raciocínio",
-                {"effort": level, "ignored": True},
-            )
-        except Exception:  # noqa: BLE001 - a notice never blocks a turn
-            pass
-        return None
+        resolved = resolve_effort(EffortContext(
+            provider=provider, model_id=model, capabilities=self.model_capabilities,
+            boost=bool(self.turn.get("effort_boost")), message=str(task or ""),
+            turn_effort=self.turn.get("effort") if isinstance(self.turn.get("effort"), str) else None,
+            is_plan_mode=bool(getattr(self, "_in_plan_mode", False) or str(self.turn.get("permission_mode") or "") in {"plan_mode", "plan"}),
+            settings=getattr(self, "effective_settings", None),
+        ))
+        self._active_effort, self._active_effort_source = resolved.level, resolved.source
+        emit_effort_events(self._record, resolved, model)
+        return resolved.level
 
     def _auto_memory_enabled(self) -> bool:
         """``autoMemoryEnabled: false`` in any layer pauses learning and consolidation (a repository may only pause)."""
@@ -6775,7 +6794,7 @@ class TurnSession:
             prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
             compact_request=self._compact_request(task),
             shell_command=self._shell_request(task),
-            effort=self._effort(),
+            effort=self._effort(task),
             on_completed=self._after_completed_turn,
             on_queued_input_claimed=self._note_queued_input_claimed,
         )

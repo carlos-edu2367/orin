@@ -303,7 +303,7 @@ def test_adapter_build_command_filters_effort_using_discovered_models(
     sys_file = tmp_path / "sys.txt"
     sys_file.write_text("System instructions", encoding="utf-8")
 
-    # gpt-6-luna supports ("low", "medium", "high", "xhigh", "max"), NOT "ultra"
+    # gpt-6-luna supports ("low", "medium", "high", "xhigh", "max"), NOT "ultra" -> clamped to "max" with adjustment
     req_unsupported = CliTurnRequest(
         binary="codex",
         system_prompt_file=sys_file,
@@ -311,7 +311,11 @@ def test_adapter_build_command_filters_effort_using_discovered_models(
         effort="ultra",
     )
     argv_unsupported = adapter.build_command(req_unsupported)
-    assert not any("model_reasoning_effort" in arg for arg in argv_unsupported)
+    assert 'model_reasoning_effort="max"' in argv_unsupported
+    assert req_unsupported.effort_adjustment is not None
+    assert req_unsupported.effort_adjustment.requested == "ultra"
+    assert req_unsupported.effort_adjustment.applied == "max"
+    assert req_unsupported.effort_adjustment.reason == "unsupported_level"
 
     # gpt-6.1-sol supports "ultra"
     req_supported = CliTurnRequest(

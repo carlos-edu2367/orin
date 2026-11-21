@@ -138,12 +138,16 @@ def test_effort_omitted_when_unsupported_by_model(tmp_path: Path) -> None:
         effort="ultra",
         persist_session=False,
     )
-    # gpt-6-luna does not support 'ultra'
+    # gpt-6-luna does not support 'ultra' -> clamped to 'max' with adjustment (E-RF8)
     argv = build_codex_command(
         req,
         supported_efforts=("low", "medium", "high", "xhigh", "max"),
     )
-    assert not any("model_reasoning_effort" in item for item in argv)
+    assert 'model_reasoning_effort="max"' in argv
+    assert req.effort_adjustment is not None
+    assert req.effort_adjustment.requested == "ultra"
+    assert req.effort_adjustment.applied == "max"
+    assert req.effort_adjustment.reason == "unsupported_level"
 
 
 def test_mcp_token_only_in_env_never_in_argv_or_logs(tmp_path: Path) -> None:

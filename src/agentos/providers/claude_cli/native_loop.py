@@ -381,6 +381,7 @@ class NativeTurnRequest:
     # Orin's effective permission mode for the turn (internal id or public name), told to the model in the system prompt.
     permission_mode: str | None = None
     user_image_paths: tuple[str | Path, ...] = ()
+    on_effort_adjusted: Callable[..., None] | None = None
 
 
 class NativeTurnSink(Protocol):
@@ -1621,32 +1622,36 @@ def start_native_turn_for_provider(
                     Path(workspace_root),
                 )
 
-        cmd = adapter.build_command(
-            CliTurnRequest(
-                binary=resolved_binary,
-                system_prompt_file=prompt_path,
-                model=effective_model,
-                effort=request.effort,
-                fallback_model=request.fallback_model,
-                max_turns=max(1, int(request.max_turns)),
-                tool_server_config_file=mcp_config_path,
-                tool_server_name=request.server_name,
-                tool_server_wiring=wiring,
-                tool_timeout_ms=mcp_tool_timeout_ms,
-                workspace_root=workspace_root,
-                image_paths=codex_image_paths,
-                capabilities=adapter.capabilities,
-                autocompact=request.autocompact,
-                session_id=session_kwargs.get("session_id"),
-                resume_session_id=resume_session_id,
-                persist_session=bool(
-                    session_kwargs.get(
-                        "persist_session",
-                        not getattr(adapter.capabilities, "persistent_stdin", True),
-                    )
-                ),
-            )
+        turn_req = CliTurnRequest(
+            binary=resolved_binary,
+            system_prompt_file=prompt_path,
+            model=effective_model,
+            effort=request.effort,
+            fallback_model=request.fallback_model,
+            max_turns=max(1, int(request.max_turns)),
+            tool_server_config_file=mcp_config_path,
+            tool_server_name=request.server_name,
+            tool_server_wiring=wiring,
+            tool_timeout_ms=mcp_tool_timeout_ms,
+            workspace_root=workspace_root,
+            image_paths=codex_image_paths,
+            capabilities=adapter.capabilities,
+            autocompact=request.autocompact,
+            session_id=session_kwargs.get("session_id"),
+            resume_session_id=resume_session_id,
+            persist_session=bool(
+                session_kwargs.get(
+                    "persist_session",
+                    not getattr(adapter.capabilities, "persistent_stdin", True),
+                )
+            ),
         )
+        cmd = adapter.build_command(turn_req)
+        if turn_req.effort_adjustment is not None and callable(request.on_effort_adjusted):
+            try:
+                request.on_effort_adjusted(turn_req.effort_adjustment, effective_model)
+            except Exception:  # noqa: BLE001 - adjustment notice never blocks turn
+                pass
 
         popen_cmd = (
             [sys.executable, *cmd]

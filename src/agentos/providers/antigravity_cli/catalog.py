@@ -71,13 +71,23 @@ def _format_antigravity_display_name(
     return f"{base} {_ANTIGRAVITY_LABEL_SUFFIX}"
 
 
+def _default_effort_for(efforts: tuple[str, ...]) -> str | None:
+    if not efforts:
+        return None
+    if len(efforts) == 1:
+        return efforts[0]
+    return "medium" if "medium" in efforts else efforts[0]
+
+
 def _model(slug: str, label: str, context_window: int) -> CliModelInfo:
+    efforts = _infer_supported_efforts(slug)
     return CliModelInfo(
         slug,
         _format_antigravity_display_name(slug, label),
         context_window,
-        _infer_supported_efforts(slug),
+        efforts,
         antigravity_input_modalities(slug),
+        default_effort=_default_effort_for(efforts),
     )
 
 
@@ -220,13 +230,15 @@ def discover_antigravity_models(
             continue
         if not slug:
             continue
+        efforts = _infer_supported_efforts(slug)
         discovered.append(
             CliModelInfo(
                 id=slug,
                 display_name=_format_antigravity_display_name(slug, raw_label),
                 context_window=_infer_context_window(slug),
-                supported_efforts=_infer_supported_efforts(slug),
+                supported_efforts=efforts,
                 input_modalities=antigravity_input_modalities(slug),
+                default_effort=_default_effort_for(efforts),
             )
         )
 

@@ -121,6 +121,7 @@ export type TodoItem = {
 
 export type AgentActivityEventType =
   | 'turn.started'
+  | 'effort.adjusted'
   | 'turn.completed'
   | 'turn.failed'
   | 'turn.cancelled'

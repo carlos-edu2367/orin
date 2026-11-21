@@ -22,7 +22,12 @@ from agentos.providers.antigravity_cli.media_gate import (
     collect_media_roots,
     is_allowed_media_path,
 )
-from agentos.providers.cli_adapter import CliTurnRequest, ToolServerWiring
+from agentos.providers.cli_adapter import (
+    CliEffortAdjustment,
+    CliTurnRequest,
+    ToolServerWiring,
+    clamp_cli_effort,
+)
 
 MIN_ANTIGRAVITY_VERSION: tuple[int, int, int] = (1, 1, 1)
 MAX_ANTIGRAVITY_MAJOR: int = 1
@@ -1230,20 +1235,27 @@ def build_antigravity_command(
             if lower_model.endswith(f"-{eff_name}"):
                 model_effort_suffix = eff_name
                 break
-        effective_efforts: Sequence[str] = (
-            supported_efforts
-            if supported_efforts is not None and len(supported_efforts) > 0
-            else (
-                (model_effort_suffix,)
-                if model_effort_suffix is not None
+        if model_effort_suffix is not None:
+            applied_effort, adjustment = clamp_cli_effort(
+                effort,
+                (model_effort_suffix,),
+                slug_fixed=model_effort_suffix,
+            )
+            if adjustment is not None:
+                object.__setattr__(request, "effort_adjustment", adjustment)
+            else:
+                cmd.extend(["--effort", applied_effort or effort])
+        else:
+            effective_efforts: Sequence[str] = (
+                supported_efforts
+                if supported_efforts is not None and len(supported_efforts) > 0
                 else ("low", "medium", "high")
             )
-        )
-        allowed_by_model = effort in effective_efforts and (
-            model_effort_suffix is None or effort == model_effort_suffix
-        )
-        if allowed_by_model:
-            cmd.extend(["--effort", effort])
+            applied_effort, adjustment = clamp_cli_effort(effort, effective_efforts)
+            if adjustment is not None:
+                object.__setattr__(request, "effort_adjustment", adjustment)
+            if applied_effort is not None:
+                cmd.extend(["--effort", applied_effort])
 
     if request.resume_session_id is not None:
         raw_resume = str(request.resume_session_id)

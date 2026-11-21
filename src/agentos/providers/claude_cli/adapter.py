@@ -134,6 +134,8 @@ class ClaudeCliAdapter:
                     id=m.id,
                     display_name=m.name,
                     context_window=m.context_window,
+                    supported_efforts=m.effort_levels,
+                    default_effort=m.default_effort,
                 )
                 for m in cached
             )

@@ -161,6 +161,8 @@ class ConversationAgentStore:
         input_tokens: int | None,
         output_tokens: int | None,
         total_tokens: int | None,
+        effort: str | None = None,
+        effort_source: str | None = None,
     ) -> None:
         values = (input_tokens, output_tokens, total_tokens)
         if any(value is not None and value < 0 for value in values):

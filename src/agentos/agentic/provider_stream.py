@@ -674,6 +674,7 @@ class HTTPProviderStreamTransport:
         self._client = client or httpx.Client(timeout=60)
         self._owns_client = client is None
         self._claude_cli_provider: Any = None
+        self.last_effort_adjustment: Any = None
 
     def __repr__(self) -> str:
         return f"HTTPProviderStreamTransport(provider={self.provider!r}, base_url={self.base_url!r}, model={self.model!r})"
@@ -875,13 +876,30 @@ class HTTPProviderStreamTransport:
         return f"{self.base_url}/api/chat", headers, payload
 
     def _request_for(self, messages: list, tools: list, tool_choice: object, requested: object, effort: object = None) -> tuple[str, dict[str, str], dict[str, object]]:
+        self.last_effort_adjustment = None
         if self.provider == "anthropic":
             endpoint, headers, payload = self._anthropic_request(messages, tools, tool_choice, requested)
         elif self.provider == "ollama":
             endpoint, headers, payload = self._ollama_request(messages, tools, tool_choice, requested)
         else:
             endpoint, headers, payload = self._openai_request(messages, tools, tool_choice, requested)
-        apply_effort(self.provider, payload, effort, explicit_cap=requested)
+        if self.provider == "anthropic":
+            tc = payload.get("tool_choice")
+            if isinstance(tc, Mapping) and str(tc.get("type") or "").lower() in {"any", "tool"}:
+                from .effort import normalize_effort
+                from .effort_levels import EffortAdjustment
+
+                req_level = normalize_effort(effort)
+                if req_level is not None:
+                    self.last_effort_adjustment = EffortAdjustment(
+                        requested=req_level,
+                        applied=None,
+                        reason="forced_tool_choice",
+                    )
+                payload.pop("thinking", None)
+                payload.pop("output_config", None)
+                return endpoint, headers, payload
+        apply_effort(self.provider, payload, effort, explicit_cap=requested, model_id=self.model)
         return endpoint, headers, payload
 
     def stream(self, request: Mapping[str, object], *, cancel_check: Any = None) -> Iterator[NormalizedStreamItem]:
@@ -983,6 +1001,13 @@ class HTTPProviderStreamTransport:
             request.get("max_output_tokens"),
             request.get("effort"),
         )
+        if self.last_effort_adjustment is not None:
+            notify_adj = request.get("on_effort_adjusted")
+            if callable(notify_adj):
+                try:
+                    notify_adj(self.last_effort_adjustment, self.model)
+                except Exception:  # noqa: BLE001 - adjustment notice never stops a stream
+                    pass
         try:
             with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:
                 if response.status_code >= 400:

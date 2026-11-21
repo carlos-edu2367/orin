@@ -43,6 +43,8 @@ class ProviderModelRecord:
     route_kind: str = "model"
     # Entered by the owner instead of discovered from the provider catalog.
     is_custom: bool = False
+    supported_efforts: tuple[str, ...] = ()
+    default_effort: str | None = None
 
     def __post_init__(self) -> None:
         for name, value in (("provider", self.provider), ("model_id", self.model_id), ("display_name", self.display_name)):
