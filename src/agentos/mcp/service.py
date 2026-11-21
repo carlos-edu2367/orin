@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Callable, Iterable, Mapping
 from uuid import uuid4
@@ -322,7 +323,8 @@ class McpServerService:
         self._require_transport(config.transport)
         cleaned_secrets = validate_mcp_secrets(secrets, expected_names=config.secret_names)
         try:
-            protocol_version, tools = connect(config, cleaned_secrets)
+            # The person is approving this server right now: connect it as approved (e.g. a loopback endpoint).
+            protocol_version, tools = connect(_as_approved(config), cleaned_secrets)
         except HttpUnauthorized as error:
             if cleaned_secrets or config.secret_names:
                 sent_headers = _sent_header_names(cleaned_secrets, config.secret_names)
@@ -394,7 +396,8 @@ class McpServerService:
         config = row_to_config(row)
         self._require_transport(config.transport)
         try:
-            protocol_version, tools = connect(config, {})
+            # The person just signed in to this server, which approves it.
+            protocol_version, tools = connect(_as_approved(config), {})
         except Exception as error:
             reason = f"Login concluído, mas a conexão falhou: {error}"[:MAX_STATE_REASON_CHARS]
             with self.engine.begin() as connection:
@@ -448,6 +451,12 @@ class McpServerService:
                 .values(protocol_version=protocol_version, tools_digest=_tools_digest(tools), updated_at=now)
             )
         return {"connected": True, "protocol_version": protocol_version, "tools": [item.name for item in tools], "error": None}
+
+
+def _as_approved(config: McpServerConfig) -> McpServerConfig:
+    if config.state is McpServerState.PENDING_APPROVAL:
+        return replace(config, state=McpServerState.ACTIVE)
+    return config
 
 
 __all__ = ["McpAuthorizationRequired", "McpConnectionFailed", "McpServerNotFound", "McpServerService", "McpServiceError"]

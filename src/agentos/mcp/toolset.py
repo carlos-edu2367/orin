@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from agentos.agentic.agent_context import get_current_agent_id
 from agentos.agentic.agent_tools import ToolOutcome, _bounded
-from .models import McpAuthKind, McpServerConfig, McpToolDescriptor, McpTransport, qualified_tool_name
+from .models import McpAuthKind, McpServerConfig, McpServerState, McpToolDescriptor, McpTransport, qualified_tool_name
 from .sanitize import MAX_DESCRIPTION_CHARS
 
 if TYPE_CHECKING:
@@ -140,7 +140,12 @@ def build_client(config: McpServerConfig, secrets: Mapping[str, str], *,
                 f"Bearer {token_val[7:].strip()}" if token_val.lower().startswith("bearer ") else f"Bearer {token_val}"
             )
         headers.update(custom_headers)
-        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source, allow_local=from_file)
+        # A server in Orin's own list may reach a loopback address (an editor's local MCP server) once the person
+        # approved it; while it only waits for approval it stays on the public-HTTPS policy, so a proposal cannot
+        # be pointed at a local service and probed with test_mcp_server before anyone reviewed it.
+        approved = config.state is not McpServerState.PENDING_APPROVAL
+        transport = HttpTransport(url=str(config.url), headers=headers, token_source=token_source,
+                                  allow_local=from_file, allow_loopback=approved)
     return McpClient(transport)
 
 

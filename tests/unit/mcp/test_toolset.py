@@ -779,3 +779,23 @@ def test_without_a_workspace_and_for_other_servers_the_config_is_unchanged(tmp_p
     )
     assert other.definitions()[0].handler().status == "succeeded"
     assert seen[1].cwd is None and "--output-dir" not in seen[1].args
+
+
+def _local_http_config(state: McpServerState) -> McpServerConfig:
+    return McpServerConfig(server_id="s-ue", user_id="u1", slug="unreal", display_name="Unreal",
+                           transport=McpTransport.HTTP, url="http://127.0.0.1:8000/mcp", state=state)
+
+
+def test_build_client_lets_an_approved_server_reach_a_loopback_http_endpoint():
+    from agentos.mcp.toolset import build_client
+
+    client = build_client(_local_http_config(McpServerState.ACTIVE), {})
+    assert client._transport._url == "http://127.0.0.1:8000/mcp"
+
+
+def test_build_client_refuses_a_loopback_endpoint_while_the_server_awaits_approval():
+    from agentos.mcp.toolset import build_client
+    from agentos.mcp.transport_http import HttpTransportRefused
+
+    with pytest.raises(HttpTransportRefused):
+        build_client(_local_http_config(McpServerState.PENDING_APPROVAL), {})

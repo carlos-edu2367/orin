@@ -11,9 +11,16 @@ for the connection httpx actually opens (a DNS-rebinding race). Re-checking
 immediately before each request closes the "validate once, reuse forever" gap;
 it does not eliminate the much narrower race against httpx's own resolution a
 few milliseconds later, which needs a pinned-IP connection to close fully.
+
+``allow_loopback`` admits one exception for a server the person approved: a
+literal loopback address (``127.0.0.0/8``, ``::1`` or ``localhost``) over http
+or https, such as an editor's local MCP server. It is decided from the URL text
+alone, never from DNS, so a public name that resolves to loopback is still
+refused and the rebinding defence above is unchanged.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import urlsplit
@@ -62,12 +69,31 @@ def _same_origin(first_url: str, second_url: str) -> tuple[bool, str]:
     return (first_scheme, first_host, first_port) == (second_scheme, second_host, second_port), (second.hostname or second_url)
 
 
+def is_loopback_url(url: str) -> bool:
+    """An http(s) URL whose host is written as a loopback address or ``localhost`` (no DNS lookup)."""
+    try:
+        parts = urlsplit(str(url))
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 class HttpTransport:
     kind = "http"
 
     def __init__(self, *, url: str, headers: Mapping[str, str] | None = None, token_source: "TokenSource | None" = None,
-                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, allow_local: bool = False) -> None:
+                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT_SECONDS, allow_local: bool = False,
+                 allow_loopback: bool = False) -> None:
         self._allow_local = allow_local
+        self._allow_loopback = allow_loopback
         self._url = self._checked(url)
         self._headers = dict(headers or {})
         self._token_source = token_source
@@ -84,6 +110,8 @@ class HttpTransport:
             # W5: a server the person wrote in a configuration file may be local or plain http (a development server).
             if not str(url).lower().startswith(("http://", "https://")):
                 raise HttpTransportRefused("an MCP endpoint must use http or https")
+            return str(url)
+        if self._allow_loopback and is_loopback_url(url):
             return str(url)
         try:
             normalized = _public_url(url, resolve_dns=True)
@@ -256,4 +284,4 @@ def _events(response: httpx.Response):
 
 
 
-__all__ = ["HttpTransport", "HttpTransportError", "HttpTransportRefused", "HttpUnauthorized"]
+__all__ = ["HttpTransport", "HttpTransportError", "HttpTransportRefused", "HttpUnauthorized", "is_loopback_url"]
