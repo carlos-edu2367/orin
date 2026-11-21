@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import { MarkdownMessage } from './MarkdownMessage'
 import { renderActivityGroup } from './ActivityStream'
 import { CodeToolCallBlock, formatToolSignature, resolveVisualStatus } from './CodeToolCallBlock'
@@ -612,7 +612,7 @@ function ParallelSubagentsGroup({
  * One assistant turn, told in order: narration and the action it triggered,
  * back to back, instead of the finished text followed by a replayed log.
  */
-export function TurnTimeline({
+export const TurnTimeline = memo(function TurnTimeline({
   items,
   events,
   conversationId,
@@ -1448,4 +1448,4 @@ export function TurnTimeline({
       )}
     </div>
   )
-}
+})

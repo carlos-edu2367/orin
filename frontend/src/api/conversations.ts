@@ -76,6 +76,8 @@ export type Conversation = {
   activity_cursor: string
   has_older_activities?: boolean
   oldest_activity_id?: number | null
+  has_older_messages?: boolean
+  oldest_message_sequence?: number | null
   workspace: WorkspaceState
   context_usage: ContextUsage | null
 }
@@ -85,7 +87,7 @@ export type ConversationSummary = Pick<Conversation, 'conversation_id' | 'title'
   permission_mode?: PermissionMode
   updated_at?: string | null
 }
-export type ConversationMessage = { message_id: string; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[]; command: MessageCommand | null; turn_id?: string | null }
+export type ConversationMessage = { message_id: string; sequence?: number; role: 'user' | 'assistant'; content: string; status: string; retryable: boolean; attachments: MessageAttachment[]; command: MessageCommand | null; turn_id?: string | null }
 export type ConversationTurn = { turn_id: string; state: string; created_at: string; started_at: string | null; finished_at: string | null; scheduled_by_schedule_id: string | null; code_mode: 'code' | null }
 
 export type SendMessageInput = {
@@ -150,8 +152,57 @@ export function parseConversationReceipt(value: unknown): ConversationReceipt {
 
 export const parseReceipt = parseConversationReceipt
 
-export function getConversation(client: ApiClient, id: string): Promise<Conversation> {
-  return client.request({ path: `/v1/conversations/${encodeURIComponent(id)}`, parse: parseConversation })
+export type GetConversationOptions = {
+  messageLimit?: number
+  signal?: AbortSignal
+}
+
+export function getConversation(
+  client: ApiClient,
+  id: string,
+  options?: GetConversationOptions,
+): Promise<Conversation> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(id)}`,
+    ...(options?.messageLimit !== undefined ? { query: { message_limit: options.messageLimit } } : {}),
+    ...(options?.signal ? { signal: options.signal } : {}),
+    parse: parseConversation,
+  })
+}
+
+export type OlderMessagesPage = {
+  messages: ConversationMessage[]
+  turns: ConversationTurn[]
+  has_older_messages: boolean
+  oldest_message_sequence: number | null
+}
+
+export function listOlderConversationMessages(
+  client: ApiClient,
+  conversationId: string,
+  beforeSequence: number,
+  limit = 50,
+  signal?: AbortSignal,
+): Promise<OlderMessagesPage> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+    query: { before_sequence: beforeSequence, limit },
+    signal,
+    parse: (value) => {
+      const data = record(value)
+      const rawMessages = Array.isArray(data.messages) ? data.messages : []
+      const rawTurns = Array.isArray(data.turns) ? data.turns : []
+      return {
+        messages: parseConversationMessagesList(rawMessages),
+        turns: parseConversationTurnsList(rawTurns),
+        has_older_messages: data.has_older_messages === true,
+        oldest_message_sequence:
+          typeof data.oldest_message_sequence === 'number' && Number.isFinite(data.oldest_message_sequence)
+            ? data.oldest_message_sequence
+            : null,
+      }
+    },
+  })
 }
 
 export type OlderActivitiesPage = {
@@ -1247,13 +1298,8 @@ export function moveConversationToProject(
   })
 }
 
-export function parseConversation(value: unknown): Conversation {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()
-  const data = value as Record<string, unknown>
-  if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
-  const activities = parseSnapshotActivities(data.activities)
-  const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
-  const turns = data.turns.map((item) => {
+function parseConversationTurnsList(rawTurns: unknown[]): ConversationTurn[] {
+  return rawTurns.map((item) => {
     const t = item as Record<string, unknown>
     return {
       turn_id: string(t.turn_id),
@@ -1265,6 +1311,34 @@ export function parseConversation(value: unknown): Conversation {
       code_mode: t.code_mode === 'code' ? ('code' as const) : null,
     }
   })
+}
+
+function parseConversationMessagesList(rawMessages: unknown[]): ConversationMessage[] {
+  return rawMessages.map((item) => {
+    const m = item as Record<string, unknown>
+    const role = string(m.role)
+    if (role !== 'user' && role !== 'assistant') throw invalidResponseError()
+    return {
+      message_id: string(m.message_id),
+      ...(typeof m.sequence === 'number' && Number.isFinite(m.sequence) ? { sequence: m.sequence } : {}),
+      role,
+      content: typeof m.content === 'string' ? m.content : '',
+      status: string(m.status),
+      retryable: m.retryable === true,
+      attachments: parseMessageAttachments(m.attachments),
+      command: parseMessageCommand(m.command),
+      turn_id: typeof m.turn_id === 'string' && m.turn_id ? m.turn_id : null,
+    }
+  })
+}
+
+export function parseConversation(value: unknown): Conversation {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidResponseError()
+  const data = value as Record<string, unknown>
+  if (!Array.isArray(data.messages) || !Array.isArray(data.turns)) throw invalidResponseError()
+  const activities = parseSnapshotActivities(data.activities)
+  const activityCursor = data.activity_cursor === undefined ? (activities[activities.length - 1]?.cursor ?? '0') : publicId(data.activity_cursor)
+  const turns = parseConversationTurnsList(data.turns)
   const fallbackMode: ConversationMode = turns.some((t) => t.code_mode === 'code') ? 'code' : 'chat'
   const { mode, permission_mode } = parseModeAndPermission(data, fallbackMode)
   const parsedWorkspace = parseWorkspaceState(data.workspace ?? {})
@@ -1282,23 +1356,14 @@ export function parseConversation(value: unknown): Conversation {
     activity_cursor: activityCursor,
     has_older_activities: data.has_older_activities === true,
     oldest_activity_id: typeof data.oldest_activity_id === 'number' && Number.isFinite(data.oldest_activity_id) ? data.oldest_activity_id : null,
+    has_older_messages: data.has_older_messages === true,
+    oldest_message_sequence:
+      typeof data.oldest_message_sequence === 'number' && Number.isFinite(data.oldest_message_sequence)
+        ? data.oldest_message_sequence
+        : null,
     workspace: parsedWorkspace,
     context_usage: parseContextUsage(data.context_usage),
-    messages: data.messages.map((item) => {
-      const m = item as Record<string, unknown>
-      const role = string(m.role)
-      if (role !== 'user' && role !== 'assistant') throw invalidResponseError()
-      return {
-        message_id: string(m.message_id),
-        role,
-        content: typeof m.content === 'string' ? m.content : '',
-        status: string(m.status),
-        retryable: m.retryable === true,
-        attachments: parseMessageAttachments(m.attachments),
-        command: parseMessageCommand(m.command),
-        turn_id: typeof m.turn_id === 'string' && m.turn_id ? m.turn_id : null,
-      }
-    }),
+    messages: parseConversationMessagesList(data.messages),
     turns,
   }
 }

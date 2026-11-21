@@ -3,8 +3,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { createBrowserApiClient } from '../../api/client'
 import {
-  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, moveConversationToProject, sendConversationAgentMessage, sendConversationMessage, startConversationPreview, stopConversationAgent, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
-  type Conversation, type ConversationMessage, type ConversationMode,
+  cancelConversation, createConversation, getConversation, listConversations, listOlderConversationActivities, listOlderConversationMessages, moveConversationToProject, sendConversationAgentMessage, sendConversationMessage, startConversationPreview, stopConversationAgent, streamConversationEvents, submitToolPermission, updateConversationPermissionMode,
+  type Conversation, type ConversationMessage, type ConversationMode, type ConversationTurn,
   getFriendPersona, updateFriendPersona, syncFriendSoul, listFriendMemories, deleteFriendMemory,
   type FriendPersonaState, type FriendMemoryEntry,
 } from '../../api/conversations'
@@ -26,7 +26,6 @@ import {
 import { attachWorkspaceFolder, detachWorkspaceFolder, inspectWorkspaceFolder, type WorkspaceState } from '../../api/workspace'
 import { CommandPalette } from '../../components/CommandPalette'
 import { ModelPicker } from '../../components/ModelPicker'
-import { OrinMascot } from '../../components/OrinMascot'
 import { OrinActivityCenter } from '../../components/OrinActivityCenter'
 import {
   enqueueMessage, forkConversation, getFileHistory, listCommandCatalog, listQueue, removeQueued, renameConversation, rewindCode,
@@ -66,9 +65,7 @@ import { LiveVoiceQuickSettings } from './LiveVoiceQuickSettings'
 import { LiveVoiceStage, type LiveVoiceTranscriptItem } from './LiveVoiceStage'
 import { CodeSessionLiveCard } from './CodeSessionLiveCard'
 import { ContextIndicator } from './ContextIndicator'
-import { MarkdownMessage } from './MarkdownMessage'
-import { MessageCommandChip } from './MessageCommandChip'
-import { MessageAttachments } from './MessageAttachments'
+import { ChatMessageRow } from './ChatMessageRow'
 import { PushNotificationToast, isFreshNotice, type PushNotice } from './PushNotificationToast'
 import { StatusLineBar } from './StatusLineBar'
 import { TasksPanel } from './TasksPanel'
@@ -93,6 +90,9 @@ import { useSessionStore } from '../sessions/sessionStore'
 
 const TOOL_CAPABILITY_NAMES = new Set(['tools', 'tool_use', 'function_calling'])
 const MAX_MESSAGE_CHARACTERS = 16000
+const SNAPSHOT_MESSAGE_LIMIT = 50
+const INITIAL_MESSAGE_WINDOW = 40
+const MESSAGE_WINDOW_STEP = 40
 
 function buildOversizedPromptMessage(rawText: string): string {
   const firstLine = rawText
@@ -270,6 +270,11 @@ export function ChatPage() {
   const [hasOlderActivities, setHasOlderActivities] = useState(false)
   const [oldestActivityId, setOldestActivityId] = useState<number | null>(null)
   const [loadingOlderActivities, setLoadingOlderActivities] = useState(false)
+  const [hasOlderMessages, setHasOlderMessages] = useState(false)
+  const [oldestMessageSequence, setOldestMessageSequence] = useState<number | null>(null)
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false)
+  const [visibleMessageCount, setVisibleMessageCount] = useState(INITIAL_MESSAGE_WINDOW)
+  const [historicalMessageIds, setHistoricalMessageIds] = useState<ReadonlySet<string>>(() => new Set())
 
   const cursorRef = useRef('0')
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -278,6 +283,9 @@ export function ChatPage() {
   // Chat offset when the Cena opened, restored when the reader comes back.
   const chatScrollRestoreRef = useRef<{ conversationId: string; top: number } | null>(null)
   const loadingOlderRef = useRef(false)
+  const loadingOlderMessagesRef = useRef(false)
+  const pendingPrependScrollRef = useRef<{ scrollHeight: number; scrollTop: number; activityId?: number | null } | null>(null)
+  const autoActivityBlockedIdRef = useRef<number | null>(null)
   const observedContentRef = useRef(new Set<string>())
   const observedConversationRef = useRef(conversationId)
   const streamedDeltaIdsRef = useRef(new Set<string>())
@@ -285,6 +293,9 @@ export function ChatPage() {
   const userChangedPermissionRef = useRef(false)
   useEffect(() => {
     userChangedPermissionRef.current = false
+    loadingOlderMessagesRef.current = false
+    pendingPrependScrollRef.current = null
+    autoActivityBlockedIdRef.current = null
   }, [conversationId])
 
   const conversationMode: ConversationMode = useMemo(() => {
@@ -303,8 +314,59 @@ export function ChatPage() {
     : `/projects/${encodeURIComponent(projectId)}/chats/${encodeURIComponent(conversationId)}`
 
   const loadSnapshot = useCallback(async (resetActivity: boolean) => {
-    const next = await getConversation(client, conversationId)
-    setConversation(next)
+    const next = await getConversation(client, conversationId, { messageLimit: SNAPSHOT_MESSAGE_LIMIT })
+    if (resetActivity) {
+      setHistoricalMessageIds(new Set(next.messages.map((m) => m.message_id)))
+      setConversation(next)
+      setHasOlderMessages(Boolean(next.has_older_messages))
+      setOldestMessageSequence(next.oldest_message_sequence ?? null)
+      setLoadingOlderMessages(false)
+      loadingOlderMessagesRef.current = false
+      setVisibleMessageCount(INITIAL_MESSAGE_WINDOW)
+    } else {
+      setConversation((current) => {
+        if (!current || current.conversation_id !== next.conversation_id) {
+          setHasOlderMessages(Boolean(next.has_older_messages))
+          setOldestMessageSequence(next.oldest_message_sequence ?? null)
+          return next
+        }
+        if (!next.has_older_messages) {
+          setHasOlderMessages(false)
+          setOldestMessageSequence(null)
+          return next
+        }
+        const nextMsgIds = new Set(next.messages.map((m) => m.message_id))
+        const firstNextSeq = next.messages[0]?.sequence
+        const olderKept = current.messages.filter(
+          (m) =>
+            !nextMsgIds.has(m.message_id) &&
+            (firstNextSeq === undefined || m.sequence === undefined || m.sequence < firstNextSeq),
+        )
+        if (olderKept.length === 0) {
+          setHasOlderMessages(Boolean(next.has_older_messages))
+          setOldestMessageSequence(next.oldest_message_sequence ?? null)
+          return next
+        }
+        const nextTurnMap = new Map<string, ConversationTurn>(next.turns.map((t) => [t.turn_id, t]))
+        const mergedTurns: ConversationTurn[] = []
+        const seenTurnIds = new Set<string>()
+        for (const t of current.turns) {
+          const updated = nextTurnMap.get(t.turn_id) ?? t
+          mergedTurns.push(updated)
+          seenTurnIds.add(t.turn_id)
+        }
+        for (const t of next.turns) {
+          if (!seenTurnIds.has(t.turn_id)) {
+            mergedTurns.push(t)
+          }
+        }
+        return {
+          ...next,
+          messages: [...olderKept, ...next.messages],
+          turns: mergedTurns,
+        }
+      })
+    }
     if (!userChangedPermissionRef.current) {
       const resolvedPerm = next.permission_mode ?? (next.mode === 'code' ? 'accept_edits' : 'ask_permissions')
       setCodePermissionMode(normalizeCodePermissionMode(resolvedPerm))
@@ -315,6 +377,7 @@ export function ChatPage() {
       setOldestActivityId(next.oldest_activity_id ?? null)
       setLoadingOlderActivities(false)
       loadingOlderRef.current = false
+      autoActivityBlockedIdRef.current = null
       dispatch({ type: 'snapshot', events: next.activities, cursor: next.activity_cursor })
     } else if (next.state !== 'working' && !RUNNING_STATES.has(next.state)) {
       if (next.activity_cursor) {
@@ -335,16 +398,87 @@ export function ChatPage() {
     return next
   }, [client, conversationId])
 
+  const loadOlderMessages = useCallback(async (inMemoryHiddenCount = 0) => {
+    if (inMemoryHiddenCount > 0) {
+      const el = scrollRef.current
+      if (el) {
+        pendingPrependScrollRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+      }
+      pinnedRef.current = false
+      setVisibleMessageCount((prev) => prev + MESSAGE_WINDOW_STEP)
+      return
+    }
+    if (!hasOlderMessages || oldestMessageSequence === null || loadingOlderMessagesRef.current) return
+    loadingOlderMessagesRef.current = true
+    setLoadingOlderMessages(true)
+    try {
+      const page = await listOlderConversationMessages(client, conversationId, oldestMessageSequence, MESSAGE_WINDOW_STEP)
+      const el = scrollRef.current
+      if (el) {
+        pendingPrependScrollRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop }
+      }
+      pinnedRef.current = false
+      for (const m of page.messages) {
+        observedContentRef.current.add(`message:${m.message_id}:${m.status}:${m.content.length}`)
+      }
+      if (page.messages.length > 0) {
+        setHistoricalMessageIds((prev) => {
+          const nextIds = new Set(prev)
+          for (const m of page.messages) nextIds.add(m.message_id)
+          return nextIds
+        })
+        setConversation((current) => {
+          if (!current || current.conversation_id !== conversationId) return current
+          const existingIds = new Set(current.messages.map((m) => m.message_id))
+          const prepended = page.messages.filter((m) => !existingIds.has(m.message_id))
+          if (prepended.length === 0) return current
+          const existingTurnIds = new Set(current.turns.map((t) => t.turn_id))
+          const prependedTurns = page.turns.filter((t) => !existingTurnIds.has(t.turn_id))
+          setVisibleMessageCount((prev) => prev + prepended.length)
+          return {
+            ...current,
+            messages: [...prepended, ...current.messages],
+            turns: [...prependedTurns, ...current.turns],
+          }
+        })
+      }
+      if (
+        page.messages.length === 0 ||
+        !page.has_older_messages ||
+        page.oldest_message_sequence === null ||
+        page.oldest_message_sequence === oldestMessageSequence
+      ) {
+        setHasOlderMessages(false)
+        setOldestMessageSequence(null)
+      } else {
+        setHasOlderMessages(true)
+        setOldestMessageSequence(page.oldest_message_sequence)
+      }
+    } catch {
+      // Ignore transient pagination errors so the user can retry by scrolling/clicking
+    } finally {
+      loadingOlderMessagesRef.current = false
+      setLoadingOlderMessages(false)
+    }
+  }, [client, conversationId, hasOlderMessages, oldestMessageSequence])
+
   const loadOlderActivities = useCallback(async () => {
     if (!hasOlderActivities || oldestActivityId === null || loadingOlderRef.current) return
     loadingOlderRef.current = true
     setLoadingOlderActivities(true)
-    const scrollEl = scrollRef.current
-    const prevScrollHeight = scrollEl?.scrollHeight ?? 0
-    const prevScrollTop = scrollEl?.scrollTop ?? 0
+    const requestOldestId = oldestActivityId
     try {
-      const page = await listOlderConversationActivities(client, conversationId, oldestActivityId, 150)
-      if (page.activities.length === 0 || !page.has_older_activities || page.oldest_activity_id === oldestActivityId) {
+      const page = await listOlderConversationActivities(client, conversationId, requestOldestId, 150)
+      const scrollEl = scrollRef.current
+      const nextOldest = page.has_older_activities ? page.oldest_activity_id : null
+      if (scrollEl && page.activities.length > 0) {
+        pendingPrependScrollRef.current = {
+          scrollHeight: scrollEl.scrollHeight,
+          scrollTop: scrollEl.scrollTop,
+          activityId: nextOldest,
+        }
+      }
+      if (page.activities.length === 0 || !page.has_older_activities || page.oldest_activity_id === requestOldestId) {
         if (page.activities.length > 0) {
           for (const item of page.activities) {
             observedContentRef.current.add(`activity:${item.eventId}`)
@@ -363,15 +497,6 @@ export function ChatPage() {
         setHasOlderActivities(true)
         setOldestActivityId(page.oldest_activity_id)
       }
-      requestAnimationFrame(() => {
-        const el = scrollRef.current
-        if (el && prevScrollHeight > 0) {
-          const delta = el.scrollHeight - prevScrollHeight
-          if (delta > 0) {
-            el.scrollTop = prevScrollTop + delta
-          }
-        }
-      })
     } catch {
       // Ignore transient pagination errors so the user can retry by scrolling/clicking
     } finally {
@@ -379,14 +504,6 @@ export function ChatPage() {
       setLoadingOlderActivities(false)
     }
   }, [client, conversationId, hasOlderActivities, oldestActivityId])
-
-  useEffect(() => {
-    if (loading || !hasOlderActivities || loadingOlderActivities || loadingOlderRef.current) return
-    const el = scrollRef.current
-    if (el && el.scrollTop < 250 && !pinnedRef.current) {
-      void loadOlderActivities()
-    }
-  }, [hasOlderActivities, loadOlderActivities, loading, loadingOlderActivities, oldestActivityId])
 
   useEffect(() => {
     let cancelled = false
@@ -728,6 +845,11 @@ export function ChatPage() {
     setChangedFilesExpanded(false)
     setHasOlderActivities(false)
     setOldestActivityId(null)
+    setHasOlderMessages(false)
+    setOldestMessageSequence(null)
+    setLoadingOlderMessages(false)
+    setVisibleMessageCount(INITIAL_MESSAGE_WINDOW)
+    setHistoricalMessageIds(new Set())
     dispatch({ type: 'snapshot', events: [], cursor: '0' })
   } else if (conversation && conversation.conversation_id === conversationId && selectionFor !== conversationId) {
     const initialProvider = asProviderName(conversation.provider)
@@ -1051,28 +1173,75 @@ export function ChatPage() {
     })
   }, [activity.events, closedQuestionEventIds, resolvedPermissionDecisions])
 
-  // Each assistant message gets its own text/action timeline, folded from the
+  const hiddenMessageCount = Math.max(0, messages.length - visibleMessageCount)
+  const visibleMessages = useMemo(
+    () => (hiddenMessageCount > 0 ? messages.slice(hiddenMessageCount) : messages),
+    [hiddenMessageCount, messages],
+  )
+  const conversationTurns = conversation?.turns
+  const turnById = useMemo(
+    () => new Map((conversationTurns ?? []).map((t) => [t.turn_id, t])),
+    [conversationTurns],
+  )
+  const chatModelsByProvider = useMemo(
+    () => (effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined),
+    [chatModels, effectiveChatProvider],
+  )
+  const visibleStickyItems = useMemo(
+    () =>
+      visibleMessages
+        .filter((item) => item.role === 'user' && (item.content.trim().length > 0 || item.attachments.length > 0))
+        .map((item) => ({ id: item.message_id, content: item.content, attachments: item.attachments })),
+    [visibleMessages],
+  )
+
+  // Each visible assistant message gets its own text/action timeline, folded from the
   // turn it belongs to; a turn no message could claim (still running before
   // its first delta, or older than the 500-event window) stays visible
   // through the flat stream below instead of disappearing.
   const { timelines: timelinesByMessage, claimedTurnIds } = useMemo(
-    () => buildMessageTimelines(messages, consolidatedEvents),
-    [messages, consolidatedEvents],
+    () => buildMessageTimelines(visibleMessages, consolidatedEvents),
+    [visibleMessages, consolidatedEvents],
   )
+  const olderHiddenTurnIds = useMemo(() => {
+    const visibleTurnIds = new Set<string>()
+    let firstVisibleTurnId: string | null = null
+    for (const m of visibleMessages) {
+      if (m.turn_id) {
+        visibleTurnIds.add(m.turn_id)
+        if (!firstVisibleTurnId) firstVisibleTurnId = m.turn_id
+      }
+    }
+    const hidden = new Set<string>()
+    if (hiddenMessageCount > 0) {
+      for (let i = 0; i < hiddenMessageCount; i += 1) {
+        const tid = messages[i]?.turn_id
+        if (tid && !visibleTurnIds.has(tid)) hidden.add(tid)
+      }
+    }
+    if (firstVisibleTurnId && conversationTurns) {
+      for (const t of conversationTurns) {
+        if (t.turn_id === firstVisibleTurnId) break
+        if (!visibleTurnIds.has(t.turn_id)) hidden.add(t.turn_id)
+      }
+    }
+    return hidden
+  }, [conversationTurns, hiddenMessageCount, messages, visibleMessages])
   const hasTerminalPlaceholderMessage = useMemo(
-    () => messages.some((m) => m.role === 'assistant' && !m.content.trim() && (m.status === 'cancelled' || m.status === 'failed' || m.status === 'completed')),
-    [messages],
+    () => visibleMessages.some((m) => m.role === 'assistant' && !m.content.trim() && (m.status === 'cancelled' || m.status === 'failed' || m.status === 'completed')),
+    [visibleMessages],
   )
   const unclaimedEvents = useMemo(
     () => consolidatedEvents.filter((event) => {
       if (claimedTurnIds.has(event.turnId ?? '') || event.type.startsWith('context.')) return false
+      if (event.turnId && olderHiddenTurnIds.has(event.turnId)) return false
       const term = terminalConversationState(event)
       if (hasTerminalPlaceholderMessage && event.kind === 'lifecycle' && (term === 'cancelled' || term === 'failed' || term === 'completed')) {
         return false
       }
       return true
     }),
-    [consolidatedEvents, claimedTurnIds, hasTerminalPlaceholderMessage],
+    [consolidatedEvents, claimedTurnIds, olderHiddenTurnIds, hasTerminalPlaceholderMessage],
   )
   const contextUsage = useMemo(
     () => [...activity.events].reverse().find((event) => event.contextUsage)?.contextUsage ?? conversation?.context_usage ?? null,
@@ -1424,7 +1593,7 @@ export function ChatPage() {
   // when its durable message id already existed as an empty placeholder.
   useEffect(() => {
     const content = new Set([
-      ...messages.map((item) => `message:${item.message_id}:${item.content}`),
+      ...messages.map((item) => `message:${item.message_id}:${item.status}:${item.content.length}`),
       // A delta's visible representation is the assistant message above; it
       // must not increment the return action twice just because the same
       // update also exists in the append-only event log.
@@ -1450,6 +1619,23 @@ export function ChatPage() {
   }, [activity.events, conversationId, messages])
 
   useLayoutEffect(() => {
+    const pendingPrepend = pendingPrependScrollRef.current
+    if (pendingPrepend && !sceneOpen) {
+      pendingPrependScrollRef.current = null
+      const el = scrollRef.current
+      if (el && pendingPrepend.scrollHeight > 0) {
+        const delta = el.scrollHeight - pendingPrepend.scrollHeight
+        if (delta > 0) {
+          el.scrollTop = pendingPrepend.scrollTop + delta
+          autoActivityBlockedIdRef.current = null
+        } else if (pendingPrepend.activityId !== undefined) {
+          // Prepending older activities did not grow scrollHeight; suppress further automatic
+          // scroll-triggered activity fetches for this cursor so we never enter a runaway loop.
+          autoActivityBlockedIdRef.current = pendingPrepend.activityId
+        }
+      }
+      return
+    }
     // The Cena shares this scroll container: live events must not drag it to the bottom.
     if (!pinnedRef.current || sceneOpen) return
     const element = scrollRef.current
@@ -1460,7 +1646,7 @@ export function ChatPage() {
     // are intentionally immediate; smooth scrolling is reserved for the
     // explicit "Ir para o fim" action below.
     element.scrollTop = element.scrollHeight
-  }, [messages, activity.events, activity.cursor, showAgentPulse, sceneOpen])
+  }, [visibleMessages, activity.events, activity.cursor, showAgentPulse, sceneOpen])
 
   useLayoutEffect(() => {
     const element = scrollRef.current
@@ -1815,6 +2001,22 @@ export function ChatPage() {
       // Ignore clipboard failures in restricted environments.
     }
   }, [])
+
+  const handleCopyAssistantMessage = useCallback(
+    (messageId: string, content: string) => {
+      void copyAssistantMessage(messageId, content)
+    },
+    [copyAssistantMessage],
+  )
+
+  const handleRetryMessage = useCallback((content: string) => {
+    setMessage(content)
+    setError(null)
+  }, [])
+
+  const handleLoadOlderActivities = useCallback(() => {
+    void loadOlderActivities()
+  }, [loadOlderActivities])
 
   /** W7-R13: one submit at a time, so a second Enter while a command (`/fork`, `/compact`…) runs does not run it again. */
   /**
@@ -2176,6 +2378,13 @@ export function ChatPage() {
       setRewindState({ history: [], busy: false, error: null, initialMessageId })
     }
   }
+  const openRewindRef = useRef(openRewind)
+  useEffect(() => {
+    openRewindRef.current = openRewind
+  })
+  const handleOpenRewindTurn = useCallback((turnId: string) => {
+    void openRewindRef.current(turnId)
+  }, [])
 
   async function rewindTo(messageId: string, mode: RewindMode, forceUnbacked: readonly string[] = []) {
     setRewindState((current) => (current ? { ...current, busy: true, error: null } : current))
@@ -2807,17 +3016,25 @@ export function ChatPage() {
           pinnedRef.current = nextAtBottom
           setAtBottom((current) => current === nextAtBottom ? current : nextAtBottom)
           if (nextAtBottom) setNewActivityCount(0)
-          if (element.scrollTop < 250 && hasOlderActivities && !loadingOlderRef.current) {
-            void loadOlderActivities()
+          const isScrollable = element.scrollHeight > element.clientHeight + 40
+          if (isScrollable && !nextAtBottom && element.scrollTop < 220) {
+            if ((hiddenMessageCount > 0 || hasOlderMessages) && !loadingOlderMessagesRef.current) {
+              void loadOlderMessages(hiddenMessageCount)
+            } else if (
+              hasOlderActivities &&
+              !loadingOlderRef.current &&
+              oldestActivityId !== null &&
+              autoActivityBlockedIdRef.current !== oldestActivityId
+            ) {
+              void loadOlderActivities()
+            }
           }
         }}>
           {!sceneOpen && !loadFailure && (
             <StickyUserMessage
               scrollRef={scrollRef}
               reducedMotion={Boolean(reduced)}
-              items={messages
-                .filter((item) => item.role === 'user' && (item.content.trim().length > 0 || item.attachments.length > 0))
-                .map((item) => ({ id: item.message_id, content: item.content, attachments: item.attachments }))}
+              items={visibleStickyItems}
             />
           )}
           {sceneOpen ? (
@@ -2868,219 +3085,155 @@ export function ChatPage() {
             {loading && <p className="chat__placeholder" role="status">Carregando conversa…</p>}
             {!loading && messages.length === 0 && <p className="chat__placeholder">Esta conversa ainda não tem mensagens.</p>}
 
+            {!loading && !loadFailure && (hiddenMessageCount > 0 || hasOlderMessages) && (
+              <div className="flex justify-center py-2">
+                <button
+                  type="button"
+                  data-testid="load-older-messages"
+                  disabled={loadingOlderMessages}
+                  onClick={() => { void loadOlderMessages(hiddenMessageCount) }}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-3.5 py-1 text-[12px] text-[var(--text-secondary)] hover:border-[var(--accent-primary)] hover:text-[var(--text-primary)] disabled:opacity-60 transition-colors"
+                >
+                  {loadingOlderMessages
+                    ? 'Carregando mensagens anteriores…'
+                    : hiddenMessageCount > 0
+                      ? `↑ Mostrar mensagens anteriores (${hiddenMessageCount}${hasOlderMessages ? '+' : ''})`
+                      : '↑ Carregar mensagens anteriores'}
+                </button>
+              </div>
+            )}
+
             {!loadFailure && (() => {
               const oldestTurnIdWithActivity = consolidatedEvents.find((ev) => Boolean(ev.turnId))?.turnId
               const matchingOldestIdx = oldestTurnIdWithActivity
-                ? messages.findIndex((m) => m.role === 'assistant' && m.turn_id === oldestTurnIdWithActivity)
+                ? visibleMessages.findIndex((m) => m.role === 'assistant' && m.turn_id === oldestTurnIdWithActivity)
                 : -1
-              const firstAssistantWithTimelineIdx = messages.findIndex(
+              const firstAssistantWithTimelineIdx = visibleMessages.findIndex(
                 (m) => m.role === 'assistant' && (timelinesByMessage.get(m.message_id)?.length ?? 0) > 0,
               )
-              const firstAssistantIdx = messages.findIndex((m) => m.role === 'assistant')
+              const firstAssistantIdx = visibleMessages.findIndex((m) => m.role === 'assistant')
               const targetOlderIdx =
                 matchingOldestIdx !== -1
                   ? matchingOldestIdx
                   : firstAssistantWithTimelineIdx !== -1
                     ? firstAssistantWithTimelineIdx
                     : firstAssistantIdx
-              return messages.map((item, itemIndex) => {
-              const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
-              const isEarliestPartialTurn = Boolean(
-                hasOlderActivities
-                && item.role === 'assistant'
-                && itemIndex === targetOlderIdx,
-              )
-              // An answer a live turn read from the queue does not end that turn, nor does a message queued as a new
-              // turn behind a turn that is still live (its question card must stay answerable).
-              const itemTurnStillLive = item.role === 'assistant' && isLiveTurn(item.turn_id)
-              const hasSubsequentUserMessage = !itemTurnStillLive
-                && messages.slice(itemIndex + 1).some((candidate) => candidate.role === 'user' && !isQueuedAnswerMessage(candidate))
-              const timelineTurnIds = timeline
-                ? Array.from(
-                    new Set(
-                      timeline.flatMap((seg) =>
-                        seg.kind === 'activity'
-                          ? seg.group.events.map((ev) => ev.turnId).filter((id): id is string => Boolean(id))
-                          : seg.kind === 'thought' && seg.thought.turnId
-                            ? [seg.thought.turnId]
-                            : [],
-                      ),
-                    ),
-                  )
-                : []
-              const isTurnWaitingOnUser = timelineTurnIds.some((tid) => openQuestionTurnIds.has(tid))
-              const isTurnFinished =
-                hasSubsequentUserMessage
-                || (!isTurnWaitingOnUser && (
-                  item.status === 'completed'
-                  || item.status === 'failed'
-                  || item.status === 'cancelled'
-                ))
-                || timelineTurnIds.some((tid) => {
-                  if (cancelledTurnIds.has(tid) || decidedPlanKeys.has(tid)) return true
-                  const turnRecord = conversation?.turns.find((t) => t.turn_id === tid)
-                  return turnRecord ? (turnRecord.state === 'completed' || turnRecord.state === 'failed' || turnRecord.state === 'cancelled') : false
-                })
-              const effectiveOpenQuestionTurnIds = isTurnFinished ? EMPTY_TURN_IDS : openQuestionTurnIds
-              const messageTurnId = item.role === 'assistant'
-                ? (item.turn_id ?? timelineTurnIds[0] ?? resolveTurnId(consolidatedEvents, item.message_id))
-                : null
-              const matchedTurn = messageTurnId
-                ? conversation?.turns.find((t) => t.turn_id === messageTurnId)
-                : undefined
-              const isCompletedSuccessTurn = Boolean(
-                matchedTurn
-                && (matchedTurn.state === 'completed' || matchedTurn.state === 'completed_with_caveats')
-                && !cancelledTurnIds.has(matchedTurn.turn_id),
-              )
-              const turnWorkDurationLabel = isCompletedSuccessTurn
-                ? formatTurnWorkDuration(matchedTurn?.started_at, matchedTurn?.finished_at)
-                : null
-              const retrySource = item.role === 'assistant' && item.retryable
-                ? messages.slice(0, itemIndex).reverse().find((candidate) => candidate.role === 'user' && candidate.content.trim())
-                : undefined
-              return (
-                <motion.article
-                  key={item.message_id}
-                  className={`bubble bubble--${item.role}`}
-                  data-sticky-user-id={item.role === 'user' ? item.message_id : undefined}
-                  initial={reduced ? false : { opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ duration: 0.24, ease: [0.22, 0.61, 0.36, 1] }}
-                >
-                  {item.role === 'assistant' && (
-                    <div className="chat__assistant-mascot" data-testid="assistant-turn-mascot">
-                      <OrinMascot size={28} variant="flat" ariaHidden />
-                    </div>
-                  )}
-                  {item.role === 'user' && (
-                    <span className="chat__user-avatar" data-testid="user-message-avatar" aria-hidden="true">
-                      {userInitial}
-                    </span>
-                  )}
-                  {isEarliestPartialTurn && (
-                    <div className="flex justify-start pb-2">
-                      <button
-                        type="button"
-                        data-testid="load-older-activities"
-                        disabled={loadingOlderActivities}
-                        onClick={() => { void loadOlderActivities() }}
-                        className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-3 py-1 text-[12px] text-[var(--text-secondary)] hover:border-[var(--accent-primary)] hover:text-[var(--text-primary)] disabled:opacity-60 transition-colors"
-                      >
-                        {loadingOlderActivities ? 'Carregando atividades anteriores…' : '↑ Carregar atividades anteriores deste turno'}
-                      </button>
-                    </div>
-                  )}
-                  {timeline
-                    ? (() => {
-                        const timelineTextSegments = timeline.filter(
-                          (seg): seg is { id: string; kind: 'text'; content: string } => seg.kind === 'text',
-                        )
-                        const combinedTimelineText = timelineTextSegments.map((seg) => seg.content).join('')
-                        const trimmedContent = item.content?.trim() ?? ''
-                        const trimmedTimelineText = combinedTimelineText.trim()
-                        const missingFinalContent =
-                          item.role === 'assistant' &&
-                          (item.status === 'completed' || isTurnFinished) &&
-                          trimmedContent.length > 0 &&
-                          trimmedTimelineText !== trimmedContent &&
-                          !combinedTimelineText.includes(trimmedContent)
-                            ? combinedTimelineText.length > 0 && item.content.startsWith(combinedTimelineText)
-                              ? item.content.slice(combinedTimelineText.length).trim()
-                              : trimmedContent
-                            : ''
 
-                        return (
-                          <>
-                            <TurnTimeline
-                              items={timeline}
-                              conversationId={conversationId}
-                              client={client}
-                              defaultProvider={effectiveChatProvider ?? undefined}
-                              defaultModelId={effectiveChatModelId || undefined}
-                              models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
-                              mode={conversationMode}
-                              permissionMode={codePermissionMode}
-                              turnCompleted={isTurnFinished}
-                              turnStartedAt={isCompletedSuccessTurn ? matchedTurn?.started_at : null}
-                              turnFinishedAt={isCompletedSuccessTurn ? matchedTurn?.finished_at : null}
-                              dockActive={true}
-                              onPreview={setPreviewReference}
-                              openQuestionTurnIds={effectiveOpenQuestionTurnIds}
-                              onAnswer={submitQuestionAnswers}
-                              onMcpApprove={submitMcpApproval}
-                              onMcpDecline={declineMcpApproval}
-                              onPluginApprove={submitPluginApproval}
-                              onPluginDecline={declinePluginApproval}
-                              onToolPermission={submitToolPermissionDecision}
-                              onCodeSessionAccept={submitCodeSessionProposal}
-                              onCodeSessionDecline={declineCodeSessionProposal}
-                              onOpenRewindTurn={(turnId) => { void openRewind(turnId) }}
-                              onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
-                              onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
-                              onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
-                            />
-                            {missingFinalContent.length > 0 && (
-                              <MarkdownMessage
-                                content={missingFinalContent}
-                                conversationId={conversationId}
-                                client={client}
-                                onPreview={setPreviewReference}
-                              />
-                            )}
-                          </>
-                        )
-                      })()
-                    : item.role === 'assistant' && item.content
-                      ? (
-                        <>
-                          <MarkdownMessage content={item.content} conversationId={conversationId} client={client} onPreview={setPreviewReference} />
-                          {turnWorkDurationLabel && (
-                            <div
-                              className="turn-timeline__work-duration font-mono text-[11px] text-[var(--text-secondary)] pt-1"
-                              data-testid="turn-work-duration"
-                            >
-                              {turnWorkDurationLabel}
-                            </div>
-                          )}
-                        </>
-                      )
-                      : item.command
-                        ? <MessageCommandChip command={item.command} />
-                        : item.role === 'assistant' && !item.content && (item.status === 'streaming' || item.status === 'queued')
-                          ? (
-                            <div className="assistant-live-placeholder" data-testid="assistant-live-placeholder">
-                              <span className="agent-pulse__dot" aria-hidden="true" />
-                              <span className="agent-pulse__label--shimmer">
-                                {item.status === 'queued' ? 'Na fila…' : 'Pensando…'}
-                              </span>
-                            </div>
-                          )
-                          : <p>{item.content || placeholderFor(item)}</p>}
-                  {item.role === 'assistant' && item.content.trim().length > 0 && item.status === 'completed' && (
-                    <div className="bubble__actions" style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '6px' }}>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        aria-label="Copiar resposta"
-                        data-testid={`copy-message-${item.message_id}`}
-                        onClick={() => { void copyAssistantMessage(item.message_id, item.content) }}
-                        style={{ fontSize: '11px', padding: '2px 8px' }}
-                      >
-                        {copiedMessageId === item.message_id ? 'Copiado' : 'Copiar resposta'}
-                      </button>
-                    </div>
-                  )}
-                  {item.role === 'user' && item.attachments.length > 0 && (
-                    <MessageAttachments conversationId={conversationId} items={item.attachments} client={client} onPreview={setPreviewReference} />
-                  )}
-                  {item.retryable && <div className="bubble__retry">
-                    <span role="status">Você pode tentar novamente sem perder a solicitação.</span>
-                    {retrySource && <button type="button" className="ghost-button" disabled={running} onClick={() => { setMessage(retrySource.content); setError(null) }}>Usar solicitação novamente</button>}
-                  </div>}
-                </motion.article>
-              )
-            })
+              let lastNonAnswerUserIdx = -1
+              for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+                const candidate = visibleMessages[i]
+                if (candidate.role === 'user' && !isQueuedAnswerMessage(candidate)) {
+                  lastNonAnswerUserIdx = i
+                  break
+                }
+              }
+
+              return visibleMessages.map((item, itemIndex) => {
+                const timeline = item.role === 'assistant' ? timelinesByMessage.get(item.message_id) : undefined
+                const isEarliestPartialTurn = Boolean(
+                  hasOlderActivities
+                  && !hasOlderMessages
+                  && hiddenMessageCount === 0
+                  && item.role === 'assistant'
+                  && itemIndex === targetOlderIdx,
+                )
+                const itemTurnStillLive = item.role === 'assistant' && isLiveTurn(item.turn_id)
+                const hasSubsequentUserMessage = !itemTurnStillLive && lastNonAnswerUserIdx > itemIndex
+                const timelineTurnIds = timeline
+                  ? Array.from(
+                      new Set(
+                        timeline.flatMap((seg) =>
+                          seg.kind === 'activity'
+                            ? seg.group.events.map((ev) => ev.turnId).filter((id): id is string => Boolean(id))
+                            : seg.kind === 'thought' && seg.thought.turnId
+                              ? [seg.thought.turnId]
+                              : [],
+                        ),
+                      ),
+                    )
+                  : []
+                const isTurnWaitingOnUser = timelineTurnIds.some((tid) => openQuestionTurnIds.has(tid))
+                const isTurnFinished =
+                  hasSubsequentUserMessage
+                  || (!isTurnWaitingOnUser && (
+                    item.status === 'completed'
+                    || item.status === 'failed'
+                    || item.status === 'cancelled'
+                  ))
+                  || timelineTurnIds.some((tid) => {
+                    if (cancelledTurnIds.has(tid) || decidedPlanKeys.has(tid)) return true
+                    const turnRecord = turnById.get(tid)
+                    return turnRecord ? (turnRecord.state === 'completed' || turnRecord.state === 'failed' || turnRecord.state === 'cancelled') : false
+                  })
+                const effectiveOpenQuestionTurnIds = isTurnFinished ? EMPTY_TURN_IDS : openQuestionTurnIds
+                const messageTurnId = item.role === 'assistant'
+                  ? (item.turn_id ?? timelineTurnIds[0] ?? resolveTurnId(consolidatedEvents, item.message_id))
+                  : null
+                const matchedTurn = messageTurnId ? turnById.get(messageTurnId) : undefined
+                const isCompletedSuccessTurn = Boolean(
+                  matchedTurn
+                  && (matchedTurn.state === 'completed' || matchedTurn.state === 'completed_with_caveats')
+                  && !cancelledTurnIds.has(matchedTurn.turn_id),
+                )
+                const turnWorkDurationLabel = isCompletedSuccessTurn
+                  ? formatTurnWorkDuration(matchedTurn?.started_at, matchedTurn?.finished_at)
+                  : null
+                let retryContent: string | undefined
+                if (item.role === 'assistant' && item.retryable) {
+                  const globalIdx = hiddenMessageCount + itemIndex
+                  for (let r = globalIdx - 1; r >= 0; r -= 1) {
+                    const candidate = messages[r]
+                    if (candidate.role === 'user' && candidate.content.trim()) {
+                      retryContent = candidate.content
+                      break
+                    }
+                  }
+                }
+                const animateEntrance = !reduced && !historicalMessageIds.has(item.message_id)
+
+                return (
+                  <ChatMessageRow
+                    key={item.message_id}
+                    item={item}
+                    timeline={timeline}
+                    conversationId={conversationId}
+                    client={client}
+                    userInitial={userInitial}
+                    animateEntrance={animateEntrance}
+                    isEarliestPartialTurn={isEarliestPartialTurn}
+                    loadingOlderActivities={loadingOlderActivities}
+                    onLoadOlderActivities={handleLoadOlderActivities}
+                    conversationMode={conversationMode}
+                    codePermissionMode={codePermissionMode}
+                    defaultProvider={effectiveChatProvider ?? undefined}
+                    defaultModelId={effectiveChatModelId || undefined}
+                    models={chatModelsByProvider}
+                    isTurnFinished={isTurnFinished}
+                    turnStartedAt={isCompletedSuccessTurn ? (matchedTurn?.started_at ?? null) : null}
+                    turnFinishedAt={isCompletedSuccessTurn ? (matchedTurn?.finished_at ?? null) : null}
+                    turnWorkDurationLabel={turnWorkDurationLabel}
+                    openQuestionTurnIds={effectiveOpenQuestionTurnIds}
+                    isCopied={copiedMessageId === item.message_id}
+                    retryContent={retryContent}
+                    retryDisabled={item.retryable ? running : false}
+                    onCopy={handleCopyAssistantMessage}
+                    onRetry={handleRetryMessage}
+                    onPreview={setPreviewReference}
+                    onOpenRewindTurn={handleOpenRewindTurn}
+                    onAnswer={submitQuestionAnswers}
+                    onMcpApprove={submitMcpApproval}
+                    onMcpDecline={declineMcpApproval}
+                    onPluginApprove={submitPluginApproval}
+                    onPluginDecline={declinePluginApproval}
+                    onToolPermission={submitToolPermissionDecision}
+                    onCodeSessionAccept={submitCodeSessionProposal}
+                    onCodeSessionDecline={declineCodeSessionProposal}
+                    onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
+                    onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
+                    onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
+                  />
+                )
+              })
             })()}
 
             {!loadFailure && unclaimedEvents.length > 0 && (() => {
@@ -3093,7 +3246,7 @@ export function ChatPage() {
                     client={client}
                     defaultProvider={effectiveChatProvider ?? undefined}
                     defaultModelId={effectiveChatModelId || undefined}
-                    models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
+                    models={chatModelsByProvider}
                     mode="code"
                     permissionMode={codePermissionMode}
                     dockActive={true}
@@ -3107,7 +3260,7 @@ export function ChatPage() {
                     onToolPermission={submitToolPermissionDecision}
                     onCodeSessionAccept={submitCodeSessionProposal}
                     onCodeSessionDecline={declineCodeSessionProposal}
-                    onOpenRewindTurn={(turnId) => { void openRewind(turnId) }}
+                    onOpenRewindTurn={handleOpenRewindTurn}
                     onApprovePlanAcceptEdits={isUnclaimedTurnActive ? handleApprovePlanAcceptEdits : undefined}
                     onApprovePlanAskPermissions={isUnclaimedTurnActive ? handleApprovePlanAskPermissions : undefined}
                     onRequestPlanChanges={isUnclaimedTurnActive ? handleRequestPlanChanges : undefined}
@@ -3120,7 +3273,7 @@ export function ChatPage() {
                     client={client}
                     defaultProvider={effectiveChatProvider ?? undefined}
                     defaultModelId={effectiveChatModelId || undefined}
-                    models={effectiveChatProvider ? { [effectiveChatProvider]: chatModels } : undefined}
+                    models={chatModelsByProvider}
                     onPreview={setPreviewReference}
                     openQuestionTurnIds={openQuestionTurnIds}
                     onAnswer={submitQuestionAnswers}
@@ -3765,17 +3918,6 @@ export function buildAssistantSpeech(
     }
   }
   return items
-}
-
-function placeholderFor(message: ConversationMessage): string {
-  if (message.role === 'user') return 'Mensagem enviada.'
-  switch (message.status) {
-    case 'queued': return 'Na fila…'
-    case 'streaming': return 'Trabalhando…'
-    case 'failed': return 'Não foi possível concluir esta resposta.'
-    case 'cancelled': return 'Execução cancelada por você.'
-    default: return 'Sem texto nesta resposta.'
-  }
 }
 
 function conversationLoadHeadline(error: unknown): string {

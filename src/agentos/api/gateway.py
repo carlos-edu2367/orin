@@ -1277,19 +1277,68 @@ def create_app(services: ApiServices) -> FastAPI:
             "project_name": project_name,
         }
 
-    def conversation_record(conversation_id: str, principal: AuthenticatedPrincipal) -> dict[str, object]:
-        conversation = _jsonable(require_port(services.conversation_application).get(conversation_id, principal.user_id))
+    def conversation_record(
+        conversation_id: str,
+        principal: AuthenticatedPrincipal,
+        *,
+        message_limit: int | None = None,
+    ) -> dict[str, object]:
+        app_port = require_port(services.conversation_application)
+        if message_limit is not None:
+            try:
+                raw = app_port.get(conversation_id, principal.user_id, message_limit=message_limit)  # type: ignore[call-arg]
+            except TypeError:
+                raw = app_port.get(conversation_id, principal.user_id)
+        else:
+            raw = app_port.get(conversation_id, principal.user_id)
+        conversation = _jsonable(raw)
         if not isinstance(conversation, dict):
             raise ApplicationNotFoundError(conversation_id)
         return conversation
 
+    def conversation_header(conversation_id: str, principal: AuthenticatedPrincipal) -> dict[str, object]:
+        app_port = require_port(services.conversation_application)
+        if hasattr(app_port, "get_header"):
+            header = _jsonable(app_port.get_header(conversation_id, principal.user_id))  # type: ignore[union-attr]
+            if isinstance(header, dict):
+                return header
+        return conversation_record(conversation_id, principal, message_limit=1)
+
     @app.get("/v1/conversations/{conversation_id}")
-    async def get_conversation(conversation_id: str, request: Request) -> JSONResponse:
+    async def get_conversation(
+        conversation_id: str,
+        request: Request,
+        message_limit: int | None = None,
+    ) -> JSONResponse:
         def _sync() -> JSONResponse:
             principal = principal_for(request)
             services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
-            conversation = conversation_record(conversation_id, principal)
+            effective_limit = 80 if message_limit is None else (None if message_limit <= 0 else min(message_limit, 500))
+            conversation = conversation_record(conversation_id, principal, message_limit=effective_limit)
             return JSONResponse({**conversation, "workspace": workspace_state(conversation, principal)})
+
+        return await run_in_threadpool(_sync)
+
+    @app.get("/v1/conversations/{conversation_id}/messages")
+    async def get_conversation_older_messages(
+        conversation_id: str,
+        request: Request,
+        before_sequence: int = 0,
+        limit: int = 50,
+    ) -> JSONResponse:
+        def _sync() -> JSONResponse:
+            principal = principal_for(request)
+            services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.read")
+            app_port = require_port(services.conversation_application)
+            if not hasattr(app_port, "list_older_messages"):
+                return JSONResponse({"messages": [], "turns": [], "has_older_messages": False, "oldest_message_sequence": None})
+            result = app_port.list_older_messages(  # type: ignore[union-attr]
+                conversation_id,
+                principal.user_id,
+                before_sequence=before_sequence,
+                limit=min(max(limit, 1), 200),
+            )
+            return JSONResponse(_jsonable(result))
 
         return await run_in_threadpool(_sync)
 
@@ -1321,7 +1370,7 @@ def create_app(services: ApiServices) -> FastAPI:
         def _precheck() -> AuthenticatedPrincipal:
             principal = principal_for(request, mutable=True)
             services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.inspect")
-            conversation_record(conversation_id, principal)
+            conversation_header(conversation_id, principal)
             return principal
 
         principal = await run_in_threadpool(_precheck)
@@ -1350,7 +1399,7 @@ def create_app(services: ApiServices) -> FastAPI:
     def attach_conversation_workspace(conversation_id: str, payload: AttachWorkspaceFolderRequest, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.attach")
-        conversation = conversation_record(conversation_id, principal)
+        conversation = conversation_header(conversation_id, principal)
         try:
             inspection = inspect_for(principal, payload.path)
         except FolderRejected as error:
@@ -1369,13 +1418,13 @@ def create_app(services: ApiServices) -> FastAPI:
     def detach_conversation_workspace(conversation_id: str, request: Request) -> JSONResponse:
         principal = principal_for(request, mutable=True)
         services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.workspace.detach")
-        conversation = conversation_record(conversation_id, principal)
+        conversation = conversation_header(conversation_id, principal)
         workspace_id, _ = effective_workspace_id(conversation, principal)
         _require_port(services.local_workspaces).clear_root(workspace_id, principal.user_id)
         return JSONResponse(workspace_state(conversation, principal))
 
     def conversation_workspace(conversation_id: str, principal: AuthenticatedPrincipal) -> ConversationWorkspace:
-        conversation = conversation_record(conversation_id, principal)
+        conversation = conversation_header(conversation_id, principal)
         workspace_id, _ = effective_workspace_id(conversation, principal)
         return resolve_workspace(workspace_id, managed_root=services.managed_root_for(principal.user_id), local_root=local_root_for(workspace_id, principal))
 
@@ -2052,7 +2101,7 @@ def create_app(services: ApiServices) -> FastAPI:
             app_service = require_port(services.conversation_application)
             # Resolve ownership before the stream opens: another profile's id must
             # be a 404, not an empty stream that stays open for minutes.
-            conversation_record(conversation_id, principal)
+            conversation_header(conversation_id, principal)
             return principal, app_service
 
         principal, app_service = await run_in_threadpool(_prepare)
