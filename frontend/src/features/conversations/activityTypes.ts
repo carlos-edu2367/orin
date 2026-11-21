@@ -152,6 +152,7 @@ export type AgentActivityEventType =
   | 'context.overflow_compacted'
   | 'context.window_learned'
   | 'memory.learned'
+  | 'memory.conflict'
   | 'workspace.trust_required'
   | 'todo.updated'
   | 'code_mode.activated'
@@ -455,6 +456,7 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   if (type === 'artifact.created') return 'completed'
   if (
     type === 'memory.learned' ||
+    type === 'memory.conflict' ||
     type === 'notification.pushed' ||
     type === 'todo.updated' ||
     type === 'TODO_UPDATED'
