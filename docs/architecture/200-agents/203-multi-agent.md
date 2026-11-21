@@ -273,6 +273,23 @@ O fluxo de mensagem é:
 
 Entrega é ao-menos-uma-vez no nível de Event; destinatário deduplica por `message_id` e efeito por `idempotency_key`. Mensagem expirada não é processada com autoridade antiga. Atraso e duplicata não autorizam reordenação causal inventada.
 
+### Mecanismos de mensagens e entrega no runtime atual (Orin 0.13)
+
+No runtime interativo real (`AgentSession` + `AgenticTurnRuntime`/`NativeTurnRunner`), a entrega de mensagens entre agentes e entre sessões opera por três caminhos complementares:
+
+1. **Mailbox de equipe (`conversations/mailbox.py`):** entrega mensagens endereçadas a teammates por nome dentro de uma sessão colaborativa; teammates em execução também recebem a notificação no próximo lote de ferramentas em vez de apenas após o encerramento.
+2. **Mensagem a subagente em execução por `agent_id` (`conversation_agent_controls`):**
+   - Aceita orientações enviadas pelo usuário (interface ou API) ou por um agente ancestral via `SendMessage(agent_id=..., message=...)` quando `orchestration.agentMessages.parentTool` está ativo; envios de agentes fora da ancestralidade são recusados (`INVALID_ARGUMENTS`) e envios a subagentes já encerrados retornam `AGENT_NOT_RUNNING`.
+   - A entrega ocorre exclusivamente em **pontos seguros** — nunca no meio de um stream de modelo nem interrompendo uma ferramenta em andamento:
+     - no laço clássico, antes da próxima chamada de modelo ao drenar a `ReminderQueue`;
+     - nos runners de CLI (Claude CLI, Codex, agy), nas notas (`_turn_notes`) anexadas ao resultado do lote de ferramentas corrente;
+     - ao fim do turno do CLI com mensagem ainda não lida e `orchestration.agentMessages.continueOnUnread = true`, o subagente continua uma rodada adicional dentro do seu orçamento de ações (`send_user` no stdin persistente ou retomada de sessão); sem orçamento ou se o subagente já encerrou/foi parado, a mensagem é repassada ao pai (`forwarded`).
+   - Os estados de `conversation_agent_controls.outcome` distinguem estritamente enfileiramento de leitura real: `queued` → `injected` (colocada na `ReminderQueue` com chave `user-msg:<control_id>`) → `delivered` (somente após drenagem efetiva para o modelo, gravando `delivered_at`), ou terminais `forwarded`, `expired` e `stopped`. Os eventos `agent.message_queued`, `agent.message_delivered`, `agent.message_forwarded` e `agent.message_expired` atualizam a interface ao vivo, e `GET /v1/conversations/{id}/agents/{agent_id}/messages` reconstrói o histórico ao recarregar.
+3. **Entrada do Orin Friend em sessão ativa (`conversation_input_queue` com `origin`):**
+   - `manage_session(action="send_message")` e `control_code_session(action="send_message")` aceitam `delivery: "now" | "queue"`, com padrão vindo de `friend.sessionDelivery` (`now` na 0.13; `queue` preserva o comportamento de criar um novo turno na fila).
+   - Com `delivery = "now"` e turno alvo vivo (`queued`, `starting` ou `running`), a mensagem entra em `conversation_input_queue` com `origin = "friend"` e `origin_conversation_id`, chave de idempotência derivada da chamada (`friend:<tool_call_id>`), prefixo explícito no transcript da sessão alvo e selo `via Friend` na timeline. Troca de provedor/modelo/permissão (`model_change`), fila cheia (`queue_full`) ou turno em cancelamento (`turn_cancelling`) caem automaticamente para `queue` com `delivery_fallback` preenchido.
+   - Enquanto aguarda o próximo ponto seguro (`pending_in_turn`), o usuário pode adiar para depois do turno por `POST /v1/conversations/{id}/queue/{queue_id}/defer`. A mensagem passa pelo mesmo hook `USER_PROMPT_SUBMIT` das mensagens do usuário; o observador de entrega (`friend_delivery_watch.py`) publica `friend.delivery_status` (`injected`, `promoted` ou `blocked`) de volta ao Friend para confirmação honesta por texto e voz.
+
 ## Delegação e contexto
 
 O fluxo de delegação é:

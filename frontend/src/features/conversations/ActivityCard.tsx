@@ -3,7 +3,9 @@ import { useEffect, useId, useState } from 'react'
 import { createBrowserApiClient, type ApiClient } from '../../api/client'
 import { resumeConversationTurn } from '../../api/conversations'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
-import { activityStateLabel, formatActivityCount, formatElapsed, isWaitingModelEvent, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
+import { activityStateLabel, formatActivityCount, formatElapsed, isFriendQueuedInputEvent, isWaitingModelEvent, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
+import { AgentMessageBox } from './AgentMessageBox'
+import type { AgentMessagesState } from './agentMessages'
 import { StructuredDiffView, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
 type ActivityCardProps = {
@@ -12,6 +14,8 @@ type ActivityCardProps = {
   onPreview?: WorkspaceFilePreviewHandler
   client?: ApiClient
   onResumeTurn?: (conversationId: string, turnId: string) => Promise<unknown>
+  agentMessages?: AgentMessagesState
+  onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
 }
 
 const GLYPHS: Record<string, string> = {
@@ -33,7 +37,7 @@ const GLYPHS: Record<string, string> = {
  * technical record: every underlying event, its status and its identifiers. The
  * chat never shows the second form unless it is asked for.
  */
-export function ActivityCard({ group, conversationId, onPreview, client, onResumeTurn }: ActivityCardProps) {
+export function ActivityCard({ group, conversationId, onPreview, client, onResumeTurn, agentMessages, onAgentMessageSent }: ActivityCardProps) {
   const [open, setOpen] = useState(false)
   const [resumeState, setResumeState] = useState<'idle' | 'working' | 'resumed' | 'failed'>('idle')
   const panelId = useId()
@@ -85,6 +89,14 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
       .then(() => setResumeState('resumed'))
       .catch(() => setResumeState('failed'))
   }
+  const isSubagentGroup = Boolean(
+    group.agentId && group.events.some((event) => Boolean(event.parentAgentId)),
+  )
+  const subagentLiveMessages = isSubagentGroup ? agentMessages?.[group.agentId] : undefined
+  const showSubagentMessageBox = Boolean(
+    isSubagentGroup && conversationId && (running || (subagentLiveMessages && subagentLiveMessages.length > 0)),
+  )
+  const isFriendInjected = Boolean(latestEvent && isFriendQueuedInputEvent(latestEvent))
 
   return (
     <motion.article
@@ -113,6 +125,7 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
             otherwise make a badge repeat, or overstate, that same number. */}
         {!isTool && group.count > 1 && <span className="activity-card__count">{formatActivityCount(group.count)}</span>}
         {failedCalls > 0 && <span className="activity-card__failure">{formatFailureCount(failedCalls)}</span>}
+        {isFriendInjected && <span className="via-friend-badge" data-testid="via-friend-badge">via Friend</span>}
         {group.agentName && <span className="activity-card__agent">{group.agentName}</span>}
         {isTool && running && elapsed !== null && <span className="activity-card__elapsed">{formatElapsed(elapsed)}</span>}
         {!isTool && <span className="activity-card__state">{activityStateLabel(group.state)}</span>}
@@ -137,6 +150,18 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
             </span>
           )}
         </div>
+      )}
+      {showSubagentMessageBox && conversationId && (
+        <AgentMessageBox
+          conversationId={conversationId}
+          agentId={group.agentId}
+          agentName={group.agentName}
+          running={running}
+          client={client}
+          liveMessages={subagentLiveMessages}
+          onMessageSent={onAgentMessageSent}
+          compact
+        />
       )}
       <AnimatePresence initial={false}>
         {open && (

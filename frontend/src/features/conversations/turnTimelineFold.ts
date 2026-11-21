@@ -10,6 +10,7 @@ import {
   groupLabel,
   groupingKey,
   isCodeModeEvent,
+  isFriendQueuedInputEvent,
   isRenderable,
   isSubagentCoordinationOrWaitEvent,
   isSubagentDelegationFailed,
@@ -596,6 +597,29 @@ export function buildTurnTimeline(
       }
       items.push(waveItem)
       subagentWaveItems.set(key, waveItem)
+      continue
+    }
+    if (isFriendQueuedInputEvent(event)) {
+      flushThought(true, event.occurredAt)
+      flushText()
+      flushGroup()
+      const friendGroup: ActivityGroup = {
+        id: groupingKey(event),
+        kind: 'lifecycle',
+        state: 'completed',
+        label: event.summary || 'Mensagem via Friend entregue ao agente',
+        count: 1,
+        events: [event],
+        agentId: event.agentId,
+        agentName: event.agentName,
+        failed: false,
+      }
+      items.push({
+        id: `activity:${friendGroup.id}:${event.originEventId ?? event.eventId}`,
+        kind: 'activity',
+        group: friendGroup,
+        event,
+      })
       continue
     }
     if (!isRenderable(rawEvent, settled)) {

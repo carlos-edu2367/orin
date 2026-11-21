@@ -35,7 +35,7 @@ const PRIMARY_CATEGORIES: readonly PrimaryCategory[] = [
     id: 'providers',
     label: 'Modelos e provedores',
     to: '/settings/providers',
-    matchPrefixes: ['/settings/providers', '/settings/vision', '/settings/media', '/settings/quota-effort'],
+    matchPrefixes: ['/settings/providers', '/settings/vision', '/settings/media', '/settings/quota-effort', '/settings/orchestration'],
     icon: (
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <circle cx="8" cy="8" r="5.25" stroke="currentColor" strokeWidth="1.4" />

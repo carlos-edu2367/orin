@@ -1029,8 +1029,21 @@ export function codeModeRunGroup(events: ConversationActivityEvent[], anchor: Co
   }
 }
 
+export function isFriendQueuedInputEvent(event: ConversationActivityEvent): boolean {
+  const origin = typeof event.payload?.origin === 'string' ? event.payload.origin.trim().toLowerCase() : ''
+  if (origin !== 'friend') return false
+  return (
+    event.type === 'turn.started' ||
+    event.type === 'TURN_STARTED' ||
+    event.type === 'turn.queued_input' ||
+    event.type === 'queued_input'
+  )
+}
+
 export function isRenderable(event: ConversationActivityEvent, settled: Set<string>): boolean {
   if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') return true
+  if (event.type === 'friend.delivery_status') return false
+  if (isFriendQueuedInputEvent(event)) return true
   if (event.type.startsWith('context.')) return false
   if (event.kind === 'message') return false
   // A lifecycle "turn started/working" line adds nothing next to the tool rows
@@ -1062,6 +1075,10 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
 }
 
 export function groupingKey(event: ConversationActivityEvent): string {
+  if (isFriendQueuedInputEvent(event)) {
+    const queueId = typeof event.payload?.queue_id === 'string' ? event.payload.queue_id : event.eventId
+    return `queued-input:friend:${event.agentId}:${event.turnId ?? ''}:${queueId}`
+  }
   if (event.toolPermission) {
     return `approval:tool:${event.agentId}:${event.turnId ?? ''}:${event.toolPermission.requestId}`
   }
@@ -1167,6 +1184,10 @@ function agentLabel(event: ConversationActivityEvent): string {
     case 'agent.created': return name ? `Criou o agente ${name}` : 'Criou um agente'
     case 'agent.message_sent': return name ? `Enviou uma tarefa para ${name}` : 'Enviou uma tarefa'
     case 'agent.message_received': return name ? `Recebeu a resposta de ${name}` : 'Recebeu uma resposta'
+    case 'agent.message_queued': return name ? `Na fila para ${name}` : 'Na fila para o subagente'
+    case 'agent.message_delivered': return name ? `Entregue a ${name}` : 'Entregue ao subagente'
+    case 'agent.message_forwarded': return name ? `Repassada ao Orin (${name})` : 'Repassada ao Orin'
+    case 'agent.message_expired': return name ? `Expirou (${name})` : 'Mensagem expirou'
     case 'delegation.failed': return name ? `${name} não concluiu a tarefa` : 'Delegação falhou'
     default: return event.summary || 'Colaboração entre agentes'
   }

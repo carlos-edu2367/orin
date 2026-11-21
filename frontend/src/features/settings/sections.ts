@@ -31,6 +31,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'vision', label: 'Leitura visual', path: '/settings/vision', lede: 'Qual modelo lê imagens e páginas escaneadas quando o modelo do turno não enxerga.' },
       { id: 'media', label: 'Geração de mídia', path: '/settings/media', lede: 'Qual provider e modelo padrão geram imagens, áudios e vídeos nas conversas.' },
       { id: 'quota-effort', label: 'Cota e esforço', path: '/settings/quota-effort', lede: 'Esforço de raciocínio, limites de cota das assinaturas e janela de contexto por modelo.' },
+      { id: 'orchestration', label: 'Orquestração', path: '/settings/orchestration', lede: 'Mensagens a subagentes, entrega do Friend e controles de orquestração multiagente.' },
     ],
   },
   {

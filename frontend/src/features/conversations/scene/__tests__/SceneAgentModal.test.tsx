@@ -436,7 +436,7 @@ describe('SceneAgentModal & integração com SceneView / SceneCanvas', () => {
     })
     expect(
       within(dialog).getByTestId('scene-agent-message-success').textContent,
-    ).toContain('Mensagem entregue a Analista')
+    ).toContain('Mensagem na fila para Analista')
 
     // Parar com confirmação pelo modal
     fireEvent.click(within(dialog).getByTestId('scene-agent-stop-button'))

@@ -400,6 +400,11 @@ A troca de assinatura por política de cota (`quota.fallback.enabled`) só ocorr
 | `quota.fallback_applied` | turno novo trocou de assinatura entre turnos pela cadeia de fallback configurada |
 | `context.overflow_compacted` | histórico foi compactado automaticamente após estouro de contexto antes da única tentativa de reenvio |
 | `context.window_learned` | limite efetivo da janela de contexto de um modelo foi aprendido após recusa por estouro |
+| `agent.message_queued` | mensagem direta a um subagente em execução foi enfileirada em `conversation_agent_controls` (`control_id`, `agent_id`, `sender_kind`, prévia limitada a 200 caracteres) |
+| `agent.message_delivered` | mensagem enfileirada foi drenada da `ReminderQueue` e incorporada a uma requisição real de modelo do subagente (inclui `delivered_at`) |
+| `agent.message_forwarded` | mensagem não lida pelo subagente (por término, parada ou fim do orçamento de ações) foi repassada ao agente pai |
+| `agent.message_expired` | mensagem enfileirada para subagente expirou antes de ser entregue |
+| `friend.delivery_status` | confirmação assíncrona da entrega de mensagem enviada pelo Orin Friend a uma sessão alvo (`injected`, `promoted` ou `blocked`) |
 
 Events pertencentes à máquina de estados, como `ExecutionStarted`, `ExecutionFinished`, `ExecutionFailed` e `ExecutionCancelled`, continuam sob ownership do Kernel. Os Events desta RFC carregam `execution_id` quando vinculados a uma tentativa e sempre preservam owner, Workspace, correlação, causalidade e classificação.
 

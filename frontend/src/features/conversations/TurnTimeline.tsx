@@ -11,10 +11,18 @@ import type { ProviderModel, ProviderName } from '../../api/providers'
 import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 import {
   formatTurnWorkDuration,
+  isFriendQueuedInputEvent,
   isSubagentCoordinationOrWaitEvent,
   isWaitingModelEvent,
   summarizeActivities,
 } from './activitySummary'
+import { AgentMessageBox } from './AgentMessageBox'
+import type { AgentMessagesState } from './agentMessages'
+import {
+  extractFriendDeliveryFromEvent,
+  FriendDeliveryCard,
+  type FriendDeliveryItem,
+} from './FriendDeliveryCard'
 import { enrichEventsWithStartedMetadata, type TimelineItem } from './turnTimelineFold'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
@@ -68,6 +76,10 @@ export type TurnTimelineProps = {
   onApproveAcceptEdits?: (event: ConversationActivityEvent) => void | Promise<void>
   onApproveAskPermissions?: (event: ConversationActivityEvent) => void | Promise<void>
   onRequestChanges?: (feedback: string, event: ConversationActivityEvent) => void | Promise<void>
+  agentMessages?: AgentMessagesState
+  onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  friendDeliveries?: Record<string, FriendDeliveryItem>
+  onOpenTargetConversation?: (conversationId: string) => void
 }
 
 const CODE_TOOL_NAMES = new Set([
@@ -645,14 +657,36 @@ export const TurnTimeline = memo(function TurnTimeline({
   onApproveAcceptEdits,
   onApproveAskPermissions,
   onRequestChanges,
+  agentMessages,
+  onAgentMessageSent,
+  friendDeliveries,
+  onOpenTargetConversation,
 }: TurnTimelineProps) {
   const [confirmingRewind, setConfirmingRewind] = useState(false)
   const [rewinding, setRewinding] = useState(false)
   const [rewound, setRewound] = useState(false)
   const [rewindError, setRewindError] = useState<string | null>(null)
   const codeSessionContext = useMemo(
-    () => ({ client, defaultProvider, defaultModelId, models }),
-    [client, defaultModelId, defaultProvider, models],
+    () => ({
+      client,
+      defaultProvider,
+      defaultModelId,
+      models,
+      agentMessages,
+      onAgentMessageSent,
+      friendDeliveries,
+      onOpenTargetConversation,
+    }),
+    [
+      agentMessages,
+      client,
+      defaultModelId,
+      defaultProvider,
+      friendDeliveries,
+      models,
+      onAgentMessageSent,
+      onOpenTargetConversation,
+    ],
   )
 
   const hasLegacyCodeModeStarted = useMemo(
@@ -961,6 +995,18 @@ export const TurnTimeline = memo(function TurnTimeline({
         running={isSubagentRunning}
       >
         {content}
+        {conversationId && group.agentId && (isSubagentRunning || (agentMessages?.[group.agentId]?.length ?? 0) > 0) && (
+          <AgentMessageBox
+            conversationId={conversationId}
+            agentId={group.agentId}
+            agentName={subagentLabel}
+            running={isSubagentRunning}
+            client={client}
+            liveMessages={agentMessages?.[group.agentId]}
+            onMessageSent={onAgentMessageSent}
+            compact
+          />
+        )}
       </SubagentTaskContainer>
     )
   }
@@ -1055,6 +1101,32 @@ export const TurnTimeline = memo(function TurnTimeline({
 
     if (first.toolPermission) {
       return renderToolPermissionTimelineNode(first, group)
+    }
+
+    if (isFriendQueuedInputEvent(first)) {
+      const rawText = typeof first.payload?.queued_text === 'string' ? first.payload.queued_text : ''
+      const cleanText = rawText.replace(/^Mensagem enviada pelo Orin Friend em nome do usuário:\s*/i, '').trim()
+      return (
+        <div className="via-friend-row" data-testid="via-friend-row">
+          <div className="via-friend-row__head">
+            <span className="via-friend-badge" data-testid="via-friend-badge">via Friend</span>
+            <span>{first.summary || 'Mensagem via Friend entregue ao agente'}</span>
+          </div>
+          {cleanText && <p className="via-friend-row__text">{cleanText}</p>}
+        </div>
+      )
+    }
+
+    const friendDelivery = extractFriendDeliveryFromEvent(first)
+    if (friendDelivery) {
+      const resolved = friendDeliveries?.[friendDelivery.id] ?? friendDelivery
+      return (
+        <FriendDeliveryCard
+          delivery={resolved}
+          client={client}
+          onOpenTarget={onOpenTargetConversation}
+        />
+      )
     }
 
     // Retire the 5-stage purple CodeModeCard stepper from normal Code Mode turns,

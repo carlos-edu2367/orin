@@ -78,6 +78,8 @@ import { notifySystem, windowIsAway } from '../notifications/systemNotify'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
+import { applyAgentMessageEvent, recordOptimisticAgentMessage, type AgentMessagesState } from './agentMessages'
+import { applyFriendDeliveryStatusEvent, type FriendDeliveryItem } from './FriendDeliveryCard'
 import { formatTurnWorkDuration } from './activitySummary'
 import type { ConversationActivityEvent, StructuredPatchHunk, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
@@ -221,6 +223,13 @@ export function ChatPage() {
   const [atBottom, setAtBottom] = useState(true)
   const [newActivityCount, setNewActivityCount] = useState(0)
   const [activity, dispatch] = useReducer(activityReducer, undefined, createActivityState)
+  const [optimisticAgentMsgs, setOptimisticAgentMsgs] = useState<AgentMessagesState>({})
+  const agentMessages = useMemo(() => activity.events.reduce(applyAgentMessageEvent, optimisticAgentMsgs), [activity.events, optimisticAgentMsgs])
+  const friendDeliveries = useMemo(() => activity.events.reduce(applyFriendDeliveryStatusEvent, {} as Record<string, FriendDeliveryItem>), [activity.events])
+  const handleAgentMessageSent = useCallback((item: { controlId: string; agentId: string; message: string }) => {
+    setOptimisticAgentMsgs((prev) => recordOptimisticAgentMessage(prev, item))
+  }, [])
+  const openTargetConversation = useCallback((targetId: string) => { navigate(`/chats/${encodeURIComponent(targetId)}`) }, [navigate])
   const [previewReference, setPreviewReference] = useState<WorkspaceFileReference | null>(null)
   const closePreview = useCallback(() => setPreviewReference(null), [])
   // What the composer's attachment notice needs to know: the turn's own model
@@ -2301,7 +2310,8 @@ export function ChatPage() {
       return { ok: false, reason: 'error', message: 'Mensagem inválida.' }
     }
     try {
-      await sendConversationAgentMessage(client, conversationId, agentId, text)
+      const receipt = await sendConversationAgentMessage(client, conversationId, agentId, text)
+      if (receipt.control_id) handleAgentMessageSent({ controlId: receipt.control_id, agentId, message: text })
       return { ok: true }
     } catch (caught) {
       if (
@@ -2700,7 +2710,7 @@ export function ChatPage() {
     >
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
-      {tasksOpen && <TasksPanel client={client} conversationId={conversationId} onClose={() => setTasksOpen(false)} />}
+      {tasksOpen && <TasksPanel client={client} conversationId={conversationId} agentMessages={agentMessages} onAgentMessageSent={handleAgentMessageSent} onClose={() => setTasksOpen(false)} />}
       {transcriptOpen && <TranscriptView messages={messages} events={activity.events} onClose={() => setTranscriptOpen(false)} />}
       {rewindState && (
         <RewindPicker
@@ -3249,6 +3259,10 @@ export function ChatPage() {
                     onApprovePlanAcceptEdits={isTurnFinished ? undefined : handleApprovePlanAcceptEdits}
                     onApprovePlanAskPermissions={isTurnFinished ? undefined : handleApprovePlanAskPermissions}
                     onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
+                    agentMessages={agentMessages}
+                    onAgentMessageSent={handleAgentMessageSent}
+                    friendDeliveries={friendDeliveries}
+                    onOpenTargetConversation={openTargetConversation}
                   />
                 )
               })
@@ -3282,6 +3296,10 @@ export function ChatPage() {
                     onApprovePlanAcceptEdits={isUnclaimedTurnActive ? handleApprovePlanAcceptEdits : undefined}
                     onApprovePlanAskPermissions={isUnclaimedTurnActive ? handleApprovePlanAskPermissions : undefined}
                     onRequestPlanChanges={isUnclaimedTurnActive ? handleRequestPlanChanges : undefined}
+                    agentMessages={agentMessages}
+                    onAgentMessageSent={handleAgentMessageSent}
+                    friendDeliveries={friendDeliveries}
+                    onOpenTargetConversation={openTargetConversation}
                   />
                 )
                 : (
@@ -3302,6 +3320,10 @@ export function ChatPage() {
                     onToolPermission={submitToolPermissionDecision}
                     onCodeSessionAccept={submitCodeSessionProposal}
                     onCodeSessionDecline={declineCodeSessionProposal}
+                    agentMessages={agentMessages}
+                    onAgentMessageSent={handleAgentMessageSent}
+                    friendDeliveries={friendDeliveries}
+                    onOpenTargetConversation={openTargetConversation}
                   />
                 )
             })()}

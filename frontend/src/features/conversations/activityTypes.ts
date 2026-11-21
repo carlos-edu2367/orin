@@ -169,6 +169,7 @@ export type AgentActivityEventType =
   | 'process.exited'
   | 'quota.updated'
   | 'quota.fallback_applied'
+  | 'friend.delivery_status'
   | (string & {})
 
 export type ConversationActivityEvent = {
@@ -396,6 +397,10 @@ const AGENT_TYPES = new Set([
   'agent.created',
   'agent.message_sent',
   'agent.message_received',
+  'agent.message_queued',
+  'agent.message_delivered',
+  'agent.message_forwarded',
+  'agent.message_expired',
   'delegation.created',
   'delegation.waiting',
   'delegation.completed',
@@ -439,6 +444,9 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
     if (status === 'cancelled') return 'cancelled'
     return status && status !== 'succeeded' ? 'failed' : 'completed'
   }
+  if (type === 'agent.message_queued') return 'queued'
+  if (type === 'agent.message_expired') return 'failed'
+  if (type === 'agent.message_delivered' || type === 'agent.message_forwarded') return 'completed'
   if (type === 'agent.message_sent' || type === 'delegation.waiting') return 'waiting_agent'
   if (type === 'agent.created' || type === 'agent.message_received' || type === 'delegation.completed') return 'completed'
   // Only ever emitted after its tool call already succeeded (see the backend

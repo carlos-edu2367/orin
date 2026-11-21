@@ -5,13 +5,19 @@ import type { ProviderModel, ProviderName } from '../../api/providers'
 import { ActivityCard } from './ActivityCard'
 import { AgentBirth } from './AgentBirth'
 import { AgentExchange } from './AgentExchange'
+import type { AgentMessagesState } from './agentMessages'
 import { CodeModeCard } from './CodeModeCard'
 import { CodeSessionProposalCard, type CodeSessionProposalDecision } from './CodeSessionProposalCard'
+import {
+  extractFriendDeliveryFromEvent,
+  FriendDeliveryCard,
+  type FriendDeliveryItem,
+} from './FriendDeliveryCard'
 import { McpApprovalCard } from './McpApprovalCard'
 import { MemoryLearnedCard } from './MemoryLearnedCard'
 import { PluginApprovalCard } from './PluginApprovalCard'
 import { ToolPermissionCard } from './ToolPermissionCard'
-import { summarizeActivities } from './activitySummary'
+import { isFriendQueuedInputEvent, summarizeActivities } from './activitySummary'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import { UserQuestionCard, type UserQuestionAnswer } from './UserQuestionCard'
 import { WorkspaceTrustCard } from './WorkspaceTrustCard'
@@ -22,6 +28,10 @@ export type CodeSessionProposalContext = {
   defaultProvider?: ProviderName
   defaultModelId?: string
   models?: Partial<Record<ProviderName, ProviderModel[]>>
+  agentMessages?: AgentMessagesState
+  onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  friendDeliveries?: Record<string, FriendDeliveryItem>
+  onOpenTargetConversation?: (conversationId: string) => void
 }
 
 type ActivityStreamProps = {
@@ -43,6 +53,10 @@ type ActivityStreamProps = {
   defaultProvider?: ProviderName
   defaultModelId?: string
   models?: Partial<Record<ProviderName, ProviderModel[]>>
+  agentMessages?: AgentMessagesState
+  onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  friendDeliveries?: Record<string, FriendDeliveryItem>
+  onOpenTargetConversation?: (conversationId: string) => void
 }
 
 const DEFAULT_LIMIT = 120
@@ -72,6 +86,10 @@ export function ActivityStream({
   defaultProvider,
   defaultModelId,
   models,
+  agentMessages,
+  onAgentMessageSent,
+  friendDeliveries,
+  onOpenTargetConversation,
 }: ActivityStreamProps) {
   const groups = useMemo(() => {
     const summarized = summarizeActivities(events)
@@ -98,7 +116,16 @@ export function ActivityStream({
               onToolPermission,
               onCodeSessionAccept,
               onCodeSessionDecline,
-              { client, defaultProvider, defaultModelId, models },
+              {
+                client,
+                defaultProvider,
+                defaultModelId,
+                models,
+                agentMessages,
+                onAgentMessageSent,
+                friendDeliveries,
+                onOpenTargetConversation,
+              },
             )}
           </li>
         ))}
@@ -181,9 +208,42 @@ export function renderActivityGroup(
   if (first.type === 'memory.learned') {
     return <>{group.events.map((event) => <MemoryLearnedCard key={event.eventId} event={event} />)}</>
   }
+  if (isFriendQueuedInputEvent(first)) {
+    const rawText = typeof first.payload?.queued_text === 'string' ? first.payload.queued_text : ''
+    const cleanText = rawText.replace(/^Mensagem enviada pelo Orin Friend em nome do usuário:\s*/i, '').trim()
+    return (
+      <div className="via-friend-row" data-testid="via-friend-row">
+        <div className="via-friend-row__head">
+          <span className="via-friend-badge" data-testid="via-friend-badge">via Friend</span>
+          <span>{first.summary || 'Mensagem via Friend entregue ao agente'}</span>
+        </div>
+        {cleanText && <p className="via-friend-row__text">{cleanText}</p>}
+      </div>
+    )
+  }
+  const friendDelivery = extractFriendDeliveryFromEvent(first)
+  if (friendDelivery) {
+    const resolved = codeSessionContext?.friendDeliveries?.[friendDelivery.id] ?? friendDelivery
+    return (
+      <FriendDeliveryCard
+        delivery={resolved}
+        client={codeSessionContext?.client}
+        onOpenTarget={codeSessionContext?.onOpenTargetConversation}
+      />
+    )
+  }
   if (group.kind === 'agent' && first.type === 'agent.created') return <AgentBirth event={first} />
   if (group.kind === 'agent' && (first.type === 'agent.message_sent' || first.type === 'agent.message_received')) {
     return <>{group.events.map((event) => <AgentExchange key={event.eventId} event={event} />)}</>
   }
-  return <ActivityCard group={group} conversationId={conversationId} onPreview={onPreview} client={codeSessionContext?.client} />
+  return (
+    <ActivityCard
+      group={group}
+      conversationId={conversationId}
+      onPreview={onPreview}
+      client={codeSessionContext?.client}
+      agentMessages={codeSessionContext?.agentMessages}
+      onAgentMessageSent={codeSessionContext?.onAgentMessageSent}
+    />
+  )
 }

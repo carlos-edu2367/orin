@@ -18,6 +18,8 @@ const DEFAULT_GROUP_LABELS: Record<string, string> = {
   effort: 'Esforço de raciocínio',
   quota: 'Cota e política de assinatura',
   context: 'Janela de contexto',
+  messages: 'Mensagens a subagentes',
+  friend: 'Orin Friend',
 }
 
 const CHOICE_LABELS: Record<string, string> = {
@@ -30,6 +32,8 @@ const CHOICE_LABELS: Record<string, string> = {
   xhigh: 'Muito alto (xhigh)',
   max: 'Máximo (max)',
   ultra: 'Ultra (ultra)',
+  now: 'Entregar no turno em andamento (now)',
+  queue: 'Deixar na fila para depois do turno (queue)',
 }
 
 function choiceLabel(choice: string): string {

@@ -222,7 +222,7 @@ export function useSceneAgentControls({
         ...prev,
         [agent.id]: {
           kind: 'success',
-          text: `Mensagem entregue a ${cleanName}; ele lê no próximo passo.`,
+          text: `Mensagem na fila para ${cleanName}; será lida no próximo ponto seguro.`,
         },
       }))
     } else if (outcome.reason === 'not_running') {

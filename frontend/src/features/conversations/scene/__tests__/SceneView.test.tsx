@@ -1232,7 +1232,7 @@ describe('SceneView', () => {
     await waitFor(() => {
       expect(
         screen.getByTestId('scene-agent-message-success').textContent,
-      ).toBe('Mensagem entregue a Analista; ele lê no próximo passo.')
+      ).toBe('Mensagem na fila para Analista; será lida no próximo ponto seguro.')
     })
 
     // Segunda tentativa retorna 409 not_running

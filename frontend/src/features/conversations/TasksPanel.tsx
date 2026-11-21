@@ -4,6 +4,8 @@ import { getConversationOverview } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { listTasks, stopTask, type ShellTask } from '../../api/sessionTools'
 import { useKeybindingHandlers } from '../keybindings/engine'
+import { AgentMessageBox } from './AgentMessageBox'
+import type { AgentMessagesState } from './agentMessages'
 import { orderAgentTree } from './agentTree'
 
 /** `depth` is 0 for an agent the main agent started, 1 for one that agent started, and so on. */
@@ -36,7 +38,19 @@ function when(value: string | null): string {
  * `/tasks` (`/bashes`, W7): the session's background shells — with their output's tail and a stop button when the
  * process can be verified as the one that was started — and its subagents. It refreshes while open.
  */
-export function TasksPanel({ client, conversationId, onClose }: { client: ApiClient; conversationId: string; onClose: () => void }) {
+export function TasksPanel({
+  client,
+  conversationId,
+  onClose,
+  agentMessages,
+  onAgentMessageSent,
+}: {
+  client: ApiClient
+  conversationId: string
+  onClose: () => void
+  agentMessages?: AgentMessagesState
+  onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+}) {
   const [shells, setShells] = useState<ShellTask[] | null>(null)
   const [agents, setAgents] = useState<BackgroundAgent[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -145,6 +159,16 @@ export function TasksPanel({ client, conversationId, onClose }: { client: ApiCli
                       <span className="tasks-panel__command">{agent.name}</span>
                       <span className="tasks-panel__state">{AGENT_STATE[agent.state] ?? agent.state}{agent.role ? ` · ${agent.role}` : ''}</span>
                     </div>
+                    <AgentMessageBox
+                      conversationId={conversationId}
+                      agentId={agent.agentId}
+                      agentName={agent.name}
+                      running={agent.state === 'running' || agent.state === 'working'}
+                      client={client}
+                      liveMessages={agentMessages?.[agent.agentId]}
+                      onMessageSent={onAgentMessageSent}
+                      compact
+                    />
                   </li>
                 ))}
               </ul>

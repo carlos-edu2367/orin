@@ -24,6 +24,7 @@ import { BackgroundSection } from '../features/settings/BackgroundSection'
 import { BrowserSection } from '../features/settings/BrowserSection'
 import { CharactersSection } from '../features/settings/CharactersSection'
 import { QuotaAndEffortSection } from '../features/settings/QuotaAndEffortSection'
+import { OrchestrationSection } from '../features/settings/OrchestrationSection'
 import { VoiceSettingsSection } from '../features/settings/VoiceSettingsSection'
 import { WorkspaceSection } from '../features/settings/WorkspaceSection'
 import { MemoryPage } from '../features/memory/MemoryPage'
@@ -80,6 +81,7 @@ export const routes: RouteDefinition[] = [
   { path: '/settings/vision', element: <VisionSettingsRoute /> },
   { path: '/settings/media', element: <MediaSettingsRoute /> },
   { path: '/settings/quota-effort', element: <SettingsRoute><QuotaAndEffortSection /></SettingsRoute> },
+  { path: '/settings/orchestration', element: <SettingsRoute><OrchestrationSection /></SettingsRoute> },
   { path: '/settings/mcp', element: <SettingsRoute><McpSection /></SettingsRoute> },
   { path: '/settings/plugins', element: <SettingsRoute><PluginsSection /></SettingsRoute> },
   { path: '/settings/voice', element: <SettingsRoute><VoiceSettingsSection /></SettingsRoute> },

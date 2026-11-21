@@ -532,6 +532,39 @@ export function sendConversationAgentMessage(
   })
 }
 
+export type DeferQueuedInputResponse = {
+  queue_id: string
+  deferred: boolean
+  delivery: 'queued_next_turn'
+  turn_id: string
+  message_id: string
+  state: string
+}
+
+export function deferConversationQueuedInput(
+  client: ApiClient,
+  conversationId: string,
+  queueId: string,
+  intent: MutationIntent = client.createMutationIntent(),
+): Promise<DeferQueuedInputResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/queue/${encodeURIComponent(queueId)}/defer`,
+    method: 'POST',
+    intent,
+    parse: (value) => {
+      const data = record(value)
+      return {
+        queue_id: typeof data.queue_id === 'string' ? data.queue_id : queueId,
+        deferred: data.deferred !== false,
+        delivery: 'queued_next_turn',
+        turn_id: typeof data.turn_id === 'string' ? data.turn_id : '',
+        message_id: typeof data.message_id === 'string' ? data.message_id : '',
+        state: typeof data.state === 'string' ? data.state : 'queued',
+      }
+    },
+  })
+}
+
 export type ToolPermissionDecisionResponse = {
   request_id: string
   decision: ToolPermissionDecision

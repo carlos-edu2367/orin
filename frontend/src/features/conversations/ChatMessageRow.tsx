@@ -6,7 +6,9 @@ import type { ConversationMessage, ConversationMode } from '../../api/conversati
 import type { ProviderModel, ProviderName } from '../../api/providers'
 import { OrinMascot } from '../../components/OrinMascot'
 import type { ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
+import type { AgentMessagesState } from './agentMessages'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
+import type { FriendDeliveryItem } from './FriendDeliveryCard'
 import { MarkdownMessage } from './MarkdownMessage'
 import { MessageAttachments } from './MessageAttachments'
 import { MessageCommandChip } from './MessageCommandChip'
@@ -69,6 +71,10 @@ export type ChatMessageRowProps = {
   onApprovePlanAcceptEdits?: (event: ConversationActivityEvent) => void | Promise<void>
   onApprovePlanAskPermissions?: (event: ConversationActivityEvent) => void | Promise<void>
   onRequestPlanChanges?: (feedback: string, event: ConversationActivityEvent) => void | Promise<void>
+  agentMessages?: AgentMessagesState
+  onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  friendDeliveries?: Record<string, FriendDeliveryItem>
+  onOpenTargetConversation?: (conversationId: string) => void
 }
 
 export const ChatMessageRow = memo(function ChatMessageRow({
@@ -109,6 +115,10 @@ export const ChatMessageRow = memo(function ChatMessageRow({
   onApprovePlanAcceptEdits,
   onApprovePlanAskPermissions,
   onRequestPlanChanges,
+  agentMessages,
+  onAgentMessageSent,
+  friendDeliveries,
+  onOpenTargetConversation,
 }: ChatMessageRowProps) {
   let bodyContent: ReactNode
   if (timeline) {
@@ -158,6 +168,10 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           onApprovePlanAcceptEdits={isTurnFinished ? undefined : onApprovePlanAcceptEdits}
           onApprovePlanAskPermissions={isTurnFinished ? undefined : onApprovePlanAskPermissions}
           onRequestPlanChanges={isTurnFinished ? undefined : onRequestPlanChanges}
+          agentMessages={agentMessages}
+          onAgentMessageSent={onAgentMessageSent}
+          friendDeliveries={friendDeliveries}
+          onOpenTargetConversation={onOpenTargetConversation}
         />
         {missingFinalContent.length > 0 && (
           <MarkdownMessage
