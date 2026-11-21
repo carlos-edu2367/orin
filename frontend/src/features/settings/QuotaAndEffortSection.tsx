@@ -6,8 +6,9 @@ import {
   type OrchestrationSettingsReport,
 } from '../../api/orchestrationSettings'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation } from '../codeSettings/shared'
+import { ContextWindowPanel } from './ContextWindowPanel'
 import { EffortSettingsPanel } from './EffortSettingsPanel'
-import { OrchestrationSettingsForm } from './OrchestrationSettingsForm'
+import { QuotaPanel } from './QuotaPanel'
 import { SettingsSection } from './SettingsSection'
 import './orchestrationSettings.css'
 
@@ -115,12 +116,12 @@ export function QuotaAndEffortSection({ client }: { client?: ApiClient }) {
           <div data-testid="quota-effort-section-quota">
             <Card title="Cota de assinatura" id="quota-effort-heading-quota">
               <p className="code-settings__muted">
-                Controle a exibição no compositor, limites de aviso/bloqueio e troca automática entre assinaturas.
+                Acompanhe as três assinaturas, controle a exibição no compositor, limites de aviso/bloqueio e troca automática.
               </p>
-              <OrchestrationSettingsForm
+              <QuotaPanel
+                client={apiClient}
                 items={quotaItems}
                 busy={saving}
-                hideGroupHeaders
                 onSave={handleSave}
               />
             </Card>
@@ -129,12 +130,13 @@ export function QuotaAndEffortSection({ client }: { client?: ApiClient }) {
           <div data-testid="quota-effort-section-context">
             <Card title="Janela de contexto por modelo" id="quota-effort-heading-context">
               <p className="code-settings__muted">
-                Ajuste limites manuais por modelo (50.000 a 1.000.000 tokens) e o uso de janela longa com créditos.
+                Inspecione catálogo, janelas aprendidas e efetivas, defina limites manuais (50.000 a 1.000.000 tokens) e controle a janela longa com créditos.
               </p>
-              <OrchestrationSettingsForm
+              <ContextWindowPanel
+                client={apiClient}
+                projectRoot={report.projectRoot}
                 items={contextItems}
                 busy={saving}
-                hideGroupHeaders
                 onSave={handleSave}
               />
             </Card>

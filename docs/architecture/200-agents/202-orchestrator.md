@@ -8,6 +8,8 @@
 
 Definir o Orchestrator como plano de controle que transforma intenções autorizadas em Executions, coordena dependências, agendamento, despacho, deadlines, timeout operacional, cancelamento, recuperação e continuidade por portas públicas. O Orchestrator coopera com o Kernel, mas não executa LLM, Agent, Tool ou Capability.
 
+> **Nota de alinhamento com o runtime atual (Orin 0.13):** no runtime real em produção, a orquestração interativa de turnos é executada por `AgentSession` em conjunto com `AgenticTurnRuntime` e `NativeTurnRunner`, com subagentes rodando em threads gerenciadas pela sessão (e, na 0.13, o motor de pipelines no worker). O modelo normativo de cada subagente materializado como uma `Execution` filha própria no Kernel permanece registrado como evolução na seção [Futuro](#futuro).
+
 ## Relação com o Kernel
 
 O Runtime da [RFC 101 — Runtime](../100-kernel/101-runtime.md) continua sendo o Kernel de execução que governa uma `Execution` por vez. O Orchestrator fica na camada de orquestração e usa as portas públicas do Kernel:
@@ -83,6 +85,8 @@ Intenção autorizada
 ```
 
 `SchedulingPort`, `DispatchPort` e `SupervisionPort` são contratos lógicos. Seus adapters podem usar tecnologias diferentes sem alterar regras de domínio. `ExecutionControl` confirma mudanças de `Execution`; `PlanStorePort` é a fachada para mudanças de plano. Ambas montam `DomainChange` e `OutboxEntry` e usam a única fronteira `TransactionalPersistence.transact` da RFC 601. O Orchestrator não recebe publicador, objetos de broker, handles de Worker ou payloads proprietários, e a entrega posterior da outbox segue a RFC 103.
+
+Na implementação atual do Orin 0.13, `AgentSession` + `AgenticTurnRuntime`/`NativeTurnRunner` atuam como fronteira prática de orquestração por conversa, executando subagentes em threads isoladas sob controle da sessão, resolvendo janela efetiva de contexto, esforço de raciocínio e política de cota entre turnos. A materialização de cada execução filha como `Execution` independente permanece prevista em [Futuro](#futuro).
 
 ## Entidades e dados conceituais
 
@@ -336,6 +340,16 @@ Falha de predecessor é representada por terminal `FAILED` e `ExecutionFailed`. 
 
 Retry nunca reabre terminal. A nova Execution recebe novo `execution_id`, preserva `correlation_id`, aponta a tentativa anterior por causalidade e repete apenas efeitos idempotentes ou reconciliáveis. Limites de retry, custo e deadline são explícitos e monotônicos no plano.
 
+### Estouro de contexto em provedores e CLIs (Pacote E)
+
+Quando um turno encontra erro de estouro de janela de contexto (por exemplo `"Prompt is too long"` em CLIs ou provedores HTTP):
+
+- o runtime aprende/registra a janela observada (`context.window_learned`) quando o erro informa o teto real ou permite estimativa segura;
+- dispara uma única compactação corretiva (`context.overflow_compacted`) e reenvia o turno uma única vez, preservando o nível de esforço configurado;
+- se ocorrer um segundo estouro consecutivo no mesmo turno, a tentativa NÃO entra em loop de retry e termina em falha terminal explícita com código `CONTEXT_LENGTH_EXCEEDED`.
+
+A troca de assinatura por política de cota (`quota.fallback.enabled`) só ocorre entre turnos (nunca no meio de um turno com efeitos de ferramenta pendentes) e emite `quota.fallback_applied`.
+
 ## Fluxo normal
 
 1. Uma intenção autorizada entra com correlação e idempotência.
@@ -381,6 +395,11 @@ Retry nunca reabre terminal. A nova Execution recebe novo `execution_id`, preser
 | `OrchestrationCancellationRequested` | comando de cancelamento do plano foi aceito |
 | `OrchestrationPlanFinished` | todos os ramos requeridos chegaram ao resultado previsto |
 | `OrchestrationPlanFailed` | política declarou que o plano não pode continuar |
+| `effort.adjusted` | nível de esforço solicitado foi ajustado/limitado ao conjunto aceito pelo modelo ou provedor |
+| `quota.updated` | novo snapshot passivo de cota de assinatura foi observado e publicado |
+| `quota.fallback_applied` | turno novo trocou de assinatura entre turnos pela cadeia de fallback configurada |
+| `context.overflow_compacted` | histórico foi compactado automaticamente após estouro de contexto antes da única tentativa de reenvio |
+| `context.window_learned` | limite efetivo da janela de contexto de um modelo foi aprendido após recusa por estouro |
 
 Events pertencentes à máquina de estados, como `ExecutionStarted`, `ExecutionFinished`, `ExecutionFailed` e `ExecutionCancelled`, continuam sob ownership do Kernel. Os Events desta RFC carregam `execution_id` quando vinculados a uma tentativa e sempre preservam owner, Workspace, correlação, causalidade e classificação.
 
@@ -422,4 +441,4 @@ Novas estratégias de agendamento, prioridade, supervisão, retry e planejamento
 
 ## Futuro
 
-Workflows recorrentes, DAGs dinâmicos, fairness multiusuário, quotas, speculative execution e coordenação distribuída poderão especializar planos e políticas. A evolução deverá manter uma Execution por tentativa, resultados por referência, ausência de ordenação global e terminais imutáveis.
+Execução filha com `Execution` própria gerenciada diretamente pelo Kernel (substituindo subagentes em threads dentro de `AgentSession`), workflows recorrentes, DAGs dinâmicos, fairness multiusuário, quotas distribuídas, speculative execution e coordenação distribuída poderão especializar planos e políticas. A evolução deverá manter uma Execution por tentativa, resultados por referência, ausência de ordenação global e terminais imutáveis.

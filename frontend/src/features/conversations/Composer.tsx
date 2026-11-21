@@ -12,6 +12,7 @@ import { EffortPicker, type EffortPickerProps } from '../../components/EffortPic
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, slashItems } from './CommandPicker'
 import { applyFileMention, detectFileMention, FileMentionPicker, matchingAgents, type MentionAgent } from './FileMentionPicker'
+import { QuotaPopover, type QuotaPopoverProps } from './QuotaPopover'
 import { TodoBar } from './TodoBar'
 import {
   GitBranchIcon,
@@ -101,6 +102,8 @@ export type ComposerProps = {
   worktreeBranch?: string | null
   /** 0.13 WS-E4: Effort selector and single-turn "Pensar mais" boost button. */
   effortControl?: EffortPickerProps
+  /** 0.13 WS-E6: Subscription quota ring and popover next to the model/effort controls. */
+  quotaControl?: QuotaPopoverProps
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -132,6 +135,7 @@ export function Composer({
   workspaceFiles = [], onSearchWorkspaceFiles, mentionAgents = [],
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
   effortControl,
+  quotaControl,
   isLiveVoiceActive = false, onToggleLiveVoice,
 }: ComposerProps) {
   const externalMode: 'chat' | 'code' =
@@ -653,6 +657,12 @@ export function Composer({
               <EffortPicker
                 {...effortControl}
                 disabled={disabled || effortControl.disabled}
+              />
+            )}
+            {quotaControl && (
+              <QuotaPopover
+                {...quotaControl}
+                disabled={disabled || quotaControl.disabled}
               />
             )}
           </div>

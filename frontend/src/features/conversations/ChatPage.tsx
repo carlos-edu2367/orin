@@ -85,6 +85,7 @@ import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
 import { conversationDraftKey, useComposerDraft } from './useComposerDraft'
 import { useEffortSelection } from './useEffortSelection'
+import { useSubscriptionQuota } from './useSubscriptionQuota'
 import { StickyUserMessage } from './StickyUserMessage'
 import { PinnedSessionTabs } from '../sessions/PinnedSessionTabs'
 import { useSessionStore } from '../sessions/sessionStore'
@@ -930,6 +931,10 @@ export function ChatPage() {
     modelId: effectiveChatModelId || modelId || null,
     supportedEfforts: composerModel?.supported_efforts ?? [],
     defaultEffort: composerModel?.default_effort ?? null,
+  })
+  const subscriptionQuota = useSubscriptionQuota({
+    client,
+    provider: effectiveChatProvider ?? provider ?? null,
   })
   const sendChatMessage = useCallback(
     async (text: string, attachments: string[] = [], liveModeOverride?: boolean) => {
@@ -3613,6 +3618,13 @@ export function ChatPage() {
             boost: effortSelection.boostNextTurn,
             onToggleBoost: effortSelection.toggleBoost,
             disabled: running || stopping,
+          }}
+          quotaControl={{
+            provider: subscriptionQuota.provider,
+            subscriptions: subscriptionQuota.subscriptions,
+            displayEnabled: subscriptionQuota.displayEnabled,
+            loading: subscriptionQuota.loading,
+            onRefresh: subscriptionQuota.refresh,
           }}
           sessionContext={{
             mode: conversationMode,

@@ -1390,11 +1390,15 @@ function parseContextUsage(value: unknown): ContextUsage | null {
   }
   const values = ['used_tokens', 'limit_tokens', 'percentage', 'system_prompt_tokens', 'history_tokens', 'input_tokens', 'tools_tokens', 'skills_tokens', 'mcps_tokens', 'omitted_messages', 'compaction_count'].map(count)
   if (values.some((item) => item === null)) return null
+  const window_source = typeof data.window_source === 'string' && data.window_source.length > 0 ? data.window_source : undefined
+  const window_detail = typeof data.window_detail === 'string' && data.window_detail.length > 0 ? data.window_detail : undefined
   return {
     used_tokens: values[0]!, limit_tokens: values[1]!, percentage: Math.min(100, values[2]!),
     system_prompt_tokens: values[3]!, history_tokens: values[4]!, input_tokens: values[5]!,
     tools_tokens: values[6]!, skills_tokens: values[7]!, mcps_tokens: values[8]!,
     omitted_messages: values[9]!, compaction_count: values[10]!, compaction_enabled: data.compaction_enabled === true,
+    ...(window_source ? { window_source } : {}),
+    ...(window_detail ? { window_detail } : {}),
   }
 }
 

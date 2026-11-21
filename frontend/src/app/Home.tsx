@@ -23,6 +23,7 @@ import { Composer } from '../features/conversations/Composer'
 import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
 import { newSessionDraftKey, useComposerDraft } from '../features/conversations/useComposerDraft'
 import { useEffortSelection } from '../features/conversations/useEffortSelection'
+import { useSubscriptionQuota } from '../features/conversations/useSubscriptionQuota'
 import { inspectNewWorkspaceFolder, type WorkspaceState } from '../api/workspace'
 import { WorkspaceNavigation, type WorkspaceNavigationConversationSummary } from '../features/projects/WorkspaceNavigation'
 import { PinnedSessionTabs } from '../features/sessions/PinnedSessionTabs'
@@ -266,6 +267,10 @@ export function Home({ client, bootstrap }: HomeProps) {
     supportedEfforts: selectedModel?.supported_efforts ?? [],
     defaultEffort: selectedModel?.default_effort ?? null,
   })
+  const subscriptionQuota = useSubscriptionQuota({
+    client: apiClient,
+    provider,
+  })
 
   async function submit() {
     const text = message.trim()
@@ -503,6 +508,13 @@ export function Home({ client, bootstrap }: HomeProps) {
               boost: effortSelection.boostNextTurn,
               onToggleBoost: effortSelection.toggleBoost,
               disabled: submitting,
+            }}
+            quotaControl={{
+              provider: subscriptionQuota.provider,
+              subscriptions: subscriptionQuota.subscriptions,
+              displayEnabled: subscriptionQuota.displayEnabled,
+              loading: subscriptionQuota.loading,
+              onRefresh: subscriptionQuota.refresh,
             }}
             sessionContext={{
               mode: codeMode === 'code' ? 'code' : 'chat',
