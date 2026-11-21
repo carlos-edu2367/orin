@@ -26,6 +26,7 @@ EXPECTED = {
     ),
     "task_get": ({"taskId"}, ["taskId"]),
     "task_list": (set(), []),
+    "task_claim": ({"taskId"}, ["taskId"]),
     "ask_user": ({"questions"}, ["questions"]),
     "enter_plan_mode": (set(), []),
     "exit_plan_mode": ({"plan", "allowedPrompts"}, []),

@@ -92,7 +92,7 @@ TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
     "skills": _SKILL_TOOLS,
     "delegation": (
         "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
-        "todo_write", "task_create", "task_update", "task_get", "task_list",
+        "todo_write", "task_create", "task_update", "task_get", "task_list", "task_claim",
     ),
 }
 # ``mcp`` and ``plugins`` are declared the same way but resolve by tool kind

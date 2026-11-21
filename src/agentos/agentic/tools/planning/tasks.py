@@ -6,12 +6,18 @@ from typing import Any, Mapping, Literal
 
 from pydantic import Field
 
+from agentos.agentic.task_board import record_to_task_dict
 from agentos.agentic.tools._shared import AgentToolError, _TEXT, _schema
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
 
 
 class TaskTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
+
+    def _active_task_board(self) -> Any | None:
+        if bool(getattr(self, "_task_board_enabled", False)):
+            return getattr(self, "_task_board", None)
+        return None
 
     def _next_task_id(self) -> str:
         existing_ids = {str(item.get("id", "")) for item in self._todos}
@@ -29,6 +35,8 @@ class TaskTools:
         status: str = "pending",
         owner: str | None = None,
         metadata: Mapping[str, Any] | None = None,
+        blocked_by: list[str] | None = None,
+        team_name: str | None = None,
     ) -> dict[str, Any]:
         task_subject = str(subject or content or "").strip()[:300]
         if not task_subject:
@@ -36,6 +44,30 @@ class TaskTools:
         clean_status = str(status or "pending").strip().lower()
         if clean_status not in {"pending", "in_progress", "completed"}:
             raise AgentToolError("status must be 'pending', 'in_progress', or 'completed'.")
+        board = self._active_task_board()
+        if board is not None:
+            record = board.create(
+                title=task_subject,
+                description=str(description or "").strip()[:1000],
+                status=clean_status,
+                owner_agent_id=str(owner).strip()[:64] if owner is not None and str(owner).strip() else None,
+                blocked_by=blocked_by or (),
+                team_name=str(team_name).strip()[:64] if team_name is not None and str(team_name).strip() else None,
+            )
+            self._touch_task_board_lease()
+            entry = record_to_task_dict(record)
+            board_list = [record_to_task_dict(item) for item in board.list_items()]
+            return {
+                "summary": f"Tarefa criada: {record.item_id} ({task_subject[:60]})",
+                "content": json.dumps(entry, ensure_ascii=False, indent=2),
+                "task": dict(entry),
+                "todos": board_list,
+                "payload": {
+                    "task": dict(entry),
+                    "todos": board_list,
+                    "tool_kind": "planning",
+                },
+            }
         task_id = self._next_task_id()
         entry: dict[str, Any] = {
             "id": task_id,
@@ -83,6 +115,44 @@ class TaskTools:
         target_id = str(task_id or "").strip()
         if not target_id:
             raise AgentToolError("task_id is required.")
+        board = self._active_task_board()
+        if board is not None:
+            if status is not None:
+                clean_status = str(status).strip().lower()
+                if clean_status not in {"pending", "in_progress", "completed", "deleted", "done", "blocked", "cancelled"}:
+                    raise AgentToolError("status must be 'pending', 'in_progress', 'completed', or 'deleted'.")
+            else:
+                clean_status = None
+            updated = board.update(
+                target_id,
+                title=str(subject).strip()[:300] if subject is not None and str(subject).strip() else None,
+                description=str(description).strip()[:1000] if description is not None else None,
+                status=clean_status,
+                add_blocked_by=add_blocked_by,
+                add_blocks=add_blocks,
+                acting_agent_id=self._task_board_actor_id(),
+            )
+            if updated is None:
+                raise AgentToolError(f"Task '{target_id}' not found.")
+            self._touch_task_board_lease()
+            entry = record_to_task_dict(updated)
+            board_list = [record_to_task_dict(item) for item in board.list_items()]
+            summary_label = (
+                f"Tarefa removida: {updated.item_id}"
+                if updated.status == "cancelled"
+                else f"Tarefa atualizada: {updated.item_id} -> {entry['status']}"
+            )
+            return {
+                "summary": summary_label,
+                "content": json.dumps(entry, ensure_ascii=False, indent=2),
+                "task": dict(entry),
+                "todos": board_list,
+                "payload": {
+                    "task": dict(entry),
+                    "todos": board_list,
+                    "tool_kind": "planning",
+                },
+            }
         found: dict[str, Any] | None = None
         for item in self._todos:
             if str(item.get("id", "")) == target_id or (
@@ -164,6 +234,22 @@ class TaskTools:
         target_id = str(task_id or "").strip()
         if not target_id:
             raise AgentToolError("task_id is required.")
+        board = self._active_task_board()
+        if board is not None:
+            record = board.get(target_id)
+            if record is None:
+                raise AgentToolError(f"Task '{target_id}' not found.")
+            self._touch_task_board_lease()
+            item = record_to_task_dict(record)
+            return {
+                "summary": f"Tarefa {item['id']}: {item['status']}",
+                "content": json.dumps(item, ensure_ascii=False, indent=2),
+                "task": dict(item),
+                "payload": {
+                    "task": dict(item),
+                    "tool_kind": "planning",
+                },
+            }
         for item in self._todos:
             if str(item.get("id", "")) == target_id or (
                 target_id.isdigit() and str(item.get("id", "")) == f"todo_{target_id}"
@@ -181,6 +267,28 @@ class TaskTools:
 
     def task_list(self, status: str | None = None) -> dict[str, Any]:
         clean_status = str(status).strip().lower() if status is not None and str(status).strip() else None
+        board = self._active_task_board()
+        if board is not None:
+            try:
+                records = board.list_items(status=clean_status)
+            except ValueError as err:
+                raise AgentToolError(str(err)) from err
+            self._touch_task_board_lease()
+            tasks = [record_to_task_dict(rec) for rec in records]
+            return {
+                "summary": f"{len(tasks)} tarefa(s)",
+                "content": json.dumps(tasks, ensure_ascii=False, indent=2),
+                "tasks": tasks,
+                "count": len(tasks),
+                "total": len(tasks),
+                "payload": {
+                    "tasks": [dict(item) for item in tasks[:6]],
+                    "todos": tasks,
+                    "count": len(tasks),
+                    "total": len(tasks),
+                    "tool_kind": "planning",
+                },
+            }
         tasks = [
             dict(item)
             for item in self._todos

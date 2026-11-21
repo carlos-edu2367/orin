@@ -94,6 +94,7 @@ from agentos.agentic.tools.orin.projects import ProjectTools
 from agentos.agentic.tools.orin.models_catalog import ModelCatalogTools
 from agentos.agentic.tools.planning.todo import TodoTools
 from agentos.agentic.tools.planning.tasks import TaskTools
+from agentos.agentic.tools.planning.task_claim import TaskClaimTools
 from agentos.agentic.tools.planning.plan_mode import PlanModeTools
 from agentos.agentic.tools.interaction.ask_user import AskUserTools
 from agentos.agentic.tools.agents.agent import AgentTools
@@ -156,7 +157,7 @@ class AgentToolset(
     ActiveInvocation, ReadTools, WriteTools, EditTools, NotebookTools, GlobTools, GrepTools, CodeSearchTools,
     BashTools, PowerShellTools, ShellTaskTools, WorkingStateTools, VerifyTools, ResolveFindingsTools, FetchTools, WebSearchTools,
     MemoryTools, SkillTools, DiskSkillTools, McpTools, PluginTools, ProjectTools, ModelCatalogTools, TodoTools,
-    TaskTools, PlanModeTools, AskUserTools, AgentTools, TeamTools, WorktreeTools, PreviewTools, MediaTools,
+    TaskTools, TaskClaimTools, PlanModeTools, AskUserTools, AgentTools, TeamTools, WorktreeTools, PreviewTools, MediaTools,
     CronTools, WakeupTools, MonitorTools, NotifyTools,
 ):
     """Builds the tool schemas and executes the model's calls.
@@ -215,6 +216,7 @@ class AgentToolset(
         read_files_state: dict[str, Any] | None = None,
         todos_state: list[dict[str, Any]] | None = None,
         on_todo_update: Callable[[list[dict[str, Any]]], None] | None = None,
+        task_board: object | None = None, task_board_enabled: bool = False, task_board_agent_id: str | None = None,
         background_shells: dict[str, dict[str, Any]] | None = None,
         read_only_mode: bool = False, host_folders: bool = False,
         default_provider: str | None = None,
@@ -362,6 +364,9 @@ class AgentToolset(
         self._non_code_edited_paths: set[str] = set()
         self._todos: list[dict[str, Any]] = todos_state if todos_state is not None else []
         self._todos_state = self._todos
+        self._task_board: Any = task_board
+        self._task_board_enabled: bool = bool(task_board_enabled and task_board is not None)
+        self._task_board_agent_id: str | None = str(task_board_agent_id).strip() or None if task_board_agent_id else None
         self._on_todo_update: Callable[[list[dict[str, Any]]], None] | None = on_todo_update
         self._background_shells: dict[str, dict[str, Any]] = background_shells if background_shells is not None else {}
         self._current_cwd: Path = self.workspace.root
@@ -1114,6 +1119,7 @@ class AgentToolset(
             ctx_agent_id = str(self._lifecycle_context.get("agent_id") or "").strip() or None
             with bind_agent_id(ctx_agent_id) if ctx_agent_id and get_current_agent_id() is None else nullcontext():
                 result = definition.handler(**dict(arguments))
+            self._touch_task_board_lease()
         except (AgentToolError, WorkspaceError) as error:
             error_code = getattr(error, "error_code", "TOOL_REFUSED") or "TOOL_REFUSED"
             return ToolOutcome("failed", str(error)[:240], str(error), err_payload, error_code)
