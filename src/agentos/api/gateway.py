@@ -198,6 +198,8 @@ class CreateConversationRequest(_RequestModel):
     code_mode: str = Field(default="chat", pattern="^(auto|code|chat|friend)$")
     permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
     live_mode: bool = False
+    effort: str | None = Field(default=None, pattern="^(low|medium|high|xhigh|max|ultra)$")
+    boost: bool = False
     # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
     cli: CliTurnOptions | None = None
 
@@ -302,6 +304,8 @@ class SendConversationMessageRequest(_RequestModel):
     code_mode: str = Field(default="chat", pattern="^(auto|code|chat|friend)$")
     permission_mode: str | None = Field(default=None, pattern="^(accept_edits|plan_mode|ask_permissions|full_autonomy|auto|dont_ask|default|acceptEdits|plan|bypassPermissions|dontAsk|manual)$")
     live_mode: bool = False
+    effort: str | None = Field(default=None, pattern="^(low|medium|high|xhigh|max|ultra)$")
+    boost: bool = False
     # W6: what `orin code` attaches to the turn; accepted only with this run's CLI token.
     cli: CliTurnOptions | None = None
 
@@ -855,6 +859,10 @@ def create_app(services: ApiServices) -> FastAPI:
                     create_kwargs["cli_options"] = cli_options
                 if payload.live_mode:
                     create_kwargs["live_mode"] = True
+                if payload.effort is not None:
+                    create_kwargs["effort"] = payload.effort
+                if payload.boost:
+                    create_kwargs["boost"] = True
                 result = application.create(  # type: ignore[union-attr]
                     ProviderCatalogContext(principal.user_id, "conversation.create"),
                     **create_kwargs,
@@ -1617,6 +1625,10 @@ def create_app(services: ApiServices) -> FastAPI:
                     send_kwargs["cli_options"] = cli_options
                 if payload.live_mode:
                     send_kwargs["live_mode"] = True
+                if payload.effort is not None:
+                    send_kwargs["effort"] = payload.effort
+                if payload.boost:
+                    send_kwargs["boost"] = True
                 result = require_port(services.conversation_application).send(
                     principal.user_id, conversation_id, payload.message, _idempotency(request),
                     attachments=attachments, provider=provider, model_id=model_id, code_mode=payload.code_mode,
@@ -3550,6 +3562,8 @@ def _catalog_model_public(value: object) -> dict[str, object]:
         "pricing": public_pricing, "is_favorite": bool(data.get("is_favorite")), "is_custom": bool(data.get("is_custom")),
         "refreshed_at": refreshed_at.isoformat() if isinstance(refreshed_at, datetime) else None,
         "route_kind": data.get("route_kind") if data.get("route_kind") in {"model", "auto"} else "model",
+        "supported_efforts": list(data.get("supported_efforts") or []),
+        "default_effort": data.get("default_effort"),
     }
 
 

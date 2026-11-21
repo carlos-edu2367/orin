@@ -13,6 +13,7 @@ MAX_ACTIVITY_SUMMARY = 512
 
 class AgentActivityEventType(StrEnum):
     TURN_STARTED = "turn.started"
+    EFFORT_ADJUSTED = "effort.adjusted"
     MODEL_ROUTING_STARTED = "model.routing_started"
     CONTEXT_UPDATED = "context.updated"
     CONTEXT_COMPACTED = "context.compacted"

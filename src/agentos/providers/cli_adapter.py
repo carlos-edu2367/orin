@@ -193,6 +193,52 @@ class CliErrorInfo:
         return self.status_code
 
 
+_CLI_EFFORT_ORDER: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
+_CLI_EFFORT_RANK: dict[str, int] = {lvl: idx for idx, lvl in enumerate(_CLI_EFFORT_ORDER)}
+
+
+@dataclass(frozen=True, slots=True)
+class CliEffortAdjustment:
+    requested: str
+    applied: str | None
+    reason: str
+
+
+def clamp_cli_effort(
+    requested: str | None,
+    supported_efforts: Sequence[str] | None,
+    *,
+    slug_fixed: str | None = None,
+) -> tuple[str | None, CliEffortAdjustment | None]:
+    """Clamp a CLI effort level to the highest accepted level <= requested without silently dropping it."""
+    if requested is None or not str(requested).strip():
+        return None, None
+    req = str(requested).strip().lower()
+    if req not in _CLI_EFFORT_RANK:
+        return None, None
+    if slug_fixed is not None:
+        fixed = slug_fixed.strip().lower()
+        if req == fixed:
+            return fixed, None
+        return fixed, CliEffortAdjustment(requested=req, applied=fixed, reason="model_slug_fixed")
+    if supported_efforts is None:
+        return req, None
+    normalized = tuple(
+        lvl
+        for lvl in (str(item).strip().lower() for item in supported_efforts)
+        if lvl in _CLI_EFFORT_RANK
+    )
+    if not normalized:
+        return req, None
+    if req in normalized:
+        return req, None
+    req_rank = _CLI_EFFORT_RANK[req]
+    ordered = sorted(dict.fromkeys(normalized), key=lambda lvl: _CLI_EFFORT_RANK[lvl])
+    lower_or_eq = [lvl for lvl in ordered if _CLI_EFFORT_RANK[lvl] <= req_rank]
+    applied = lower_or_eq[-1] if lower_or_eq else ordered[0]
+    return applied, CliEffortAdjustment(requested=req, applied=applied, reason="unsupported_level")
+
+
 @dataclass(frozen=True, slots=True)
 class CliModelInfo:
     id: str
@@ -201,6 +247,7 @@ class CliModelInfo:
     supported_efforts: tuple[str, ...] = ()
     input_modalities: tuple[str, ...] | None = None
     output_modalities: tuple[str, ...] | None = None
+    default_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +308,7 @@ class CliTurnRequest:
     workspace_root: Path | None = None
     image_paths: tuple[Path, ...] = ()
     capabilities: CliCapabilities = field(default_factory=CliCapabilities)
+    effort_adjustment: CliEffortAdjustment | None = None
     prompt_via_stdin_once: bool = field(init=False)
 
     def __post_init__(self) -> None:
@@ -359,6 +407,7 @@ __all__ = [
     "AdapterCapabilities",
     "CliAgentAdapter",
     "CliCapabilities",
+    "CliEffortAdjustment",
     "CliErrorInfo",
     "CliErrorKind",
     "CliEvent",
@@ -372,4 +421,5 @@ __all__ = [
     "RateLimitState",
     "StreamUsage",
     "ToolServerWiring",
+    "clamp_cli_effort",
 ]

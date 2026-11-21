@@ -419,13 +419,17 @@ def test_build_command_infers_supported_efforts_from_suffix_for_unknown_model(
     assert "--effort" in cmd_std
     assert cmd_std[cmd_std.index("--effort") + 1] == "medium"
 
-    cmd_non_std = adapter.build_command(
-        CliTurnRequest(
-            binary="agy",
-            system_prompt_file=sys_file,
-            model="gemini-5-unreleased",
-            effort="xhigh",
-        )
+    req_non_std = CliTurnRequest(
+        binary="agy",
+        system_prompt_file=sys_file,
+        model="gemini-5-unreleased",
+        effort="xhigh",
     )
-    assert "--effort" not in cmd_non_std
+    cmd_non_std = adapter.build_command(req_non_std)
+    assert "--effort" in cmd_non_std
+    assert cmd_non_std[cmd_non_std.index("--effort") + 1] == "high"
+    assert req_non_std.effort_adjustment is not None
+    assert req_non_std.effort_adjustment.requested == "xhigh"
+    assert req_non_std.effort_adjustment.applied == "high"
+    assert req_non_std.effort_adjustment.reason == "unsupported_level"
 

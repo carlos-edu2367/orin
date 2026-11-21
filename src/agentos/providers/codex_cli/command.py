@@ -9,7 +9,12 @@ import subprocess
 import sys
 from typing import Any, Mapping, Sequence
 
-from agentos.providers.cli_adapter import CliTurnRequest, ToolServerWiring
+from agentos.providers.cli_adapter import (
+    CliEffortAdjustment,
+    CliTurnRequest,
+    ToolServerWiring,
+    clamp_cli_effort,
+)
 
 MIN_CODEX_VERSION: tuple[int, int, int] = (0, 167, 0)
 MAX_CODEX_MAJOR: int = 1
@@ -527,13 +532,17 @@ def build_codex_command(
 
     if request.effort is not None and str(request.effort).strip():
         effort = str(request.effort).strip().lower()
-        allowed_by_model = (
-            supported_efforts is None
-            or len(supported_efforts) == 0
-            or effort in supported_efforts
-        )
-        if effort in VALID_EFFORT_LEVELS and allowed_by_model:
-            base_c_values.append(f'model_reasoning_effort="{effort}"')
+        if effort in VALID_EFFORT_LEVELS:
+            eff_supported = (
+                supported_efforts
+                if supported_efforts is not None and len(supported_efforts) > 0
+                else None
+            )
+            applied_effort, adjustment = clamp_cli_effort(effort, eff_supported)
+            if adjustment is not None:
+                object.__setattr__(request, "effort_adjustment", adjustment)
+            if applied_effort is not None:
+                base_c_values.append(f'model_reasoning_effort="{applied_effort}"')
 
     locked_c_keys: set[str] = {
         "model_instructions_file",

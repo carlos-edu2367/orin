@@ -55,6 +55,10 @@ class CatalogModel:
     id: str
     name: str
     context_window: int
+    effort_levels: tuple[str, ...] = ()
+    default_effort: str | None = None
+    rejects_disabled_thinking: bool = False
+    has_effort_metadata: bool = False
 
     def get(self, key: str, default: Any = None) -> Any:
         if key == "id":
@@ -63,6 +67,12 @@ class CatalogModel:
             return self.name
         if key in {"context_window", "context_length", "max_input_tokens"}:
             return self.context_window
+        if key in {"effort_levels", "supported_efforts"}:
+            return self.effort_levels
+        if key == "default_effort":
+            return self.default_effort
+        if key == "rejects_disabled_thinking":
+            return self.rejects_disabled_thinking
         return default
 
     def __getitem__(self, key: str) -> Any:
@@ -74,6 +84,10 @@ class CatalogModel:
             "context_window",
             "context_length",
             "max_input_tokens",
+            "effort_levels",
+            "supported_efforts",
+            "default_effort",
+            "rejects_disabled_thinking",
         }:
             raise KeyError(key)
         return val
@@ -182,7 +196,44 @@ def _format_catalog_model_entry(entry: Mapping[str, Any]) -> CatalogModel | None
         context_window = max_input
     else:
         context_window = context_window_for(model_id)
-    return CatalogModel(id=model_id, name=display_name, context_window=context_window)
+
+    has_effort_metadata = False
+    effort_levels: tuple[str, ...] = ()
+    raw_efforts = runtime.get("effort_levels") if "effort_levels" in runtime else entry.get("effort_levels")
+    if "effort_levels" in runtime or "effort_levels" in entry:
+        has_effort_metadata = True
+        if isinstance(raw_efforts, (list, tuple)):
+            parsed_efforts: list[str] = []
+            for item in raw_efforts:
+                lvl = str(item or "").strip().lower()
+                if lvl in {"low", "medium", "high", "xhigh", "max", "ultra"} and lvl not in parsed_efforts:
+                    parsed_efforts.append(lvl)
+            effort_levels = tuple(parsed_efforts)
+
+    raw_default = runtime.get("default_effort") if "default_effort" in runtime else entry.get("default_effort")
+    default_effort: str | None = None
+    if isinstance(raw_default, str) and raw_default.strip().lower() in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+        default_effort = raw_default.strip().lower()
+        has_effort_metadata = True
+
+    caps = entry.get("capabilities") if isinstance(entry.get("capabilities"), Mapping) else {}
+    runtime_caps = runtime.get("capabilities") if isinstance(runtime.get("capabilities"), Mapping) else {}
+    rejects_disabled = bool(
+        runtime.get("rejects_disabled_thinking")
+        or entry.get("rejects_disabled_thinking")
+        or caps.get("rejects_disabled_thinking")
+        or runtime_caps.get("rejects_disabled_thinking")
+    )
+
+    return CatalogModel(
+        id=model_id,
+        name=display_name,
+        context_window=context_window,
+        effort_levels=effort_levels,
+        default_effort=default_effort,
+        rejects_disabled_thinking=rejects_disabled,
+        has_effort_metadata=has_effort_metadata,
+    )
 
 
 def _fetch_published_claude_cli_models(

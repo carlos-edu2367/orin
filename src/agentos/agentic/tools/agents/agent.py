@@ -173,6 +173,7 @@ class AgentTools:
         task: str,
         description: str = "",
         model_id: str | None = None,
+        effort: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
         teammate_name: str | None = None,
@@ -199,6 +200,9 @@ class AgentTools:
         clean_agent_id = str(agent_id).strip() if agent_id is not None and str(agent_id).strip() else None
         clean_model_id = str(model_id).strip() if model_id is not None and str(model_id).strip() else None
         clean_char_name = sanitize_character_name(character_name)
+        clean_effort = str(effort).strip().lower() if effort is not None and str(effort).strip() else None
+        if clean_effort is not None and clean_effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+            raise AgentToolError("effort must be one of 'low', 'medium', 'high', 'xhigh', 'max', or 'ultra'.")
         if self._run_subagent is not None:
             # W5: a named teammate of an agent team (only passed when asked, so older callables keep working).
             extra: dict[str, Any] = (
@@ -208,6 +212,8 @@ class AgentTools:
             )
             if clean_char_name is not None:
                 extra["character_name"] = clean_char_name
+            if clean_effort is not None:
+                extra["effort"] = clean_effort
             try:
                 return self._run_subagent(
                     clean_type,
@@ -290,6 +296,7 @@ class AgentInput(ToolInput):
     prompt: str = Field(description="Complete instructions; the subagent does not see this conversation.")
     subagent_type: str | None = Field(None, description="Explore, Plan, general-purpose or fork.")
     model: str | None = Field(None, description="Optional model. For an agent that lists its own models, one of them (required when it lists several).")
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = Field(None, description="Optional reasoning effort level for this subagent call.")
     run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
     resume: str | None = Field(None, description="Id of a previous subagent to continue.")
     name: str | None = Field(None, description="Name a teammate of an agent team, so the team can message it with SendMessage.")
@@ -351,6 +358,7 @@ SPECS: tuple[ToolSpec, ...] = (
             "task": {**_TEXT, "description": "Complete task instructions for the subagent."},
             "description": {**_TEXT, "description": "Short 3-5 word summary of what the subagent will do."},
             "model_id": {**_TEXT, "description": "Optional. For an agent that lists its own models, one of them (required when it lists several); otherwise a favorite model ID of the current provider."},
+            "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Optional reasoning effort level for this subagent call."},
             "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
             "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent (or check_subagent(agent_ids=[...]) for several) to inspect or await its output."},
             "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},

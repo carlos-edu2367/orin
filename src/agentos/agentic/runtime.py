@@ -690,6 +690,34 @@ class AgenticTurnRuntime:
         else:
             self._summary_spent += amount
 
+    def _emit_effort_adjusted(
+        self,
+        turn: dict[str, object],
+        *,
+        requested: str,
+        applied: str | None,
+        reason: str,
+        model: str,
+    ) -> None:
+        recorder = getattr(self.store, "record", None)
+        if not callable(recorder):
+            return
+        try:
+            target = applied if applied is not None else "padrão"
+            recorder(
+                turn,
+                AgentActivityEventType.EFFORT_ADJUSTED,
+                f"Esforço ajustado de '{requested}' para '{target}' ({model})",
+                {
+                    "requested": requested,
+                    "applied": applied,
+                    "reason": reason,
+                    "model": model,
+                },
+            )
+        except Exception:  # noqa: BLE001 - adjustment notice never stops a turn
+            pass
+
     def _model_accepts_effort(self, model: str) -> bool:
         if self._effort_supported is None:
             return True
@@ -731,8 +759,31 @@ class AgenticTurnRuntime:
                 except Exception:  # noqa: BLE001
                     pass
             turn["model_id"] = candidate
-            if self.effort and not self._model_accepts_effort(candidate):
-                self.effort = None
+            if self.effort:
+                from .effort_levels import clamp as _clamp_effort
+
+                provider_name = str(turn.get("provider") or "")
+                if self._effort_supported is not None and not self._model_accepts_effort(candidate):
+                    prev_effort = self.effort
+                    self.effort = None
+                    self._emit_effort_adjusted(
+                        turn,
+                        requested=prev_effort,
+                        applied=None,
+                        reason="unsupported_model",
+                        model=candidate,
+                    )
+                else:
+                    clamped, adj = _clamp_effort(provider_name, candidate, self.effort)
+                    self.effort = clamped
+                    if adj is not None:
+                        self._emit_effort_adjusted(
+                            turn,
+                            requested=adj.requested,
+                            applied=adj.applied,
+                            reason=adj.reason,
+                            model=candidate,
+                        )
             if self._model_switched is not None:
                 try:
                     self._model_switched(candidate)
@@ -956,6 +1007,13 @@ class AgenticTurnRuntime:
             }
             if self.effort and not bool(turn.get("live_mode")):
                 request["effort"] = self.effort
+                request["on_effort_adjusted"] = lambda adj, mdl=None: self._emit_effort_adjusted(
+                    turn,
+                    requested=str(getattr(adj, "requested", "")),
+                    applied=getattr(adj, "applied", None),
+                    reason=str(getattr(adj, "reason", "")),
+                    model=str(mdl or turn.get("model_id") or ""),
+                )
             if final_iteration:
                 request["tool_choice"] = "none"
             if str(turn.get("provider", "")).lower() == "anthropic":

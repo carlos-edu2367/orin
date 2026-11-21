@@ -30,7 +30,7 @@ def test_payload_mapping() -> None:
     anthropic = apply_effort("anthropic", {"max_tokens": 8192}, "high")
     assert anthropic["thinking"] == {"type": "enabled", "budget_tokens": THINKING_BUDGET["high"]}
     assert anthropic["max_tokens"] > THINKING_BUDGET["high"]
-    assert apply_effort("openrouter", {}, "max") == {"reasoning": {"effort": "high"}}
+    assert apply_effort("openrouter", {}, "max") == {"reasoning": {"effort": "max"}}
     assert apply_effort("openai", {}, "low") == {"reasoning_effort": "low"}
     assert apply_effort("ollama", {}, "high") == {}
     assert apply_effort("anthropic", {"max_tokens": 1}, None) == {"max_tokens": 1}

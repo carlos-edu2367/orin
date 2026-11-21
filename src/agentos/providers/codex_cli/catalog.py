@@ -52,6 +52,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         500_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-6-astra",
@@ -59,6 +60,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-6.1-terra",
@@ -66,6 +68,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         500_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-6-sol",
@@ -73,6 +76,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-6-luna",
@@ -80,6 +84,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         272_000,
         ("low", "medium", "high", "xhigh", "max"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-5.6-sol",
@@ -87,6 +92,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-5.6-terra",
@@ -94,6 +100,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         272_000,
         ("low", "medium", "high", "xhigh", "max", "ultra"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
     CliModelInfo(
         "gpt-5.6-luna",
@@ -101,6 +108,7 @@ FALLBACK_CODEX_MODELS: tuple[CliModelInfo, ...] = (
         272_000,
         ("low", "medium", "high", "xhigh", "max"),
         input_modalities=("text", "image"),
+        default_effort="medium",
     ),
 )
 
@@ -201,6 +209,12 @@ def discover_codex_models(
         supported_efforts = _extract_supported_efforts(
             entry.get("supported_reasoning_levels")
         )
+        raw_default = entry.get("default_reasoning_effort") or entry.get("default_effort")
+        default_effort = (
+            raw_default.strip().lower()
+            if isinstance(raw_default, str) and raw_default.strip().lower() in supported_efforts
+            else None
+        )
         discovered.append(
             CliModelInfo(
                 id=slug,
@@ -210,6 +224,7 @@ def discover_codex_models(
                 input_modalities=codex_input_modalities(
                     slug, entry.get("input_modalities")
                 ),
+                default_effort=default_effort,
             )
         )
 

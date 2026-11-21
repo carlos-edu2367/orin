@@ -39,7 +39,7 @@ class CustomAgentFields(BaseModel):
     models: list[str] = Field(default_factory=list, max_length=MAX_AGENT_MODELS)
     tools: list[str] | None = Field(default=None, max_length=128)
     disallowed_tools: list[str] = Field(default_factory=list, max_length=128)
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = None
     permission_mode: Literal["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions", "auto"] | None = None
     max_turns: int | None = Field(default=None, ge=1, le=500)
     enabled: bool = True

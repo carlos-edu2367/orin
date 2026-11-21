@@ -188,6 +188,8 @@ class ProviderModelCatalogService:
                         efforts = getattr(item, "supported_efforts", ())
                         caps = ("tools", "reasoning") if efforts else ("tools",)
                 in_mods = getattr(item, "input_modalities", None) or ("text",)
+                raw_efforts = tuple(str(e) for e in (getattr(item, "supported_efforts", ()) or ())) if "text" in out_mods else ()
+                raw_default_effort = getattr(item, "default_effort", None) if raw_efforts else None
                 records.append(
                     ProviderModelRecord(
                         provider=normalized_provider,
@@ -199,6 +201,8 @@ class ProviderModelCatalogService:
                         output_modalities=tuple(str(m) for m in out_mods),
                         pricing=None,
                         refreshed_at=refreshed_at,
+                        supported_efforts=raw_efforts,
+                        default_effort=str(raw_default_effort) if raw_default_effort else None,
                     )
                 )
             return self._fill_context_windows(records)
@@ -432,7 +436,30 @@ class ProviderModelCatalogService:
                 if (not raw_base and not has_key) or not is_opencode_cloud(raw_base or DEFAULT_OPENCODE_LOCAL_BASE_URL):
                     if self._try_auto_refresh(context, normalized_provider):
                         items = self._repository.list(context, normalized_provider, favorites_only)
-        return items
+        return self._enrich_effort_levels(items)
+
+    @staticmethod
+    def _enrich_effort_levels(items: list[ProviderModelRecord]) -> list[ProviderModelRecord]:
+        from agentos.agentic.effort_levels import levels_for
+
+        enriched: list[ProviderModelRecord] = []
+        for item in items:
+            if "text" not in item.output_modalities:
+                enriched.append(item)
+                continue
+            if item.supported_efforts:
+                if item.default_effort is not None:
+                    enriched.append(item)
+                else:
+                    default_eff = "medium" if "medium" in item.supported_efforts else item.supported_efforts[0]
+                    enriched.append(replace(item, default_effort=default_eff))
+                continue
+            info = levels_for(item.provider, item.model_id, item.capabilities)
+            if info.levels != item.supported_efforts or info.default != item.default_effort:
+                enriched.append(replace(item, supported_efforts=info.levels, default_effort=info.default))
+            else:
+                enriched.append(item)
+        return enriched
 
     def favorite(self, context: ProviderCatalogContext, provider: str, model_id: str, favorite: bool) -> ProviderModelRecord:
         if not isinstance(model_id, str) or not model_id.strip():
