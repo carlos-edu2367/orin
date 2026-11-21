@@ -1189,28 +1189,40 @@ class RuntimeToolExecutor(ToolExecutor):
         return False
 
     def _claim_queued_texts(self) -> list[str]:
+        from agentos.agentic.tools.orin.session_delivery import format_friend_injected_text
+
         claim = getattr(self.runtime.store, "claim_queued_inputs", None)
         if not callable(claim):
             return []
+        deferred_friend_ack = False
         try:
-            items = list(claim(self.turn) or ())
+            try:
+                items = list(claim(self.turn, notify_friend=False) or ())
+                deferred_friend_ack = True
+            except TypeError:
+                items = list(claim(self.turn) or ())
         except Exception:  # noqa: BLE001
             return []
         claimed: list[str] = []
         for item in items:
             text = str((item or {}).get("content") or "").strip()
             queue_id = str((item or {}).get("queue_id") or "")
+            origin = str((item or {}).get("origin") or "user").strip().lower() or "user"
+            origin_cid = (item or {}).get("origin_conversation_id") or None
             if not text:
                 continue
             decision = self.runtime._emit(HookEvent.USER_PROMPT_SUBMIT, prompt=text)
             if decision is not None and (decision.blocked or decision.stop):
+                reason = decision.reason or decision.stop_reason or "blocked by hook"
                 marker = getattr(self.runtime.store, "mark_queued_input_blocked", None)
                 if callable(marker):
                     try:
-                        marker(queue_id)
+                        try:
+                            marker(queue_id, reason=reason)
+                        except TypeError:
+                            marker(queue_id)
                     except Exception:  # noqa: BLE001
                         pass
-                reason = decision.reason or decision.stop_reason or "blocked by hook"
                 self.runtime.store.delta(
                     self.turn,
                     f"\n\n⚠️ Mensagem da fila bloqueada por um hook: {reason}\n\n",
@@ -1221,23 +1233,38 @@ class RuntimeToolExecutor(ToolExecutor):
                 for entry in (decision.additional_context if decision is not None else [])
                 if entry
             ]
+            injected_text = format_friend_injected_text(text) if origin == "friend" else text
             content = (
-                f"{text}\n\n{system_reminder(chr(10).join(extra))}"
+                f"{injected_text}\n\n{system_reminder(chr(10).join(extra))}"
                 if extra
-                else text
+                else injected_text
             )
             if self._deferred_queued_records is not None:
                 # Claimed while an ask_user batch is open: recorded after that batch's tool call and results,
                 # so the transcript never shows the answer before the question.
-                self._deferred_queued_records.append((content, text))
+                self._deferred_queued_records.append((content, injected_text, origin, origin_cid))
             else:
-                self._record_queued_input(content, text)
-            self.runtime._life(
-                self.turn,
-                "queued_input",
-                queued_text=text[:2000],
-                queue_id=queue_id,
-            )
+                self._record_queued_input(
+                    content,
+                    injected_text,
+                    origin=origin,
+                    origin_conversation_id=origin_cid,
+                )
+            life_kwargs: dict[str, object] = {
+                "queued_text": text[:2000],
+                "queue_id": queue_id,
+            }
+            if origin == "friend":
+                life_kwargs["origin"] = "friend"
+                life_kwargs["origin_conversation_id"] = origin_cid
+            self.runtime._life(self.turn, "queued_input", **life_kwargs)
+            if deferred_friend_ack and origin == "friend":
+                confirm = getattr(self.runtime.store, "confirm_queued_input_injected", None)
+                if callable(confirm):
+                    try:
+                        confirm(self.turn, item)
+                    except Exception:  # noqa: BLE001
+                        pass
             claimed.append(content)
         if claimed:
             notify = getattr(self.runtime, "_notify_queued_input_claimed", None)
@@ -1263,13 +1290,25 @@ class RuntimeToolExecutor(ToolExecutor):
                         break
         return claimed
 
-    def _record_queued_input(self, content: str, text: str) -> None:
+    def _record_queued_input(
+        self,
+        content: str,
+        text: str,
+        *,
+        origin: str = "user",
+        origin_conversation_id: str | None = None,
+    ) -> None:
         self.messages.append({"role": "user", "content": content})
         self.runtime._queued_turn_count += 1
+        payload: dict[str, object] = {"content": text}
+        if origin == "friend":
+            payload["origin"] = "friend"
+            if origin_conversation_id:
+                payload["origin_conversation_id"] = origin_conversation_id
         self.runtime._record_step(
             self.turn,
             kind=transcript.STEP_QUEUED_INPUT,
-            payload={"content": text},
+            payload=payload,
         )
 
     def _turn_notes(self, *, claim_queue: bool = True) -> str:
@@ -1401,8 +1440,13 @@ class RuntimeToolExecutor(ToolExecutor):
                 self._reserved_actions += reserved_count
                 if self._deferred_queued_records is not None:  # an earlier batch broke off before recording them
                     leftover, self._deferred_queued_records = self._deferred_queued_records, None
-                    for content, text in leftover:
-                        self._record_queued_input(content, text)
+                    for entry in leftover:
+                        if len(entry) == 4:
+                            content, text, origin, origin_cid = entry
+                            self._record_queued_input(content, text, origin=origin, origin_conversation_id=origin_cid)
+                        else:
+                            content, text = entry
+                            self._record_queued_input(content, text)
                 self._active_batches += 1
                 if self._active_batches == 1:
                     if entries and entries[0].batch_key:
@@ -1606,8 +1650,13 @@ class RuntimeToolExecutor(ToolExecutor):
                     self._deferred_queued_records,
                     None,
                 )
-                for content, text in deferred_records or ():
-                    self._record_queued_input(content, text)
+                for entry in deferred_records or ():
+                    if len(entry) == 4:
+                        content, text, origin, origin_cid = entry
+                        self._record_queued_input(content, text, origin=origin, origin_conversation_id=origin_cid)
+                    else:
+                        content, text = entry
+                        self._record_queued_input(content, text)
 
                 if self.on_batch_finished is not None:
                     try:

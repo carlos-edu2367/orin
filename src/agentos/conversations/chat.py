@@ -2420,7 +2420,16 @@ class PostgresChatStore:
         if owned is None:
             raise ApplicationNotFoundError(conversation_id)
 
-    def enqueue_input(self, *, user_id: str, conversation_id: str, content: str, idempotency_key: str | None = None) -> dict[str, object]:
+    def enqueue_input(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        idempotency_key: str | None = None,
+        origin: str = "user",
+        origin_conversation_id: str | None = None,
+    ) -> dict[str, object]:
         """Keep text typed while a turn runs; the turn reads it between tool rounds.
 
         A repeated ``idempotency_key`` in the conversation returns the row the first call made: a retried POST
@@ -2430,13 +2439,26 @@ class PostgresChatStore:
         text = str(content or "").strip()
         if not text or len(text) > 16000:
             raise ValueError("message must be a bounded non-blank string")
+        clean_origin = (str(origin or "user").strip().lower() or "user")[:16]
+        clean_origin_cid = (
+            str(origin_conversation_id).strip()[:255]
+            if isinstance(origin_conversation_id, str) and origin_conversation_id.strip()
+            else None
+        )
         key = str(idempotency_key) if idempotency_key else None
         if key is not None:
             earlier = self.queued_input_for_key(conversation_id, user_id, key)
             if earlier is not None:
                 return _same_queued_text(earlier, text)
         try:
-            return self._insert_queued_input(user_id=user_id, conversation_id=conversation_id, text=text, key=key)
+            return self._insert_queued_input(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                text=text,
+                key=key,
+                origin=clean_origin,
+                origin_conversation_id=clean_origin_cid,
+            )
         except IntegrityError:
             earlier = self.queued_input_for_key(conversation_id, user_id, key) if key is not None else None
             if earlier is None:
@@ -2460,16 +2482,37 @@ class PostgresChatStore:
         with self._engine.connect() as c:
             self._owned(c, conversation_id, user_id)
             row = c.execute(select(
-                conversation_input_queue.c.queue_id, conversation_input_queue.c.state, conversation_input_queue.c.content,
+                conversation_input_queue.c.queue_id,
+                conversation_input_queue.c.state,
+                conversation_input_queue.c.content,
+                conversation_input_queue.c.turn_id,
+                conversation_input_queue.c.origin,
+                conversation_input_queue.c.origin_conversation_id,
             ).where(
                 conversation_input_queue.c.conversation_id == conversation_id,
                 conversation_input_queue.c.idempotency_key == idempotency_key,
             )).mappings().first()
         if row is None:
             return None
-        return {"queue_id": row["queue_id"], "state": row["state"], "content": row["content"]}
+        return {
+            "queue_id": row["queue_id"],
+            "state": row["state"],
+            "content": row["content"],
+            "turn_id": row["turn_id"],
+            "origin": str(row.get("origin") or "user"),
+            "origin_conversation_id": row.get("origin_conversation_id") or None,
+        }
 
-    def _insert_queued_input(self, *, user_id: str, conversation_id: str, text: str, key: str | None) -> dict[str, object]:
+    def _insert_queued_input(
+        self,
+        *,
+        user_id: str,
+        conversation_id: str,
+        text: str,
+        key: str | None,
+        origin: str = "user",
+        origin_conversation_id: str | None = None,
+    ) -> dict[str, object]:
         now = datetime.now(UTC)
         queue_id = _id("queue")
         with self._engine.begin() as c:
@@ -2482,9 +2525,17 @@ class PostgresChatStore:
                 raise ApplicationValidationError("the input queue is full")
             c.execute(insert(conversation_input_queue).values(
                 queue_id=queue_id, conversation_id=conversation_id, user_id=user_id, content=text,
-                state="pending", turn_id=None, idempotency_key=key, created_at=now, updated_at=now,
+                state="pending", turn_id=None, idempotency_key=key,
+                origin=origin, origin_conversation_id=origin_conversation_id,
+                created_at=now, updated_at=now,
             ))
-        return {"queue_id": queue_id, "state": "pending", "content": text}
+        return {
+            "queue_id": queue_id,
+            "state": "pending",
+            "content": text,
+            "origin": origin,
+            "origin_conversation_id": origin_conversation_id,
+        }
 
     def has_queued_inputs(self, turn: Mapping[str, object]) -> bool:
         engine = getattr(self, "_engine", None) or self.store._engine
@@ -2500,13 +2551,55 @@ class PostgresChatStore:
         with self._engine.connect() as c:
             self._owned(c, conversation_id, user_id)
             rows = c.execute(select(
-                conversation_input_queue.c.queue_id, conversation_input_queue.c.content, conversation_input_queue.c.created_at,
+                conversation_input_queue.c.queue_id,
+                conversation_input_queue.c.content,
+                conversation_input_queue.c.origin,
+                conversation_input_queue.c.origin_conversation_id,
+                conversation_input_queue.c.created_at,
             ).where(
                 conversation_input_queue.c.conversation_id == conversation_id,
                 conversation_input_queue.c.user_id == user_id,
                 conversation_input_queue.c.state == "pending",
             ).order_by(conversation_input_queue.c.id)).mappings().all()
-        return [{"queue_id": str(row["queue_id"]), "content": str(row["content"]), "created_at": row["created_at"].isoformat()} for row in rows]
+        return [
+            {
+                "queue_id": str(row["queue_id"]),
+                "content": str(row["content"]),
+                "origin": str(row.get("origin") or "user"),
+                "origin_conversation_id": row.get("origin_conversation_id") or None,
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
+
+    def queued_inputs_by_ids(self, queue_ids: Sequence[str]) -> list[dict[str, object]]:
+        ids = [str(item) for item in queue_ids if str(item).strip()]
+        if not ids:
+            return []
+        with self._engine.connect() as c:
+            rows = c.execute(select(
+                conversation_input_queue.c.queue_id,
+                conversation_input_queue.c.conversation_id,
+                conversation_input_queue.c.user_id,
+                conversation_input_queue.c.content,
+                conversation_input_queue.c.state,
+                conversation_input_queue.c.turn_id,
+                conversation_input_queue.c.origin,
+                conversation_input_queue.c.origin_conversation_id,
+            ).where(conversation_input_queue.c.queue_id.in_(ids)).order_by(conversation_input_queue.c.id)).mappings().all()
+        return [
+            {
+                "queue_id": str(row["queue_id"]),
+                "conversation_id": str(row["conversation_id"]),
+                "user_id": str(row["user_id"]),
+                "content": str(row["content"]),
+                "state": str(row["state"]),
+                "turn_id": row.get("turn_id") or None,
+                "origin": str(row.get("origin") or "user"),
+                "origin_conversation_id": row.get("origin_conversation_id") or None,
+            }
+            for row in rows
+        ]
 
     def cancel_queued_input(self, conversation_id: str, user_id: str, queue_id: str) -> bool:
         now = datetime.now(UTC)
@@ -2519,12 +2612,98 @@ class PostgresChatStore:
             ).values(state="cancelled", updated_at=now))
         return result.rowcount == 1
 
-    def claim_queued_inputs(self, turn: Mapping[str, object], *, limit: int = MAX_QUEUED_INPUTS, state: str = "injected") -> list[dict[str, object]]:
+    def cancel_pending_queued_input_for_defer(
+        self,
+        conversation_id: str,
+        user_id: str,
+        queue_id: str,
+    ) -> dict[str, object]:
+        """Atomically cancel a pending queued input for deferral, raising 404/409 otherwise."""
+        now = datetime.now(UTC)
+        with self._engine.begin() as c:
+            self._owned(c, conversation_id, user_id)
+            row = c.execute(select(
+                conversation_input_queue.c.queue_id,
+                conversation_input_queue.c.content,
+                conversation_input_queue.c.state,
+                conversation_input_queue.c.turn_id,
+                conversation_input_queue.c.origin,
+                conversation_input_queue.c.origin_conversation_id,
+            ).where(
+                conversation_input_queue.c.queue_id == str(queue_id),
+                conversation_input_queue.c.conversation_id == conversation_id,
+                conversation_input_queue.c.user_id == user_id,
+            )).mappings().first()
+            if row is None:
+                raise ApplicationNotFoundError(str(queue_id))
+            if str(row["state"] or "") != "pending":
+                raise ApplicationConflictError(
+                    str(queue_id),
+                    code="QUEUED_INPUT_NOT_PENDING",
+                    retryable=False,
+                )
+            result = c.execute(update(conversation_input_queue).where(
+                conversation_input_queue.c.queue_id == str(queue_id),
+                conversation_input_queue.c.conversation_id == conversation_id,
+                conversation_input_queue.c.user_id == user_id,
+                conversation_input_queue.c.state == "pending",
+            ).values(state="cancelled", updated_at=now))
+            if result.rowcount != 1:
+                raise ApplicationConflictError(
+                    str(queue_id),
+                    code="QUEUED_INPUT_NOT_PENDING",
+                    retryable=False,
+                )
+        return {
+            "queue_id": str(row["queue_id"]),
+            "content": str(row["content"]),
+            "turn_id": row.get("turn_id") or None,
+            "origin": str(row.get("origin") or "user"),
+            "origin_conversation_id": row.get("origin_conversation_id") or None,
+        }
+
+    def restore_cancelled_queued_input(self, queue_id: str) -> None:
+        with self._engine.begin() as c:
+            c.execute(update(conversation_input_queue).where(
+                conversation_input_queue.c.queue_id == str(queue_id),
+                conversation_input_queue.c.state == "cancelled",
+            ).values(state="pending", updated_at=datetime.now(UTC)))
+
+    def confirm_queued_input_injected(self, turn: Mapping[str, object], item: Mapping[str, object]) -> None:
+        if str(item.get("origin") or "user").strip().lower() != "friend":
+            return
+        try:
+            from agentos.agentic.tools.orin.friend_delivery_watch import notify_friend_delivery_injected
+
+            notify_friend_delivery_injected(
+                user_id=str(turn.get("user_id") or ""),
+                target_conversation_id=str(turn.get("conversation_id") or ""),
+                queue_id=str(item.get("queue_id") or ""),
+                origin_conversation_id=str(item.get("origin_conversation_id") or "") or None,
+                target_turn_id=str(turn.get("turn_id") or "") or None,
+                store=self,
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("could not notify friend delivery watcher on injection", exc_info=True)
+
+    def claim_queued_inputs(
+        self,
+        turn: Mapping[str, object],
+        *,
+        limit: int = MAX_QUEUED_INPUTS,
+        state: str = "injected",
+        notify_friend: bool = True,
+    ) -> list[dict[str, object]]:
         """Take the pending input of the turn's conversation, oldest first. Each row is taken by one caller only."""
         now = datetime.now(UTC)
         claimed: list[dict[str, object]] = []
         with self._engine.begin() as c:
-            rows = c.execute(select(conversation_input_queue.c.queue_id, conversation_input_queue.c.content).where(
+            rows = c.execute(select(
+                conversation_input_queue.c.queue_id,
+                conversation_input_queue.c.content,
+                conversation_input_queue.c.origin,
+                conversation_input_queue.c.origin_conversation_id,
+            ).where(
                 conversation_input_queue.c.conversation_id == str(turn["conversation_id"]),
                 conversation_input_queue.c.user_id == str(turn["user_id"]),
                 conversation_input_queue.c.state == "pending",
@@ -2534,15 +2713,46 @@ class PostgresChatStore:
                     conversation_input_queue.c.queue_id == row["queue_id"], conversation_input_queue.c.state == "pending",
                 ).values(state=state, turn_id=str(turn.get("turn_id") or "") or None, updated_at=now))
                 if result.rowcount == 1:
-                    claimed.append({"queue_id": str(row["queue_id"]), "content": str(row["content"])})
+                    claimed.append({
+                        "queue_id": str(row["queue_id"]),
+                        "content": str(row["content"]),
+                        "origin": str(row.get("origin") or "user"),
+                        "origin_conversation_id": row.get("origin_conversation_id") or None,
+                    })
+        if state == "injected" and notify_friend:
+            for item in claimed:
+                self.confirm_queued_input_injected(turn, item)
         return claimed
 
-    def mark_queued_input_blocked(self, queue_id: str) -> None:
+    def mark_queued_input_blocked(self, queue_id: str, *, reason: str | None = None) -> None:
         # The refused text is erased, as a refused prompt is (W2-R6); only the placeholder stays.
+        meta: Mapping[str, object] | None = None
         with self._engine.begin() as c:
+            meta = c.execute(select(
+                conversation_input_queue.c.conversation_id,
+                conversation_input_queue.c.user_id,
+                conversation_input_queue.c.turn_id,
+                conversation_input_queue.c.origin,
+                conversation_input_queue.c.origin_conversation_id,
+            ).where(conversation_input_queue.c.queue_id == str(queue_id))).mappings().first()
             c.execute(update(conversation_input_queue).where(conversation_input_queue.c.queue_id == str(queue_id)).values(
                 state="blocked", content=BLOCKED_PROMPT_PLACEHOLDER, updated_at=datetime.now(UTC),
             ))
+        if meta is not None and str(meta.get("origin") or "user").strip().lower() == "friend":
+            try:
+                from agentos.agentic.tools.orin.friend_delivery_watch import notify_friend_delivery_blocked
+
+                notify_friend_delivery_blocked(
+                    user_id=str(meta.get("user_id") or ""),
+                    target_conversation_id=str(meta.get("conversation_id") or ""),
+                    queue_id=str(queue_id),
+                    origin_conversation_id=str(meta.get("origin_conversation_id") or "") or None,
+                    target_turn_id=str(meta.get("turn_id") or "") or None,
+                    reason=reason,
+                    store=self,
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("could not notify friend delivery watcher on block", exc_info=True)
 
     def take_queued_inputs(self, turn: Mapping[str, object]) -> tuple[str, list[str]] | None:
         """Pending input joined into one message for a follow-up turn, or None."""
@@ -4109,7 +4319,16 @@ class ChatApplication:
                 conversation_turns.c.state.in_(("queued", "starting", "running", "cancelling")),
             )).first() is not None
 
-    def enqueue(self, user_id: str, conversation_id: str, message: str, idempotency_key: str) -> dict[str, object]:
+    def enqueue(
+        self,
+        user_id: str,
+        conversation_id: str,
+        message: str,
+        idempotency_key: str,
+        *,
+        origin: str = "user",
+        origin_conversation_id: str | None = None,
+    ) -> dict[str, object]:
         """Queue text for the running turn, or send it now when nothing is running."""
         text = str(message or "").strip()
         if idempotency_key:
@@ -4128,7 +4347,14 @@ class ChatApplication:
         if not self._has_live_turn(conversation_id, user_id):
             receipt = self.send(user_id, conversation_id, message, idempotency_key)
             return {"queued": False, "turn_id": receipt.turn_id, "message_id": receipt.message_id, "state": receipt.state}
-        item = self.store.enqueue_input(user_id=user_id, conversation_id=conversation_id, content=message, idempotency_key=idempotency_key or None)
+        item = self.store.enqueue_input(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            content=message,
+            idempotency_key=idempotency_key or None,
+            origin=origin,
+            origin_conversation_id=origin_conversation_id,
+        )
         if not self._has_live_turn(conversation_id, user_id):
             # The turn ended between the check and the insert: nothing would read the queue now.
             self.promote_queued_inputs(conversation_id, user_id)
@@ -4157,10 +4383,71 @@ class ChatApplication:
             return None
         message, ids = taken
         try:
-            return self.send(user_id, conversation_id, message, f"queue:{ids[0]}")
+            receipt = self.send(user_id, conversation_id, message, f"queue:{ids[0]}")
         except Exception:
             self.store.restore_queued_inputs(ids)
             raise
+        lookup_by_ids = getattr(self.store, "queued_inputs_by_ids", None)
+        if callable(lookup_by_ids):
+            try:
+                from agentos.agentic.tools.orin.friend_delivery_watch import notify_friend_delivery_promoted
+
+                for item in lookup_by_ids(ids):
+                    if str(item.get("origin") or "user").strip().lower() == "friend":
+                        notify_friend_delivery_promoted(
+                            user_id=user_id,
+                            target_conversation_id=conversation_id,
+                            queue_id=str(item["queue_id"]),
+                            origin_conversation_id=str(item.get("origin_conversation_id") or "") or None,
+                            target_turn_id=source_turn_id or (str(item.get("turn_id") or "") or None),
+                            new_turn_id=receipt.turn_id,
+                            store=self.store,
+                        )
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("could not notify friend delivery watcher on promotion", exc_info=True)
+        return receipt
+
+    def defer_queued_input_to_next_turn(
+        self,
+        user_id: str,
+        conversation_id: str,
+        queue_id: str,
+    ) -> dict[str, object]:
+        """Atomically cancel a pending queued input and schedule it as the next queued turn."""
+        cancelled = self.store.cancel_pending_queued_input_for_defer(conversation_id, user_id, queue_id)
+        try:
+            receipt = self.send(user_id, conversation_id, str(cancelled["content"]), f"defer:{queue_id}")
+        except Exception:
+            restore = getattr(self.store, "restore_cancelled_queued_input", None)
+            if callable(restore):
+                try:
+                    restore(queue_id)
+                except Exception:  # noqa: BLE001
+                    pass
+            raise
+        if str(cancelled.get("origin") or "user").strip().lower() == "friend":
+            try:
+                from agentos.agentic.tools.orin.friend_delivery_watch import notify_friend_delivery_promoted
+
+                notify_friend_delivery_promoted(
+                    user_id=user_id,
+                    target_conversation_id=conversation_id,
+                    queue_id=str(queue_id),
+                    origin_conversation_id=str(cancelled.get("origin_conversation_id") or "") or None,
+                    target_turn_id=str(cancelled.get("turn_id") or "") or None,
+                    new_turn_id=receipt.turn_id,
+                    store=self.store,
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("could not notify friend delivery watcher on defer", exc_info=True)
+        return {
+            "queue_id": str(queue_id),
+            "deferred": True,
+            "delivery": "queued_next_turn",
+            "turn_id": receipt.turn_id,
+            "message_id": receipt.message_id,
+            "state": receipt.state,
+        }
 
     def record_preview_event(
         self,

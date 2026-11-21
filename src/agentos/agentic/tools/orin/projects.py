@@ -299,6 +299,7 @@ class ProjectTools:
         decision: str | None = None,
         feedback: str | None = None,
         project_id: str | None = None,
+        delivery: str | None = None,
     ) -> ToolOutcome:
         return self.propose_code_session(
             title=title,
@@ -313,6 +314,7 @@ class ProjectTools:
             decision=decision,
             feedback=feedback,
             project_id=project_id,
+            delivery=delivery,
         )
 
     def propose_code_session(
@@ -329,6 +331,7 @@ class ProjectTools:
         decision: str | None = None,
         feedback: str | None = None,
         project_id: str | None = None,
+        delivery: str | None = None,
     ) -> ToolOutcome:
         if action is None:
             if code_conversation_id:
@@ -534,41 +537,32 @@ class ProjectTools:
             if not isinstance(raw_msg, str) or not (1 <= len(raw_msg.strip()) <= 16000):
                 raise AgentToolError("message must be a non-blank string between 1 and 16000 characters.")
             clean_msg = raw_msg.strip()
-            try:
-                created = self._chat_store.create(
-                    user_id=self._project_user_id,
-                    message=clean_msg,
-                    provider=conv.get("provider") or self._default_provider,
-                    model_id=conv.get("model_id") or self._default_model_id,
-                    idempotency_key=f"code_msg_{uuid4().hex[:16]}",
-                    conversation_id=clean_cid,
-                    project_id=conv.get("project_id") or self._project_id,
-                    code_mode="code",
-                    permission_mode=conv.get("permission_mode") or "accept_edits",
-                )
-            except Exception as error:
-                raise AgentToolError(f"Failed to send message to Orin Code session: {error}") from error
-
-            registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
-            watcher = registry.get(clean_cid, user_id=self._project_user_id)
-            if watcher is not None:
-                watcher.pending_question = None
-
-            self._notify_session_watch(
-                target_conversation_id=clean_cid,
-                target_turn_id=created.turn_id,
+            eff_provider = conv.get("provider") or self._default_provider
+            eff_model = conv.get("model_id") or self._default_model_id
+            eff_perm = conv.get("permission_mode") or "accept_edits"
+            result = self._deliver_session_message(
+                conversation_id=clean_cid,
+                conv=conv,
+                text=clean_msg,
+                delivery=delivery,
                 origin="friend",
+                provider=str(eff_provider or ""),
+                model_id=str(eff_model or ""),
+                permission_mode=str(eff_perm or "accept_edits"),
+                code_mode="code",
+                requested_provider=provider,
+                requested_model_id=model_id,
+                requested_permission_mode=None,
             )
-
-            dispatcher = getattr(self, "_code_turn_dispatcher", None)
-            if callable(dispatcher):
-                dispatcher(clean_cid, created.turn_id)
-
             payload = {
                 "action": "send_message",
                 "code_conversation_id": clean_cid,
-                "turn_id": created.turn_id,
-                "state": created.state,
+                "turn_id": result.turn_id,
+                "queue_id": result.queue_id,
+                "delivery": result.delivery,
+                "delivery_fallback": result.delivery_fallback,
+                "idempotent": result.idempotent,
+                "state": result.state,
                 "wait_for_user": False,
                 "tool_kind": "code_handoff",
             }
@@ -684,6 +678,76 @@ class ProjectTools:
             json.dumps(payload, ensure_ascii=False),
             payload,
         )
+
+    def _deliver_session_message(
+        self,
+        *,
+        conversation_id: str,
+        conv: Mapping[str, Any],
+        text: str,
+        delivery: str | None,
+        origin: str,
+        provider: str,
+        model_id: str,
+        permission_mode: str,
+        code_mode: str,
+        requested_provider: str | None = None,
+        requested_model_id: str | None = None,
+        requested_permission_mode: str | None = None,
+    ):
+        from agentos.agentic.tools.orin.friend_delivery_watch import register_friend_delivery_target
+        from agentos.agentic.tools.orin.session_delivery import deliver_to_session
+
+        friend_cid = str(getattr(self, "_conversation_id", "") or "").strip() or None
+        tool_call_id = getattr(self, "_active_invocation_id", None)
+        ws_root = getattr(getattr(self, "workspace", None), "root", None)
+        try:
+            result = deliver_to_session(
+                chat_store=self._chat_store,
+                user_id=self._project_user_id,
+                conversation_id=conversation_id,
+                text=text,
+                delivery=delivery,
+                origin=origin,
+                origin_conversation_id=friend_cid,
+                tool_call_id=tool_call_id,
+                requested_provider=requested_provider,
+                requested_model_id=requested_model_id,
+                requested_permission_mode=requested_permission_mode,
+                provider=provider,
+                model_id=model_id,
+                permission_mode=permission_mode,
+                project_id=conv.get("project_id") or self._project_id,
+                code_mode=code_mode,
+                conv=conv,
+                settings=getattr(self, "_effective_settings", None),
+                workspace_root=ws_root,
+            )
+        except Exception as error:
+            raise AgentToolError(f"Failed to send message to session '{conversation_id}': {error}") from error
+
+        registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
+        watcher = registry.get(conversation_id, user_id=self._project_user_id)
+        if watcher is not None:
+            watcher.pending_question = None
+
+        if result.delivery == "pending_in_turn":
+            register_friend_delivery_target(
+                friend_conversation_id=friend_cid,
+                reminder_queue=getattr(self, "reminders", None),
+                on_watch_notify=getattr(self, "_on_session_watch", None),
+            )
+        if result.turn_id:
+            self._notify_session_watch(
+                target_conversation_id=conversation_id,
+                target_turn_id=result.turn_id,
+                origin=origin,
+            )
+        if result.delivery != "pending_in_turn" and result.turn_id:
+            dispatcher = getattr(self, "_code_turn_dispatcher", None)
+            if callable(dispatcher):
+                dispatcher(conversation_id, result.turn_id)
+        return result
 
     def _notify_session_watch(
         self,
@@ -1150,6 +1214,7 @@ class ProjectTools:
         limit: int = 20,
         message_limit: int = 10,
         origin: str = "friend",
+        delivery: str | None = None,
     ) -> ToolOutcome:
         if self._chat_store is None or not self._project_user_id:
             raise AgentToolError("Chat store is not available to manage sessions.")
@@ -1470,43 +1535,31 @@ class ProjectTools:
                 effective_model = conv.get("model_id") or self._default_model_id
                 effective_perm = default_perm
 
-            try:
-                created = self._chat_store.create(
-                    user_id=self._project_user_id,
-                    message=clean_msg,
-                    provider=effective_provider,
-                    model_id=effective_model,
-                    idempotency_key=f"sess_msg_{uuid4().hex[:16]}",
-                    conversation_id=clean_cid,
-                    project_id=conv.get("project_id") or self._project_id,
-                    code_mode=conv_mode,
-                    permission_mode=effective_perm,
-                )
-            except Exception as error:
-                raise AgentToolError(f"Failed to send message to session '{clean_cid}': {error}") from error
-
-            registry = getattr(self, "_milestone_registry", None) or get_milestone_watcher_registry()
-            watcher = registry.get(clean_cid, user_id=self._project_user_id)
-            if watcher is not None:
-                watcher.pending_question = None
-
-            self._notify_session_watch(
-                target_conversation_id=clean_cid,
-                target_turn_id=created.turn_id,
+            result = self._deliver_session_message(
+                conversation_id=clean_cid,
+                conv=conv,
+                text=clean_msg,
+                delivery=delivery,
                 origin=origin,
+                provider=str(effective_provider or ""),
+                model_id=str(effective_model or ""),
+                permission_mode=str(effective_perm or default_perm),
+                code_mode=conv_mode,
+                requested_provider=provider,
+                requested_model_id=model_id,
+                requested_permission_mode=permission_mode,
             )
-
-            dispatcher = getattr(self, "_code_turn_dispatcher", None)
-            if callable(dispatcher):
-                dispatcher(clean_cid, created.turn_id)
-
             payload = {
                 "action": "send_message",
                 "conversation_id": clean_cid,
                 "code_conversation_id": clean_cid,
-                "turn_id": created.turn_id,
+                "turn_id": result.turn_id,
+                "queue_id": result.queue_id,
+                "delivery": result.delivery,
+                "delivery_fallback": result.delivery_fallback,
+                "idempotent": result.idempotent,
                 "mode": conv_mode,
-                "state": created.state,
+                "state": result.state,
                 "provider": effective_provider,
                 "model_id": effective_model,
                 "permission_mode": effective_perm,
@@ -2179,6 +2232,11 @@ SPECS: tuple[ToolSpec, ...] = (
                     **_TEXT,
                     "description": "Follow-up instruction for action='send_message'.",
                 },
+                "delivery": {
+                    "type": "string",
+                    "enum": ["now", "queue"],
+                    "description": "Delivery mode for action='send_message': 'now' injects into the running turn at the next safe point (default per friend.sessionDelivery); 'queue' schedules a follow-up turn after the current turn ends.",
+                },
                 "decision": {
                     "type": "string",
                     "enum": ["approve", "reject", "revise"],
@@ -2354,6 +2412,11 @@ SPECS: tuple[ToolSpec, ...] = (
                 "message": {
                     **_TEXT,
                     "description": "Follow-up message or answer text (for action='send_message' or 'respond').",
+                },
+                "delivery": {
+                    "type": "string",
+                    "enum": ["now", "queue"],
+                    "description": "Delivery mode for action='send_message': 'now' injects into the running turn at the next safe point (default per friend.sessionDelivery); 'queue' schedules a follow-up turn after the current turn ends.",
                 },
                 "provider": {
                     **_TEXT,
