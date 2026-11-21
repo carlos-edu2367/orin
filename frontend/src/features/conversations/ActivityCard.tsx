@@ -5,7 +5,9 @@ import { resumeConversationTurn } from '../../api/conversations'
 import type { ActivityGroup, ConversationActivityEvent } from './activityTypes'
 import { activityStateLabel, formatActivityCount, formatElapsed, isFriendQueuedInputEvent, isWaitingModelEvent, splitActionSummary, toolBatchOverview, toolCalls } from './activitySummary'
 import { AgentMessageBox } from './AgentMessageBox'
+import { AgentProgressRow } from './AgentProgressRow'
 import type { AgentMessagesState } from './agentMessages'
+import type { AgentProgressData } from './agentTree'
 import { StructuredDiffView, type WorkspaceFilePreviewHandler } from './WorkspaceFileCard'
 
 type ActivityCardProps = {
@@ -16,6 +18,7 @@ type ActivityCardProps = {
   onResumeTurn?: (conversationId: string, turnId: string) => Promise<unknown>
   agentMessages?: AgentMessagesState
   onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  agentProgress?: AgentProgressData | null
 }
 
 const GLYPHS: Record<string, string> = {
@@ -37,7 +40,7 @@ const GLYPHS: Record<string, string> = {
  * technical record: every underlying event, its status and its identifiers. The
  * chat never shows the second form unless it is asked for.
  */
-export function ActivityCard({ group, conversationId, onPreview, client, onResumeTurn, agentMessages, onAgentMessageSent }: ActivityCardProps) {
+export function ActivityCard({ group, conversationId, onPreview, client, onResumeTurn, agentMessages, onAgentMessageSent, agentProgress }: ActivityCardProps) {
   const [open, setOpen] = useState(false)
   const [resumeState, setResumeState] = useState<'idle' | 'working' | 'resumed' | 'failed'>('idle')
   const panelId = useId()
@@ -126,6 +129,7 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
         {!isTool && group.count > 1 && <span className="activity-card__count">{formatActivityCount(group.count)}</span>}
         {failedCalls > 0 && <span className="activity-card__failure">{formatFailureCount(failedCalls)}</span>}
         {isFriendInjected && <span className="via-friend-badge" data-testid="via-friend-badge">via Friend</span>}
+        {agentProgress?.stalled && <span className="agent-progress-row__badge agent-progress-row__badge--stalled" data-testid="activity-card-stalled-badge">travado</span>}
         {group.agentName && <span className="activity-card__agent">{group.agentName}</span>}
         {isTool && running && elapsed !== null && <span className="activity-card__elapsed">{formatElapsed(elapsed)}</span>}
         {!isTool && <span className="activity-card__state">{activityStateLabel(group.state)}</span>}
@@ -150,6 +154,14 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
             </span>
           )}
         </div>
+      )}
+      {agentProgress && (
+        <AgentProgressRow
+          progress={agentProgress}
+          conversationId={conversationId}
+          client={client}
+          compact
+        />
       )}
       {showSubagentMessageBox && conversationId && (
         <AgentMessageBox

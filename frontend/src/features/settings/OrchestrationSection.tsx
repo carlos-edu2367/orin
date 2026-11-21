@@ -7,13 +7,16 @@ import {
 } from '../../api/orchestrationSettings'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation } from '../codeSettings/shared'
 import { AgentMessagesSettingsBlock } from './AgentMessagesSettingsBlock'
+import { BackgroundSettingsBlock } from './BackgroundSettingsBlock'
 import { FriendDeliverySettingsBlock } from './FriendDeliverySettingsBlock'
 import { SettingsSection } from './SettingsSection'
+import { TaskBoardSettingsBlock } from './TaskBoardSettingsBlock'
 import { VerifierMetricsTable } from './VerifierMetricsTable'
 import { VerifierSettingsBlocks } from './VerifierSettingsBlocks'
+import { WorktreeSettingsBlock } from './WorktreeSettingsBlock'
 import './orchestrationSettings.css'
 
-const GROUPS_QUERY = 'messages,friend,verifier'
+const GROUPS_QUERY = 'messages,friend,verifier,worktree,task_board,background'
 
 export function OrchestrationSection({ client }: { client?: ApiClient }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
@@ -83,6 +86,18 @@ export function OrchestrationSection({ client }: { client?: ApiClient }) {
     () => (report?.items ?? []).filter((item) => item.group === 'friend'),
     [report],
   )
+  const worktreeItems = useMemo(
+    () => (report?.items ?? []).filter((item) => item.group === 'worktree'),
+    [report],
+  )
+  const taskBoardItems = useMemo(
+    () => (report?.items ?? []).filter((item) => item.group === 'task_board'),
+    [report],
+  )
+  const backgroundItems = useMemo(
+    () => (report?.items ?? []).filter((item) => item.group === 'background'),
+    [report],
+  )
 
   return (
     <SettingsSection eyebrow="INTELIGÊNCIA / ORQUESTRAÇÃO" title="Orquestração">
@@ -147,6 +162,53 @@ export function OrchestrationSection({ client }: { client?: ApiClient }) {
               />
             </Card>
           </div>
+
+          {worktreeItems.length > 0 && (
+            <div data-testid="orchestration-section-worktree">
+              <Card title="Worktree por subagente" id="orchestration-heading-worktree">
+                <p className="code-settings__muted">
+                  Isola subagentes configurados com <code>isolation: worktree</code> em worktrees Git próprias e integra as alterações pela fila serializada.
+                </p>
+                <WorktreeSettingsBlock
+                  items={worktreeItems}
+                  busy={saving}
+                  trusted={report.trusted}
+                  projectRoot={report.projectRoot}
+                  onSave={handleSave}
+                />
+              </Card>
+            </div>
+          )}
+
+          {taskBoardItems.length > 0 && (
+            <div data-testid="orchestration-section-task-board">
+              <Card title="Quadro de tarefas compartilhado" id="orchestration-heading-task-board">
+                <p className="code-settings__muted">
+                  Permite coordenar tarefas concorrentes entre subagentes com reivindicação atômica (<code>TaskClaim</code>) e dependências.
+                </p>
+                <TaskBoardSettingsBlock
+                  items={taskBoardItems}
+                  busy={saving}
+                  onSave={handleSave}
+                />
+              </Card>
+            </div>
+          )}
+
+          {backgroundItems.length > 0 && (
+            <div data-testid="orchestration-section-background">
+              <Card title="Segundo plano e travamento" id="orchestration-heading-background">
+                <p className="code-settings__muted">
+                  Configure a retomada automática após reinício e os limites para detectar ou cancelar subagentes travados.
+                </p>
+                <BackgroundSettingsBlock
+                  items={backgroundItems}
+                  busy={saving}
+                  onSave={handleSave}
+                />
+              </Card>
+            </div>
+          )}
         </div>
       )}
     </SettingsSection>

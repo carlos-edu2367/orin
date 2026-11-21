@@ -426,6 +426,162 @@ export function stopConversationAgent(
   })
 }
 
+export type AgentRunItem = {
+  agent_id: string
+  user_id: string
+  conversation_id: string
+  turn_id: string | null
+  parent_agent_id: string | null
+  subagent_type: string
+  provider: string | null
+  model_id: string | null
+  effort: string | null
+  state: string
+  task_digest: string
+  history_path: string | null
+  worktree_path: string | null
+  pipeline_run_id: string | null
+  last_activity_at: string | null
+  elapsed_seconds: number | null
+  current_tool: string | null
+  tool_calls: number
+  input_tokens: number
+  output_tokens: number
+  cost_usd: number | null
+  result_ref: string | null
+  created_at: string | null
+  finished_at: string | null
+  stalled: boolean
+  merge_state: string | null
+}
+
+export type ListAgentRunsResponse = {
+  conversation_id: string
+  runs: AgentRunItem[]
+}
+
+export function listAgentRuns(
+  client: ApiClient,
+  conversationId: string,
+): Promise<ListAgentRunsResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/agent-runs`,
+    method: 'GET',
+    parse: (value) => {
+      const data = record(value)
+      const rawRuns = Array.isArray(data.runs) ? data.runs : []
+      const runs: AgentRunItem[] = rawRuns
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => {
+          const state = typeof item.state === 'string' ? item.state : 'running'
+          return {
+            agent_id: typeof item.agent_id === 'string' ? item.agent_id : '',
+            user_id: typeof item.user_id === 'string' ? item.user_id : '',
+            conversation_id: typeof item.conversation_id === 'string' ? item.conversation_id : conversationId,
+            turn_id: typeof item.turn_id === 'string' ? item.turn_id : null,
+            parent_agent_id: typeof item.parent_agent_id === 'string' ? item.parent_agent_id : null,
+            subagent_type: typeof item.subagent_type === 'string' ? item.subagent_type : '',
+            provider: typeof item.provider === 'string' ? item.provider : null,
+            model_id: typeof item.model_id === 'string' ? item.model_id : null,
+            effort: typeof item.effort === 'string' ? item.effort : null,
+            state,
+            task_digest: typeof item.task_digest === 'string' ? item.task_digest : '',
+            history_path: typeof item.history_path === 'string' ? item.history_path : null,
+            worktree_path: typeof item.worktree_path === 'string' ? item.worktree_path : null,
+            pipeline_run_id: typeof item.pipeline_run_id === 'string' ? item.pipeline_run_id : null,
+            last_activity_at: typeof item.last_activity_at === 'string' ? item.last_activity_at : null,
+            elapsed_seconds: typeof item.elapsed_seconds === 'number' && Number.isFinite(item.elapsed_seconds) ? item.elapsed_seconds : null,
+            current_tool: typeof item.current_tool === 'string' && item.current_tool.trim() ? item.current_tool : null,
+            tool_calls: typeof item.tool_calls === 'number' && Number.isFinite(item.tool_calls) ? item.tool_calls : 0,
+            input_tokens: typeof item.input_tokens === 'number' && Number.isFinite(item.input_tokens) ? item.input_tokens : 0,
+            output_tokens: typeof item.output_tokens === 'number' && Number.isFinite(item.output_tokens) ? item.output_tokens : 0,
+            cost_usd: typeof item.cost_usd === 'number' && Number.isFinite(item.cost_usd) ? item.cost_usd : null,
+            result_ref: typeof item.result_ref === 'string' ? item.result_ref : null,
+            created_at: typeof item.created_at === 'string' ? item.created_at : null,
+            finished_at: typeof item.finished_at === 'string' ? item.finished_at : null,
+            stalled: item.stalled === true || state === 'stalled',
+            merge_state: typeof item.merge_state === 'string' ? item.merge_state : null,
+          }
+        })
+        .filter((item) => Boolean(item.agent_id))
+      return {
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        runs,
+      }
+    },
+  })
+}
+
+export type ResumeSubagentResponse = {
+  agent_id: string
+  conversation_id: string
+  state: string
+  resumed: boolean
+  history_messages: number
+  history_corrupted: boolean
+  warning: string | null
+  notice: string | null
+}
+
+export function resumeSubagent(
+  client: ApiClient,
+  conversationId: string,
+  agentId: string,
+  intent: MutationIntent = client.createMutationIntent(),
+): Promise<ResumeSubagentResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/agents/${encodeURIComponent(agentId)}/resume`,
+    method: 'POST',
+    expectedStatus: 202,
+    intent,
+    body: {},
+    parse: (value) => {
+      const data = record(value)
+      return {
+        agent_id: typeof data.agent_id === 'string' ? data.agent_id : agentId,
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        state: typeof data.state === 'string' ? data.state : 'queued',
+        resumed: data.resumed !== false,
+        history_messages: typeof data.history_messages === 'number' && Number.isFinite(data.history_messages) ? data.history_messages : 0,
+        history_corrupted: data.history_corrupted === true,
+        warning: typeof data.warning === 'string' ? data.warning : null,
+        notice: typeof data.notice === 'string' ? data.notice : null,
+      }
+    },
+  })
+}
+
+export type DiscardAgentWorktreeResponse = {
+  discarded: boolean
+  conversation_id: string
+  agent_id: string
+  merge_state: string
+}
+
+export function discardAgentWorktree(
+  client: ApiClient,
+  conversationId: string,
+  agentId: string,
+  intent: MutationIntent = client.createMutationIntent(),
+): Promise<DiscardAgentWorktreeResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/worktrees/${encodeURIComponent(agentId)}/discard`,
+    method: 'POST',
+    expectedStatus: 200,
+    intent,
+    body: {},
+    parse: (value) => {
+      const data = record(value)
+      return {
+        discarded: data.discarded !== false,
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        agent_id: typeof data.agent_id === 'string' ? data.agent_id : agentId,
+        merge_state: typeof data.merge_state === 'string' ? data.merge_state : 'discarded',
+      }
+    },
+  })
+}
+
 export type SendConversationAgentMessageResponse = {
   agent_id: string
   status: string

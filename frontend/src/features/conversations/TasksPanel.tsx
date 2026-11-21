@@ -1,19 +1,28 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import type { ApiClient } from '../../api/client'
-import { getConversationOverview } from '../../api/conversations'
+import { getConversationOverview, listAgentRuns, type AgentRunItem } from '../../api/conversations'
 import { ApiError } from '../../api/errors'
 import { listTasks, stopTask, type ShellTask } from '../../api/sessionTools'
 import { useKeybindingHandlers } from '../keybindings/engine'
 import { AgentMessageBox } from './AgentMessageBox'
+import { AgentProgressRow } from './AgentProgressRow'
 import type { AgentMessagesState } from './agentMessages'
-import { orderAgentTree } from './agentTree'
+import { hydrateAgentRuns, mergeAgentProgress, orderAgentTree, type AgentProgressMap } from './agentTree'
 
 /** `depth` is 0 for an agent the main agent started, 1 for one that agent started, and so on. */
 export type BackgroundAgent = { agentId: string; name: string; role: string; state: string; parentAgentId: string | null; depth: number }
 
 const SHELL_STATE: Record<ShellTask['state'], string> = { running: 'rodando', finished: 'terminado', unknown: 'estado desconhecido' }
 const AGENT_STATE: Record<string, string> = {
-  working: 'trabalhando', running: 'trabalhando', completed: 'concluído', failed: 'falhou', cancelled: 'cancelado', idle: 'parado',
+  working: 'trabalhando',
+  running: 'trabalhando',
+  queued: 'na fila',
+  stalled: 'travado',
+  interrupted: 'interrompido',
+  completed: 'concluído',
+  failed: 'falhou',
+  cancelled: 'cancelado',
+  idle: 'parado',
 }
 const REFRESH_MS = 3000
 
@@ -44,15 +53,18 @@ export function TasksPanel({
   onClose,
   agentMessages,
   onAgentMessageSent,
+  agentProgress: liveAgentProgress,
 }: {
   client: ApiClient
   conversationId: string
   onClose: () => void
   agentMessages?: AgentMessagesState
   onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  agentProgress?: AgentProgressMap
 }) {
   const [shells, setShells] = useState<ShellTask[] | null>(null)
   const [agents, setAgents] = useState<BackgroundAgent[]>([])
+  const [runProgress, setRunProgress] = useState<AgentProgressMap>({})
   const [error, setError] = useState<string | null>(null)
   const [stopping, setStopping] = useState<string | null>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
@@ -60,33 +72,93 @@ export function TasksPanel({
   useEffect(() => { closeRef.current?.focus() }, [])
 
   const fetchAll = useCallback(
-    () => Promise.allSettled([listTasks(client, conversationId), getConversationOverview(client, conversationId)]),
+    () =>
+      Promise.allSettled([
+        listTasks(client, conversationId),
+        getConversationOverview(client, conversationId),
+        listAgentRuns(client, conversationId),
+      ]),
     [client, conversationId],
   )
 
-  useEffect(() => {
-    let cancelled = false
-    const refresh = () => {
-      fetchAll().then(([tasks, overview]) => {
-        if (cancelled) return
-        if (tasks.status === 'fulfilled') { setShells(tasks.value); setError(null) } else {
-          setShells((current) => current ?? [])
-          setError('Não foi possível ler os processos em segundo plano.')
+  const refresh = useCallback(() => {
+    let active = true
+    void fetchAll().then(([tasks, overview, runsResult]) => {
+      if (!active) return
+      if (tasks.status === 'fulfilled') { setShells(tasks.value); setError(null) } else {
+        setShells((current) => current ?? [])
+        setError('Não foi possível ler os processos em segundo plano.')
+      }
+      const fetchedRuns: AgentRunItem[] = runsResult.status === 'fulfilled' ? runsResult.value.runs : []
+      if (runsResult.status === 'fulfilled') {
+        setRunProgress(hydrateAgentRuns(fetchedRuns))
+      }
+      const overviewAgents = overview.status === 'fulfilled'
+        ? overview.value.agents.filter((agent) => agent.parent_agent_id != null)
+        : []
+      const byId = new Map<string, { agent_id: string; name: string; role: string; state: string; parent_agent_id: string | null }>()
+      for (const agent of overviewAgents) {
+        byId.set(agent.agent_id, { ...agent })
+      }
+      for (const run of fetchedRuns) {
+        const existing = byId.get(run.agent_id)
+        if (existing) {
+          existing.state = run.stalled ? 'stalled' : run.state
+        } else {
+          byId.set(run.agent_id, {
+            agent_id: run.agent_id,
+            name: run.subagent_type || run.agent_id,
+            role: run.subagent_type,
+            state: run.stalled ? 'stalled' : run.state,
+            parent_agent_id: run.parent_agent_id,
+          })
         }
-        if (overview.status === 'fulfilled') {
-          const subagents = overview.value.agents.filter((agent) => agent.parent_agent_id != null)
-          setAgents(orderAgentTree(subagents, (agent) => agent.agent_id, (agent) => agent.parent_agent_id)
-            .map(({ item: agent, depth }) => ({
-              agentId: agent.agent_id, name: agent.name, role: agent.role, state: agent.state,
-              parentAgentId: agent.parent_agent_id, depth,
-            })))
-        }
-      })
-    }
-    refresh()
-    const timer = window.setInterval(refresh, REFRESH_MS)
-    return () => { cancelled = true; window.clearInterval(timer) }
+      }
+      if (overview.status === 'fulfilled' || runsResult.status === 'fulfilled') {
+        const combined = Array.from(byId.values())
+        setAgents(
+          orderAgentTree(combined, (agent) => agent.agent_id, (agent) => agent.parent_agent_id).map(({ item: agent, depth }) => ({
+            agentId: agent.agent_id,
+            name: agent.name,
+            role: agent.role,
+            state: agent.state,
+            parentAgentId: agent.parent_agent_id,
+            depth,
+          })),
+        )
+      }
+    })
+    return () => { active = false }
   }, [fetchAll])
+
+  useEffect(() => {
+    const cancelFirst = refresh()
+    const timer = window.setInterval(() => { refresh() }, REFRESH_MS)
+    return () => { cancelFirst(); window.clearInterval(timer) }
+  }, [refresh])
+
+  const effectiveProgress = useMemo<AgentProgressMap>(() => {
+    const merged: AgentProgressMap = { ...runProgress }
+    if (liveAgentProgress) {
+      for (const [id, data] of Object.entries(liveAgentProgress)) {
+        merged[id] = mergeAgentProgress(merged[id], data)
+      }
+    }
+    return merged
+  }, [runProgress, liveAgentProgress])
+
+  const handleAgentResumed = useCallback((agentId: string) => {
+    setRunProgress((prev) => ({
+      ...prev,
+      [agentId]: mergeAgentProgress(prev[agentId], {
+        agentId,
+        state: 'queued',
+        interrupted: false,
+        stalled: false,
+      }),
+    }))
+    setAgents((prev) => prev.map((agent) => (agent.agentId === agentId ? { ...agent, state: 'queued' } : agent)))
+  }, [])
 
   async function stop(task: ShellTask) {
     setStopping(task.taskId)
@@ -148,29 +220,41 @@ export function TasksPanel({
             <>
               <h3>Agentes</h3>
               <ul className="tasks-panel__list">
-                {agents.map((agent) => (
-                  <li
-                    key={agent.agentId}
-                    className={agent.depth > 0 ? 'tasks-panel__item tasks-panel__item--nested' : 'tasks-panel__item'}
-                    style={{ '--agent-depth': agent.depth } as CSSProperties}
-                    data-depth={agent.depth}
-                  >
-                    <div className="tasks-panel__row">
-                      <span className="tasks-panel__command">{agent.name}</span>
-                      <span className="tasks-panel__state">{AGENT_STATE[agent.state] ?? agent.state}{agent.role ? ` · ${agent.role}` : ''}</span>
-                    </div>
-                    <AgentMessageBox
-                      conversationId={conversationId}
-                      agentId={agent.agentId}
-                      agentName={agent.name}
-                      running={agent.state === 'running' || agent.state === 'working'}
-                      client={client}
-                      liveMessages={agentMessages?.[agent.agentId]}
-                      onMessageSent={onAgentMessageSent}
-                      compact
-                    />
-                  </li>
-                ))}
+                {agents.map((agent) => {
+                  const progress = effectiveProgress[agent.agentId]
+                  const displayState: string = progress?.stalled ? 'stalled' : progress?.state ?? agent.state
+                  return (
+                    <li
+                      key={agent.agentId}
+                      className={agent.depth > 0 ? 'tasks-panel__item tasks-panel__item--nested' : 'tasks-panel__item'}
+                      style={{ '--agent-depth': agent.depth } as CSSProperties}
+                      data-depth={agent.depth}
+                    >
+                      <div className="tasks-panel__row">
+                        <span className="tasks-panel__command">{agent.name}</span>
+                        <span className="tasks-panel__state">{AGENT_STATE[displayState] ?? displayState}{agent.role ? ` · ${agent.role}` : ''}</span>
+                      </div>
+                      {progress && (
+                        <AgentProgressRow
+                          progress={progress}
+                          conversationId={conversationId}
+                          client={client}
+                          onResumed={handleAgentResumed}
+                        />
+                      )}
+                      <AgentMessageBox
+                        conversationId={conversationId}
+                        agentId={agent.agentId}
+                        agentName={agent.name}
+                        running={displayState === 'running' || displayState === 'working' || displayState === 'stalled'}
+                        client={client}
+                        liveMessages={agentMessages?.[agent.agentId]}
+                        onMessageSent={onAgentMessageSent}
+                        compact
+                      />
+                    </li>
+                  )
+                })}
               </ul>
             </>
           )}

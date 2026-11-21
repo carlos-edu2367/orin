@@ -214,7 +214,18 @@ export function reduceAgentProgressEvents(
   let state: AgentProgressMap = { ...initial }
   for (const event of events) {
     const type = event.type
-    if (type !== 'agent.progress' && type !== 'agent.stalled' && type !== 'agent.interrupted') {
+    const isMergeOrWorktree =
+      type === 'merge.applied' ||
+      type === 'merge.conflict' ||
+      type === 'merge.check_failed' ||
+      type === 'worktree.created' ||
+      type === 'worktree.removed'
+    if (
+      type !== 'agent.progress' &&
+      type !== 'agent.stalled' &&
+      type !== 'agent.interrupted' &&
+      !isMergeOrWorktree
+    ) {
       continue
     }
     const payload = (event.payload ?? {}) as Record<string, unknown>
@@ -225,6 +236,28 @@ export function reduceAgentProgressEvents(
     if (!agentId) continue
 
     const existing = state[agentId]
+    if (isMergeOrWorktree) {
+      const nextMergeState: AgentMergeState | null =
+        type === 'merge.applied'
+          ? 'applied'
+          : type === 'merge.conflict'
+            ? 'conflict'
+            : type === 'merge.check_failed'
+              ? 'check_failed'
+              : type === 'worktree.created'
+                ? 'pending'
+                : normalizeMergeState(payload.merge_state) ?? existing?.mergeState ?? null
+      state = {
+        ...state,
+        [agentId]: mergeAgentProgress(existing, {
+          agentId,
+          mergeState: nextMergeState,
+          ...(event.parentAgentId ? { parentAgentId: event.parentAgentId } : {}),
+        }),
+      }
+      continue
+    }
+
     const fallbackState: AgentRunState =
       type === 'agent.stalled' ? 'stalled' : type === 'agent.interrupted' ? 'interrupted' : existing?.state ?? 'running'
     const nextState =

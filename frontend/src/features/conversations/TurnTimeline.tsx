@@ -4,6 +4,7 @@ import { renderActivityGroup } from './ActivityStream'
 import { CodeToolCallBlock, formatToolSignature, resolveVisualStatus } from './CodeToolCallBlock'
 import { CaveatsNotice, UnverifiedNotice } from './CodeModeCard'
 import { VerificationCard } from './VerificationCard'
+import { MergeConflictCard, type MergeResolveDetails } from './MergeConflictCard'
 import { PlanApprovalCard, extractPlanApprovalDetails } from './PlanApprovalCard'
 import type { ApiClient } from '../../api/client'
 import type { CodePermissionMode } from '../../api/codeMode'
@@ -13,12 +14,15 @@ import { WorkspaceFileCard, type WorkspaceFilePreviewHandler } from './Workspace
 import {
   formatTurnWorkDuration,
   isFriendQueuedInputEvent,
+  isMergeEvent,
   isSubagentCoordinationOrWaitEvent,
   isWaitingModelEvent,
   summarizeActivities,
 } from './activitySummary'
 import { AgentMessageBox } from './AgentMessageBox'
+import { AgentProgressRow } from './AgentProgressRow'
 import type { AgentMessagesState } from './agentMessages'
+import type { AgentProgressMap } from './agentTree'
 import {
   extractFriendDeliveryFromEvent,
   FriendDeliveryCard,
@@ -79,6 +83,9 @@ export type TurnTimelineProps = {
   onRequestChanges?: (feedback: string, event: ConversationActivityEvent) => void | Promise<void>
   agentMessages?: AgentMessagesState
   onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  agentProgress?: AgentProgressMap
+  onOpenWorktree?: (worktreePath: string, agentId: string) => void
+  onAskAgentToResolveMerge?: (prompt: string, details: MergeResolveDetails) => void | Promise<void>
   friendDeliveries?: Record<string, FriendDeliveryItem>
   onOpenTargetConversation?: (conversationId: string) => void
 }
@@ -660,6 +667,9 @@ export const TurnTimeline = memo(function TurnTimeline({
   onRequestChanges,
   agentMessages,
   onAgentMessageSent,
+  agentProgress,
+  onOpenWorktree,
+  onAskAgentToResolveMerge,
   friendDeliveries,
   onOpenTargetConversation,
 }: TurnTimelineProps) {
@@ -675,18 +685,24 @@ export const TurnTimeline = memo(function TurnTimeline({
       models,
       agentMessages,
       onAgentMessageSent,
+      agentProgress,
+      onOpenWorktree,
+      onAskAgentToResolveMerge,
       friendDeliveries,
       onOpenTargetConversation,
     }),
     [
       agentMessages,
+      agentProgress,
       client,
       defaultModelId,
       defaultProvider,
       friendDeliveries,
       models,
       onAgentMessageSent,
+      onAskAgentToResolveMerge,
       onOpenTargetConversation,
+      onOpenWorktree,
     ],
   )
 
@@ -996,6 +1012,14 @@ export const TurnTimeline = memo(function TurnTimeline({
         running={isSubagentRunning}
       >
         {content}
+        {group.agentId && agentProgress?.[group.agentId] && (
+          <AgentProgressRow
+            progress={agentProgress[group.agentId]}
+            conversationId={conversationId}
+            client={client}
+            compact
+          />
+        )}
         {conversationId && group.agentId && (isSubagentRunning || (agentMessages?.[group.agentId]?.length ?? 0) > 0) && (
           <AgentMessageBox
             conversationId={conversationId}
@@ -1132,6 +1156,18 @@ export const TurnTimeline = memo(function TurnTimeline({
 
     if (group.id.startsWith('verifier:') || first.type.startsWith('verifier.')) {
       return <VerificationCard group={group} />
+    }
+
+    if (group.id.startsWith('merge:') || isMergeEvent(first)) {
+      return (
+        <MergeConflictCard
+          group={group}
+          conversationId={conversationId}
+          client={client}
+          onOpenWorktree={onOpenWorktree}
+          onAskAgentToResolve={onAskAgentToResolveMerge}
+        />
+      )
     }
 
     // Retire the 5-stage purple CodeModeCard stepper from normal Code Mode turns,

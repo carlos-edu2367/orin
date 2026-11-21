@@ -175,6 +175,23 @@ export function pulseDetailFromEvents(events: ConversationActivityEvent[], turnS
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event.type.startsWith('context.')) continue
+    if (event.type === 'agent.stalled' || event.payload?.stalled === true) {
+      const name = event.agentName || (typeof event.payload?.agent_id === 'string' ? event.payload.agent_id : 'subagente')
+      return `${name} travado`
+    }
+    if (event.type === 'agent.progress') {
+      const tool = typeof event.payload?.current_tool === 'string' && event.payload.current_tool.trim()
+        ? event.payload.current_tool.trim()
+        : null
+      const calls = typeof event.payload?.tool_calls === 'number' && Number.isFinite(event.payload.tool_calls)
+        ? event.payload.tool_calls
+        : 0
+      if (tool || calls > 0) {
+        const name = event.agentName || 'Subagente'
+        const parts = [tool ? `${tool}` : null, calls > 0 ? `${calls} ${calls === 1 ? 'ferramenta' : 'ferramentas'}` : null].filter(Boolean)
+        return `${name}: ${parts.join(' · ')}`
+      }
+    }
     if (
       event.waitingSubagents === true ||
       event.payload?.waiting_subagents === true ||

@@ -6,6 +6,7 @@ import {
   deleteCustomAgent,
   listCustomAgents,
   updateCustomAgent,
+  type AgentIsolationMode,
   type AgentMemoryMode,
   type CustomAgent,
   type CustomAgentDraft,
@@ -21,6 +22,10 @@ const AGENT_MEMORY_MODES: ReadonlyArray<{ id: AgentMemoryMode; label: string }> 
   { id: 'user', label: 'Usuário (user)' },
   { id: 'local', label: 'Local (local)' },
   { id: 'none', label: 'Nenhuma (none)' },
+]
+const AGENT_ISOLATION_MODES: ReadonlyArray<{ id: AgentIsolationMode; label: string }> = [
+  { id: 'none', label: 'Nenhum (none)' },
+  { id: 'worktree', label: 'Worktree isolada (worktree)' },
 ]
 const RESERVED = new Set(['explore', 'plan', 'general-purpose', 'general', 'fork', 'verifier'])
 const TOOL_NAME = /^[A-Za-z_][\w.:*-]*$/
@@ -89,12 +94,13 @@ export type AgentForm = {
   permissionMode: string
   maxTurns: string
   memory?: AgentMemoryMode
+  isolation?: AgentIsolationMode
   enabled: boolean
 }
 
 const EMPTY: AgentForm = {
   name: '', description: '', prompt: '', provider: '', models: [], tools: '', disallowed: '', effort: '',
-  permissionMode: '', maxTurns: '', memory: 'project', enabled: true,
+  permissionMode: '', maxTurns: '', memory: 'project', isolation: 'none', enabled: true,
 }
 
 /** Starting points for a new agent: they fill what to do and which tools, never a provider (that is the person's). */
@@ -202,6 +208,7 @@ export function draftOf(form: AgentForm): CustomAgentDraft {
     permissionMode: form.permissionMode || null,
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null,
     memory: form.memory || 'project',
+    isolation: form.isolation || 'none',
     enabled: form.enabled,
   }
 }
@@ -212,6 +219,7 @@ function formOf(agent: CustomAgent): AgentForm {
     models: [...agent.models], tools: (agent.tools ?? []).join(', '), disallowed: agent.disallowedTools.join(', '),
     effort: agent.effort ?? '', permissionMode: agent.permissionMode ?? '', maxTurns: agent.maxTurns ? String(agent.maxTurns) : '',
     memory: agent.memory ?? 'project',
+    isolation: agent.isolation ?? 'none',
     enabled: agent.enabled,
   }
 }
@@ -728,6 +736,25 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                     </select>
                     <FieldHint id="agent-memory-hint">
                       Sem efeito enquanto a memória por agente estiver desligada
+                    </FieldHint>
+                  </label>
+                  <label className="agents-studio__field">
+                    <span className="agents-studio__label">Isolamento</span>
+                    <select
+                      value={form.isolation ?? 'none'}
+                      aria-label="Isolamento"
+                      aria-describedby="agent-isolation-hint"
+                      onChange={(event) => set({ isolation: event.target.value as AgentIsolationMode })}
+                    >
+                      {AGENT_ISOLATION_MODES.map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FieldHint id="agent-isolation-hint">
+                      Tem efeito só com a chave global &ldquo;Worktree por subagente&rdquo; ligada em{' '}
+                      <Link to="/settings/orchestration">Configurações › Orquestração</Link>.
                     </FieldHint>
                   </label>
                 </div>

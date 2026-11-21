@@ -79,6 +79,7 @@ import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
 import { applyAgentMessageEvent, recordOptimisticAgentMessage, type AgentMessagesState } from './agentMessages'
+import { reduceAgentProgressEvents } from './agentTree'
 import { applyFriendDeliveryStatusEvent, type FriendDeliveryItem } from './FriendDeliveryCard'
 import { formatTurnWorkDuration } from './activitySummary'
 import type { ConversationActivityEvent, StructuredPatchHunk, ToolPermissionDecision } from './activityTypes'
@@ -225,6 +226,7 @@ export function ChatPage() {
   const [activity, dispatch] = useReducer(activityReducer, undefined, createActivityState)
   const [optimisticAgentMsgs, setOptimisticAgentMsgs] = useState<AgentMessagesState>({})
   const agentMessages = useMemo(() => activity.events.reduce(applyAgentMessageEvent, optimisticAgentMsgs), [activity.events, optimisticAgentMsgs])
+  const agentProgress = useMemo(() => reduceAgentProgressEvents(activity.events), [activity.events])
   const friendDeliveries = useMemo(() => activity.events.reduce(applyFriendDeliveryStatusEvent, {} as Record<string, FriendDeliveryItem>), [activity.events])
   const handleAgentMessageSent = useCallback((item: { controlId: string; agentId: string; message: string }) => {
     setOptimisticAgentMsgs((prev) => recordOptimisticAgentMessage(prev, item))
@@ -958,6 +960,15 @@ export function ChatPage() {
     },
     [chatSelection, client, conversationId, conversationMode, effortSelection, liveVoiceOpen],
   )
+  const handleOpenWorktree = useCallback((worktreePath: string) => {
+    setCommandNotice(`Worktree: ${worktreePath}`)
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(worktreePath).catch(() => {})
+    }
+  }, [])
+  const handleAskAgentToResolveMerge = useCallback((prompt: string) => {
+    return sendChatMessage(prompt).then(() => undefined)
+  }, [sendChatMessage])
   const visionModel = chooseVisionModel(visionCandidates, effectiveChatProvider ?? provider ?? '', visionSetting)
   const notice = attachmentNotice({
     hasVisualAttachment,
@@ -2710,7 +2721,7 @@ export function ChatPage() {
     >
       <PushNotificationToast notice={pushNotice} onDismiss={dismissPushNotice} />
       {infoPanel && <CommandInfoDialog panel={infoPanel} commands={chatCommands.offered} onClose={() => setInfoPanel(null)} />}
-      {tasksOpen && <TasksPanel client={client} conversationId={conversationId} agentMessages={agentMessages} onAgentMessageSent={handleAgentMessageSent} onClose={() => setTasksOpen(false)} />}
+      {tasksOpen && <TasksPanel client={client} conversationId={conversationId} agentMessages={agentMessages} agentProgress={agentProgress} onAgentMessageSent={handleAgentMessageSent} onClose={() => setTasksOpen(false)} />}
       {transcriptOpen && <TranscriptView messages={messages} events={activity.events} onClose={() => setTranscriptOpen(false)} />}
       {rewindState && (
         <RewindPicker
@@ -3261,6 +3272,9 @@ export function ChatPage() {
                     onRequestPlanChanges={isTurnFinished ? undefined : handleRequestPlanChanges}
                     agentMessages={agentMessages}
                     onAgentMessageSent={handleAgentMessageSent}
+                    agentProgress={agentProgress}
+                    onOpenWorktree={handleOpenWorktree}
+                    onAskAgentToResolveMerge={handleAskAgentToResolveMerge}
                     friendDeliveries={friendDeliveries}
                     onOpenTargetConversation={openTargetConversation}
                   />
@@ -3298,6 +3312,9 @@ export function ChatPage() {
                     onRequestPlanChanges={isUnclaimedTurnActive ? handleRequestPlanChanges : undefined}
                     agentMessages={agentMessages}
                     onAgentMessageSent={handleAgentMessageSent}
+                    agentProgress={agentProgress}
+                    onOpenWorktree={handleOpenWorktree}
+                    onAskAgentToResolveMerge={handleAskAgentToResolveMerge}
                     friendDeliveries={friendDeliveries}
                     onOpenTargetConversation={openTargetConversation}
                   />
@@ -3322,6 +3339,9 @@ export function ChatPage() {
                     onCodeSessionDecline={declineCodeSessionProposal}
                     agentMessages={agentMessages}
                     onAgentMessageSent={handleAgentMessageSent}
+                    agentProgress={agentProgress}
+                    onOpenWorktree={handleOpenWorktree}
+                    onAskAgentToResolveMerge={handleAskAgentToResolveMerge}
                     friendDeliveries={friendDeliveries}
                     onOpenTargetConversation={openTargetConversation}
                   />

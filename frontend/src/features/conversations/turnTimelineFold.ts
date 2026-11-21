@@ -11,6 +11,7 @@ import {
   groupingKey,
   isCodeModeEvent,
   isFriendQueuedInputEvent,
+  isMergeEvent,
   isRenderable,
   isSubagentCoordinationOrWaitEvent,
   isSubagentDelegationFailed,
@@ -348,6 +349,7 @@ export function buildTurnTimeline(
   } | null = null
   const renderedCodeRuns = new Set<string>()
   const verifierItems = new Map<string, TimelineActivityItem>()
+  const mergeItems = new Map<string, TimelineActivityItem>()
   const subagentWaveItems = new Map<string, TimelineActivityItem>()
   const settledWaveSubagents = new Set<string>()
 
@@ -679,6 +681,37 @@ export function buildTurnTimeline(
       }
       items.push(nextItem)
       verifierItems.set(key, nextItem)
+      continue
+    }
+    if (isMergeEvent(event)) {
+      flushThought(true, event.occurredAt)
+      flushText()
+      flushGroup()
+      const existing = mergeItems.get(key)
+      if (existing) {
+        applyEventToGroup(existing.group, event)
+        existing.event = event
+        continue
+      }
+      const mergeGroup: ActivityGroup = {
+        id: key,
+        kind: event.kind,
+        state: event.state,
+        label: 'Integração da worktree',
+        count: 1,
+        events: [event],
+        agentId: event.agentId,
+        agentName: event.agentName,
+        failed: event.state === 'failed',
+      }
+      const nextItem: TimelineActivityItem = {
+        id: `activity:${mergeGroup.id}:${event.originEventId ?? event.eventId}`,
+        kind: 'activity',
+        group: mergeGroup,
+        event,
+      }
+      items.push(nextItem)
+      mergeItems.set(key, nextItem)
       continue
     }
     if (subagentEvent && event.kind === 'tool' && key.startsWith('tool:')) {
