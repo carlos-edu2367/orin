@@ -864,7 +864,15 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
   if (payload.unchanged === true) event.unchanged = true
   assign('screenshotPath', optionalWorkspacePath(payload.screenshot_path))
   assign('codeStage', optionalText(payload.stage, 64))
-  if (payload.verification === 'unverified') event.verification = 'unverified'
+  if (
+    payload.verification === 'unverified' ||
+    payload.verification === 'verified' ||
+    payload.verification === 'completed_with_caveats'
+  ) {
+    event.verification = payload.verification
+  } else if (type === 'code_mode.completed_with_caveats') {
+    event.verification = 'completed_with_caveats'
+  }
   if (payload.waiting_for_slot === true) event.waitingForSlot = true
   if (payload.compacting === true && (type === 'context.updated' || type === 'CONTEXT_UPDATED')) {
     event.compacting = true
@@ -1031,6 +1039,11 @@ export function parseConversationActivityEvent(value: unknown, cursor: string): 
     if (logPath) {
       if (!event.path) event.path = logPath
       extraPayload.log_path = logPath
+    }
+  }
+  if (type.startsWith('verifier.') || type === 'code_mode.completed_with_caveats') {
+    for (const [k, v] of Object.entries(payload)) {
+      if (v !== undefined && !(k in extraPayload)) extraPayload[k] = v
     }
   }
   if (Object.keys(extraPayload).length > 0) {

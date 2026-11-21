@@ -2,7 +2,8 @@ import { memo, useMemo, useState, type ReactNode } from 'react'
 import { MarkdownMessage } from './MarkdownMessage'
 import { renderActivityGroup } from './ActivityStream'
 import { CodeToolCallBlock, formatToolSignature, resolveVisualStatus } from './CodeToolCallBlock'
-import { UnverifiedNotice } from './CodeModeCard'
+import { CaveatsNotice, UnverifiedNotice } from './CodeModeCard'
+import { VerificationCard } from './VerificationCard'
 import { PlanApprovalCard, extractPlanApprovalDetails } from './PlanApprovalCard'
 import type { ApiClient } from '../../api/client'
 import type { CodePermissionMode } from '../../api/codeMode'
@@ -1129,6 +1130,10 @@ export const TurnTimeline = memo(function TurnTimeline({
       )
     }
 
+    if (group.id.startsWith('verifier:') || first.type.startsWith('verifier.')) {
+      return <VerificationCard group={group} />
+    }
+
     // Retire the 5-stage purple CodeModeCard stepper from normal Code Mode turns,
     // while keeping plan approval and concrete file/command events.
     if (group.id.startsWith('code-mode:') || first.type.startsWith('code_mode.')) {
@@ -1158,6 +1163,12 @@ export const TurnTimeline = memo(function TurnTimeline({
         } else if (event.type === 'code_mode.unverified') {
           flushCodeToolBatch()
           renderedNodes.push(<UnverifiedNotice key={event.eventId} />)
+        } else if (
+          event.type === 'code_mode.completed_with_caveats' ||
+          event.verification === 'completed_with_caveats'
+        ) {
+          flushCodeToolBatch()
+          renderedNodes.push(<CaveatsNotice key={event.eventId} summary={event.summary} />)
         } else if (
           event.mcpApproval ||
           event.pluginApproval ||

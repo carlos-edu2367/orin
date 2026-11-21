@@ -425,6 +425,10 @@ Events usam passado, envelope da RFC 103, `execution_id` aplicável, `correlatio
 - prompt injection em resultado, Memory ou Artifact não altera hierarquia de instruções;
 - memória proposta por subagente (`status = proposed`) nunca entra no prompt de nenhum agente e só é promovida por um único escritor com trava por escopo (`MemoryPromotionGate`) após verificação aprovada ou aprovação manual do usuário;
 - memórias originadas de ferramentas externas, web ou arquivos entram em quarentena (`status = quarantined`, quando `memory.quarantine.enabled = true`) e ficam bloqueadas do prompt e da consolidação até aprovação explícita do usuário;
+- **segurança do verificador independente (Pacote A):**
+  - **revisor somente leitura:** o subagente `verifier` NÃO recebe ferramentas de escrita/edição de arquivos nem permissão para criar outros subagentes; sua superfície fica restrita à leitura do repositório, execução de comandos de inspeção/testes e envio de relatório estruturado via `report_verification`;
+  - **prova objetiva obrigatória para bloquear turno:** um achado só bloqueia o encerramento do turno e exige `resolve_findings` quando possui severidade `blocker` ou `major` acompanhada de evidência verificável (`failing_test`, `command` com `exit_code`, ou `code_ref` com `file`, `line >= 1` e `reason`); achados sem prova são rebaixados automaticamente para `unproven` ("sem prova") e nunca bloqueiam a entrega nem forçam retrabalho;
+  - **isolamento de escopo e contexto:** o verificador executa em contexto limpo contendo apenas o objetivo do turno e o escopo de arquivos/diff alterados (sem herdar histórico bruto, memória privada do autor ou credenciais); a persistência de revisões e métricas por par permanece isolada por `user_id`;
 - segredo e credencial nunca entram em mensagem, handoff, Event ou Context;
 - cross-workspace é negado por padrão;
 - o lançamento single-user preserva `user_id` para futura separação entre usuários.

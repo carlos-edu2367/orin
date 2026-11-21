@@ -4,7 +4,7 @@
 import type { ApiClient } from './client'
 import { bool, list, optStr, rec, str } from './parse'
 
-export type OrchestrationSettingType = 'boolean' | 'number' | 'string' | 'choice' | 'string_list' | 'map'
+export type OrchestrationSettingType = 'boolean' | 'number' | 'string' | 'choice' | 'string_list' | 'map' | 'object'
 export type OrchestrationSettingLayer = 'default' | 'user' | 'project' | 'local' | 'cli' | 'managed'
 export type OrchestrationSettingScope = 'user_only' | 'project_off_only' | 'project_lower_only' | 'any' | 'agent_file'
 
@@ -42,7 +42,7 @@ export type OrchestrationSettingsQuery = {
   prefix?: string
 }
 
-const TYPES: readonly OrchestrationSettingType[] = ['boolean', 'number', 'string', 'choice', 'string_list', 'map']
+const TYPES: readonly OrchestrationSettingType[] = ['boolean', 'number', 'string', 'choice', 'string_list', 'map', 'object']
 const LAYERS: readonly OrchestrationSettingLayer[] = ['default', 'user', 'project', 'local', 'cli', 'managed']
 const SCOPES: readonly OrchestrationSettingScope[] = [
   'user_only',
