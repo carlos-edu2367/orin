@@ -6,6 +6,7 @@ import {
   type OrchestrationSettingsReport,
 } from '../../api/orchestrationSettings'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation } from '../codeSettings/shared'
+import { EffortSettingsPanel } from './EffortSettingsPanel'
 import { OrchestrationSettingsForm } from './OrchestrationSettingsForm'
 import { SettingsSection } from './SettingsSection'
 import './orchestrationSettings.css'
@@ -103,10 +104,9 @@ export function QuotaAndEffortSection({ client }: { client?: ApiClient }) {
               <p className="code-settings__muted">
                 Defina o esforço padrão, políticas para subagentes, modo plano e escalada após reprovação.
               </p>
-              <OrchestrationSettingsForm
+              <EffortSettingsPanel
                 items={effortItems}
                 busy={saving}
-                hideGroupHeaders
                 onSave={handleSave}
               />
             </Card>

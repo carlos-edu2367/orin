@@ -44,6 +44,8 @@ export type CreateConversationInput = {
   code_mode?: CodeModeChoice
   mode?: ConversationMode
   permission_mode?: PermissionMode
+  effort?: string
+  boost?: boolean
 }
 
 export type CodeModeChoice = 'auto' | 'code' | 'chat' | 'friend'
@@ -98,6 +100,8 @@ export type SendMessageInput = {
   mode?: ConversationMode
   permission_mode?: PermissionMode
   liveMode?: boolean
+  effort?: string
+  boost?: boolean
 }
 
 function parseModeAndPermission(data: Record<string, unknown>, fallbackMode: ConversationMode = 'chat'): {
@@ -130,6 +134,8 @@ export function createConversation(client: ApiClient, input: CreateConversationI
       attachments: input.attachments ?? [],
       ...(effectiveCodeMode ? { code_mode: effectiveCodeMode } : {}),
       ...(input.permission_mode ? { permission_mode: input.permission_mode } : {}),
+      ...(input.effort ? { effort: input.effort } : {}),
+      ...(input.boost === true ? { boost: true } : {}),
     },
     parse: parseConversationReceipt,
   })
@@ -263,6 +269,7 @@ export function sendConversationMessage(
   permissionModeOrIntent?: PermissionMode | MutationIntent,
   intentArg?: MutationIntent,
   liveMode?: boolean,
+  effortOptions?: { effort?: string; boost?: boolean },
 ): Promise<ConversationReceipt> {
   if (typeof messageOrInput === 'object' && messageOrInput !== null) {
     const effectiveMode = messageOrInput.mode ?? (messageOrInput.code_mode && messageOrInput.code_mode !== 'auto' ? messageOrInput.code_mode : undefined)
@@ -279,6 +286,8 @@ export function sendConversationMessage(
         ...(messageOrInput.permission_mode ? { permission_mode: messageOrInput.permission_mode } : {}),
         ...(messageOrInput.selection ? { selection: messageOrInput.selection } : {}),
         ...(messageOrInput.liveMode === true ? { live_mode: true } : {}),
+        ...(messageOrInput.effort ? { effort: messageOrInput.effort } : {}),
+        ...(messageOrInput.boost === true ? { boost: true } : {}),
       },
       parse: parseConversationReceipt,
     })
@@ -294,6 +303,8 @@ export function sendConversationMessage(
       ...(permissionMode ? { permission_mode: permissionMode } : {}),
       ...(selection ? { selection } : {}),
       ...(liveMode === true ? { live_mode: true } : {}),
+      ...(effortOptions?.effort ? { effort: effortOptions.effort } : {}),
+      ...(effortOptions?.boost === true ? { boost: true } : {}),
     },
     parse: parseConversationReceipt,
   })

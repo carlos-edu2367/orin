@@ -22,6 +22,7 @@ import { OrinActivityCenter } from '../components/OrinActivityCenter'
 import { Composer } from '../features/conversations/Composer'
 import { useComposerAttachments } from '../features/conversations/useComposerAttachments'
 import { newSessionDraftKey, useComposerDraft } from '../features/conversations/useComposerDraft'
+import { useEffortSelection } from '../features/conversations/useEffortSelection'
 import { inspectNewWorkspaceFolder, type WorkspaceState } from '../api/workspace'
 import { WorkspaceNavigation, type WorkspaceNavigationConversationSummary } from '../features/projects/WorkspaceNavigation'
 import { PinnedSessionTabs } from '../features/sessions/PinnedSessionTabs'
@@ -257,6 +258,14 @@ export function Home({ client, bootstrap }: HomeProps) {
   }
 
   const sessionReady = session.status !== 'missing_csrf'
+  const selectedModel = useMemo(() => models.find((item) => item.model_id === modelId) ?? null, [models, modelId])
+  const effortSelection = useEffortSelection({
+    client: apiClient,
+    provider,
+    modelId,
+    supportedEfforts: selectedModel?.supported_efforts ?? [],
+    defaultEffort: selectedModel?.default_effort ?? null,
+  })
 
   async function submit() {
     const text = message.trim()
@@ -290,6 +299,7 @@ export function Home({ client, bootstrap }: HomeProps) {
         effectiveMessage = buildOversizedPromptMessage(text)
         effectiveAttachments = [...readyUploads, uploaded.upload_id]
       }
+      const effortPayload = effortSelection.payloadFields()
       const receipt = await createConversation(apiClient, {
         message: effectiveMessage,
         provider,
@@ -301,7 +311,9 @@ export function Home({ client, bootstrap }: HomeProps) {
         code_mode: resolvedMode,
         mode: resolvedMode,
         permission_mode: resolvedPermissionMode,
+        ...effortPayload,
       })
+      if (effortPayload.boost) effortSelection.consumeBoost()
       autoUploadedId = null
       writeStored(PROVIDER_STORAGE_KEY, provider)
       writeStored(MODEL_STORAGE_KEY, modelId)
@@ -482,6 +494,15 @@ export function Home({ client, bootstrap }: HomeProps) {
             modeSwitch={{
               mode: codeMode === 'code' ? 'code' : 'chat',
               onModeChange: (next) => selectMode(next),
+            }}
+            effortControl={{
+              supportedEfforts: selectedModel?.supported_efforts ?? [],
+              defaultEffort: selectedModel?.default_effort ?? null,
+              value: effortSelection.selectedEffort,
+              onChange: (next) => { void effortSelection.selectEffort(next) },
+              boost: effortSelection.boostNextTurn,
+              onToggleBoost: effortSelection.toggleBoost,
+              disabled: submitting,
             }}
             sessionContext={{
               mode: codeMode === 'code' ? 'code' : 'chat',

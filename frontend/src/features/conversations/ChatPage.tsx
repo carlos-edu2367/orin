@@ -84,6 +84,7 @@ import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
 import { useComposerAttachments } from './useComposerAttachments'
 import { conversationDraftKey, useComposerDraft } from './useComposerDraft'
+import { useEffortSelection } from './useEffortSelection'
 import { StickyUserMessage } from './StickyUserMessage'
 import { PinnedSessionTabs } from '../sessions/PinnedSessionTabs'
 import { useSessionStore } from '../sessions/sessionStore'
@@ -905,22 +906,6 @@ export function ChatPage() {
     [effectiveChatModelId, effectiveChatProvider],
   )
 
-  const sendChatMessage = useCallback(
-    (text: string, attachments: string[] = [], liveModeOverride?: boolean) =>
-      sendConversationMessage(
-        client,
-        conversationId,
-        text,
-        attachments,
-        chatSelection,
-        conversationMode === 'code' ? 'code' : 'auto',
-        undefined,
-        undefined,
-        Boolean(liveModeOverride ?? liveVoiceOpen),
-      ),
-    [chatSelection, client, conversationId, conversationMode, liveVoiceOpen],
-  )
-
   useEffect(() => {
     if (!provider || !modelId || !PROVIDER_NAMES.includes(provider as ProviderName)) return
     const controller = new AbortController()
@@ -939,6 +924,26 @@ export function ChatPage() {
   const hasVisualAttachment = attachments.some((item) => item.kind === 'image' || item.kind === 'pdf')
   const selectedChatModel = chatModels.find((item) => item.model_id === effectiveChatModelId)
   const composerModel = selectedChatModel?.provider === effectiveChatProvider ? selectedChatModel : turnModel
+  const effortSelection = useEffortSelection({
+    client,
+    provider: effectiveChatProvider ?? provider ?? null,
+    modelId: effectiveChatModelId || modelId || null,
+    supportedEfforts: composerModel?.supported_efforts ?? [],
+    defaultEffort: composerModel?.default_effort ?? null,
+  })
+  const sendChatMessage = useCallback(
+    async (text: string, attachments: string[] = [], liveModeOverride?: boolean) => {
+      const effortPayload = effortSelection.payloadFields()
+      const receipt = await sendConversationMessage(
+        client, conversationId, text, attachments, chatSelection,
+        conversationMode === 'code' ? 'code' : 'auto', undefined, undefined,
+        Boolean(liveModeOverride ?? liveVoiceOpen), effortPayload,
+      )
+      if (effortPayload.boost) effortSelection.consumeBoost()
+      return receipt
+    },
+    [chatSelection, client, conversationId, conversationMode, effortSelection, liveVoiceOpen],
+  )
   const visionModel = chooseVisionModel(visionCandidates, effectiveChatProvider ?? provider ?? '', visionSetting)
   const notice = attachmentNotice({
     hasVisualAttachment,
@@ -1577,6 +1582,14 @@ export function ChatPage() {
     openPreferences: () => setPreferencesOpen(true),
     openModelPicker: () => setModelPickerSignal((value) => value + 1),
     setPermissionMode: (mode) => changeCodePermissionMode(mode),
+    effort: {
+      current: effortSelection.selectedEffort,
+      defaultEffort: composerModel?.default_effort ?? null,
+      supportedEfforts: composerModel?.supported_efforts ?? [],
+      modelLabel: composerModel?.display_name ?? effectiveChatModelId,
+      modelLoaded: Boolean(composerModel),
+      setEffort: effortSelection.selectEffort,
+    },
   })
 
   const showAgentPulse =
@@ -3592,6 +3605,15 @@ export function ChatPage() {
           worktreeIsolated={worktreeIsolated}
           onWorktreeIsolatedChange={toggleWorktreeIsolation}
           worktreeBranch={worktreeBranch}
+          effortControl={{
+            supportedEfforts: composerModel?.supported_efforts ?? [],
+            defaultEffort: composerModel?.default_effort ?? null,
+            value: effortSelection.selectedEffort,
+            onChange: (next) => { void effortSelection.selectEffort(next) },
+            boost: effortSelection.boostNextTurn,
+            onToggleBoost: effortSelection.toggleBoost,
+            disabled: running || stopping,
+          }}
           sessionContext={{
             mode: conversationMode,
             permissionMode: codePermissionMode,

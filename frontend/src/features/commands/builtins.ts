@@ -40,7 +40,7 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommand[] = [
   // Configuration
   c('config', 'config', 'Abre as configurações', ['settings']),
   c('doctor', 'config', 'Verifica a instalação do Orin'),
-  c('effort', 'config', 'Explica como o esforço do modelo é escolhido no Orin'),
+  c('effort', 'config', 'Define ou consulta o esforço de raciocínio do modelo', [], '[nível|default]'),
   c('fast', 'config', 'Modo rápido (o Orin não tem; explica a alternativa)'),
   c('model', 'config', 'Escolhe o modelo'),
   c('output-style', 'config', 'Escolhe o estilo de resposta', [], '[estilo]'),

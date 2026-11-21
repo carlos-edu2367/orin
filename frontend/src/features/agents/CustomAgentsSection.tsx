@@ -10,7 +10,8 @@ import {
   type CustomAgentDraft,
 } from '../../api/customAgents'
 import { ApiError } from '../../api/errors'
-import { listProviderModels, PROVIDER_NAMES, type ProviderModel, type ProviderName } from '../../api/providers'
+import { EFFORT_LEVELS, listProviderModels, PROVIDER_NAMES, type EffortLevel, type ProviderModel, type ProviderName } from '../../api/providers'
+import { clampEffort } from '../conversations/useEffortSelection'
 import { ErrorNote, type describeError } from '../codeSettings/shared'
 
 export const AGENT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -24,7 +25,39 @@ const PERMISSION_MODES: ReadonlyArray<{ id: string; label: string }> = [
   { id: 'auto', label: 'Automático' },
   { id: 'bypassPermissions', label: 'Sem pedir permissão' },
 ]
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+export function acceptedEffortsForAgentModels(
+  models: readonly ProviderModel[],
+  selectedIds: readonly string[],
+): { levels: readonly EffortLevel[]; restrictedToEmpty: boolean } {
+  if (selectedIds.length === 0) {
+    return { levels: EFFORT_LEVELS, restrictedToEmpty: false }
+  }
+  const byId = new Map(models.map((item) => [item.model_id, item]))
+  const matched = selectedIds.map((id) => byId.get(id)).filter((item): item is ProviderModel => Boolean(item))
+  if (matched.length === 0) {
+    return { levels: EFFORT_LEVELS, restrictedToEmpty: false }
+  }
+  const union = new Set<EffortLevel>()
+  let allDeclareField = true
+  for (const model of matched) {
+    if (!Array.isArray(model.supported_efforts)) {
+      allDeclareField = false
+      continue
+    }
+    for (const level of model.supported_efforts) {
+      if ((EFFORT_LEVELS as readonly string[]).includes(level)) {
+        union.add(level)
+      }
+    }
+  }
+  if (union.size > 0) {
+    return { levels: EFFORT_LEVELS.filter((level) => union.has(level)), restrictedToEmpty: false }
+  }
+  if (allDeclareField) {
+    return { levels: [], restrictedToEmpty: true }
+  }
+  return { levels: EFFORT_LEVELS, restrictedToEmpty: false }
+}
 const PROVIDER_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
   'openai-codex': 'OpenAI Codex (Assinatura)',
@@ -344,6 +377,10 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
   const set = (patch: Partial<AgentForm>) => setForm((current) => (current ? { ...current, ...patch } : current))
   const providers = Object.keys(catalog)
   const providerOptions = form?.provider && !providers.includes(form.provider) ? [...providers, form.provider] : providers
+  const acceptedEfforts = useMemo(
+    () => (form?.provider ? acceptedEffortsForAgentModels(catalog[form.provider] ?? [], form.models) : { levels: EFFORT_LEVELS, restrictedToEmpty: false }),
+    [catalog, form],
+  )
   const pristine = form !== null && creating && JSON.stringify(form) === JSON.stringify(EMPTY)
 
   function open(next: AgentForm, name: string | null) {
@@ -598,7 +635,19 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                 {form.provider && (
                   <div className="agents-studio__field" aria-describedby="agent-models-hint">
                     <span className="agents-studio__label">Modelos permitidos</span>
-                    <ModelChecklist models={catalog[form.provider] ?? []} selected={form.models} onChange={(models) => set({ models })} />
+                    <ModelChecklist
+                      models={catalog[form.provider] ?? []}
+                      selected={form.models}
+                      onChange={(models) => {
+                        const nextAccepted = acceptedEffortsForAgentModels(catalog[form.provider] ?? [], models)
+                        const nextEffort = form.effort
+                          ? (nextAccepted.levels.includes(form.effort as EffortLevel)
+                            ? form.effort
+                            : (clampEffort(form.effort, nextAccepted.levels) ?? ''))
+                          : ''
+                        set({ models, effort: nextEffort })
+                      }}
+                    />
                     <FieldHint id="agent-models-hint" error={problemOf('models')}>
                       Com um modelo só, ele roda direto nele. Com mais de um, quem chama escolhe um a cada chamada; se o
                       escolhido falhar ao iniciar, o agente tenta os outros, nesta ordem.
@@ -626,10 +675,18 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                   </label>
                   <label className="agents-studio__field">
                     <span className="agents-studio__label">Esforço</span>
-                    <select value={form.effort} aria-label="Esforço" onChange={(event) => set({ effort: event.target.value })}>
+                    <select
+                      value={acceptedEfforts.levels.includes(form.effort as EffortLevel) ? form.effort : ''}
+                      aria-label="Esforço"
+                      disabled={acceptedEfforts.restrictedToEmpty}
+                      onChange={(event) => set({ effort: event.target.value })}
+                    >
                       <option value="">O do modelo</option>
-                      {EFFORTS.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+                      {acceptedEfforts.levels.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                     </select>
+                    {acceptedEfforts.restrictedToEmpty && (
+                      <FieldHint id="agent-effort-hint">Os modelos selecionados não configuram nível de esforço.</FieldHint>
+                    )}
                   </label>
                   <label className="agents-studio__field">
                     <span className="agents-studio__label">Permissão</span>

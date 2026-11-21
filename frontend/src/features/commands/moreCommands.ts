@@ -7,6 +7,16 @@ import type { ApiClient } from '../../api/client'
 import { getInstallationStatus } from '../../api/installation'
 import { getInstance } from '../../api/sessionTools'
 import type { ThemeAccent } from '../../app/ThemeContext'
+import { EFFORT_LEVELS, effortLabel, normalizeEffortLevel } from '../conversations/useEffortSelection'
+
+export type EffortCommandController = {
+  current: string | null
+  defaultEffort: string | null
+  supportedEfforts: readonly string[]
+  modelLabel?: string
+  modelLoaded?: boolean
+  setEffort: (level: string | null) => Promise<void> | void
+}
 
 export type MoreCommandDeps = {
   client: ApiClient
@@ -15,6 +25,7 @@ export type MoreCommandDeps = {
   notify: (text: string) => void
   openInfo: (panel: { kind: 'text'; title: string; lines: string[] }) => void
   setAccent?: (accent: ThemeAccent) => void
+  effort?: EffortCommandController
 }
 
 type Handler = (args: string) => Promise<void> | void
@@ -37,7 +48,6 @@ export const NOT_IN_ORIN: Record<string, { title: string; lines: string[] }> = {
   autocompact: { title: 'Compactação automática', lines: ['No Orin a compactação automática está sempre ligada: a conversa é resumida quando o contexto enche.', 'Para compactar agora, use /compact [instruções].'] },
   btw: { title: 'Pergunta paralela', lines: ['O Orin ainda não tem perguntas fora do histórico.', 'Para perguntar sem mexer nesta conversa, use /fork e pergunte na cópia.'] },
   cd: { title: 'Pasta de trabalho', lines: ['Para trocar a pasta desta sessão, use o seletor de pasta no topo da conversa.', 'Para acrescentar outra pasta, use /add-dir <pasta>.'] },
-  effort: { title: 'Esforço', lines: ['O Orin não ajusta o esforço do modelo por sessão.', 'Escolha um modelo com /model; o esforço de um subagente vai no arquivo dele (/agents).'] },
   fast: { title: 'Modo rápido', lines: ['O Orin não tem um modo rápido.', 'Para respostas mais rápidas, escolha um modelo menor com /model.'] },
   'reload-plugins': { title: 'Plugins', lines: ['O Orin lê os plugins de novo a cada turno: a próxima mensagem já usa o que mudou.'] },
   'reload-skills': { title: 'Skills', lines: ['O Orin lê as skills de novo a cada turno: a próxima mensagem já usa o que mudou.'] },
@@ -75,6 +85,55 @@ export function moreCommandHandlers(deps: MoreCommandDeps): Record<string, Handl
       }
       deps.setAccent(wanted)
       deps.notify(`Cor de destaque: ${args.trim() || 'default'}.`)
+    },
+    effort: async (args) => {
+      const controller = deps.effort
+      const clean = args.trim().toLowerCase()
+      const supported = controller?.supportedEfforts ?? []
+      const modelLoaded = controller?.modelLoaded ?? supported.length > 0
+      const allowed: readonly string[] = supported.length > 0 ? supported : (modelLoaded ? [] : EFFORT_LEVELS)
+
+      if (!clean) {
+        if (modelLoaded && supported.length === 0) {
+          deps.notify('O modelo atual não oferece níveis configuráveis de esforço.')
+          return
+        }
+        const current = normalizeEffortLevel(controller?.current)
+        const def = normalizeEffortLevel(controller?.defaultEffort)
+        const status = current
+          ? `escolhido: ${current} (${effortLabel(current)})`
+          : def
+            ? `padrão do modelo: ${def} (${effortLabel(def)})`
+            : 'padrão do modelo (automático)'
+        const listText = allowed.length > 0 ? `Aceitos: ${allowed.join(', ')}.` : ''
+        deps.notify(`Esforço atual — ${status}. ${listText}`.trim())
+        return
+      }
+
+      if (clean === 'default' || clean === 'auto' || clean === 'padrao' || clean === 'padrão' || clean === 'reset') {
+        await controller?.setEffort(null)
+        const def = normalizeEffortLevel(controller?.defaultEffort)
+        deps.notify(
+          def
+            ? `Esforço voltou ao padrão do modelo (${def} · ${effortLabel(def)}).`
+            : 'Esforço voltou ao padrão do modelo.',
+        )
+        return
+      }
+
+      if (modelLoaded && supported.length === 0) {
+        deps.notify('O modelo atual não aceita configuração de esforço.')
+        return
+      }
+
+      const requested = normalizeEffortLevel(clean)
+      if (!requested || !allowed.includes(requested)) {
+        deps.notify(`Nível "${args.trim()}" não aceito pelo modelo atual. Aceitos: ${allowed.join(', ')}.`)
+        return
+      }
+
+      await controller?.setEffort(requested)
+      deps.notify(`Esforço definido para ${requested} (${effortLabel(requested)}) no próximo turno e lembrado para este modelo.`)
     },
     doctor: async () => {
       const [status, instance] = await Promise.allSettled([getInstallationStatus(deps.client), getInstance(deps.client)])

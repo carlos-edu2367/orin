@@ -8,6 +8,7 @@ import { PENDING, useKeybindingHandlers, useKeybindings } from '../keybindings/e
 import type { SkillSummary } from '../../api/skills'
 import type { CodeModeChoice, ConversationMode } from '../../api/conversations'
 import type { TodoItem } from './activityTypes'
+import { EffortPicker, type EffortPickerProps } from '../../components/EffortPicker'
 import { AttachmentChips, type ComposerAttachment } from './AttachmentChips'
 import { CommandPicker, slashItems } from './CommandPicker'
 import { applyFileMention, detectFileMention, FileMentionPicker, matchingAgents, type MentionAgent } from './FileMentionPicker'
@@ -98,6 +99,8 @@ export type ComposerProps = {
   worktreeIsolated?: boolean
   onWorktreeIsolatedChange?: (isolated: boolean) => void
   worktreeBranch?: string | null
+  /** 0.13 WS-E4: Effort selector and single-turn "Pensar mais" boost button. */
+  effortControl?: EffortPickerProps
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -128,6 +131,7 @@ export function Composer({
   codePermissionMode, onCodePermissionModeChange, todos,
   workspaceFiles = [], onSearchWorkspaceFiles, mentionAgents = [],
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
+  effortControl,
   isLiveVoiceActive = false, onToggleLiveVoice,
 }: ComposerProps) {
   const externalMode: 'chat' | 'code' =
@@ -645,6 +649,12 @@ export function Composer({
               </>
             ) : null}
             {settings}
+            {effortControl && (
+              <EffortPicker
+                {...effortControl}
+                disabled={disabled || effortControl.disabled}
+              />
+            )}
           </div>
           <div className="composer__actions">
             {hint && <span className="composer__hint" role="status" aria-live="polite">{hint}</span>}
