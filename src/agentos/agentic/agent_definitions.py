@@ -151,6 +151,22 @@ def _text(value: object, maximum: int = 200) -> str | None:
     return None
 
 
+VALID_ISOLATION_MODES: tuple[str, ...] = ("none", "worktree")
+
+
+def _isolation_mode(raw: object) -> str | None:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    if not isinstance(raw, str):
+        allowed = ", ".join(VALID_ISOLATION_MODES)
+        raise ValueError(f"isolation must be one of: {allowed}")
+    cleaned = raw.strip().lower()
+    if cleaned not in VALID_ISOLATION_MODES:
+        allowed = ", ".join(VALID_ISOLATION_MODES)
+        raise ValueError(f"isolation must be one of: {allowed}")
+    return cleaned
+
+
 def _memory_mode(raw: object, *, agent_name: str, is_builtin: bool = False) -> str:
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return resolve_agent_memory_mode(agent_name, None, is_builtin=is_builtin)
@@ -176,12 +192,13 @@ def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
     max_turns = int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None
     provider, models = _provider_and_models(meta)
     memory = _memory_mode(meta.get("memory"), agent_name=name, is_builtin=(origin == "builtin"))
+    isolation = _isolation_mode(meta.get("isolation"))
     return AgentDefinition(
         name=name, description=description, prompt=body.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin, path=path,
         tools=tools, disallowed_tools=_list(meta.get("disallowedTools")),
         model=_text(meta.get("model"), 120), provider=provider, models=models, permission_mode=_text(meta.get("permissionMode"), 40),
         max_turns=max_turns, skills=_list(meta.get("skills")), background=_flag(meta.get("background")),
-        omit_claude_md=_flag(meta.get("omitClaudeMd")), isolation=_text(meta.get("isolation"), 20),
+        omit_claude_md=_flag(meta.get("omitClaudeMd")), isolation=isolation,
         effort=_text(meta.get("effort"), 20), color=_text(meta.get("color"), 20),
         hooks=meta.get("hooks") if isinstance(meta.get("hooks"), dict) else None,
         mcp_servers=meta.get("mcpServers"), memory=memory,
@@ -217,6 +234,7 @@ def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[Agent
         try:
             provider, models = _provider_and_models(value)
             memory = _memory_mode(value.get("memory"), agent_name=name, is_builtin=(origin == "builtin"))
+            isolation = _isolation_mode(value.get("isolation"))
         except ValueError as error:
             errors.append((name, str(error)[:200]))
             continue
@@ -227,6 +245,7 @@ def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[Agent
             permission_mode=_text(value.get("permissionMode"), 40),
             max_turns=int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None,
             skills=_list(value.get("skills")),
+            isolation=isolation,
             memory=memory,
             digest=hashlib.sha256(repr(sorted(value.items(), key=str)).encode("utf-8")).hexdigest(),
         ))

@@ -143,7 +143,7 @@ class AgentWorktreeStore:
     create = upsert
 
     def get(self, agent_id: str) -> AgentWorktreeRecord | None:
-        aid = str(agent_id).strip()
+        aid = str(agent_id).strip()[:64]
         if not aid:
             return None
         with self._engine.connect() as conn:
@@ -161,7 +161,7 @@ class AgentWorktreeStore:
         queued_at: datetime | None = None,
         merged_at: datetime | None = None,
     ) -> AgentWorktreeRecord | None:
-        aid = str(agent_id).strip()
+        aid = str(agent_id).strip()[:64]
         if not aid:
             return None
         clean_state = _validate_merge_state(merge_state)
@@ -198,7 +198,7 @@ class AgentWorktreeStore:
         return [_row_to_record(r) for r in rows]
 
     def delete(self, agent_id: str) -> bool:
-        aid = str(agent_id).strip()
+        aid = str(agent_id).strip()[:64]
         if not aid:
             return False
         with self._engine.begin() as conn:

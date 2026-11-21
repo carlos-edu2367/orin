@@ -180,6 +180,7 @@ class WorktreeManager:
         base_branch: str | None = None,
         *,
         name: str | None = None,
+        base_ref: str | None = None,
     ) -> WorktreeInfo:
         """Create (or reuse) an isolated worktree at ``.orin/worktrees/<slug>`` on branch ``orin/<slug>``."""
         if not self.is_git_repo():
@@ -215,8 +216,9 @@ class WorktreeManager:
             cmd = ["worktree", "add", str(worktree_path), branch_name]
         else:
             cmd = ["worktree", "add", "-b", branch_name, str(worktree_path)]
-            if base_branch and base_branch.strip():
-                cmd.append(base_branch.strip())
+            effective_base = (base_ref or base_branch or "").strip()
+            if effective_base:
+                cmd.append(effective_base)
 
         completed = self._run_git(cmd, cwd=main_root)
         if completed.returncode != 0:

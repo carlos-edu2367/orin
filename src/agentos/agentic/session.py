@@ -3055,6 +3055,7 @@ class TurnSession:
         provider: str | None = None,
         model_id: str | None = None,
         effort: str | None = None,
+        isolation: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
         hook_cancel: threading.Event | None = None,
@@ -3071,7 +3072,7 @@ class TurnSession:
             )
         if not teammate_name:
             return self._start_subagent(
-                subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, agent_id=agent_id,
+                subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, isolation=isolation, agent_id=agent_id,
                 run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
@@ -3080,7 +3081,7 @@ class TurnSession:
         clean_name = str(teammate_name).strip().lower()
         try:
             outcome = self._start_subagent(
-                subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, agent_id=agent_id,
+                subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, isolation=isolation, agent_id=agent_id,
                 run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
             )
         except BaseException:
@@ -3099,6 +3100,7 @@ class TurnSession:
         provider: str | None = None,
         model_id: str | None = None,
         effort: str | None = None,
+        isolation: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
         hook_cancel: threading.Event | None = None,
@@ -3134,6 +3136,7 @@ class TurnSession:
             requested_provider=provider,
             requested_model_id=model_id,
             requested_effort=effort,
+            requested_isolation=isolation,
             description=description,
             resumed_agent_id=clean_agent_id,
             run_in_background=bool(run_in_background),
@@ -3152,6 +3155,7 @@ class TurnSession:
         requested_provider: str | None = None,
         requested_model_id: str | None = None,
         requested_effort: str | None = None,
+        requested_isolation: str | None = None,
         description: str = "",
         resumed_agent_id: str | None = None,
         run_in_background: bool = False,
@@ -3481,6 +3485,8 @@ class TurnSession:
             routing = {}
         if requested_effort is not None:
             routing["requested_effort"] = requested_effort
+        if requested_isolation is not None:
+            routing["requested_isolation"] = requested_isolation
         with self._subagent_lock:
             if self._max_subagents_per_turn is not None and self._subagent_runs >= self._max_subagents_per_turn:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
@@ -3963,6 +3969,7 @@ class TurnSession:
         child_provider: str | None = None,
         model_chain: tuple[str, ...] = (),
         requested_effort: str | None = None,
+        requested_isolation: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         if hook_cancel is None:
@@ -4039,6 +4046,7 @@ class TurnSession:
                 child_provider=child_provider,
                 model_chain=model_chain,
                 requested_effort=requested_effort,
+                requested_isolation=requested_isolation,
             )
         finally:
             try:
@@ -4152,6 +4160,7 @@ class TurnSession:
         child_provider: str | None = None,
         model_chain: tuple[str, ...] = (),
         requested_effort: str | None = None,
+        requested_isolation: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         parent_agent_id = caller.agent_id
@@ -4283,6 +4292,11 @@ class TurnSession:
                 history=lambda: [dict(item) for item in store_cell[0].history_for_turn(store_cell[0].load(""))],
                 slot=slot,
             )
+            from .subagent_worktree import finalize_subagent_worktree, prepare_subagent_worktree, worktree_prompt_notice
+            active_wt = prepare_subagent_worktree(
+                self, agent_id=agent_id, parent_agent_id=parent_agent_id,
+                requested_isolation=requested_isolation, definition=definition,
+            )
             grants = self._inherited_code_grants(caller, sub_permission_mode, read_only=read_only_subagent)
             subagent_tools = self._toolset(
                 subagents=can_delegate,
@@ -4306,6 +4320,7 @@ class TurnSession:
                 reminders=sub_reminders,
                 todos_state=[],
                 memory_override=sub_memory_view,
+                workspace_override=active_wt.workspace if active_wt is not None else None,
             )
             subagent_tools.set_allow_deferral(self._tool_deferral_allowed(provider_name))
             child_caller.toolset = subagent_tools
@@ -4344,7 +4359,7 @@ class TurnSession:
                 store=sub_store,
                 provider=child_provider_instance,
                 toolset=subagent_tools,
-                system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
+                system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools) + worktree_prompt_notice(active_wt),
                 limits=self._subagent_limits(
                     max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode,
                     model_id=active_model_id, provider=provider_name,
@@ -4413,7 +4428,7 @@ class TurnSession:
                     store=sub_store,
                     provider=fallback_provider_instance,
                     toolset=subagent_tools,
-                    system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools),
+                    system_prompt=self._subagent_prompt(enriched_record, task_text, subagent_tools) + worktree_prompt_notice(active_wt),
                     limits=self._subagent_limits(
                         max_iterations=sub_max_iterations, max_actions=sub_max_actions, code_mode=is_code_mode,
                         model_id=active_model_id, provider=provider_name,
@@ -4542,6 +4557,15 @@ class TurnSession:
                 )
             else:
                 content = f"{clean} reported:\n\n{answer}"
+            if active_wt is not None:
+                wt_payload, wt_note = finalize_subagent_worktree(
+                    self, active_wt, agent_id=agent_id, parent_agent_id=parent_agent_id,
+                    cancelled=lambda: bool(sub_cancelled(subagent_turn)),
+                )
+                if wt_payload is not None:
+                    payload["worktree"] = wt_payload
+                if wt_note:
+                    content += wt_note
             return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
         finally:
             if subagent_tools is not None and getattr(subagent_tools, "_changed_paths", None) and builtin_key not in {"verifier", "explore", "plan"}:
@@ -5938,6 +5962,7 @@ class TurnSession:
         cli_native_media: bool | None = None,
         native_media_hears: bool | None = None,
         memory_override: object | None = None,
+        workspace_override: Any | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -5951,7 +5976,7 @@ class TurnSession:
 
         is_main_toolset = subagents and caller is None
         toolset = AgentToolset(
-            self.workspace,
+            workspace_override if workspace_override is not None else self.workspace,
             memory=(memory_override if memory_override is not None else self.memory),
             create_agent=bound(self._create_agent),
             delegate=bound(self._ask_agent),

@@ -175,6 +175,7 @@ class AgentTools:
         provider: str | None = None,
         model_id: str | None = None,
         effort: str | None = None,
+        isolation: str | None = None,
         agent_id: str | None = None,
         run_in_background: bool = False,
         teammate_name: str | None = None,
@@ -205,6 +206,9 @@ class AgentTools:
         clean_effort = str(effort).strip().lower() if effort is not None and str(effort).strip() else None
         if clean_effort is not None and clean_effort not in {"low", "medium", "high", "xhigh", "max", "ultra"}:
             raise AgentToolError("effort must be one of 'low', 'medium', 'high', 'xhigh', 'max', or 'ultra'.")
+        clean_isolation = str(isolation).strip().lower() if isolation is not None and str(isolation).strip() else None
+        if clean_isolation is not None and clean_isolation not in {"none", "worktree"}:
+            raise AgentToolError("isolation must be 'none' or 'worktree'.")
         if self._run_subagent is not None:
             # W5: a named teammate of an agent team (only passed when asked, so older callables keep working).
             extra: dict[str, Any] = (
@@ -218,6 +222,8 @@ class AgentTools:
                 extra["character_name"] = clean_char_name
             if clean_effort is not None:
                 extra["effort"] = clean_effort
+            if clean_isolation is not None:
+                extra["isolation"] = clean_isolation
             try:
                 return self._run_subagent(
                     clean_type,
@@ -314,6 +320,10 @@ class AgentInput(ToolInput):
         ),
     )
     effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = Field(None, description="Optional reasoning effort level for this subagent call.")
+    isolation: Literal["none", "worktree"] | None = Field(
+        None,
+        description="Optional isolation mode: 'worktree' runs the subagent in an isolated Git worktree when enabled in settings.",
+    )
     run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
     resume: str | None = Field(None, description="Id of a previous subagent to continue.")
     name: str | None = Field(None, description="Name a teammate of an agent team, so the team can message it with SendMessage.")
@@ -383,6 +393,7 @@ SPECS: tuple[ToolSpec, ...] = (
             },
             "model_id": {**_TEXT, "description": "Optional. Relative to `provider` when `provider` is set; for an agent that lists its own models, one of them (required when it lists several); otherwise a favorite model ID of the current provider."},
             "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Optional reasoning effort level for this subagent call."},
+            "isolation": {"type": "string", "enum": ["none", "worktree"], "description": "Optional isolation mode ('none' or 'worktree')."},
             "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
             "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent (or check_subagent(agent_ids=[...]) for several) to inspect or await its output."},
             "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},
