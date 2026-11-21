@@ -12,6 +12,7 @@ export const activityStates = [
   'listening',
   'working',
   'speaking',
+  'stalled',
   'interrupted',
   'waiting_tool',
   'waiting_agent',
@@ -137,6 +138,9 @@ export type AgentActivityEventType =
   | 'agent.message_delivered'
   | 'agent.message_forwarded'
   | 'agent.message_expired'
+  | 'agent.progress'
+  | 'agent.stalled'
+  | 'agent.interrupted'
   | 'delegation.created'
   | 'delegation.waiting'
   | 'delegation.completed'
@@ -413,6 +417,9 @@ const AGENT_TYPES = new Set([
   'agent.message_delivered',
   'agent.message_forwarded',
   'agent.message_expired',
+  'agent.progress',
+  'agent.stalled',
+  'agent.interrupted',
   'delegation.created',
   'delegation.waiting',
   'delegation.completed',
@@ -466,6 +473,17 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   if (type === 'tool.finished') {
     if (status === 'cancelled') return 'cancelled'
     return status && status !== 'succeeded' ? 'failed' : 'completed'
+  }
+  if (type === 'agent.stalled') return 'stalled'
+  if (type === 'agent.interrupted') return 'interrupted'
+  if (type === 'agent.progress') {
+    if (status === 'stalled') return 'stalled'
+    if (status === 'interrupted') return 'interrupted'
+    if (status === 'completed') return 'completed'
+    if (status === 'failed') return 'failed'
+    if (status === 'cancelled') return 'cancelled'
+    if (status === 'queued') return 'queued'
+    return 'working'
   }
   if (type === 'agent.message_queued') return 'queued'
   if (type === 'agent.message_expired') return 'failed'

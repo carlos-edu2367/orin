@@ -1,3 +1,5 @@
+import type { ConversationActivityEvent } from './activityTypes'
+
 /**
  * The delegation tree of a turn's subagents (a subagent may start its own). Items come back depth-first — each
  * parent followed by the agents it started — with their depth: 0 for an agent the main agent started.
@@ -34,4 +36,268 @@ export function orderAgentTree<T>(
   // A cycle in bad data has no root: its agents still show, at the top level.
   for (const item of items) visit(item, 0)
   return ordered
+}
+
+export type AgentRunState =
+  | 'queued'
+  | 'running'
+  | 'stalled'
+  | 'interrupted'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export type AgentMergeState =
+  | 'pending'
+  | 'applied'
+  | 'conflict'
+  | 'check_failed'
+  | 'discarded'
+  | 'empty'
+
+export type AgentProgressData = {
+  agentId: string
+  state: AgentRunState
+  stalled: boolean
+  interrupted: boolean
+  elapsedSeconds: number
+  lastActivityAt: string | null
+  currentTool: string | null
+  toolCalls: number
+  inputTokens: number
+  outputTokens: number
+  costUsd: number | null
+  mergeState: AgentMergeState | null
+  parentAgentId: string | null
+  resultRef: string | null
+}
+
+export type AgentProgressMap = Record<string, AgentProgressData>
+
+export type AgentRunSummary = {
+  agent_id: string
+  parent_agent_id?: string | null
+  state: string
+  elapsed_seconds?: number | null
+  last_activity_at?: string | null
+  current_tool?: string | null
+  tool_calls?: number | null
+  input_tokens?: number | null
+  output_tokens?: number | null
+  cost_usd?: number | null
+  stalled?: boolean | null
+  merge_state?: string | null
+  result_ref?: string | null
+}
+
+function normalizeRunState(raw: unknown, fallback: AgentRunState = 'running'): AgentRunState {
+  const s = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  switch (s) {
+    case 'queued':
+    case 'running':
+    case 'stalled':
+    case 'interrupted':
+    case 'completed':
+    case 'failed':
+    case 'cancelled':
+      return s
+    case 'working':
+      return 'running'
+    case 'stopped':
+      return 'cancelled'
+    default:
+      return fallback
+  }
+}
+
+function normalizeMergeState(raw: unknown): AgentMergeState | null {
+  const s = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  switch (s) {
+    case 'pending':
+    case 'applied':
+    case 'conflict':
+    case 'check_failed':
+    case 'discarded':
+    case 'empty':
+      return s
+    default:
+      return null
+  }
+}
+
+function numberOr(raw: unknown, fallback: number): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : fallback
+}
+
+function nullableNumberOr(raw: unknown, fallback: number | null): number | null {
+  if (raw === null) return null
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : fallback
+}
+
+function defaultProgress(agentId: string): AgentProgressData {
+  return {
+    agentId,
+    state: 'running',
+    stalled: false,
+    interrupted: false,
+    elapsedSeconds: 0,
+    lastActivityAt: null,
+    currentTool: null,
+    toolCalls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: null,
+    mergeState: null,
+    parentAgentId: null,
+    resultRef: null,
+  }
+}
+
+export function mergeAgentProgress(
+  existing: AgentProgressData | undefined,
+  patch: Partial<AgentProgressData> & { agentId: string },
+): AgentProgressData {
+  const base = existing ?? defaultProgress(patch.agentId)
+  const nextState = patch.state ?? base.state
+  const nextStalled = patch.stalled !== undefined ? patch.stalled : nextState === 'stalled'
+  const nextInterrupted = patch.interrupted !== undefined ? patch.interrupted : nextState === 'interrupted'
+  return {
+    agentId: patch.agentId,
+    state: nextState,
+    stalled: nextStalled,
+    interrupted: nextInterrupted,
+    elapsedSeconds: patch.elapsedSeconds !== undefined ? Math.max(0, patch.elapsedSeconds) : base.elapsedSeconds,
+    lastActivityAt: patch.lastActivityAt !== undefined ? patch.lastActivityAt : base.lastActivityAt,
+    currentTool: patch.currentTool !== undefined ? patch.currentTool : base.currentTool,
+    toolCalls: patch.toolCalls !== undefined ? Math.max(0, patch.toolCalls) : base.toolCalls,
+    inputTokens: patch.inputTokens !== undefined ? Math.max(0, patch.inputTokens) : base.inputTokens,
+    outputTokens: patch.outputTokens !== undefined ? Math.max(0, patch.outputTokens) : base.outputTokens,
+    costUsd: patch.costUsd !== undefined ? patch.costUsd : base.costUsd,
+    mergeState: patch.mergeState !== undefined ? patch.mergeState : base.mergeState,
+    parentAgentId: patch.parentAgentId !== undefined ? patch.parentAgentId : base.parentAgentId,
+    resultRef: patch.resultRef !== undefined ? patch.resultRef : base.resultRef,
+  }
+}
+
+export function hydrateAgentRuns(
+  runs: readonly AgentRunSummary[],
+  current: AgentProgressMap = {},
+): AgentProgressMap {
+  const next: AgentProgressMap = { ...current }
+  for (const run of runs) {
+    if (!run.agent_id) continue
+    const state = normalizeRunState(run.state, 'running')
+    next[run.agent_id] = mergeAgentProgress(next[run.agent_id], {
+      agentId: run.agent_id,
+      state,
+      stalled: typeof run.stalled === 'boolean' ? run.stalled : state === 'stalled',
+      interrupted: state === 'interrupted',
+      elapsedSeconds: numberOr(run.elapsed_seconds, next[run.agent_id]?.elapsedSeconds ?? 0),
+      lastActivityAt: run.last_activity_at ?? next[run.agent_id]?.lastActivityAt ?? null,
+      currentTool: run.current_tool !== undefined ? run.current_tool : next[run.agent_id]?.currentTool ?? null,
+      toolCalls: numberOr(run.tool_calls, next[run.agent_id]?.toolCalls ?? 0),
+      inputTokens: numberOr(run.input_tokens, next[run.agent_id]?.inputTokens ?? 0),
+      outputTokens: numberOr(run.output_tokens, next[run.agent_id]?.outputTokens ?? 0),
+      costUsd: nullableNumberOr(run.cost_usd, next[run.agent_id]?.costUsd ?? null),
+      mergeState: run.merge_state !== undefined ? normalizeMergeState(run.merge_state) : next[run.agent_id]?.mergeState ?? null,
+      parentAgentId: run.parent_agent_id !== undefined ? run.parent_agent_id : next[run.agent_id]?.parentAgentId ?? null,
+      resultRef: run.result_ref !== undefined ? run.result_ref : next[run.agent_id]?.resultRef ?? null,
+    })
+  }
+  return next
+}
+
+export function reduceAgentProgressEvents(
+  events: readonly ConversationActivityEvent[],
+  initial: AgentProgressMap = {},
+): AgentProgressMap {
+  let state: AgentProgressMap = { ...initial }
+  for (const event of events) {
+    const type = event.type
+    if (type !== 'agent.progress' && type !== 'agent.stalled' && type !== 'agent.interrupted') {
+      continue
+    }
+    const payload = (event.payload ?? {}) as Record<string, unknown>
+    const agentId =
+      (typeof payload.agent_id === 'string' && payload.agent_id.trim()) ||
+      (typeof event.agentId === 'string' && event.agentId.trim()) ||
+      ''
+    if (!agentId) continue
+
+    const existing = state[agentId]
+    const fallbackState: AgentRunState =
+      type === 'agent.stalled' ? 'stalled' : type === 'agent.interrupted' ? 'interrupted' : existing?.state ?? 'running'
+    const nextState =
+      type === 'agent.stalled'
+        ? 'stalled'
+        : type === 'agent.interrupted'
+          ? 'interrupted'
+          : normalizeRunState(payload.state ?? payload.status ?? event.status, fallbackState)
+
+    const patch: Partial<AgentProgressData> & { agentId: string } = {
+      agentId,
+      state: nextState,
+      stalled:
+        type === 'agent.stalled'
+          ? true
+          : typeof payload.stalled === 'boolean'
+            ? payload.stalled
+            : nextState === 'stalled',
+      interrupted: type === 'agent.interrupted' ? true : nextState === 'interrupted',
+    }
+    if (typeof payload.elapsed_seconds === 'number' && Number.isFinite(payload.elapsed_seconds)) {
+      patch.elapsedSeconds = payload.elapsed_seconds
+    }
+    if (typeof payload.last_activity_at === 'string') {
+      patch.lastActivityAt = payload.last_activity_at
+    }
+    if ('current_tool' in payload) {
+      patch.currentTool = typeof payload.current_tool === 'string' && payload.current_tool.trim() ? payload.current_tool : null
+    }
+    if (typeof payload.tool_calls === 'number' && Number.isFinite(payload.tool_calls)) {
+      patch.toolCalls = payload.tool_calls
+    }
+    if (typeof payload.input_tokens === 'number' && Number.isFinite(payload.input_tokens)) {
+      patch.inputTokens = payload.input_tokens
+    }
+    if (typeof payload.output_tokens === 'number' && Number.isFinite(payload.output_tokens)) {
+      patch.outputTokens = payload.output_tokens
+    }
+    if ('cost_usd' in payload) {
+      patch.costUsd = nullableNumberOr(payload.cost_usd, existing?.costUsd ?? null)
+    }
+    if ('merge_state' in payload) {
+      patch.mergeState = normalizeMergeState(payload.merge_state)
+    } else if (payload.worktree && typeof payload.worktree === 'object') {
+      const wt = payload.worktree as Record<string, unknown>
+      if ('merge_state' in wt) {
+        patch.mergeState = normalizeMergeState(wt.merge_state)
+      }
+    }
+    if (typeof payload.result_ref === 'string') {
+      patch.resultRef = payload.result_ref
+    }
+    if (event.parentAgentId) {
+      patch.parentAgentId = event.parentAgentId
+    }
+
+    state = {
+      ...state,
+      [agentId]: mergeAgentProgress(existing, patch),
+    }
+  }
+  return state
+}
+
+export function projectAgentTreeNodes<T>(
+  items: readonly T[],
+  idOf: (item: T) => string,
+  parentOf: (item: T) => string | null | undefined,
+  progressByAgent: AgentProgressMap,
+): Array<{ item: T; depth: number; progress: AgentProgressData | null }> {
+  return orderAgentTree(items, idOf, parentOf).map(({ item, depth }) => ({
+    item,
+    depth,
+    progress: progressByAgent[idOf(item)] ?? null,
+  }))
 }

@@ -22,11 +22,11 @@ from uuid import uuid4
 from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
 
-from agentos.persistence.postgres.schema import conversation_agents
+from agentos.persistence.postgres.schema import agent_runs, conversation_agents
 
 logger = logging.getLogger("agentos.agentic.background_agents")
 
-BackgroundAgentStatus = Literal["running", "completed", "failed", "stopped"]
+BackgroundAgentStatus = Literal["running", "stalled", "interrupted", "completed", "failed", "stopped"]
 
 POLL_WAIT_SECONDS = 0.2
 
@@ -84,6 +84,10 @@ def _normalize_status(status: str) -> BackgroundAgentStatus:
         return "stopped"
     if raw == "running":
         return "running"
+    if raw == "stalled":
+        return "stalled"
+    if raw == "interrupted":
+        return "interrupted"
     return "failed"
 
 
@@ -439,21 +443,28 @@ def get_background_agent_registry() -> BackgroundAgentRegistry:
     return BACKGROUND_AGENTS
 
 
+DEFAULT_INTERRUPTED_REPORT = (
+    "Execução interrompida pelo reinício do Orin. "
+    "Este subagente ficou no estado interrompido (interrupted) e é retomável a partir do último histórico salvo."
+)
+
+
 def fail_orphaned_running_agents(
     engine: Engine,
     *,
     workspace_root_resolver: Callable[[str], Path] | None = None,
-    reason: str = "Orin reiniciou",
+    reason: str = DEFAULT_INTERRUPTED_REPORT,
 ) -> list[str]:
-    """Mark database agent records left in ``running``/``working`` state without an active in-process entry as ``failed``."""
+    """Mark database agent records left in ``running``/``working``/``stalled`` state without an active in-process entry as ``interrupted`` (B-RF4)."""
     swept: list[str] = []
+    swept_set: set[str] = set()
     now = datetime.now(UTC)
     with engine.begin() as connection:
         rows = connection.execute(
             select(
                 conversation_agents.c.agent_id,
                 conversation_agents.c.conversation_id,
-            ).where(conversation_agents.c.state.in_(("running", "working")))
+            ).where(conversation_agents.c.state.in_(("running", "working", "stalled")))
         ).mappings().all()
         for row in rows:
             agent_id = str(row["agent_id"] or "")
@@ -461,14 +472,16 @@ def fail_orphaned_running_agents(
             if not agent_id:
                 continue
             live = BACKGROUND_AGENTS.get(conv_id, agent_id)
-            if live is not None and live.status == "running":
+            if live is not None and live.status in {"running", "stalled"}:
                 continue
             connection.execute(
                 update(conversation_agents)
                 .where(conversation_agents.c.agent_id == agent_id)
-                .values(state="failed", updated_at=now)
+                .values(state="interrupted", updated_at=now)
             )
-            swept.append(agent_id)
+            if agent_id not in swept_set:
+                swept_set.add(agent_id)
+                swept.append(agent_id)
             if workspace_root_resolver is not None and conv_id:
                 try:
                     ws_root = workspace_root_resolver(conv_id)
@@ -479,4 +492,31 @@ def fail_orphaned_running_agents(
                         report_file.write_text(reason, encoding="utf-8")
                 except Exception:  # noqa: BLE001
                     logger.debug("could not write orphan report for %s", agent_id, exc_info=True)
+
+        # Also sweep orphaned rows in agent_runs (WS-B4 source of truth).
+        try:
+            run_rows = connection.execute(
+                select(
+                    agent_runs.c.agent_id,
+                    agent_runs.c.conversation_id,
+                ).where(agent_runs.c.state.in_(("running", "stalled")))
+            ).mappings().all()
+            for rrow in run_rows:
+                raid = str(rrow["agent_id"] or "")
+                rcid = str(rrow["conversation_id"] or "")
+                if not raid:
+                    continue
+                live = BACKGROUND_AGENTS.get(rcid, raid)
+                if live is not None and live.status in {"running", "stalled"}:
+                    continue
+                connection.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.agent_id == raid)
+                    .values(state="interrupted", finished_at=now)
+                )
+                if raid not in swept_set:
+                    swept_set.add(raid)
+                    swept.append(raid)
+        except Exception:  # noqa: BLE001 - tolerate legacy schemas without agent_runs
+            logger.debug("could not sweep orphaned agent_runs rows", exc_info=True)
     return swept

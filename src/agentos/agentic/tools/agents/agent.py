@@ -107,6 +107,19 @@ def format_multi_subagent_check(ids: Sequence[str], outcomes: Sequence[ToolOutco
             "agent_name": agent_name,
             "status": item_status,
         }
+        for progress_key in (
+            "state",
+            "elapsed_seconds",
+            "last_activity_at",
+            "current_tool",
+            "tool_calls",
+            "input_tokens",
+            "output_tokens",
+            "cost_usd",
+            "stalled",
+        ):
+            if progress_key in outcome.payload:
+                agent_entry[progress_key] = outcome.payload[progress_key]
         if "output_file" in outcome.payload:
             agent_entry["output_file"] = outcome.payload["output_file"]
         if outcome.error_code:
