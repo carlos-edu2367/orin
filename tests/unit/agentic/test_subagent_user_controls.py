@@ -623,7 +623,7 @@ def test_message_queued_but_never_read_is_forwarded_to_the_orin_at_the_end() -> 
     store, main, watcher = _memory_watcher()
     control_id = store.post_message("u1", "c1", "agent:c1:1", "Inclua o resumo")
     watcher.poll()
-    assert _outcome(store, control_id) == "delivered"
+    assert _outcome(store, control_id) == "injected"
 
     watcher.finalize()  # the subagent ended without another model request: its queue was never drained
 
@@ -635,10 +635,15 @@ def test_message_queued_but_never_read_is_forwarded_to_the_orin_at_the_end() -> 
 
 
 def test_message_read_by_the_subagent_is_not_forwarded_again() -> None:
+    from agentos.agentic.message_ack import ack_delivered_reminders
+
     store, main, watcher = _memory_watcher()
     control_id = store.post_message("u1", "c1", "agent:c1:1", "Priorize auth.py")
     watcher.poll()
-    assert len(watcher.reminders.drain()) == 1  # the runtime drained it before the next model request
+    assert _outcome(store, control_id) == "injected"
+    drained = watcher.reminders.drain()
+    assert len(drained) == 1  # the runtime drained it before the next model request
+    ack_delivered_reminders(drained, watcher.ack_control)
 
     watcher.finalize()
 

@@ -1289,6 +1289,9 @@ class RuntimeToolExecutor(ToolExecutor):
             parts.append(str(phase_note))
         if reminder_body:
             parts.append(reminder_body)
+            from .message_ack import ack_delivered_reminders
+
+            ack_delivered_reminders(pending, getattr(self.runtime, "on_reminder_ack", None))
         if queued_texts:
             parts.append(
                 system_reminder(
@@ -2641,6 +2644,9 @@ class NativeTurnRunner:
             )
         if reminder_body:
             blocks.append({"type": "text", "text": reminder_body})
+            from .message_ack import ack_delivered_reminders
+
+            ack_delivered_reminders(pending_reminders, getattr(self.runtime, "on_reminder_ack", None))
 
         if cur_text or not (blocks or cur_images):
             rendered_cur_text = (
@@ -3238,6 +3244,85 @@ class NativeTurnRunner:
                         hasattr(self.runtime.store, "text")
                         and hasattr(self.runtime.store, "agent_id")
                     )
+
+                    # WS-B7 (B-RF8): if a CLI subagent ends without calling a tool while unread direct messages
+                    # wait for it, continue in-place (send_user or session resume) when continueOnUnread is on
+                    # and action/turn budget remains.
+                    control_watcher = getattr(self.runtime, "control_watcher", None)
+                    continue_on_unread = bool(getattr(self.runtime, "continue_on_unread", True))
+                    if (
+                        is_subagent_turn
+                        and not closing_sent
+                        and not turns_used
+                        and continue_on_unread
+                        and not self.runtime.cancelled(self.turn)
+                    ):
+                        if control_watcher is not None:
+                            try:
+                                control_watcher.poll(force=True)
+                            except TypeError:
+                                try:
+                                    control_watcher.poll()
+                                except Exception:  # noqa: BLE001
+                                    pass
+                            except Exception:  # noqa: BLE001
+                                pass
+                        stopped_by_user = bool(getattr(control_watcher, "stopped_by_user", False))
+                        max_actions = self.runtime.limits.max_actions
+                        has_action_budget = max_actions is None or executor.action_count < max_actions
+                        has_unread = (
+                            bool(control_watcher.has_unread_messages())
+                            if control_watcher is not None and callable(getattr(control_watcher, "has_unread_messages", None))
+                            else len(self.runtime.reminders) > 0
+                        )
+                        if (
+                            has_unread
+                            and has_action_budget
+                            and not stopped_by_user
+                            and not self.runtime.cancelled(self.turn)
+                        ):
+                            try:
+                                unread_pending = self.runtime.reminders.drain()
+                            except Exception:  # noqa: BLE001
+                                unread_pending = []
+                            unread_msg = render_reminders(unread_pending)
+                            if unread_msg:
+                                from .message_ack import ack_delivered_reminders
+
+                                ack_cb = getattr(self.runtime, "on_reminder_ack", None)
+                                if persistent_stdin:
+                                    try:
+                                        handle.send_user([{"type": "text", "text": unread_msg}])
+                                    except (RuntimeError, NativeLoopUnavailable):
+                                        pass
+                                    else:
+                                        executor.action_count += 1
+                                        ack_delivered_reminders(unread_pending, ack_cb)
+                                        sink.reset_for_new_message()
+                                        self.runtime._life(self.turn, "running")
+                                        continue
+                                else:
+                                    executor.action_count += 1
+                                    self.runtime._effect_finished(
+                                        self.turn,
+                                        provider_effect_id,
+                                        state="APPLIED",
+                                        private_result={"outcome": "unread_message_continuation"},
+                                    )
+                                    if supports_session_resume and resume_session_id:
+                                        user_content = [{"type": "text", "text": unread_msg}]
+                                    else:
+                                        assistant_text = sink.settled_assistant_text()
+                                        if assistant_text:
+                                            self.messages.append({"role": "assistant", "content": assistant_text})
+                                        self.messages.append({"role": "user", "content": unread_msg})
+                                        user_content = self._build_initial_user_content(tool_schemas)
+                                    ack_delivered_reminders(unread_pending, ack_cb)
+                                    sink.reset_for_new_message()
+                                    self.runtime._life(self.turn, "running")
+                                    next_process = True
+                                    break
+
                     since_mono = getattr(self.runtime, "_started_mono", None)
                     if (
                         not closing_sent

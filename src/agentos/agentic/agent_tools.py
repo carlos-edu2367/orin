@@ -538,6 +538,10 @@ class AgentToolset(
             items.extend(item for item in self._mcp_provider.definitions() if item.name not in native)
         return tuple(items)
 
+    def refresh_definitions(self) -> None:
+        """Invalidate cached tool definitions when dynamic availability (children/team) changes."""
+        self._definitions = None
+
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """The tool set is fixed for the lifetime of a turn, so build it once."""
         if self._definitions is None:

@@ -432,6 +432,82 @@ export type SendConversationAgentMessageResponse = {
   control_id: string
 }
 
+export type AgentMessageState = 'queued' | 'injected' | 'delivered' | 'forwarded' | 'expired' | 'stopped'
+export type AgentMessageSenderKind = 'user' | 'parent'
+
+export type ConversationAgentMessage = {
+  control_id: string
+  agent_id: string
+  sender_kind: AgentMessageSenderKind
+  sender_agent_id: string | null
+  message: string
+  preview: string
+  state: AgentMessageState
+  created_at: string | null
+  delivered_at: string | null
+}
+
+export type ListConversationAgentMessagesResponse = {
+  conversation_id: string
+  agent_id: string
+  messages: ConversationAgentMessage[]
+}
+
+function normalizeAgentMessageState(raw: unknown): AgentMessageState {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (
+    value === 'queued' ||
+    value === 'injected' ||
+    value === 'delivered' ||
+    value === 'forwarded' ||
+    value === 'expired' ||
+    value === 'stopped'
+  ) {
+    return value
+  }
+  return 'queued'
+}
+
+export function listConversationAgentMessages(
+  client: ApiClient,
+  conversationId: string,
+  agentId: string,
+): Promise<ListConversationAgentMessagesResponse> {
+  return client.request({
+    path: `/v1/conversations/${encodeURIComponent(conversationId)}/agents/${encodeURIComponent(agentId)}/messages`,
+    method: 'GET',
+    parse: (value) => {
+      const data = record(value)
+      const rawMessages = Array.isArray(data.messages) ? data.messages : []
+      const messages: ConversationAgentMessage[] = rawMessages
+        .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+        .map((item) => {
+          const message = typeof item.message === 'string' ? item.message : ''
+          const preview = typeof item.preview === 'string' ? item.preview : message.slice(0, 200)
+          const rawSender = typeof item.sender_kind === 'string' ? item.sender_kind.trim().toLowerCase() : 'user'
+          const senderKind: AgentMessageSenderKind = rawSender === 'parent' ? 'parent' : 'user'
+          return {
+            control_id: typeof item.control_id === 'string' ? item.control_id : '',
+            agent_id: typeof item.agent_id === 'string' ? item.agent_id : agentId,
+            sender_kind: senderKind,
+            sender_agent_id: typeof item.sender_agent_id === 'string' && item.sender_agent_id ? item.sender_agent_id : null,
+            message,
+            preview,
+            state: normalizeAgentMessageState(item.state),
+            created_at: typeof item.created_at === 'string' ? item.created_at : null,
+            delivered_at: typeof item.delivered_at === 'string' ? item.delivered_at : null,
+          }
+        })
+        .filter((item) => Boolean(item.control_id))
+      return {
+        conversation_id: typeof data.conversation_id === 'string' ? data.conversation_id : conversationId,
+        agent_id: typeof data.agent_id === 'string' ? data.agent_id : agentId,
+        messages,
+      }
+    },
+  })
+}
+
 export function sendConversationAgentMessage(
   client: ApiClient,
   conversationId: string,

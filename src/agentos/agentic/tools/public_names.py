@@ -438,7 +438,23 @@ class PublicToolNames:
             new_function = copy.deepcopy(dict(function))
             new_function["name"] = public_name(internal)
             if replacement is not None:
-                new_function["description"], new_function["parameters"] = replacement
+                rep_desc, rep_params = replacement
+                if internal == "send_message":
+                    raw_props = (function.get("parameters") or {}).get("properties") if isinstance(function.get("parameters"), Mapping) else None
+                    if isinstance(raw_props, Mapping) and "agent_id" not in raw_props:
+                        rep_params = copy.deepcopy(rep_params)
+                        props = rep_params.get("properties")
+                        if isinstance(props, dict):
+                            props.pop("agent_id", None)
+                        req = list(rep_params.get("required") or [])
+                        if "to" not in req:
+                            req.insert(0, "to")
+                        rep_params["required"] = req
+                        rep_desc = (
+                            'Send a message to a teammate by name, or to "lead". '
+                            "A running teammate receives it at its next safe checkpoint; an idle teammate starts on it."
+                        )
+                new_function["description"], new_function["parameters"] = rep_desc, rep_params
             out.append({**schema, "function": new_function})
         return out
 

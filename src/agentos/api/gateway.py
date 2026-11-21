@@ -3295,6 +3295,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_quota_routes(app, services, principal_for)
     from .context_window_routes import register_context_window_routes
     register_context_window_routes(app, services, principal_for)
+    from .agent_message_routes import register_agent_message_routes
+    register_agent_message_routes(app, services, principal_for, require_port, _jsonable)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
 

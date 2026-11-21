@@ -897,7 +897,7 @@ class SubagentCaller:
 
 
 class _AgentControlWatcher:
-    """Polls user stop/message controls for one running subagent at most once per second."""
+    """Polls user/parent stop and message controls for one running subagent at most once per second."""
 
     POLL_INTERVAL_SECONDS: float = 1.0
 
@@ -917,7 +917,12 @@ class _AgentControlWatcher:
         min_interval: float = POLL_INTERVAL_SECONDS,
         main_turn_active: Callable[[], bool] | None = None,
         wake_main: Callable[[str, str], None] | None = None,
+        sender_name_resolver: Callable[[str], str] | None = None,
+        on_unread_teammate_message: Callable[[str, str], bool] | None = None,
+        on_delivered_teammate_message: Callable[[str], None] | None = None,
     ) -> None:
+        from .message_ack import MessageAcknowledger
+
         self._store = store
         self.user_id = str(user_id or "")
         self.conversation_id = str(conversation_id or "")
@@ -932,11 +937,18 @@ class _AgentControlWatcher:
         self._last_poll: float | None = None
         self._main_turn_active = main_turn_active
         self._wake_main = wake_main
-        # control_id -> content of messages put in `reminders` that the subagent may not have read yet
-        self._queued_messages: dict[str, str] = {}
+        self._sender_name_resolver = sender_name_resolver
+        self._on_unread_teammate_message = on_unread_teammate_message
+        self._on_delivered_teammate_message = on_delivered_teammate_message
+        # control_id -> metadata of messages injected into `reminders` that have not been acked as delivered yet
+        self._queued_messages: dict[str, dict[str, str]] = {}
         self._warned = False
         self.stopped_by_user = False
         self._lock = threading.Lock()
+        self._acknowledger = MessageAcknowledger(
+            self._store,
+            on_delivered=self._on_message_delivered,
+        )
         self.expire_pending()
 
     def _store_failed(self, what: str) -> None:
@@ -956,11 +968,21 @@ class _AgentControlWatcher:
         if self._store is None or not self.agent_id:
             return
         try:
-            self._store.expire_pending(self.user_id, self.conversation_id, self.agent_id)
+            expired_items = list(self._store.expire_pending(self.user_id, self.conversation_id, self.agent_id) or ())
+            for item in expired_items:
+                if str(item.get("kind") or "") == "message":
+                    self._emit_message_event(
+                        AgentActivityEventType.AGENT_MESSAGE_EXPIRED,
+                        control_id=str(item.get("control_id") or ""),
+                        content=str(item.get("content") or ""),
+                        sender_kind=str(item.get("sender_kind") or "user"),
+                        sender_agent_id=str(item.get("sender_agent_id") or ""),
+                        state="expired",
+                    )
         except Exception:  # noqa: BLE001
             self._store_failed("expire_pending")
 
-    def poll(self) -> None:
+    def poll(self, *, force: bool = False) -> None:
         if self._store is None or not self.agent_id:
             return
         with self._lock:
@@ -969,7 +991,7 @@ class _AgentControlWatcher:
             except Exception:  # noqa: BLE001
                 logger.debug("agent control clock failed for %s", self.agent_id, exc_info=True)
                 return
-            if self._last_poll is not None and (now - self._last_poll) < self._min_interval:
+            if not force and self._last_poll is not None and (now - self._last_poll) < self._min_interval:
                 return
             self._last_poll = now
             try:
@@ -980,10 +1002,64 @@ class _AgentControlWatcher:
             for item in items:
                 self._apply_polled_item(item)
 
+    def _resolve_sender_name(self, sender_kind: str, sender_agent_id: str) -> str:
+        if sender_kind != "parent":
+            return "Você"
+        if self._sender_name_resolver is not None:
+            try:
+                resolved = str(self._sender_name_resolver(sender_agent_id) or "").strip()
+                if resolved:
+                    return resolved
+            except Exception:  # noqa: BLE001
+                pass
+        return sender_agent_id.strip() or "Orin"
+
+    def _emit_message_event(
+        self,
+        event_type: AgentActivityEventType,
+        *,
+        control_id: str,
+        content: str,
+        sender_kind: str,
+        sender_agent_id: str = "",
+        state: str,
+        delivered_at: str | None = None,
+    ) -> None:
+        if self._record_activity is None or not control_id:
+            return
+        summary_map = {
+            AgentActivityEventType.AGENT_MESSAGE_QUEUED: f"Mensagem na fila para {self.clean}",
+            AgentActivityEventType.AGENT_MESSAGE_DELIVERED: f"Mensagem entregue a {self.clean}",
+            AgentActivityEventType.AGENT_MESSAGE_FORWARDED: f"Mensagem para {self.clean} repassada ao Orin",
+            AgentActivityEventType.AGENT_MESSAGE_EXPIRED: f"Mensagem para {self.clean} expirou",
+        }
+        payload: dict[str, object] = {
+            "control_id": control_id,
+            "agent_id": self.agent_id,
+            "sender_kind": sender_kind or "user",
+            "preview": str(content or "")[:200],
+            "state": state,
+        }
+        if sender_agent_id:
+            payload["sender_agent_id"] = sender_agent_id
+        if delivered_at is not None:
+            payload["delivered_at"] = delivered_at
+        try:
+            self._record_activity(
+                event_type,
+                summary_map.get(event_type, f"Atualização de mensagem para {self.clean}"),
+                payload,
+                agent_id=self.agent_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("could not record %s for %s", event_type, self.agent_id, exc_info=True)
+
     def _apply_polled_item(self, item: Mapping[str, object]) -> None:
         control_id = str(item.get("control_id") or "")
         kind = str(item.get("kind") or "")
         content = str(item.get("content") or "")
+        sender_kind = str(item.get("sender_kind") or "user").strip().lower() or "user"
+        sender_agent_id = str(item.get("sender_agent_id") or "")
         if kind == "stop":
             self.stopped_by_user = True
             self.event.set()
@@ -992,30 +1068,52 @@ class _AgentControlWatcher:
         if kind == "message":
             if not content:
                 self._set_outcome(control_id, "expired")
+                self._emit_message_event(
+                    AgentActivityEventType.AGENT_MESSAGE_EXPIRED,
+                    control_id=control_id,
+                    content=content,
+                    sender_kind=sender_kind,
+                    sender_agent_id=sender_agent_id,
+                    state="expired",
+                )
                 return
-            # A subagent that is stopping, or whose queue is full, would never read it: the Orin gets it instead.
+            sender_name = self._resolve_sender_name(sender_kind, sender_agent_id)
+            msg_text = self._message_text(content, sender_kind=sender_kind, sender_name=sender_name)
+            # A subagent that is stopping, or whose queue is full, would never read it: forward instead.
             if self.stopped_by_user or not self.reminders.add(
                 "user_message",
-                self._message_text(content),
+                msg_text,
                 key=f"user-msg:{control_id}",
             ):
-                self._forward(control_id, content)
+                self._forward(control_id, content, sender_kind=sender_kind, sender_agent_id=sender_agent_id)
                 return
-            self._queued_messages[control_id] = content
-            self._set_outcome(control_id, "delivered")
+            self._queued_messages[control_id] = {
+                "content": content,
+                "sender_kind": sender_kind,
+                "sender_agent_id": sender_agent_id,
+                "text": msg_text,
+            }
+            self._set_outcome(control_id, "injected")
             if self._record_activity is not None:
+                summary_text = (
+                    f"Você enviou uma mensagem para {self.clean}"
+                    if sender_kind == "user"
+                    else f"{sender_name} enviou uma mensagem para {self.clean}"
+                )
                 try:
                     self._record_activity(
                         AgentActivityEventType.AGENT_MESSAGE_SENT,
-                        f"Você enviou uma mensagem para {self.clean}",
+                        summary_text,
                         {
                             "agent_name": self.clean,
                             "recipient_name": self.clean,
-                            "sender_name": "Você",
+                            "sender_name": sender_name,
                             "label": self.clean,
                             "content": content[:PREVIEW_CHARS],
                             "to_agent_id": self.agent_id,
-                            "source": "user",
+                            "source": sender_kind,
+                            "state": "injected",
+                            "control_id": control_id,
                             "tool_kind": "agent",
                         },
                         agent_id=self.agent_id,
@@ -1024,8 +1122,50 @@ class _AgentControlWatcher:
                     logger.debug("could not record user message activity for %s", self.agent_id, exc_info=True)
 
     @staticmethod
-    def _message_text(content: str) -> str:
+    def _message_text(content: str, *, sender_kind: str = "user", sender_name: str = "") -> str:
+        if sender_kind == "parent":
+            label = str(sender_name or "").strip() or "Orin"
+            return f"Message from parent agent {label} (sent to you directly while you work):\n{content}".strip()
         return f"Message from the user (sent to you directly while you work):\n{content}".strip()
+
+    def ack_control(self, control_id: str) -> bool:
+        """Acknowledge that ``control_id`` was drained into a model request or CLI tool-batch note."""
+        return self._acknowledger.ack(control_id)
+
+    def _on_message_delivered(self, control_id: str, delivered_at: datetime) -> None:
+        meta: dict[str, str] | None = None
+        with self._lock:
+            meta = self._queued_messages.pop(control_id, None)
+        if self._on_delivered_teammate_message is not None:
+            try:
+                self._on_delivered_teammate_message(control_id)
+            except Exception:  # noqa: BLE001
+                pass
+        content = meta["content"] if meta is not None else ""
+        sender_kind = meta["sender_kind"] if meta is not None else "user"
+        sender_agent_id = meta["sender_agent_id"] if meta is not None else ""
+        if meta is None and self._store is not None and callable(getattr(self._store, "get", None)):
+            try:
+                fetched = self._store.get(control_id)
+                if isinstance(fetched, Mapping):
+                    content = str(fetched.get("message") or "")
+                    sender_kind = str(fetched.get("sender_kind") or "user")
+                    sender_agent_id = str(fetched.get("sender_agent_id") or "")
+            except Exception:  # noqa: BLE001
+                pass
+        self._emit_message_event(
+            AgentActivityEventType.AGENT_MESSAGE_DELIVERED,
+            control_id=control_id,
+            content=content,
+            sender_kind=sender_kind,
+            sender_agent_id=sender_agent_id,
+            state="delivered",
+            delivered_at=delivered_at.isoformat(),
+        )
+
+    def has_unread_messages(self) -> bool:
+        with self._lock:
+            return bool(self._queued_messages)
 
     def _set_outcome(self, control_id: str, outcome: str) -> None:
         try:
@@ -1033,10 +1173,33 @@ class _AgentControlWatcher:
         except Exception:  # noqa: BLE001
             self._store_failed(f"set_outcome {outcome}")
 
-    def _forward(self, control_id: str, content: str) -> None:
-        """Hand a message the subagent will never read to the Orin: this turn if it still runs, else a new one."""
+    def _forward(
+        self,
+        control_id: str,
+        content: str,
+        *,
+        sender_kind: str = "user",
+        sender_agent_id: str = "",
+    ) -> None:
+        """Hand a message the subagent will never read to its teammate mailbox or the Orin."""
+        if self._on_unread_teammate_message is not None:
+            try:
+                if self._on_unread_teammate_message(control_id, content):
+                    self._set_outcome(control_id, "forwarded")
+                    self._emit_message_event(
+                        AgentActivityEventType.AGENT_MESSAGE_FORWARDED,
+                        control_id=control_id,
+                        content=content,
+                        sender_kind=sender_kind,
+                        sender_agent_id=sender_agent_id,
+                        state="forwarded",
+                    )
+                    return
+            except Exception:  # noqa: BLE001
+                logger.debug("teammate mailbox fallback failed for %s", control_id, exc_info=True)
+        who = "The user" if sender_kind == "user" else f"Parent agent {self._resolve_sender_name(sender_kind, sender_agent_id)}"
         text = (
-            f"The user sent this to subagent {self.clean} ({self.agent_id}), which finished before reading it:\n{content}"
+            f"{who} sent this to subagent {self.clean} ({self.agent_id}), which finished before reading it:\n{content}"
         )
         main_running = True
         if self._main_turn_active is not None:
@@ -1055,18 +1218,31 @@ class _AgentControlWatcher:
                 logger.warning("could not hand the user's message for %s to the Orin", self.agent_id, exc_info=True)
         if not delivered and not main_running and self.main_reminders is not None:
             delivered = self.main_reminders.add("user_message", text, key=f"user-msg-fwd:{control_id}")
-        self._set_outcome(control_id, "forwarded" if delivered else "expired")
+        outcome = "forwarded" if delivered else "expired"
+        self._set_outcome(control_id, outcome)
+        self._emit_message_event(
+            AgentActivityEventType.AGENT_MESSAGE_FORWARDED if delivered else AgentActivityEventType.AGENT_MESSAGE_EXPIRED,
+            control_id=control_id,
+            content=content,
+            sender_kind=sender_kind,
+            sender_agent_id=sender_agent_id,
+            state=outcome,
+        )
 
     def finalize(self) -> None:
         if self._store is None or not self.agent_id:
             return
         with self._lock:
-            # Messages queued for the subagent that it never drained (it ended on that model call).
+            # Any injected message that was never acked as delivered is forwarded to parent / mailbox.
             if self._queued_messages:
-                unread = {item.text for item in self.reminders.drain() if item.kind == "user_message"}
-                for control_id, content in self._queued_messages.items():
-                    if self._message_text(content) in unread:
-                        self._forward(control_id, content)
+                self.reminders.drain()
+                for control_id, meta in list(self._queued_messages.items()):
+                    self._forward(
+                        control_id,
+                        meta["content"],
+                        sender_kind=meta["sender_kind"],
+                        sender_agent_id=meta["sender_agent_id"],
+                    )
                 self._queued_messages.clear()
             try:
                 items = list(self._store.take(self.user_id, self.conversation_id, self.agent_id) or ())
@@ -1077,10 +1253,21 @@ class _AgentControlWatcher:
                 control_id = str(item.get("control_id") or "")
                 kind = str(item.get("kind") or "")
                 content = str(item.get("content") or "")
+                sender_kind = str(item.get("sender_kind") or "user").strip().lower() or "user"
+                sender_agent_id = str(item.get("sender_agent_id") or "")
                 if kind == "message" and content:
-                    self._forward(control_id, content)
+                    self._forward(control_id, content, sender_kind=sender_kind, sender_agent_id=sender_agent_id)
                 else:
                     self._set_outcome(control_id, "expired")
+                    if kind == "message":
+                        self._emit_message_event(
+                            AgentActivityEventType.AGENT_MESSAGE_EXPIRED,
+                            control_id=control_id,
+                            content=content,
+                            sender_kind=sender_kind,
+                            sender_agent_id=sender_agent_id,
+                            state="expired",
+                        )
 
 
 class _SubagentStore:
@@ -1558,6 +1745,9 @@ class TurnSession:
         self._subagent_histories: dict[str, list[dict[str, Any]]] = {}
         self._subagent_records: dict[str, dict[str, object]] = {}
         self._background_subagents: dict[str, dict[str, Any]] = {}
+        self._active_watchers: dict[str, _AgentControlWatcher] = {}
+        self._teammate_control_meta: dict[str, dict[str, str]] = {}
+        self._main_toolset_ref: Any = None
         self._bg_subagent_executor: ThreadPoolExecutor | None = None
         self._read_file_state: dict[str, object] = read_file_state if read_file_state is not None else {}
         if read_file_state:
@@ -3418,7 +3608,13 @@ class TurnSession:
             clock=getattr(self, "_agent_control_clock", None),
             main_turn_active=partial(BACKGROUND_AGENTS.turn_active, str(self.turn.get("conversation_id") or "")),
             wake_main=self._user_message_waker(str(self.turn.get("conversation_id") or "")),
+            sender_name_resolver=self._sender_display_name,
+            on_unread_teammate_message=self._fallback_unread_teammate_message,
+            on_delivered_teammate_message=self._clear_teammate_control_meta,
         )
+        with self._subagent_lock:
+            self._active_watchers[agent_id] = watcher
+        self._refresh_toolsets_for_children(caller)
         slot = _SubagentSlot(self._subagent_semaphore)
         slot.acquire()
         try:
@@ -3480,7 +3676,11 @@ class TurnSession:
             except Exception:
                 pass
             try:
+                with self._subagent_lock:
+                    if self._active_watchers.get(agent_id) is watcher:
+                        self._active_watchers.pop(agent_id, None)
                 watcher.finalize()
+                self._refresh_toolsets_for_children(caller)
             finally:
                 slot.release()
 
@@ -3763,6 +3963,9 @@ class TurnSession:
                 phase_controller=None,
                 reminders=sub_reminders,
                 cancelled=sub_cancelled,
+                on_reminder_ack=watcher.ack_control if watcher is not None else None,
+                control_watcher=watcher,
+                continue_on_unread=self._continue_on_unread_enabled(),
                 effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
             )
@@ -3818,6 +4021,9 @@ class TurnSession:
                     phase_controller=None,
                     reminders=sub_reminders,
                     cancelled=sub_cancelled,
+                    on_reminder_ack=watcher.ack_control if watcher is not None else None,
+                    control_watcher=watcher,
+                    continue_on_unread=self._continue_on_unread_enabled(),
                     effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                     **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
                 )
@@ -4181,9 +4387,49 @@ class TurnSession:
                 {"tool_kind": "agent"}, "AGENT_NOT_FOUND",
             )
         mailbox = self._team_mailbox()
-        mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
         if not self._claim_teammate(target):
+            mate_agent_id = str(mate.get("agent_id") or "")
+            if mate_agent_id and self._is_subagent_running(mate_agent_id):
+                sender_agent_id = (
+                    self.main_agent_id
+                    if sender == "lead"
+                    else str(roster.get(sender, {}).get("agent_id") or "")
+                )
+                control_id = self._agent_controls().post_message(
+                    user_id,
+                    conversation_id,
+                    mate_agent_id,
+                    text,
+                    sender_kind="parent",
+                    sender_agent_id=sender_agent_id or None,
+                )
+                with self._team_lock:
+                    self._teammate_control_meta[control_id] = {
+                        "team_name": str(mate.get("team_name") or ""),
+                        "sender": sender,
+                        "recipient": target,
+                        "summary": str(summary or ""),
+                    }
+                self._emit_agent_message_event(
+                    "agent.message_queued",
+                    {
+                        "control_id": control_id,
+                        "agent_id": mate_agent_id,
+                        "sender_kind": "parent",
+                        **({"sender_agent_id": sender_agent_id} if sender_agent_id else {}),
+                        "preview": text[:200],
+                        "state": "queued",
+                    },
+                )
+                return ToolOutcome(
+                    "succeeded",
+                    f"Mensagem na fila de {target}",
+                    f"Queued for running teammate {target}; it will read it at its next safe checkpoint.",
+                    {"to": target, "status": "queued", "control_id": control_id, "agent_id": mate_agent_id, "tool_kind": "agent"},
+                )
+            mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
             return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
         taken: list[str] = []
         try:
             task, taken = self._take_team_mail(target)
@@ -4213,6 +4459,159 @@ class TurnSession:
                 {**dict(started.payload or {}), "to": target}, started.error_code,
             )
         return ToolOutcome("succeeded", f"{target} começou a trabalhar", f"Delivered; {target} is working on it.", {"to": target, "status": "running", "agent_id": mate["agent_id"], "tool_kind": "agent"})
+
+    def _parent_message_tool_enabled(self) -> bool:
+        from agentos.settings.registry import resolve as resolve_setting
+
+        try:
+            return bool(resolve_setting(self.effective_settings, "orchestration.agentMessages.parentTool").value)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _continue_on_unread_enabled(self) -> bool:
+        from agentos.settings.registry import resolve as resolve_setting
+
+        try:
+            return bool(resolve_setting(self.effective_settings, "orchestration.agentMessages.continueOnUnread").value)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _sender_display_name(self, sender_agent_id: str) -> str:
+        clean_id = str(sender_agent_id or "").strip()
+        if not clean_id or clean_id == self.main_agent_id:
+            return "Orin"
+        with self._subagent_lock:
+            rec = self._subagent_records.get(clean_id)
+        if isinstance(rec, Mapping) and rec.get("name"):
+            return str(rec["name"])
+        return clean_id
+
+    def _refresh_toolsets_for_children(self, caller: SubagentCaller | None) -> None:
+        for candidate in (getattr(caller, "toolset", None), getattr(self, "_main_toolset_ref", None)):
+            refresh = getattr(candidate, "refresh_definitions", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _is_subagent_known(self, agent_id: str) -> bool:
+        clean_id = str(agent_id or "").strip()
+        if not clean_id or clean_id == self.main_agent_id:
+            return False
+        if clean_id in self._agent_tree():
+            return True
+        with self._subagent_lock:
+            if clean_id in self._subagent_records or clean_id in self._active_watchers or clean_id in self._background_subagents:
+                return True
+        conv_id = str(self.turn.get("conversation_id") or "")
+        if BACKGROUND_AGENTS.get(conv_id, clean_id) is not None:
+            return True
+        if self.agents_store is not None and callable(getattr(self.agents_store, "get", None)):
+            try:
+                return self.agents_store.get(clean_id) is not None
+            except Exception:  # noqa: BLE001
+                return False
+        return False
+
+    def _is_subagent_running(self, agent_id: str) -> bool:
+        clean_id = str(agent_id or "").strip()
+        if not clean_id or clean_id == self.main_agent_id:
+            return False
+        with self._subagent_lock:
+            if clean_id in self._active_watchers:
+                return True
+            bg_entry = self._background_subagents.get(clean_id)
+            if bg_entry is not None:
+                fut = bg_entry.get("future")
+                return fut is not None and not fut.done()
+        conv_id = str(self.turn.get("conversation_id") or "")
+        reg_entry = BACKGROUND_AGENTS.get(conv_id, clean_id)
+        if reg_entry is not None:
+            return reg_entry.status == "running"
+        if self.agents_store is not None and callable(getattr(self.agents_store, "get", None)):
+            try:
+                row = self.agents_store.get(clean_id)
+                if isinstance(row, Mapping):
+                    return str(row.get("state") or "") in {"running", "working"}
+            except Exception:  # noqa: BLE001
+                return False
+        return False
+
+    def _has_living_children(self, caller_agent_id: str) -> bool:
+        with self._subagent_lock:
+            candidates = set(self._active_watchers.keys())
+            for aid, entry in self._background_subagents.items():
+                fut = entry.get("future")
+                if fut is not None and not fut.done():
+                    candidates.add(aid)
+        conv_id = str(self.turn.get("conversation_id") or "")
+        for reg in BACKGROUND_AGENTS.running(conv_id):
+            candidates.add(reg.agent_id)
+        if not candidates:
+            return False
+        if caller_agent_id == self.main_agent_id:
+            return any(aid != self.main_agent_id for aid in candidates)
+        return any(self._is_descendant(aid, caller_agent_id) for aid in candidates)
+
+    def _emit_agent_message_event(self, event_name: str, payload: dict[str, object]) -> None:
+        event_map = {
+            "agent.message_queued": (AgentActivityEventType.AGENT_MESSAGE_QUEUED, "Mensagem na fila para subagente"),
+            "agent.message_delivered": (AgentActivityEventType.AGENT_MESSAGE_DELIVERED, "Mensagem entregue ao subagente"),
+            "agent.message_forwarded": (AgentActivityEventType.AGENT_MESSAGE_FORWARDED, "Mensagem repassada ao Orin"),
+            "agent.message_expired": (AgentActivityEventType.AGENT_MESSAGE_EXPIRED, "Mensagem para subagente expirou"),
+        }
+        mapped = event_map.get(event_name)
+        if mapped is None:
+            return
+        event_type, summary = mapped
+        target_id = str(payload.get("agent_id") or "") or self.main_agent_id
+        self._record(event_type, summary, dict(payload), agent_id=target_id)
+
+    def _send_agent_message(
+        self,
+        *,
+        agent_id: str,
+        message: str,
+        summary: str = "",
+        caller: SubagentCaller | None = None,
+    ) -> ToolOutcome:
+        from .agent_messaging import AgentMessenger
+
+        caller_id = caller.agent_id if caller is not None else self.main_agent_id
+        messenger = AgentMessenger(
+            controls=self._agent_controls(),
+            user_id=str(self.turn.get("user_id") or ""),
+            conversation_id=str(self.turn.get("conversation_id") or ""),
+            main_agent_id=self.main_agent_id,
+            agent_tree=self._agent_tree,
+            is_running=self._is_subagent_running,
+            is_known=self._is_subagent_known,
+            emit_event=self._emit_agent_message_event,
+        )
+        return messenger.send(caller_id, agent_id, message, summary=summary or None)
+
+    def _clear_teammate_control_meta(self, control_id: str) -> None:
+        with self._team_lock:
+            self._teammate_control_meta.pop(str(control_id or ""), None)
+
+    def _fallback_unread_teammate_message(self, control_id: str, content: str) -> bool:
+        with self._team_lock:
+            meta = self._teammate_control_meta.pop(str(control_id or ""), None)
+        if meta is None:
+            return False
+        user_id = str(self.turn.get("user_id") or "")
+        conversation_id = str(self.turn.get("conversation_id") or "")
+        self._team_mailbox().post(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            team_name=meta["team_name"],
+            sender=meta["sender"],
+            recipient=meta["recipient"],
+            content=content,
+            summary=meta.get("summary") or "",
+        )
+        return True
 
     def _take_team_mail(self, name: str) -> tuple[str, list[str]]:
         """The teammate's pending messages as one task and their ids, or ("", []) when there are none."""
@@ -5221,13 +5620,21 @@ class TurnSession:
         toolset._skill_model_for = lambda requested: self._allowed_requested_model(requested, "a skill")
         toolset._lsp_after_write = self._lsp_after_write  # W5: diagnostics after Write and Edit
         if is_main_toolset:
+            self._main_toolset_ref = toolset
             toolset._stop_subagent = self._stop_background_subagent  # W5: TaskStop stops a background agent
             toolset._team_sender = "lead"  # W5: the lead of any agent team this turn starts
             toolset._send_team_message = self._send_team_message
+            toolset._has_team = lambda: bool(self._team_roster())
+            toolset._parent_message_tool_enabled = self._parent_message_tool_enabled()
+            toolset._has_living_children = lambda: self._has_living_children(self.main_agent_id)
+            toolset._send_agent_message = self._send_agent_message
             toolset.on_queued_input_claimed = self._note_queued_input_claimed
         elif subagents:
-            # A delegating subagent stops only what it started; agent teams stay with the main agent (v1).
+            # A delegating subagent stops and messages only what it started; agent teams stay with the main agent (v1).
             toolset._stop_subagent = partial(self._stop_background_subagent, caller=caller)
+            toolset._parent_message_tool_enabled = self._parent_message_tool_enabled()
+            toolset._has_living_children = partial(self._has_living_children, caller.agent_id)
+            toolset._send_agent_message = partial(self._send_agent_message, caller=caller)
         if permission_broker is not None:
             toolset._permission_broker = permission_broker
             toolset._interactive_permissions = bool(interactive_permissions)
