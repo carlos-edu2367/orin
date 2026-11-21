@@ -14,6 +14,7 @@ import threading
 import time
 from typing import Callable
 
+from .freshness import DEFAULT_FRESHNESS_BUDGET_MS, FreshnessChecker
 from .indexer import ProjectIndexer
 from .models import IndexStatus, SearchHit
 from .pagerank import personalized_pagerank
@@ -48,20 +49,43 @@ def reciprocal_rank_fusion(rankings: list[list[str]], *, k: int = RRF_K) -> dict
 
 
 class RetrievalService:
-    def __init__(self, *, store: SqliteChunkStore, indexer: ProjectIndexer, embedder: EmbeddingPort) -> None:
+    def __init__(
+        self,
+        *,
+        store: SqliteChunkStore,
+        indexer: ProjectIndexer,
+        embedder: EmbeddingPort,
+        clock: Callable[[], float] = time.monotonic,
+        freshness_budget_ms: float = DEFAULT_FRESHNESS_BUDGET_MS,
+    ) -> None:
         self._store = store
         self._indexer = indexer
         self._embedder = embedder
+        self._clock = clock
+        self._freshness_budget_ms = float(freshness_budget_ms)
         self._last_scan_embedded = True
         # One scan at a time. A tool call never waits on it: the first scan of
         # a large project takes minutes, and a turn blocked on it looks hung.
         self._scan_lock = threading.Lock()
         self._background_refresh: Callable[[], None] | None = None
+        self._background_reindex_paths: Callable[[list[str]], None] | None = None
         self._refresh_requested_at: float | None = None
+        self._freshness = FreshnessChecker(
+            store=store,
+            indexer=indexer,
+            workspace_root=indexer.root,
+            schedule_reindex=self._schedule_path_reindex,
+            scan_lock=self._scan_lock,
+            clock=clock,
+        )
 
     def attach_background_refresh(self, schedule: Callable[[], None]) -> None:
         """Hand stale-index refreshes to the background worker instead of the tool call."""
         self._background_refresh = schedule
+
+    def attach_background_reindex(self, schedule: Callable[[list[str]], None]) -> None:
+        """Hand targeted stale-path reindex requests to a background worker."""
+        self._background_reindex_paths = schedule
 
     @property
     def indexing(self) -> bool:
@@ -69,28 +93,91 @@ class RetrievalService:
         return self._scan_lock.locked() or self._store.status().last_scan_at is None
 
     def search(self, query: str, *, limit: int = 8) -> SearchResult:
+        """Search indexed code by meaning and keywords, verifying result freshness.
+
+        The files backing the top ``limit`` ranked hits are stat-checked against
+        ``files(mtime_ns, size_bytes)`` before returning: removed files are
+        forgotten and dropped, changed files are reindexed inline within the
+        freshness budget (default 200 ms) and re-evaluated so stale snippets are
+        never returned, and changed files that miss the budget are discarded
+        while async reindexing is scheduled. As a result, ``search`` may return
+        fewer than ``limit`` hits when files changed outside the budget or were
+        removed.
+        """
         if not isinstance(query, str) or not query.strip():
             raise ValueError("query must be a non-blank string")
+        effective_limit = max(1, int(limit))
         self._refresh_if_stale(embed=True)
+        hits, mode, query_vector = self._rank_hits(query, limit=effective_limit)
+        if not hits:
+            return SearchResult(hits=[], mode=mode, status=self._store.status())
+
+        def _reevaluate(
+            kept_paths: set[str],
+            reindexed_paths: set[str],
+            _discarded_paths: set[str],
+        ) -> list[SearchHit]:
+            allowed = kept_paths | reindexed_paths
+            if not allowed:
+                return []
+            fresh_hits, _mode, _vec = self._rank_hits(
+                query,
+                limit=effective_limit,
+                query_vector=query_vector,
+                allowed_paths=allowed,
+            )
+            return fresh_hits
+
+        fresh_hits = self._freshness.filter(
+            hits,
+            limit=effective_limit,
+            budget_ms=self._freshness_budget_ms,
+            reevaluate=_reevaluate,
+            max_hit_chars=MAX_HIT_CHARS,
+        )
+        return SearchResult(hits=fresh_hits, mode=mode, status=self._store.status())
+
+    def _rank_hits(
+        self,
+        query: str,
+        *,
+        limit: int,
+        query_vector: list[float] | None = None,
+        allowed_paths: set[str] | None = None,
+    ) -> tuple[list[SearchHit], str, list[float] | None]:
         lexical = self._store.search_lexical(query, limit=CANDIDATES)
-        rankings = [[chunk_id for chunk_id, _ in lexical]]
+        lexical_ids = [
+            chunk_id for chunk_id, _ in lexical
+            if allowed_paths is None or chunk_id.rsplit(":", 1)[0] in allowed_paths
+        ]
+        rankings = [lexical_ids]
         mode = "lexical"
-        try:
-            vectors = self._embedder.embed([query])
-            if vectors:
-                vector = vectors[0]
-                semantic = self._store.search_vector(vector, limit=CANDIDATES)
-                if semantic:
-                    rankings.append([chunk_id for chunk_id, _ in semantic])
+        resolved_vector = query_vector
+        if resolved_vector is None and allowed_paths is None:
+            try:
+                vectors = self._embedder.embed([query])
+                if vectors:
+                    resolved_vector = vectors[0]
+            except (EmbeddingUnavailable, Exception):
+                resolved_vector = None
+        if resolved_vector is not None:
+            try:
+                semantic = self._store.search_vector(resolved_vector, limit=CANDIDATES)
+                semantic_ids = [
+                    chunk_id for chunk_id, _ in semantic
+                    if allowed_paths is None or chunk_id.rsplit(":", 1)[0] in allowed_paths
+                ]
+                if semantic_ids:
+                    rankings.append(semantic_ids)
                     mode = "semantic"
-        except (EmbeddingUnavailable, Exception):
-            pass
+            except (EmbeddingUnavailable, Exception):
+                pass
         scores = reciprocal_rank_fusion(rankings)
         if not scores:
-            return SearchResult(hits=[], mode=mode, status=self._store.status())
+            return [], mode, resolved_vector
         ordered = sorted(scores, key=lambda chunk_id: -scores[chunk_id])
         scores = self._apply_graph_bonus(ordered, scores)
-        ordered = sorted(scores, key=lambda chunk_id: -scores[chunk_id])[: max(1, int(limit))]
+        ordered = sorted(scores, key=lambda chunk_id: -scores[chunk_id])[:limit]
         chunks = self._store.chunks_by_id(ordered)
         hits = [
             SearchHit(
@@ -99,7 +186,7 @@ class RetrievalService:
             )
             for chunk_id, chunk in chunks.items()
         ]
-        return SearchResult(hits=hits, mode=mode, status=self._store.status())
+        return hits, mode, resolved_vector
 
     def _apply_graph_bonus(self, ordered: list[str], scores: dict[str, float]) -> dict[str, float]:
         seeds = {chunk_id.rsplit(":", 1)[0] for chunk_id in ordered[:GRAPH_SEEDS]}
@@ -139,7 +226,7 @@ class RetrievalService:
     def _schedule_background_refresh(self) -> None:
         if self._scan_lock.locked():
             return
-        now = time.monotonic()
+        now = self._clock()
         requested = self._refresh_requested_at
         if requested is not None and now - requested < STALE_AFTER.total_seconds():
             return
@@ -148,6 +235,26 @@ class RetrievalService:
             self._background_refresh()  # type: ignore[misc]
         except Exception:  # noqa: BLE001 - a refresh request never fails a tool call
             self._refresh_requested_at = None
+
+    def _schedule_path_reindex(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        if self._background_reindex_paths is not None:
+            try:
+                self._background_reindex_paths(list(paths))
+            except Exception:  # noqa: BLE001 - a reindex request never fails a tool call
+                pass
+            return
+        if self._background_refresh is not None:
+            target_self = getattr(self._background_refresh, "__self__", None)
+            enqueue_paths = getattr(target_self, "enqueue_paths", None)
+            try:
+                if callable(enqueue_paths):
+                    enqueue_paths(list(paths))
+                else:
+                    self._background_refresh()
+            except Exception:  # noqa: BLE001 - a reindex request never fails a tool call
+                pass
 
     def reindex(self, paths: list[str] | None = None, *, embed: bool = True) -> None:
         with self._scan_lock:

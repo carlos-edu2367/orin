@@ -142,13 +142,53 @@ class ProjectIndexer:
             return None
         return resolved
 
+    def _forget_if_known(self, relative_path: str, known: dict[str, tuple[str, int, int]]) -> None:
+        if relative_path in known or self._store.file_state(relative_path) is not None:
+            self._store.forget_file(relative_path)
+
+    def index_file(self, relative_path: str, *, embed: bool = True) -> str:
+        """Reconcile a single file with the disk without touching ``last_scan_at``.
+
+        Returns ``"updated"`` when chunks were replaced, ``"unchanged"`` when
+        the file is still valid with identical content, or ``"forgotten"`` when
+        the file vanished, is excluded, or became unreadable/oversized/binary/non-UTF-8.
+        """
+        index_filter = IndexFilter(GitignoreFilter.from_root(self.root))
+        if index_filter.rejects(relative_path):
+            if self._store.file_state(relative_path) is not None:
+                self._store.forget_file(relative_path)
+            return "forgotten"
+        record = self._store.file_record(relative_path)
+        known = {relative_path: record} if record is not None else {}
+        outcome = self._index_one(relative_path, known)
+        if outcome is None:
+            return "unchanged" if self._store.file_state(relative_path) is not None else "forgotten"
+        language, text = outcome
+        known_paths = tuple(self._store.known_files())
+        known_symbols = self._store.defined_symbols()
+        defs_by_file = self._store.symbols_by_file()
+        self._record_imports(relative_path, language, text, known_paths)
+        self._record_symbol_refs(relative_path, text, known_symbols, defs_by_file.get(relative_path, ()))
+        if embed:
+            self._embed_file(relative_path)
+        return "updated"
+
     def _index_one(self, relative_path: str, known: dict[str, tuple[str, int, int]]) -> tuple[str | None, str] | None:
-        """Index a file's content if it changed; return (language, text) for later import resolution."""
+        """Index a file's content if it changed; return (language, text) for later import resolution.
+
+        A previously indexed file that vanished, grew past ``MAX_FILE_BYTES``,
+        became unreadable (``OSError``), binary (NUL bytes), or invalid UTF-8
+        is explicitly forgotten rather than leaving stale chunks behind.
+        """
         resolved = self._resolve(relative_path)
         if resolved is None:
+            self._forget_if_known(relative_path, known)
             return None
         try:
             stat = resolved.stat()
+            if stat.st_size > MAX_FILE_BYTES:
+                self._forget_if_known(relative_path, known)
+                return None
             previous = known.get(relative_path)
             # Size has to agree too, not just mtime: filesystem timestamp
             # granularity is coarse (~16ms on NTFS, and whole seconds on some
@@ -159,13 +199,19 @@ class ProjectIndexer:
                 return None
             payload = resolved.read_bytes()
         except OSError:
+            self._forget_if_known(relative_path, known)
+            return None
+        if len(payload) > MAX_FILE_BYTES or b"\x00" in payload:
+            self._forget_if_known(relative_path, known)
             return None
         content_hash = blake2b(payload, digest_size=16).hexdigest()
         if previous is not None and previous[0] == content_hash:
+            self._store.update_file_stat(relative_path, mtime_ns=stat.st_mtime_ns, size_bytes=stat.st_size)
             return None
         try:
             text = payload.decode("utf-8")
         except UnicodeDecodeError:
+            self._forget_if_known(relative_path, known)
             return None
         language = language_for(relative_path)
         chunks = self._chunker.split(relative_path, text)
@@ -208,6 +254,26 @@ class ProjectIndexer:
         self._store.replace_symbol_refs(relative_path, refs)
 
     # -- embedding ------------------------------------------------------
+
+    def _embed_file(self, relative_path: str) -> None:
+        """Embed only the chunks belonging to ``relative_path``, stopping on refusal."""
+        chunks = self._store.chunks_of_file(relative_path)
+        if not chunks:
+            return
+        for offset in range(0, len(chunks), EMBED_BATCH):
+            batch = chunks[offset : offset + EMBED_BATCH]
+            texts = [chunk.text for chunk in batch]
+            try:
+                vectors = self._embedder.embed(texts)
+            except Exception:
+                return
+            if not vectors:
+                return
+            self._store.store_vectors(
+                {chunk.chunk_id: vector for chunk, vector in zip(batch, vectors, strict=False)}
+            )
+            if len(vectors) < len(batch):
+                return
 
     def _embed_pending(self) -> None:
         """Fill in missing vectors, in batches, stopping at the first refusal."""
