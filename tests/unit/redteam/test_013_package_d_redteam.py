@@ -463,9 +463,15 @@ def test_redteam_05_verifier_and_custom_agent_get_remember_recall_and_code_verif
     engine = _make_engine(tmp_path, "rt05.db")
     try:
         store = PostgresAgentMemoryStore(engine, "user-1", project_id="proj-1", data_dir=tmp_path / "idx")
-        # 1) VERIFIER directly allows remember and recall
+        # 1) VERIFIER allows remember/recall ONLY when memory.agent.enabled (allow_agent_memory=True)
+        ts_verifier_off = AgentToolset(ConversationWorkspace(tmp_path, "cv-ver-off"), memory=store)
+        ts_verifier_off._policy = AgentToolPolicy(ts_verifier_off._policy, VERIFIER, allow_agent_memory=False)
+        ver_names_off = {d.name for d in ts_verifier_off.definitions()}
+        assert "remember" not in ver_names_off
+        assert "recall" not in ver_names_off
+
         ts_verifier = AgentToolset(ConversationWorkspace(tmp_path, "cv-ver"), memory=store)
-        ts_verifier._policy = AgentToolPolicy(ts_verifier._policy, VERIFIER)
+        ts_verifier._policy = AgentToolPolicy(ts_verifier._policy, VERIFIER, allow_agent_memory=True)
         ver_names = {d.name for d in ts_verifier.definitions()}
         assert "remember" in ver_names
         assert "recall" in ver_names

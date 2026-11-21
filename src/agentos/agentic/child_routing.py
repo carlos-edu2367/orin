@@ -269,8 +269,13 @@ def resolve_child_target(
         )
 
     prov_favorites = _favorites_for(favorites_by_provider, req_provider)
+    same_as_parent_provider = bool(parent_prov) and req_provider.lower() == parent_prov.lower()
+    clean_parent_model = str(parent_model_id).strip() if parent_model_id else ""
     if req_model:
         matched_model = _match_favorite(req_model, prov_favorites)
+        if not matched_model and same_as_parent_provider and clean_parent_model:
+            if req_model.lower() == clean_parent_model.lower():
+                matched_model = clean_parent_model
         if not matched_model:
             fav_hint = (
                 f" Valid favorite models for '{req_provider}': {', '.join(prov_favorites)}."
@@ -294,19 +299,23 @@ def resolve_child_target(
         chosen_model = matched_model
     else:
         if not prov_favorites:
-            return ToolOutcome(
-                "failed",
-                f"Provedor {req_provider} sem modelos favoritos",
-                f"Provider '{req_provider}' has no favorite models available for subagent '{agent_name}'.",
-                {
-                    "agent_name": agent_name,
-                    "label": agent_name,
-                    "tool_kind": "agent",
-                    "provider": req_provider,
-                },
-                CHILD_PROVIDER_UNAVAILABLE,
-            )
-        chosen_model = prov_favorites[0]
+            if same_as_parent_provider and clean_parent_model:
+                chosen_model = clean_parent_model
+            else:
+                return ToolOutcome(
+                    "failed",
+                    f"Provedor {req_provider} sem modelos favoritos",
+                    f"Provider '{req_provider}' has no favorite models available for subagent '{agent_name}'.",
+                    {
+                        "agent_name": agent_name,
+                        "label": agent_name,
+                        "tool_kind": "agent",
+                        "provider": req_provider,
+                    },
+                    CHILD_PROVIDER_UNAVAILABLE,
+                )
+        else:
+            chosen_model = prov_favorites[0]
 
     quota_blocked = check_child_quota(
         quota_service,

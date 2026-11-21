@@ -991,6 +991,57 @@ class RuntimeToolExecutor(ToolExecutor):
                             },
                         }
                     )
+        # Advertise resolve_findings (ResolveFindings) in MCP tools/list on initial boot
+        # whenever independent verification can run on this turn, so persistent_stdin /
+        # tool_list_changed=False CLIs (claude_cli, antigravity_cli) can invoke it as soon
+        # as VerificationGate opens blocking findings; execution remains guarded when none are open.
+        toolset_for_rf = getattr(self.runtime, "toolset", None)
+        withheld_for_rf = getattr(self.runtime, "withheld_tools", ()) or ()
+        offered_for_rf = getattr(self.runtime, "offered_tools", None)
+        verifier_can_run = False
+        if toolset_for_rf is not None and hasattr(toolset_for_rf, "resolve_findings"):
+            if bool(getattr(toolset_for_rf, "_open_verification_findings", None)):
+                verifier_can_run = True
+            elif getattr(self.runtime, "_verification_gate", None) is not None:
+                verifier_can_run = True
+            else:
+                from agentos.agentic.verification_gate import read_gate_setting
+
+                verifier_can_run = bool(
+                    read_gate_setting(
+                        getattr(self.runtime, "effective_settings", None),
+                        "orchestration.verifier.enabled",
+                        False,
+                    )
+                )
+        if (
+            verifier_can_run
+            and "resolve_findings" not in withheld_for_rf
+            and (offered_for_rf is None or "resolve_findings" in offered_for_rf)
+        ):
+            present_rf = {
+                str(
+                    (s.get("function") if isinstance(s.get("function"), Mapping) else s).get(
+                        "name", ""
+                    )
+                )
+                for s in raw_schemas
+                if isinstance(s, Mapping)
+            }
+            if "resolve_findings" not in present_rf:
+                from agentos.agentic.tools.orin.resolve_findings import SPECS as _RF_SPECS
+
+                rf_spec = _RF_SPECS[0]
+                raw_schemas.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": rf_spec.key,
+                            "description": rf_spec.description,
+                            "parameters": rf_spec.legacy_schema,
+                        },
+                    }
+                )
         if self.runtime.phases is not None:
             try:
                 all_raw = list(self.runtime.toolset.schemas())
@@ -2925,6 +2976,44 @@ class NativeTurnRunner:
                     if nm and nm not in seen_names:
                         all_raw.append(s)
                         seen_names.add(nm)
+            verifier_can_run_init = False
+            if (
+                "resolve_findings" not in seen_names
+                and getattr(self.runtime, "toolset", None) is not None
+                and hasattr(self.runtime.toolset, "resolve_findings")
+                and "resolve_findings" not in (getattr(self.runtime, "withheld_tools", ()) or ())
+                and (getattr(self.runtime, "offered_tools", None) is None or "resolve_findings" in self.runtime.offered_tools)
+            ):
+                if (
+                    bool(getattr(self.runtime.toolset, "_open_verification_findings", None))
+                    or getattr(self.runtime, "_verification_gate", None) is not None
+                ):
+                    verifier_can_run_init = True
+                else:
+                    from agentos.agentic.verification_gate import read_gate_setting
+
+                    verifier_can_run_init = bool(
+                        read_gate_setting(
+                            getattr(self.runtime, "effective_settings", None),
+                            "orchestration.verifier.enabled",
+                            False,
+                        )
+                    )
+            if verifier_can_run_init:
+                from agentos.agentic.tools.orin.resolve_findings import SPECS as _RF_SPECS
+
+                rf_spec = _RF_SPECS[0]
+                all_raw.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": rf_spec.key,
+                            "description": rf_spec.description,
+                            "parameters": rf_spec.legacy_schema,
+                        },
+                    }
+                )
+                seen_names.add("resolve_findings")
             executor_schemas: list[dict[str, object]] | None = (
                 self.runtime._names.schemas_out(all_raw)
                 if self.runtime._names is not None
@@ -3016,6 +3105,11 @@ class NativeTurnRunner:
         initial_user_images_pending = bool(initial_user_image_paths)
 
         while True:
+            effort = (
+                self.runtime.effort
+                if (self.runtime.effort and not bool(self.turn.get("live_mode")))
+                else None
+            )
             self.runtime.counters.note_iteration()
             if self.runtime.cancelled(self.turn):
                 return self.runtime._cancel(
@@ -3287,7 +3381,13 @@ class NativeTurnRunner:
                     )
                     if gate_action.action == "continue" and gate_action.system_message:
                         executor._maybe_refresh_live_specs()
-                        if persistent_stdin:
+                        next_effort = (
+                            self.runtime.effort
+                            if (self.runtime.effort and not bool(self.turn.get("live_mode")))
+                            else None
+                        )
+                        effort_changed = next_effort != effort
+                        if persistent_stdin and not effort_changed:
                             handle.send_user(
                                 [{"type": "text", "text": gate_action.system_message}]
                             )
@@ -3300,7 +3400,7 @@ class NativeTurnRunner:
                             state="APPLIED",
                             private_result={"outcome": gate_action.reason or "verify_findings_continuation"},
                         )
-                        if supports_session_resume and resume_session_id:
+                        if supports_session_resume and resume_session_id and not effort_changed:
                             user_content = [{"type": "text", "text": gate_action.system_message}]
                         else:
                             assistant_text = sink.settled_assistant_text()
@@ -3595,11 +3695,20 @@ class NativeTurnRunner:
                         self.turn, sink.speak_state
                     )
                     verification = self.runtime._code_verification(self.turn)
+                    gate_rejected_or_caveats = (
+                        gate_action.action == "complete_with_caveats"
+                        or (gate_action.outcome is not None and gate_action.outcome.verdict != "pass")
+                    )
                     if verification is not None:
                         self.runtime._life(
                             self.turn, "code_verification", status=verification
                         )
-                        if verification == "verified" and callable(self.runtime._on_verification):
+                        if (
+                            verification == "verified"
+                            and not gate_rejected_or_caveats
+                            and gate_action.outcome is None
+                            and callable(self.runtime._on_verification)
+                        ):
                             self.runtime._last_verification_passed = True
                             try:
                                 self.runtime._on_verification(True)

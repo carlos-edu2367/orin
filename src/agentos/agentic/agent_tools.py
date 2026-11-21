@@ -1233,9 +1233,22 @@ class AgentToolset(
     def _is_verification_command(command_str: str) -> bool:
         return is_verification_command(command_str)
 
-    @staticmethod
-    def _normalize_tracked_path(raw_path: str) -> str:
-        clean = str(raw_path or "").strip().replace("\\", "/")
+    def _normalize_tracked_path(self, raw_path: str) -> str:
+        text = str(raw_path or "").strip()
+        if not text:
+            return ""
+        root = getattr(getattr(self, "workspace", None), "root", None)
+        if root is not None:
+            try:
+                root_resolved = Path(root).resolve()
+                cand = Path(text)
+                if cand.is_absolute():
+                    return cand.resolve().relative_to(root_resolved).as_posix()
+                if ".." in cand.parts:
+                    return (root_resolved / cand).resolve().relative_to(root_resolved).as_posix()
+            except ValueError:
+                pass
+        clean = text.replace("\\", "/")
         while clean.startswith(("./", "/")):
             clean = clean[2:] if clean.startswith("./") else clean[1:]
         return clean
@@ -1276,7 +1289,14 @@ class AgentToolset(
         })
         payload = outcome.payload or {}
         if name in {"write_file", "edit_file", "notebook_edit"}:
-            path = self._normalize_tracked_path(str(payload.get("path") or arguments.get("path") or arguments.get("notebook_path") or ""))
+            artifacts = payload.get("artifacts")
+            art_path = (
+                artifacts[0].get("path")
+                if isinstance(artifacts, (list, tuple)) and artifacts and isinstance(artifacts[0], Mapping)
+                else None
+            )
+            raw_p = str(art_path or payload.get("path") or arguments.get("path") or arguments.get("file_path") or arguments.get("notebook_path") or "")
+            path = self._normalize_tracked_path(raw_p)
             if path and not path.startswith((".orin/", "uploads/")):
                 self._changed_paths.add(path)
                 self._change_events += 1

@@ -250,7 +250,7 @@ VERIFIER = AgentDefinition(
         "and `unverified`. Do not fix anything and do not change files."
     ),
     origin="builtin",
-    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch", "ReportVerification", "Remember", "Recall"),
+    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch", "ReportVerification"),
     memory="project",
 )
 BUILTIN_DEFINITIONS = (VERIFIER,)

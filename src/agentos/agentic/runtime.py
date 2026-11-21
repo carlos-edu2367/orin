@@ -1752,9 +1752,18 @@ class AgenticTurnRuntime:
                 )
                 self._emit_optimistic_lie_retraction(turn, speak_state)
                 verification = self._code_verification(turn)
+                gate_rejected_or_caveats = (
+                    gate_action.action == "complete_with_caveats"
+                    or (gate_action.outcome is not None and gate_action.outcome.verdict != "pass")
+                )
                 if verification is not None:
                     self._life(turn, "code_verification", status=verification)
-                    if verification == "verified" and callable(self._on_verification):
+                    if (
+                        verification == "verified"
+                        and not gate_rejected_or_caveats
+                        and gate_action.outcome is None
+                        and callable(self._on_verification)
+                    ):
                         self._last_verification_passed = True
                         try:
                             self._on_verification(True)

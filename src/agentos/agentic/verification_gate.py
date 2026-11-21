@@ -105,6 +105,7 @@ class TurnGateState:
     independent_settled: bool = False
     completed_with_caveats: bool = False
     caveat_findings: tuple[Finding, ...] = ()
+    escalated_retry_used: bool = False
 
 
 def _get_nested(mapping: Mapping[str, Any], dotted: str) -> tuple[bool, Any]:
@@ -617,33 +618,37 @@ class VerificationGate:
         finish_fn = getattr(recorder, "finish", None)
         if not callable(start_fn):
             return None
-        review_id = start_fn(
-            user_id=str(turn.get("user_id") or ""),
-            conversation_id=str(turn.get("conversation_id") or ""),
-            turn_id=str(turn.get("turn_id") or ""),
-            agent_id=str(turn.get("agent_id") or getattr(self._session, "main_agent_id", "main") or "main"),
-            round=round_num,
-            trigger_reason=trigger_reason,
-            files_changed=summary.files if summary is not None else 0,
-            lines_changed=(summary.lines if (summary is not None and summary.lines_known) else None),
-            author_provider=str(turn.get("provider") or ""),
-            author_model=str(turn.get("model_id") or ""),
-            author_effort=author_effort,
-            reviewer_provider=choice.provider if choice is not None else None,
-            reviewer_model=choice.model if choice is not None else None,
-            reviewer_effort=choice.effort if choice is not None else None,
-            policy=choice.policy if choice is not None else "cross_family",
-            fallback_step=choice.fallback_step if choice is not None else 4,
-        )
-        if callable(finish_fn) and review_id is not None:
-            finish_fn(
-                review_id,
-                verdict="skipped",
-                input_tokens=None,
-                output_tokens=None,
-                cost_usd=None,
+        try:
+            review_id = start_fn(
+                user_id=str(turn.get("user_id") or ""),
+                conversation_id=str(turn.get("conversation_id") or ""),
+                turn_id=str(turn.get("turn_id") or ""),
+                agent_id=str(turn.get("agent_id") or getattr(self._session, "main_agent_id", "main") or "main"),
+                round=round_num,
+                trigger_reason=trigger_reason,
+                files_changed=summary.files if summary is not None else 0,
+                lines_changed=(summary.lines if (summary is not None and summary.lines_known) else 0),
+                author_provider=str(turn.get("provider") or ""),
+                author_model=str(turn.get("model_id") or ""),
+                author_effort=author_effort,
+                reviewer_provider=choice.provider if choice is not None else None,
+                reviewer_model=choice.model if choice is not None else None,
+                reviewer_effort=choice.effort if choice is not None else None,
+                policy=choice.policy if choice is not None else "cross_family",
+                fallback_step=choice.fallback_step if choice is not None else 4,
             )
-        return str(review_id) if review_id is not None else None
+            if callable(finish_fn) and review_id is not None:
+                finish_fn(
+                    review_id,
+                    verdict="skipped",
+                    input_tokens=None,
+                    output_tokens=None,
+                    cost_usd=None,
+                )
+            return str(review_id) if review_id is not None else None
+        except Exception:  # noqa: BLE001 - review recorder errors must never crash user turns
+            logger.warning("Failed to record skipped verification review", exc_info=True)
+            return None
 
     def _promote_memories(self, turn: Mapping[str, Any], verdict: str, settings: Any, runtime: Any) -> None:
         turn_id = str(turn.get("turn_id") or "").strip()
@@ -763,16 +768,30 @@ class VerificationGate:
                 requested_effort = str(read_gate_setting(settings, "orchestration.verifier.effort", "high") or "high")
 
                 available = self._resolve_available_models(turn)
+                user_id = str(turn.get("user_id") or "")
+                raw_quota = self._get_quota_service()
+                quota_arg: Any = raw_quota
+                if raw_quota is not None and callable(getattr(raw_quota, "status_for", None)):
+                    status_fn = raw_quota.status_for
+
+                    def _quota_lookup(prov: str, mod: str) -> Any:
+                        try:
+                            return status_fn(user_id, prov, model_id=mod)
+                        except TypeError:
+                            return status_fn(prov, mod)
+
+                    quota_arg = _quota_lookup
                 choice = select_verifier(
                     author=author,
                     available=available,
                     policy=policy,
                     explicit=explicit,
-                    quota=self._get_quota_service(),
+                    quota=quota_arg,
                     tiers=tiers if isinstance(tiers, Mapping) else None,
                     requested_effort=requested_effort,
                     quota_policy_enabled=quota_enabled,
                     quota_block_percent=quota_block,
+                    user_id=user_id,
                 )
 
                 # Resolve final effort via effort_resolver rule 5 when a model was chosen.
@@ -938,25 +957,29 @@ class VerificationGate:
         recorder = self._get_review_recorder()
         review_id: str | None = None
         if recorder is not None and callable(getattr(recorder, "start", None)):
-            raw_id = recorder.start(
-                user_id=str(turn.get("user_id") or ""),
-                conversation_id=str(turn.get("conversation_id") or ""),
-                turn_id=str(turn.get("turn_id") or ""),
-                agent_id=str(turn.get("agent_id") or getattr(self._session, "main_agent_id", "main") or "main"),
-                round=round_num,
-                trigger_reason=trigger_reason,
-                files_changed=files_changed,
-                lines_changed=lines_changed,
-                author_provider=str(turn.get("provider") or ""),
-                author_model=str(turn.get("model_id") or ""),
-                author_effort=author_effort,
-                reviewer_provider=choice.provider,
-                reviewer_model=choice.model,
-                reviewer_effort=choice.effort,
-                policy=choice.policy,
-                fallback_step=choice.fallback_step,
-            )
-            review_id = str(raw_id) if raw_id is not None else None
+            try:
+                raw_id = recorder.start(
+                    user_id=str(turn.get("user_id") or ""),
+                    conversation_id=str(turn.get("conversation_id") or ""),
+                    turn_id=str(turn.get("turn_id") or ""),
+                    agent_id=str(turn.get("agent_id") or getattr(self._session, "main_agent_id", "main") or "main"),
+                    round=round_num,
+                    trigger_reason=trigger_reason,
+                    files_changed=files_changed,
+                    lines_changed=lines_changed,
+                    author_provider=str(turn.get("provider") or ""),
+                    author_model=str(turn.get("model_id") or ""),
+                    author_effort=author_effort,
+                    reviewer_provider=choice.provider,
+                    reviewer_model=choice.model,
+                    reviewer_effort=choice.effort,
+                    policy=choice.policy,
+                    fallback_step=choice.fallback_step,
+                )
+                review_id = str(raw_id) if raw_id is not None else None
+            except Exception:  # noqa: BLE001 - telemetry failure never breaks a turn
+                logger.warning("Failed to record verification review start", exc_info=True)
+                review_id = None
 
         all_review_ids = (*previous_review_ids, *( (review_id,) if review_id else () ))
 
@@ -965,7 +988,10 @@ class VerificationGate:
             child_runner = getattr(self._session, "run_child", None)
         if not callable(child_runner):
             if recorder is not None and review_id and callable(getattr(recorder, "finish", None)):
-                recorder.finish(review_id, verdict="skipped", input_tokens=None, output_tokens=None, cost_usd=None)
+                try:
+                    recorder.finish(review_id, verdict="skipped", input_tokens=None, output_tokens=None, cost_usd=None)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Failed to record verification finish (no_child_runner)", exc_info=True)
             self._emit_event(
                 AgentActivityEventType.VERIFIER_FINISHED.value,
                 "Verificação independente pulada: executor de subagente indisponível",
@@ -1030,7 +1056,10 @@ class VerificationGate:
             logger.warning("Independent verifier execution failed: %s", exc, exc_info=True)
             reason = f"verifier_error:{type(exc).__name__}"
             if recorder is not None and review_id and callable(getattr(recorder, "finish", None)):
-                recorder.finish(review_id, verdict="skipped", input_tokens=None, output_tokens=None, cost_usd=None)
+                try:
+                    recorder.finish(review_id, verdict="skipped", input_tokens=None, output_tokens=None, cost_usd=None)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Failed to record verification finish (error)", exc_info=True)
             self._emit_event(
                 AgentActivityEventType.VERIFIER_FINISHED.value,
                 f"Verificação independente interrompida ({reason})",
@@ -1077,7 +1106,10 @@ class VerificationGate:
         if child_failed:
             reason = fail_reason or "verifier_failed"
             if recorder is not None and review_id and callable(getattr(recorder, "finish", None)):
-                recorder.finish(review_id, verdict="skipped", input_tokens=None, output_tokens=None, cost_usd=None)
+                try:
+                    recorder.finish(review_id, verdict="skipped", input_tokens=None, output_tokens=None, cost_usd=None)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Failed to record verification finish (child_failed)", exc_info=True)
             self._emit_event(
                 AgentActivityEventType.VERIFIER_FINISHED.value,
                 f"Verificação independente não concluída ({reason})",
@@ -1125,15 +1157,21 @@ class VerificationGate:
 
         if recorder is not None and review_id:
             if callable(getattr(recorder, "add_findings", None)) and report.findings:
-                recorder.add_findings(review_id, report.findings)
+                try:
+                    recorder.add_findings(review_id, report.findings)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Failed to record verification findings", exc_info=True)
             if callable(getattr(recorder, "finish", None)):
-                recorder.finish(
-                    review_id,
-                    verdict=report.verdict,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                )
+                try:
+                    recorder.finish(
+                        review_id,
+                        verdict=report.verdict,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cost_usd=cost_usd,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("Failed to record verification finish", exc_info=True)
 
         blocking = report.blocking_findings
         unproven_count = sum(1 for item in report.findings if item.severity == "unproven")
@@ -1225,7 +1263,10 @@ class VerificationGate:
         def _on_resolve(resolutions: tuple[FindingResolution, ...]) -> None:
             if recorder is not None and active_review_id and callable(getattr(recorder, "set_resolution", None)):
                 for item in resolutions:
-                    recorder.set_resolution(active_review_id, item.id, item.status, item.reason)
+                    try:
+                        recorder.set_resolution(active_review_id, item.id, item.status, item.reason)
+                    except Exception:  # noqa: BLE001
+                        logger.warning("Failed to record finding resolution", exc_info=True)
 
         if callable(setter):
             setter(outcome.open_findings, on_resolve=_on_resolve)
@@ -1241,6 +1282,47 @@ class VerificationGate:
                 runtime._verified_at_change_events = int(fn())
             except Exception:  # noqa: BLE001
                 pass
+
+    def _emit_resolution_settled_event(
+        self,
+        *,
+        turn: Mapping[str, Any],
+        runtime: Any,
+        state: TurnGateState,
+        outcome: VerificationOutcome | None,
+        resolutions: Mapping[str, FindingResolution],
+        open_findings: Sequence[Finding],
+        completed_with_caveats: bool,
+    ) -> None:
+        """Emit an updated ``verifier.finished`` event carrying resolutions and caveat state (RT-A-08)."""
+        choice = outcome.choice if outcome is not None else state.last_choice
+        summary_text = (
+            f"Verificação independente concluída com {len(open_findings)} pendência(s)"
+            if completed_with_caveats
+            else "Verificação independente concluída com resoluções aplicadas"
+        )
+        verdict = outcome.verdict if outcome is not None else ("fail" if completed_with_caveats else "pass")
+        payload: dict[str, Any] = {
+            "review_id": state.review_ids[-1] if state.review_ids else state.active_review_id,
+            "round": state.round_num,
+            "verdict": verdict,
+            "passed": (verdict == "pass") and not completed_with_caveats,
+            "reviewer_provider": choice.provider if choice is not None else None,
+            "reviewer_model": choice.model if choice is not None else None,
+            "effort": choice.effort if choice is not None else None,
+            "trigger_reason": state.trigger_reason,
+            "resolutions": {fid: res.to_dict() for fid, res in resolutions.items()},
+            "open_findings": [item.to_dict() for item in open_findings],
+            "completed_with_caveats": bool(completed_with_caveats),
+            "blocking_count": len(open_findings),
+        }
+        self._emit_event(
+            AgentActivityEventType.VERIFIER_FINISHED.value,
+            summary_text,
+            payload,
+            turn=turn,
+            runtime=runtime,
+        )
 
     def evaluate_turn_end(
         self,
@@ -1286,7 +1368,12 @@ class VerificationGate:
                         reason="unresolved_findings",
                     )
                 pending_set = set(unresolved_ids)
-                still_open = tuple(item for item in open_findings if item.id in pending_set)
+                still_open = tuple(
+                    item
+                    for item in open_findings
+                    if item.id in pending_set
+                    or (item.id in resolutions and resolutions[item.id].status in {"confirmed", "fixed"})
+                )
                 clear_fn = getattr(toolset, "clear_open_verification_findings", None)
                 if callable(clear_fn):
                     clear_fn()
@@ -1306,6 +1393,15 @@ class VerificationGate:
                     else None
                 )
                 state.last_outcome = final_outcome
+                self._emit_resolution_settled_event(
+                    turn=turn,
+                    runtime=runtime,
+                    state=state,
+                    outcome=final_outcome,
+                    resolutions=resolutions,
+                    open_findings=still_open,
+                    completed_with_caveats=True,
+                )
                 return VerificationGateAction(
                     action="complete_with_caveats",
                     outcome=final_outcome,
@@ -1329,8 +1425,9 @@ class VerificationGate:
                 if item.id in resolutions and resolutions[item.id].status == "confirmed"
             )
 
+            effective_max_rounds = max_rounds + (1 if state.escalated_retry_used else 0)
             if fixed_findings:
-                if state.round_num < max_rounds and state.last_choice is not None:
+                if state.round_num < effective_max_rounds and state.last_choice is not None:
                     next_round = state.round_num + 1
                     refreshed_summary = self._measure_changes(turn, runtime, settings=settings, use_cache=False)
                     merged_files = tuple(
@@ -1362,49 +1459,104 @@ class VerificationGate:
                         if confirmed_findings:
                             state.completed_with_caveats = True
                             state.caveat_findings = confirmed_findings
+                            settled = replace(outcome, open_findings=confirmed_findings, resolutions=resolutions, completed_with_caveats=True)
+                            state.last_outcome = settled
+                            self._emit_resolution_settled_event(
+                                turn=turn, runtime=runtime, state=state, outcome=settled,
+                                resolutions=resolutions, open_findings=confirmed_findings, completed_with_caveats=True,
+                            )
                             return VerificationGateAction(
                                 action="complete_with_caveats",
-                                outcome=replace(outcome, open_findings=confirmed_findings, resolutions=resolutions, completed_with_caveats=True),
+                                outcome=settled,
                                 open_findings=confirmed_findings,
                                 reason="reverification_skipped_with_confirmed_findings",
                             )
+                        settled = replace(outcome, resolutions=resolutions)
+                        state.last_outcome = settled
+                        self._emit_resolution_settled_event(
+                            turn=turn, runtime=runtime, state=state, outcome=settled,
+                            resolutions=resolutions, open_findings=(), completed_with_caveats=False,
+                        )
                         return VerificationGateAction(
                             action="complete",
-                            outcome=replace(outcome, resolutions=resolutions),
+                            outcome=settled,
                             reason="reverification_skipped",
                         )
 
                     if not outcome.open_findings:
                         state.independent_settled = True
                         self._mark_verified(runtime)
+                        if confirmed_findings:
+                            state.completed_with_caveats = True
+                            state.caveat_findings = confirmed_findings
+                            settled = replace(
+                                outcome,
+                                open_findings=confirmed_findings,
+                                resolutions=resolutions,
+                                completed_with_caveats=True,
+                            )
+                            state.last_outcome = settled
+                            self._emit_resolution_settled_event(
+                                turn=turn, runtime=runtime, state=state, outcome=settled,
+                                resolutions=resolutions, open_findings=confirmed_findings, completed_with_caveats=True,
+                            )
+                            return VerificationGateAction(
+                                action="complete_with_caveats",
+                                outcome=settled,
+                                open_findings=confirmed_findings,
+                                reason="reverification_passed_with_confirmed_findings",
+                            )
+                        settled = replace(outcome, resolutions=resolutions)
+                        state.last_outcome = settled
+                        self._emit_resolution_settled_event(
+                            turn=turn, runtime=runtime, state=state, outcome=settled,
+                            resolutions=resolutions, open_findings=(), completed_with_caveats=False,
+                        )
                         return VerificationGateAction(
                             action="complete",
-                            outcome=replace(outcome, resolutions=resolutions),
+                            outcome=settled,
                             reason="reverification_passed",
                         )
 
                     # Still has proven blocking findings after re-verification!
-                    if next_round >= max_rounds or not allow_continuation:
+                    merged_open = tuple({item.id: item for item in (*confirmed_findings, *outcome.open_findings)}.values())
+                    outcome_with_merged = replace(outcome, open_findings=merged_open)
+                    escalated_extra_round = (
+                        allow_continuation
+                        and outcome.escalation_advice is not None
+                        and outcome.escalation_advice.escalated
+                        and not state.escalated_retry_used
+                    )
+                    if (next_round >= effective_max_rounds and not escalated_extra_round) or not allow_continuation:
                         state.independent_settled = True
                         state.completed_with_caveats = True
-                        state.caveat_findings = outcome.open_findings
+                        state.caveat_findings = merged_open
                         self._mark_verified(runtime)
-                        caveat_outcome = replace(outcome, resolutions=resolutions, completed_with_caveats=True)
+                        caveat_outcome = replace(outcome_with_merged, resolutions=resolutions, completed_with_caveats=True)
                         state.last_outcome = caveat_outcome
+                        self._emit_resolution_settled_event(
+                            turn=turn, runtime=runtime, state=state, outcome=caveat_outcome,
+                            resolutions=resolutions, open_findings=merged_open, completed_with_caveats=True,
+                        )
                         return VerificationGateAction(
                             action="complete_with_caveats",
                             outcome=caveat_outcome,
-                            open_findings=outcome.open_findings,
+                            open_findings=merged_open,
                             reason="max_rounds_exhausted",
                         )
 
-                    # More rounds available (e.g. maxRounds > 2): hand new findings to implementer.
-                    self._register_open_findings(runtime, outcome, state)
+                    if escalated_extra_round:
+                        state.escalated_retry_used = True
+                    # More rounds available (e.g. maxRounds > 2 or effort escalated): hand findings to implementer.
+                    self._register_open_findings(runtime, outcome_with_merged, state)
                     return VerificationGateAction(
                         action="continue",
-                        system_message=format_findings_for_implementer(outcome, max_rounds=max_rounds),
-                        outcome=outcome,
-                        open_findings=outcome.open_findings,
+                        system_message=format_findings_for_implementer(
+                            outcome_with_merged,
+                            max_rounds=max_rounds + (1 if state.escalated_retry_used else 0),
+                        ),
+                        outcome=outcome_with_merged,
+                        open_findings=merged_open,
                         reason="reverification_failed",
                     )
 
@@ -1420,6 +1572,10 @@ class VerificationGate:
                     else None
                 )
                 state.last_outcome = final_outcome
+                self._emit_resolution_settled_event(
+                    turn=turn, runtime=runtime, state=state, outcome=final_outcome,
+                    resolutions=resolutions, open_findings=caveats, completed_with_caveats=True,
+                )
                 return VerificationGateAction(
                     action="complete_with_caveats",
                     outcome=final_outcome,
@@ -1438,6 +1594,10 @@ class VerificationGate:
                     else None
                 )
                 state.last_outcome = final_outcome
+                self._emit_resolution_settled_event(
+                    turn=turn, runtime=runtime, state=state, outcome=final_outcome,
+                    resolutions=resolutions, open_findings=confirmed_findings, completed_with_caveats=True,
+                )
                 return VerificationGateAction(
                     action="complete_with_caveats",
                     outcome=final_outcome,
@@ -1454,6 +1614,10 @@ class VerificationGate:
                 else None
             )
             state.last_outcome = final_outcome
+            self._emit_resolution_settled_event(
+                turn=turn, runtime=runtime, state=state, outcome=final_outcome,
+                resolutions=resolutions, open_findings=(), completed_with_caveats=False,
+            )
             return VerificationGateAction(
                 action="complete",
                 outcome=final_outcome,

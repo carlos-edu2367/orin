@@ -17,7 +17,7 @@ PROPOSAL_EXPIRATION_DAYS = 14
 PROPOSAL_EXPIRATION_DELTA = timedelta(days=PROPOSAL_EXPIRATION_DAYS)
 
 _PASS_STRINGS = frozenset({"pass", "passed", "approved", "ok", "true", "yes"})
-_FAIL_STRINGS = frozenset({"fail", "failed", "rejected", "false", "no"})
+_FAIL_STRINGS = frozenset({"fail", "failed", "rejected", "false", "no", "inconclusive", "skipped"})
 
 _LOCKS_GUARD = threading.Lock()
 _SCOPE_LOCKS: dict[str, threading.Lock] = {}

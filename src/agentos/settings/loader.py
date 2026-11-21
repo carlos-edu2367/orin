@@ -70,6 +70,8 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "autoMode",
     # A repository may only add restrictions; a repository "switch off" is decided once it is trusted.
     "disableAllHooks",
+    # Verifier thresholds/ignore/sensitivePaths cannot be weakened or weaponized by an untrusted repo.
+    "orchestration.verifier.threshold",
 )
 # A repository can never turn these on: it may only switch them off (a restriction).
 PROJECT_TRUE_IGNORED = (

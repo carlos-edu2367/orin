@@ -243,9 +243,21 @@ function extractViewModel(group: ActivityGroup): VerificationViewModel {
   let skippedReason: string | null = null
   let completedWithCaveats = group.state === 'completed_with_caveats'
   let checked: VerificationCheckedCommand[] = []
-  let latestRawFindings: unknown = null
+  const mergedRawFindings = new Map<string, Record<string, unknown>>()
+  let findingAutoIndex = 0
   const mergedResolutions = new Map<string, { status: VerificationFindingResolution; reason?: string }>()
   let unverified: string[] = []
+
+  const mergeRawFindingList = (rawList: unknown) => {
+    if (!Array.isArray(rawList)) return
+    for (const entry of rawList) {
+      const rec = asRecord(entry)
+      findingAutoIndex += 1
+      const id = asString(rec.id ?? rec.finding_id) ?? `F${findingAutoIndex}`
+      const prev = mergedRawFindings.get(id)
+      mergedRawFindings.set(id, prev ? { ...prev, ...rec } : { ...rec })
+    }
+  }
 
   for (const event of group.events) {
     const payload = asRecord(event.payload)
@@ -313,9 +325,10 @@ function extractViewModel(group: ActivityGroup): VerificationViewModel {
         }
       }
       if (Array.isArray(payload.findings)) {
-        latestRawFindings = payload.findings
-      } else if (Array.isArray(payload.open_findings)) {
-        latestRawFindings = payload.open_findings
+        mergeRawFindingList(payload.findings)
+      }
+      if (Array.isArray(payload.open_findings)) {
+        mergeRawFindingList(payload.open_findings)
       }
       if (Array.isArray(payload.unverified)) {
         unverified = payload.unverified.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
@@ -339,7 +352,7 @@ function extractViewModel(group: ActivityGroup): VerificationViewModel {
     skippedReason,
     completedWithCaveats,
     checked,
-    findings: parseFindings(latestRawFindings, mergedResolutions),
+    findings: parseFindings(Array.from(mergedRawFindings.values()), mergedResolutions),
     unverified,
   }
 }

@@ -1612,7 +1612,12 @@ class TurnSession:
         self.quota_gate = quota_gate
         self._quota_service = quota_service
         self._review_recorder = review_recorder
-        self._effort_escalator = effort_escalator
+        if effort_escalator is None:
+            from .effort_resolver import EffortEscalator
+
+            self._effort_escalator = EffortEscalator()
+        else:
+            self._effort_escalator = effort_escalator
         self._favorites_by_provider = favorites_by_provider
         self._configured_providers = configured_providers
         self._quota_sink = quota_sink
@@ -2405,6 +2410,20 @@ class TurnSession:
                 parent_agent_id=self._parent_of(actor) if is_subagent else None,
             )
             return
+        if state == "completed_with_caveats":
+            summary_text = str(payload.get("summary") or "Concluído com pendências")[:240]
+            self._record(
+                AgentActivityEventType.CODE_MODE_COMPLETED_WITH_CAVEATS,
+                summary_text,
+                {
+                    **base,
+                    "verification": "completed_with_caveats",
+                    "completed_with_caveats": True,
+                    "open_findings": list(payload.get("open_findings") or ()),
+                },
+                agent_id=actor,
+            )
+            return
         if state in {
             AgentActivityEventType.SPEAK_BLOCK_STARTED.value,
             AgentActivityEventType.SPEAK_DELTA.value,
@@ -2456,6 +2475,7 @@ class TurnSession:
 
         return SubagentCaller(
             agent_id=self.main_agent_id, name="Main", depth=0, permission_mode=self.permission_mode,
+            read_only=bool(getattr(getattr(self, "toolset", None), "_plan_mode_active", False)) or self.permission_mode == "plan_mode",
             cancelled=self.cancelled, history=history,
         )
 
@@ -3566,6 +3586,8 @@ class TurnSession:
         if (
             hook_cancel is None
             and (caller is None or caller.is_main)
+            and builtin_key != "verifier"
+            and clean.lower() != "verifier"
             and self._can_watch_queued_user_input()
         ):
             return self._run_foreground_subagent_watching_queue(
@@ -4189,6 +4211,8 @@ class TurnSession:
             "is_subagent": True,
             "subagent_type": subagent_kind,
         }
+        subagent_turn.pop("_change_measure_summary", None)
+        subagent_turn.pop("_change_measure_version", None)
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
@@ -4333,7 +4357,7 @@ class TurnSession:
                 on_reminder_ack=watcher.ack_control if watcher is not None else None,
                 control_watcher=watcher,
                 continue_on_unread=self._continue_on_unread_enabled(),
-                on_verification=self._promote_agent_memories,
+                on_verification=None,
                 effective_settings=self.effective_settings,
                 verification_gate=self._verification_gate(),
                 effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
@@ -4374,6 +4398,8 @@ class TurnSession:
                     "is_subagent": True,
                     "subagent_type": subagent_kind,
                 }
+                subagent_turn.pop("_change_measure_summary", None)
+                subagent_turn.pop("_change_measure_version", None)
                 sub_store = _SubagentStore(
                     self,
                     subagent_turn,
@@ -4400,7 +4426,7 @@ class TurnSession:
                     on_reminder_ack=watcher.ack_control if watcher is not None else None,
                     control_watcher=watcher,
                     continue_on_unread=self._continue_on_unread_enabled(),
-                    on_verification=self._promote_agent_memories,
+                    on_verification=None,
                     effective_settings=self.effective_settings,
                     verification_gate=self._verification_gate(),
                     effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
@@ -4518,7 +4544,7 @@ class TurnSession:
                 content = f"{clean} reported:\n\n{answer}"
             return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
         finally:
-            if subagent_tools is not None and getattr(subagent_tools, "_changed_paths", None):
+            if subagent_tools is not None and getattr(subagent_tools, "_changed_paths", None) and builtin_key not in {"verifier", "explore", "plan"}:
                 # Changes go up one level; the caller hands them on when it finishes.
                 parent_tools = caller.toolset if caller.toolset is not None else getattr(self, "toolset", None)
                 if parent_tools is not None and hasattr(parent_tools, "_changed_paths"):

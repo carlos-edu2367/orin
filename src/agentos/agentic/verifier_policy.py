@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from agentos.agentic.effort_levels import EffortAdjustment, clamp
@@ -166,6 +167,8 @@ def _lookup_quota(
     provider: str,
     model: str,
     candidate_status: QuotaStatus | None = None,
+    *,
+    user_id: str | None = None,
 ) -> QuotaStatus | None:
     if candidate_status is not None:
         return candidate_status
@@ -194,9 +197,16 @@ def _lookup_quota(
     status_fn = getattr(quota, "status_for", None)
     if callable(status_fn):
         try:
+            sig = inspect.signature(status_fn)
+            param_names = list(sig.parameters.keys())
+            if param_names and param_names[0] == "user_id":
+                return _coerce_quota_status(status_fn(str(user_id or ""), provider, model_id=model))
             return _coerce_quota_status(status_fn(provider, model))
-        except TypeError:
-            return None
+        except (TypeError, ValueError):
+            try:
+                return _coerce_quota_status(status_fn(provider, model))
+            except TypeError:
+                return None
     return None
 
 
@@ -221,6 +231,7 @@ def _evaluate_candidates(
     tiers: Mapping[str, Any] | None,
     quota_policy_enabled: bool,
     quota_block_percent: int | float,
+    user_id: str | None = None,
 ) -> list[_EvaluatedCandidate]:
     evaluated: list[_EvaluatedCandidate] = []
     for idx, raw_item in enumerate(available):
@@ -232,7 +243,7 @@ def _evaluate_candidates(
         base_model = strip_effort_suffix(clean_model)
         fam = family_of(cand.provider, cand.model, tiers=tiers)
         tier = tier_of(cand.provider, cand.model, tiers=tiers)
-        q_status = _lookup_quota(quota, cand.provider, cand.model, cand.quota_status)
+        q_status = _lookup_quota(quota, cand.provider, cand.model, cand.quota_status, user_id=user_id)
 
         unavail_reason: str | None = None
         if not cand.configured:
@@ -418,6 +429,7 @@ def select_verifier(
     requested_effort: str = "high",
     quota_policy_enabled: bool = False,
     quota_block_percent: int | float = 90,
+    user_id: str | None = None,
 ) -> VerifierChoice:
     """Choose the verifier model according to policy and fallback rules (spec 5.3)."""
     norm_policy = str(policy or "").strip().lower()
@@ -439,6 +451,7 @@ def select_verifier(
         tiers=tiers,
         quota_policy_enabled=quota_policy_enabled,
         quota_block_percent=quota_block_percent,
+        user_id=user_id,
     )
 
     if norm_policy == "same_model":

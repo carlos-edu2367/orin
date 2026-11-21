@@ -93,19 +93,32 @@ def register_verifier_metrics_routes(
                         },
                     )
             elif days is not None:
-                if days <= 0:
+                if days <= 0 or days > 36500:
                     return (
                         400,
                         {
                             "error": {
                                 "category": "VALIDATION",
                                 "code": "invalid_days",
-                                "message": "query parameter 'days' must be a positive integer",
+                                "message": "query parameter 'days' must be a positive integer up to 36500",
                                 "retryable": False,
                             }
                         },
                     )
-                since_dt = datetime.now(UTC) - timedelta(days=days)
+                try:
+                    since_dt = datetime.now(UTC) - timedelta(days=days)
+                except (ValueError, OverflowError):
+                    return (
+                        400,
+                        {
+                            "error": {
+                                "category": "VALIDATION",
+                                "code": "invalid_days",
+                                "message": "query parameter 'days' is out of range",
+                                "retryable": False,
+                            }
+                        },
+                    )
 
             store = _resolve_review_store(services)
             if store is None:

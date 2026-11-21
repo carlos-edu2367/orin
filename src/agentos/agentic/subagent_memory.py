@@ -12,7 +12,7 @@ from agentos.memory.agent_scope import (
     is_learn_from_verified_only,
 )
 from agentos.memory.agent_summary import freeze_summary
-from agentos.memory.promotion import MemoryPromotionGate
+from agentos.memory.promotion import MemoryPromotionGate, parse_verification_verdict
 
 
 def build_subagent_memory_context(
@@ -77,8 +77,9 @@ def subagent_memory_turn_state(session: Any, scope: AgentMemoryScope) -> dict[st
 
 def promote_session_agent_memories(session: Any, verdict: bool | str | None) -> None:
     """Invoke ``MemoryPromotionGate.on_verified`` for the session's current turn."""
-    if isinstance(verdict, bool):
-        session._last_verification_passed = verdict
+    if verdict is not None:
+        parsed = parse_verification_verdict(verdict)
+        session._last_verification_passed = (parsed is True)
     parent_memory = getattr(session, "memory", None)
     effective_settings = getattr(session, "effective_settings", None)
     if parent_memory is None or not is_agent_memory_enabled(effective_settings):

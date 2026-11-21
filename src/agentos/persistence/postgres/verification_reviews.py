@@ -87,8 +87,8 @@ class VerificationReviewStore:
         agent_id: str = "",
         round: int = 1,
         trigger_reason: str = "files",
-        files_changed: int = 0,
-        lines_changed: int = 0,
+        files_changed: int | None = 0,
+        lines_changed: int | None = 0,
         author_provider: str = "",
         author_model: str = "",
         author_effort: str | None = None,
@@ -110,8 +110,8 @@ class VerificationReviewStore:
             "agent_id": str(agent_id or ""),
             "round": int(round),
             "trigger_reason": str(trigger_reason)[:32],
-            "files_changed": max(0, int(files_changed)),
-            "lines_changed": max(0, int(lines_changed)),
+            "files_changed": max(0, int(files_changed or 0)),
+            "lines_changed": max(0, int(lines_changed or 0)),
             "author_provider": str(author_provider)[:64],
             "author_model": str(author_model)[:128],
             "author_effort": str(author_effort)[:16] if author_effort is not None else None,
@@ -135,9 +135,12 @@ class VerificationReviewStore:
 
     def add_findings(self, review_id: str, findings: Sequence[Any]) -> None:
         rid = str(review_id)
-        normalized = [normalize_finding_record(item) for item in findings]
-        if not normalized:
+        raw_normalized = [normalize_finding_record(item) for item in findings]
+        if not raw_normalized:
             return
+        # Deduplicate within the batch keeping last-wins semantics (matching InMemoryReviewRecorder).
+        deduped = {rec["finding_id"]: rec for rec in raw_normalized}
+        normalized = list(deduped.values())
 
         t = verification_findings
         with self._engine.begin() as conn:

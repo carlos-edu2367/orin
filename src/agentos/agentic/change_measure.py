@@ -22,6 +22,7 @@ from agentos.settings.registry import resolve
 TriggerReason = Literal["sensitive_path", "files", "lines"]
 
 TURN_CACHE_KEY = "_change_measure_summary"
+TURN_CACHE_VERSION_KEY = "_change_measure_version"
 _GIT_TIMEOUT_SECONDS = 5.0
 
 
@@ -71,6 +72,12 @@ def _normalize_workspace_rel_path(raw_path: str, root: Path | None) -> str:
         return ""
     parts = PurePosixPath(norm).parts
     if ".." in parts:
+        if root is not None:
+            try:
+                resolved = (root / norm).resolve()
+                return resolved.relative_to(root).as_posix()
+            except ValueError:
+                return ""
         return ""
     return PurePosixPath(*parts).as_posix()
 
@@ -363,21 +370,29 @@ def _git_numstat_for_paths(root: Path | None, paths: Sequence[str]) -> dict[str,
     return result
 
 
-def _get_cached_summary(turn: Any) -> ChangeSummary | None:
+def _get_cached_summary(turn: Any, version: Any) -> ChangeSummary | None:
     if isinstance(turn, MutableMapping):
         cached = turn.get(TURN_CACHE_KEY)
-        return cached if isinstance(cached, ChangeSummary) else None
+        cached_ver = turn.get(TURN_CACHE_VERSION_KEY)
+        if isinstance(cached, ChangeSummary) and cached_ver == version:
+            return cached
+        return None
     if turn is not None and hasattr(turn, "__dict__"):
         cached = getattr(turn, TURN_CACHE_KEY, None)
-        return cached if isinstance(cached, ChangeSummary) else None
+        cached_ver = getattr(turn, TURN_CACHE_VERSION_KEY, None)
+        if isinstance(cached, ChangeSummary) and cached_ver == version:
+            return cached
+        return None
     return None
 
 
-def _set_cached_summary(turn: Any, summary: ChangeSummary) -> None:
+def _set_cached_summary(turn: Any, summary: ChangeSummary, version: Any) -> None:
     if isinstance(turn, MutableMapping):
         turn[TURN_CACHE_KEY] = summary
+        turn[TURN_CACHE_VERSION_KEY] = version
     elif turn is not None and hasattr(turn, "__dict__"):
         setattr(turn, TURN_CACHE_KEY, summary)
+        setattr(turn, TURN_CACHE_VERSION_KEY, version)
 
 
 def measure_turn_changes(
@@ -398,14 +413,9 @@ def measure_turn_changes(
 
     Reads the per-turn checkpoint snapshots (and falls back to ``git diff --numstat``
     for snapshot-less Bash edits inside git repositories). When ``turn`` is supplied
-    and ``use_cache=True``, the computed ``ChangeSummary`` is cached on ``turn`` so
-    it is measured at most once per turn.
+    and ``use_cache=True``, the computed ``ChangeSummary`` is cached on ``turn`` keyed
+    by the current mutation version (toolset change events and snapshot count).
     """
-    if use_cache and turn is not None:
-        cached = _get_cached_summary(turn)
-        if cached is not None:
-            return cached
-
     eff_checkpoint_store = checkpoint_store
     if eff_checkpoint_store is None and toolset is not None:
         eff_checkpoint_store = getattr(toolset, "_checkpoint_store", None)
@@ -421,13 +431,53 @@ def measure_turn_changes(
         ignore_globs=ignore_globs,
     )
 
+    toolset_paths = _collect_toolset_paths(toolset)
+    is_subagent = bool(
+        turn.get("is_subagent")
+        if isinstance(turn, Mapping)
+        else getattr(turn, "is_subagent", False)
+    )
+    manifest_sig: tuple[int, int] | None = None
+    manifest_fn = getattr(eff_checkpoint_store, "manifest_path", None)
+    if callable(manifest_fn):
+        try:
+            mpath = manifest_fn(eff_turn_id)
+            if isinstance(mpath, Path) and mpath.exists():
+                st = mpath.stat()
+                manifest_sig = (st.st_mtime_ns, st.st_size)
+        except Exception:
+            manifest_sig = None
+
+    cache_version = (
+        id(toolset),
+        getattr(toolset, "_change_events", None),
+        manifest_sig,
+        is_subagent,
+        eff_files_thr,
+        eff_lines_thr,
+        eff_sensitive,
+        eff_ignore,
+    )
+
+    if use_cache and turn is not None:
+        cached = _get_cached_summary(turn, cache_version)
+        if cached is not None:
+            return cached
+
     snapshots = _collect_checkpoint_snapshots(eff_checkpoint_store, eff_turn_id, root)
 
-    candidate_set: set[str] = set(snapshots.keys())
-    for raw_path in _collect_toolset_paths(toolset):
-        norm = _normalize_workspace_rel_path(raw_path, root)
-        if norm:
-            candidate_set.add(norm)
+    if is_subagent and toolset is not None:
+        candidate_set = set()
+        for raw_path in toolset_paths:
+            norm = _normalize_workspace_rel_path(raw_path, root)
+            if norm:
+                candidate_set.add(norm)
+    else:
+        candidate_set = set(snapshots.keys())
+        for raw_path in toolset_paths:
+            norm = _normalize_workspace_rel_path(raw_path, root)
+            if norm:
+                candidate_set.add(norm)
 
     counted_files = tuple(
         sorted(path for path in candidate_set if not matches_any_glob(path, eff_ignore))
@@ -458,7 +508,11 @@ def measure_turn_changes(
                 total_lines += delta
 
     sensitive_hits = (
-        tuple(path for path in counted_files if matches_any_glob(path, eff_sensitive))
+        tuple(
+            path
+            for path in counted_files
+            if matches_any_glob(path, eff_sensitive, case_sensitive=False)
+        )
         if eff_sensitive
         else ()
     )
@@ -482,7 +536,7 @@ def measure_turn_changes(
     )
 
     if turn is not None:
-        _set_cached_summary(turn, summary)
+        _set_cached_summary(turn, summary, cache_version)
 
     return summary
 

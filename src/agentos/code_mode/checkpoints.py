@@ -37,7 +37,11 @@ def _normalize_rel_path(raw_path: str, workspace_root: Path) -> str:
         return ""
     parts = PurePosixPath(cleaned).parts
     if ".." in parts:
-        return ""
+        try:
+            resolved = (workspace_root / cleaned).resolve()
+            return resolved.relative_to(workspace_root).as_posix()
+        except ValueError:
+            return ""
     return PurePosixPath(*parts).as_posix()
 
 
