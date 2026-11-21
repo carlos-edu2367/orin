@@ -481,6 +481,7 @@ class ApiServices:
         quota_service: object | None = None,
         quota_poller: object | None = None,
         context_observations: object | None = None,
+        verification_reviews: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -523,6 +524,7 @@ class ApiServices:
         self.quota_service = quota_service
         self.quota_poller = quota_poller
         self.context_observations = context_observations
+        self.verification_reviews = verification_reviews
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
@@ -3282,6 +3284,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_settings_routes(app, services, principal_for, conversation_root)
     from .orchestration_settings_routes import register_orchestration_settings_routes
     register_orchestration_settings_routes(app, services, principal_for, conversation_root)
+    from .verifier_metrics_routes import register_verifier_metrics_routes
+    register_verifier_metrics_routes(app, services, principal_for)
     register_conversation_routes(app, services, principal_for, conversation_root)
     from .friend_routes import register_friend_routes
     register_friend_routes(app, services, principal_for)

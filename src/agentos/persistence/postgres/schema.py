@@ -1382,6 +1382,56 @@ model_context_observations = Table(
     Column("invalidated_at", DateTime(timezone=True), nullable=True),
 )
 
+verification_reviews = Table(
+    "verification_reviews",
+    metadata,
+    Column("review_id", String(64), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("conversation_id", String(255), nullable=False),
+    Column("turn_id", String(255), nullable=False),
+    Column("agent_id", String(255), nullable=False, server_default=""),
+    Column("round", SmallInteger, nullable=False),
+    Column("trigger_reason", String(32), nullable=False),
+    Column("files_changed", Integer, nullable=False, server_default="0"),
+    Column("lines_changed", Integer, nullable=False, server_default="0"),
+    Column("author_provider", String(64), nullable=False),
+    Column("author_model", String(128), nullable=False),
+    Column("author_effort", String(16), nullable=True),
+    Column("reviewer_provider", String(64), nullable=True),
+    Column("reviewer_model", String(128), nullable=True),
+    Column("reviewer_effort", String(16), nullable=True),
+    Column("policy", String(16), nullable=False),
+    Column("fallback_step", SmallInteger, nullable=False),
+    Column("verdict", String(16), nullable=False),
+    Column("input_tokens", Integer, nullable=False, server_default="0"),
+    Column("output_tokens", Integer, nullable=False, server_default="0"),
+    Column("cost_usd", Numeric(12, 6), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index(
+    "ix_verification_reviews_user_started",
+    verification_reviews.c.user_id,
+    verification_reviews.c.started_at,
+)
+Index(
+    "ix_verification_reviews_conversation_turn",
+    verification_reviews.c.conversation_id,
+    verification_reviews.c.turn_id,
+)
+
+verification_findings = Table(
+    "verification_findings",
+    metadata,
+    Column("review_id", String(64), primary_key=True),
+    Column("finding_id", String(64), primary_key=True),
+    Column("severity", String(16), nullable=False),
+    Column("category", String(16), nullable=False),
+    Column("has_evidence", Boolean, nullable=False),
+    Column("resolution", String(16), nullable=True),
+    Column("resolution_reason", String(1000), nullable=True),
+)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -1441,5 +1491,7 @@ __all__ = [
     "discord_interaction_bindings",
     "subscription_quota_snapshots",
     "model_context_observations",
+    "verification_reviews",
+    "verification_findings",
     "create_engine_for_tests",
 ]
