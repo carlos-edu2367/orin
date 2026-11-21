@@ -11,6 +11,7 @@ from agentos.agentic.lifecycle import HookEvent
 from agentos.settings import EffectiveSettings
 
 HANDLER_TYPES = ("command", "http", "prompt", "agent", "callback")
+AGENT_HOOK_AGENTS = ("explore", "verifier")
 DEFAULT_TIMEOUTS = {"command": 60, "http": 30, "prompt": 30, "agent": 120, "callback": 60}
 _CALLBACK_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 MAX_TIMEOUT = 600
@@ -32,6 +33,7 @@ class HookSpec:
     allowed_env_vars: tuple[str, ...] = ()
     prompt: str = ""
     model: str = ""
+    agent: str = ""
     run_async: bool = False
     on_failure: str = "ignore"
     status_message: str = ""
@@ -42,7 +44,7 @@ class HookSpec:
     callback_id: str = ""
 
     def identity(self) -> tuple[Any, ...]:
-        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root, self.callback_id)
+        return (self.event, self.type, self.command, self.url, self.prompt, self.matcher, self.plugin_root, self.callback_id, self.agent)
 
     def label(self) -> str:
         if self.type == "command":
@@ -101,6 +103,17 @@ def _entry(event: HookEvent, matcher: str, source: str, raw: Any) -> HookSpec | 
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_TEXT:
         return f"{kind} hook needs a non-empty 'prompt'"
     model = raw.get("model") if isinstance(raw.get("model"), str) else ""
+    if kind == "agent":
+        raw_agent = raw.get("agent")
+        if raw_agent is None or raw_agent == "":
+            agent = ""
+        elif isinstance(raw_agent, str):
+            agent = raw_agent.strip().lower()
+            if agent not in {"", *AGENT_HOOK_AGENTS}:
+                return f"agent hook 'agent' must be 'explore' or 'verifier' (got '{raw_agent}')"
+        else:
+            return "agent hook 'agent' must be 'explore' or 'verifier'"
+        return HookSpec(**common, prompt=prompt.strip(), model=model.strip()[:200], agent=agent)
     return HookSpec(**common, prompt=prompt.strip(), model=model.strip()[:200])
 
 
@@ -176,6 +189,8 @@ def load_hook_specs(settings: EffectiveSettings) -> tuple[tuple[HookSpec, ...], 
     errors: list[HookConfigError] = []
     for layer in ordered:
         if (managed_only or non_managed_off) and layer.name != "managed":
+            continue
+        if not settings.trusted and layer.name in {"project", "local"}:
             continue
         declared = layer.data.get("hooks")
         if declared is None:

@@ -5,6 +5,75 @@ import { Card, describeError, ErrorNote, FolderBanner, LAYER_LABEL, useFolderCon
 
 const LAYERS: readonly WritableLayer[] = ['user', 'project', 'local']
 export const HOOKS_TEXT_MAX = 200_000
+export const AGENT_HOOK_AGENTS = ['explore', 'verifier'] as const
+export type AgentHookAgent = (typeof AGENT_HOOK_AGENTS)[number]
+const HOOK_TYPES = ['command', 'http', 'prompt', 'agent'] as const
+type EditableHookType = (typeof HOOK_TYPES)[number]
+const HOOK_EVENTS = ['Stop', 'PreToolUse', 'PostToolUse', 'SubagentStop', 'UserPromptSubmit', 'SessionStart'] as const
+
+type AgentHookEntryRef = {
+  event: string
+  groupIndex: number
+  hookIndex: number
+  prompt: string
+  agent: AgentHookAgent
+}
+
+function normalizeAgentChoice(raw: unknown): AgentHookAgent {
+  return typeof raw === 'string' && raw.trim().toLowerCase() === 'verifier' ? 'verifier' : 'explore'
+}
+
+export function listAgentHooks(hooks: Record<string, unknown>): AgentHookEntryRef[] {
+  const found: AgentHookEntryRef[] = []
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue
+    groups.forEach((group, groupIndex) => {
+      if (typeof group !== 'object' || group === null || Array.isArray(group)) return
+      const entries = (group as Record<string, unknown>).hooks
+      if (!Array.isArray(entries)) return
+      entries.forEach((entry, hookIndex) => {
+        if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return
+        const rec = entry as Record<string, unknown>
+        if (rec.type === 'agent') {
+          found.push({
+            event,
+            groupIndex,
+            hookIndex,
+            prompt: typeof rec.prompt === 'string' ? rec.prompt : '',
+            agent: normalizeAgentChoice(rec.agent),
+          })
+        }
+      })
+    })
+  }
+  return found
+}
+
+export function setAgentHookSelection(
+  hooks: Record<string, unknown>,
+  event: string,
+  groupIndex: number,
+  hookIndex: number,
+  agent: AgentHookAgent,
+): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...hooks }
+  const groups = next[event]
+  if (!Array.isArray(groups) || !groups[groupIndex]) return next
+  const nextGroups = [...groups]
+  const rawGroup = nextGroups[groupIndex]
+  if (typeof rawGroup !== 'object' || rawGroup === null || Array.isArray(rawGroup)) return next
+  const groupObj = { ...(rawGroup as Record<string, unknown>) }
+  const entries = groupObj.hooks
+  if (!Array.isArray(entries) || !entries[hookIndex]) return next
+  const nextEntries = [...entries]
+  const rawEntry = nextEntries[hookIndex]
+  if (typeof rawEntry !== 'object' || rawEntry === null || Array.isArray(rawEntry)) return next
+  nextEntries[hookIndex] = { ...(rawEntry as Record<string, unknown>), agent }
+  groupObj.hooks = nextEntries
+  nextGroups[groupIndex] = groupObj
+  next[event] = nextGroups
+  return next
+}
 
 /** The JSON of a layer's `hooks` object as the person edits it; `null` when it is not an object of event lists. */
 export function parseHooksText(text: string): { hooks: Record<string, unknown> | null; error: string | null } {
@@ -32,7 +101,38 @@ function LayerEditor({ layer, entry, onSave }: {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<ReturnType<typeof describeError> | null>(null)
   const [saved, setSaved] = useState(false)
+  const [newEvent, setNewEvent] = useState<string>(HOOK_EVENTS[0])
+  const [newType, setNewType] = useState<EditableHookType>('command')
+  const [newAgent, setNewAgent] = useState<AgentHookAgent>('explore')
+  const [newValue, setNewValue] = useState('')
   const parsed = parseHooksText(text)
+  const agentHooks = parsed.hooks ? listAgentHooks(parsed.hooks) : []
+
+  function updateAgentChoice(item: AgentHookEntryRef, agent: AgentHookAgent) {
+    if (!parsed.hooks) return
+    const next = setAgentHookSelection(parsed.hooks, item.event, item.groupIndex, item.hookIndex, agent)
+    setText(JSON.stringify(next, null, 2))
+    setSaved(false)
+  }
+
+  function addHookEntry() {
+    if (!parsed.hooks || !newValue.trim()) return
+    const next: Record<string, unknown> = { ...parsed.hooks }
+    const existing = Array.isArray(next[newEvent]) ? [...(next[newEvent] as unknown[])] : []
+    const spec: Record<string, unknown> =
+      newType === 'command'
+        ? { type: 'command', command: newValue.trim() }
+        : newType === 'http'
+          ? { type: 'http', url: newValue.trim() }
+          : newType === 'prompt'
+            ? { type: 'prompt', prompt: newValue.trim() }
+            : { type: 'agent', prompt: newValue.trim(), agent: newAgent }
+    existing.push({ matcher: '', hooks: [spec] })
+    next[newEvent] = existing
+    setText(JSON.stringify(next, null, 2))
+    setNewValue('')
+    setSaved(false)
+  }
 
   async function save() {
     if (!parsed.hooks) return
@@ -52,9 +152,80 @@ function LayerEditor({ layer, entry, onSave }: {
   }
 
   const id = `hooks-${layer}`
+  const valuePlaceholder =
+    newType === 'command' ? 'Comando shell' : newType === 'http' ? 'https://...' : 'Instrução do prompt'
   return (
     <Card title={LAYER_LABEL[layer]} id={`${id}-title`}>
       <p className="code-settings__file">{entry.file}</p>
+      {agentHooks.length > 0 && (
+        <div className="code-settings__agent-hooks">
+          <p className="code-settings__label">Hooks do tipo agente</p>
+          {agentHooks.map((item) => {
+            const selectId = `${id}-agent-${item.event}-${item.groupIndex}-${item.hookIndex}`
+            return (
+              <div key={selectId} className="code-settings__row">
+                <span>
+                  <strong>{item.event}</strong>
+                  {item.prompt ? ` — ${item.prompt.slice(0, 60)}` : ''}
+                </span>
+                <label htmlFor={selectId} className="code-settings__label">Agente</label>
+                <select
+                  id={selectId}
+                  value={item.agent}
+                  onChange={(event) => updateAgentChoice(item, normalizeAgentChoice(event.target.value))}
+                >
+                  {AGENT_HOOK_AGENTS.map((option) => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      <div className="code-settings__row">
+        <label htmlFor={`${id}-new-event`} className="code-settings__label">Evento</label>
+        <select id={`${id}-new-event`} value={newEvent} onChange={(event) => setNewEvent(event.target.value)}>
+          {HOOK_EVENTS.map((ev) => <option key={ev} value={ev}>{ev}</option>)}
+        </select>
+        <label htmlFor={`${id}-new-type`} className="code-settings__label">Tipo</label>
+        <select
+          id={`${id}-new-type`}
+          value={newType}
+          onChange={(event) => setNewType(event.target.value as EditableHookType)}
+        >
+          {HOOK_TYPES.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+        </select>
+        {newType === 'agent' && (
+          <>
+            <label htmlFor={`${id}-new-agent`} className="code-settings__label">Agente</label>
+            <select
+              id={`${id}-new-agent`}
+              value={newAgent}
+              onChange={(event) => setNewAgent(normalizeAgentChoice(event.target.value))}
+            >
+              {AGENT_HOOK_AGENTS.map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+          </>
+        )}
+        <input
+          type="text"
+          aria-label="Conteúdo do novo hook"
+          placeholder={valuePlaceholder}
+          value={newValue}
+          onChange={(event) => setNewValue(event.target.value)}
+        />
+        <button
+          type="button"
+          className="button button--quiet"
+          disabled={!parsed.hooks || !newValue.trim()}
+          onClick={addHookEntry}
+        >
+          Adicionar hook
+        </button>
+      </div>
       <label htmlFor={id} className="code-settings__label">Hooks deste arquivo (JSON)</label>
       <textarea id={id} className="code-settings__code" spellCheck={false} rows={10} value={text}
         onChange={(event) => { setText(event.target.value); setSaved(false) }} />
@@ -112,7 +283,9 @@ export function HooksSection() {
                 <tbody>
                   {data.effective.map((hook, index) => (
                     <tr key={index}>
-                      <td>{hook.event}</td><td><code>{hook.matcher || '*'}</code></td><td>{hook.type}</td><td>{hook.source}</td>
+                      <td>{hook.event}</td><td><code>{hook.matcher || '*'}</code></td>
+                      <td>{hook.type === 'agent' ? `agent (${hook.agent || 'explore'})` : hook.type}</td>
+                      <td>{hook.source}</td>
                       <td><code>{hook.label}</code></td><td>{hook.timeout ? `${hook.timeout} s` : '—'}</td>
                     </tr>
                   ))}

@@ -1635,6 +1635,43 @@ class ChatWorker:
         allowed.discard("")
         return allowed
 
+    def _child_routing_catalog(self, turn: dict[str, object]) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...]]:
+        """Return ``(favorites_by_provider, configured_providers)`` for per-call child provider routing (WS-A1)."""
+        try:
+            with self.store._engine.connect() as connection:
+                allowed_providers = sorted(self._allowed_child_providers(connection, turn))
+                if not allowed_providers:
+                    return {}, ()
+                rows = connection.execute(
+                    select(
+                        provider_model_catalog.c.provider,
+                        provider_model_catalog.c.model_id,
+                    )
+                    .join(
+                        provider_model_favorites,
+                        (provider_model_favorites.c.user_id == provider_model_catalog.c.user_id)
+                        & (provider_model_favorites.c.provider == provider_model_catalog.c.provider)
+                        & (provider_model_favorites.c.model_id == provider_model_catalog.c.model_id),
+                    )
+                    .where(
+                        provider_model_catalog.c.user_id == turn["user_id"],
+                        provider_model_catalog.c.provider.in_(allowed_providers),
+                    )
+                    .order_by(provider_model_catalog.c.display_name, provider_model_catalog.c.model_id)
+                ).all()
+        except Exception:
+            return {}, ()
+        grouped: dict[str, list[str]] = {prov: [] for prov in allowed_providers}
+        for row in rows:
+            prov = str(row.provider or "").strip()
+            mid = str(row.model_id or "").strip()
+            if not prov or not mid or mid.lower().endswith(":batch"):
+                continue
+            bucket = grouped.setdefault(prov, [])
+            if mid not in bucket:
+                bucket.append(mid)
+        return {prov: tuple(models) for prov, models in grouped.items()}, tuple(allowed_providers)
+
     def _favorite_child_model_ids(self, turn: dict[str, object]) -> tuple[str, ...]:
         """Return this user's non-batch favorites across the active turn provider and enabled providers."""
         try:
@@ -2055,6 +2092,9 @@ class ChatWorker:
             child_model_ids=self._favorite_child_model_ids(turn),
             child_model_authorizer=lambda model_id: self._is_favorite_child_model(turn, model_id),
             agent_model_authorizer=lambda model_id, provider: self._is_agent_model_allowed(turn, model_id, provider),
+            favorites_by_provider=lambda: self._child_routing_catalog(turn)[0],
+            configured_providers=lambda: self._child_routing_catalog(turn)[1],
+            quota_service=getattr(self, "_quota_service", None),
             subagent_context_limits=lambda model_id, provider: self._context_limits_for(
                 {**turn, "model_id": model_id, "provider": provider or turn["provider"]}
             ),

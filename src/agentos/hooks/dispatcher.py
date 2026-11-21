@@ -56,6 +56,7 @@ class HookDispatcher:
                 "hook_event": spec.event.value, "source": spec.source, "type": spec.type, "label": spec.label(),
                 "status": status, "exit_code": exit_code, "blocked": bool(decision.blocked or decision.permission_decision == "deny"),
                 "reason": (decision.reason or "")[:300], "duration_ms": int((time.monotonic() - started) * 1000),
+                **({"agent": spec.agent or "explore"} if spec.type == "agent" else {}),
             })
         except Exception:  # noqa: BLE001 - recording never breaks a hook
             logger.debug("hook recorder failed", exc_info=True)
