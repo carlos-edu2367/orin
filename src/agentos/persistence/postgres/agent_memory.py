@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
+import logging
 from pathlib import Path
 import re
 from threading import Lock
@@ -18,6 +19,13 @@ from sqlalchemy import inspect, insert, select, text, update
 from sqlalchemy.engine import Engine
 
 from agentos.agentic.learning import is_ephemeral_mechanical_fact
+from agentos.memory.conflict import (
+    ExistingMemoryCandidate,
+    MAX_CONFLICT_CANDIDATES,
+    _has_polarity_inversion,
+    _is_short_slot_replacement,
+    compute_jaccard,
+)
 from agentos.memory.hybrid_index import MemoryHybridIndex
 from agentos.memory.models_write import (
     MemoryWriteCandidate,
@@ -25,12 +33,14 @@ from agentos.memory.models_write import (
     compute_text_hash,
     source_kind_from_legacy_source,
 )
-from agentos.memory.policy import IdentityWritePolicy, WritePolicy
+from agentos.memory.policy import WritePolicy, default_write_policy
 from agentos.memory.security import validate_memory_content
 from agentos.retrieval.ports import EmbeddingPort
 
 from .memory_lifecycle import MemoryLifecycle
 from .schema import agent_memories, memory_events
+
+logger = logging.getLogger(__name__)
 
 
 _WORD = re.compile(r"[\wÀ-ÿ]{3,}", re.UNICODE)
@@ -79,31 +89,6 @@ def _terms(text_val: str) -> set[str]:
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, float(value)))
-
-
-def _negated_targets(text_val: str) -> set[tuple[str, tuple[str, ...]]]:
-    targets: set[tuple[str, tuple[str, ...]]] = set()
-    raw = text_val or ""
-    for match in _NEGATION_RE.finditer(raw):
-        tail = raw[match.end() :]
-        clause = _NEG_CLAUSE_SPLIT_RE.split(tail, maxsplit=1)[0]
-        tokens = [
-            tok.lower()
-            for tok in _NEG_TARGET_WORD_RE.findall(clause)
-            if tok.lower() not in _NEG_FILLER_WORDS
-        ]
-        targets.add(("neg", tuple(tokens[:3])))
-    return targets
-
-
-def _has_polarity_inversion(text_a: str, text_b: str) -> bool:
-    neg_a = [m.group(0).lower() for m in _NEGATION_RE.finditer(text_a or "")]
-    neg_b = [m.group(0).lower() for m in _NEGATION_RE.finditer(text_b or "")]
-    if (bool(neg_a) != bool(neg_b)) or (len(neg_a) != len(neg_b)):
-        return True
-    if not neg_a and not neg_b:
-        return False
-    return _negated_targets(text_a) != _negated_targets(text_b)
 
 
 def _merge_tags(existing: Sequence[object] | None, incoming: Sequence[object] | None) -> list[str]:
@@ -170,7 +155,7 @@ class PostgresAgentMemoryStore:
         self._execution_id = execution_id
         self._explicit_scope_type = scope_type
         self._agent_key = str(agent_key).strip() if agent_key and str(agent_key).strip() else None
-        self._write_policy: WritePolicy = write_policy or IdentityWritePolicy()
+        self._write_policy: WritePolicy = write_policy or default_write_policy()
         self._lifecycle = MemoryLifecycle(engine)
         self._friend_turn_seq = 0
         self._recent_joke_turns: dict[str, int] = {}
@@ -267,6 +252,8 @@ class PostgresAgentMemoryStore:
                 conversation_id=context.conversation_id if context.conversation_id is not None else self._conversation_id,
                 turn_id=context.turn_id,
                 trust=int(context.trust),
+                existing_candidates=context.existing_candidates,
+                llm_adjudication=context.llm_adjudication,
             )
         else:
             inferred_kind, inferred_trust = source_kind_from_legacy_source(source)
@@ -292,6 +279,31 @@ class PostgresAgentMemoryStore:
         text_hash = compute_text_hash(normalized)
         target_supersede = str(supersedes_id).strip() if supersedes_id and str(supersedes_id).strip() else None
 
+        conflict_candidates = (
+            effective_context.existing_candidates
+            if effective_context.existing_candidates
+            else self._find_conflict_candidates(
+                normalized,
+                kind,
+                scope_type=effective_scope,
+                project_id=effective_project_id,
+                agent_key=resolved_agent_key,
+                text_hash=text_hash,
+                limit=MAX_CONFLICT_CANDIDATES,
+            )
+        )
+        policy_context = MemoryWriteContext(
+            source_kind=effective_context.source_kind,
+            source_ref=effective_context.source_ref,
+            actor=effective_context.actor,
+            agent_key=effective_context.agent_key,
+            conversation_id=effective_context.conversation_id,
+            turn_id=effective_context.turn_id,
+            trust=effective_context.trust,
+            existing_candidates=conflict_candidates,
+            llm_adjudication=effective_context.llm_adjudication,
+        )
+
         candidate = MemoryWriteCandidate(
             fact=normalized,
             text_hash=text_hash,
@@ -304,7 +316,7 @@ class PostgresAgentMemoryStore:
             tags=tuple(str(t) for t in tags),
             supersedes_id=target_supersede,
         )
-        decision = self._write_policy.decide(candidate, effective_context)
+        decision = self._write_policy.decide(candidate, policy_context)
 
         scope_predicate = (
             agent_memories.c.project_id == effective_project_id
@@ -340,8 +352,14 @@ class PostgresAgentMemoryStore:
                     "status": "deleted",
                 }
 
-            # Policy-driven non-default actions (hooks for D3 conflict resolution & D4 quarantine).
+            # Policy-driven non-default actions (D3 conflict resolution & D4 quarantine).
             if decision.action == "noop" and decision.target_id:
+                existing_target = connection.execute(
+                    select(agent_memories.c.fact).where(
+                        agent_memories.c.memory_id == decision.target_id,
+                        agent_memories.c.user_id == self._user_id,
+                    )
+                ).mappings().first()
                 connection.execute(
                     update(agent_memories)
                     .where(
@@ -352,11 +370,12 @@ class PostgresAgentMemoryStore:
                 )
                 return {
                     "memory_id": decision.target_id,
-                    "fact": normalized,
+                    "fact": str(existing_target["fact"]) if existing_target else normalized,
                     "created": False,
                     "superseded": [],
                     "status": decision.status,
                     "decision": "noop",
+                    "reason": decision.reason,
                 }
 
             if decision.action in {"quarantine", "conflict"}:
@@ -408,26 +427,59 @@ class PostgresAgentMemoryStore:
                     created_at=now,
                 )
                 if decision.action == "conflict" and decision.target_id:
+                    conflicting_row = connection.execute(
+                        select(agent_memories.c.fact).where(
+                            agent_memories.c.memory_id == decision.target_id,
+                            agent_memories.c.user_id == self._user_id,
+                        )
+                    ).mappings().first()
+                    existing_old_fact = str(conflicting_row["fact"]) if conflicting_row else None
                     self._lifecycle.record_event(
                         connection,
                         memory_id=decision.target_id,
                         user_id=self._user_id,
                         event="conflict",
                         actor=effective_context.actor,
+                        old_text=existing_old_fact,
                         new_text=normalized,
                         related_id=memory_id,
                         conversation_id=effective_context.conversation_id,
                         turn_id=effective_context.turn_id,
                         created_at=now,
                     )
-                return {
+                if decision.action == "conflict":
+                    logger.info(
+                        "memory.conflict user_id=%s scope=%s kind=%s reason=%s existing_id=%s proposed_id=%s",
+                        self._user_id,
+                        effective_scope,
+                        kind,
+                        decision.reason,
+                        decision.target_id,
+                        memory_id,
+                        extra={
+                            "event": "memory.conflict",
+                            "user_id": self._user_id,
+                            "scope_type": effective_scope,
+                            "project_id": effective_project_id,
+                            "kind": kind,
+                            "reason": decision.reason,
+                            "existing_memory_id": decision.target_id,
+                            "proposed_memory_id": memory_id,
+                            "source_kind": effective_context.source_kind,
+                        },
+                    )
+                receipt: dict[str, object] = {
                     "memory_id": memory_id,
                     "fact": normalized,
                     "created": True,
                     "superseded": [],
                     "status": row_status,
                     "decision": decision.action,
+                    "reason": decision.reason,
                 }
+                if decision.action == "conflict" and decision.target_id:
+                    receipt["conflict_with"] = decision.target_id
+                return receipt
 
             # Exact active match by text_hash in the same scope -> update in-place & audit event
             existing_row = connection.execute(
@@ -493,12 +545,29 @@ class PostgresAgentMemoryStore:
             # Policy-driven explicit supersede target
             if decision.action == "supersede" and decision.target_id:
                 memory_id = f"mem_{uuid4().hex}"
+                old_target_row = connection.execute(
+                    select(agent_memories).where(
+                        agent_memories.c.memory_id == decision.target_id,
+                        agent_memories.c.user_id == self._user_id,
+                    )
+                ).mappings().first()
+                effective_tags = (
+                    _merge_tags(old_target_row.get("tags"), tags)
+                    if old_target_row is not None and decision.reason == "near_duplicate_or_replacement"
+                    else list(tags)
+                )
+                effective_conf = (
+                    max(float(old_target_row.get("confidence") or 0.0), float(confidence))
+                    if old_target_row is not None and decision.reason == "near_duplicate_or_replacement"
+                    else float(confidence)
+                )
                 superseded = self._supersede_by_id(
                     connection,
                     decision.target_id,
                     memory_id,
                     now,
                     actor=effective_context.actor,
+                    old_text=str(old_target_row.get("fact") or "") if old_target_row is not None else None,
                     new_text=normalized,
                     conversation_id=effective_context.conversation_id,
                     turn_id=effective_context.turn_id,
@@ -527,9 +596,9 @@ class PostgresAgentMemoryStore:
                         source_message_id=None,
                         source_execution_id=self._execution_id,
                         fact=normalized,
-                        tags=list(tags),
+                        tags=effective_tags,
                         kind=kind,
-                        confidence=confidence,
+                        confidence=effective_conf,
                         emotional_valence=valence,
                         salience=salience_val,
                         source=source,
@@ -560,7 +629,15 @@ class PostgresAgentMemoryStore:
                     turn_id=effective_context.turn_id,
                     created_at=now,
                 )
-                return {"memory_id": memory_id, "fact": normalized, "created": True, "superseded": superseded}
+                return {
+                    "memory_id": memory_id,
+                    "fact": normalized,
+                    "created": True,
+                    "superseded": superseded,
+                    "status": decision.status or "active",
+                    "decision": "supersede",
+                    "reason": decision.reason,
+                }
 
             # D-RF3: Near-duplicate creates a new version and supersedes the old one, preserving old_text in memory_events.
             near_dup = self._find_near_duplicate(
@@ -714,6 +791,89 @@ class PostgresAgentMemoryStore:
                 created_at=now,
             )
         return {"memory_id": memory_id, "fact": normalized, "created": True, "superseded": superseded}
+
+    def _find_conflict_candidates(
+        self,
+        fact: str,
+        kind: str,
+        *,
+        scope_type: str,
+        project_id: str | None,
+        agent_key: str | None = None,
+        text_hash: str,
+        limit: int = MAX_CONFLICT_CANDIDATES,
+    ) -> tuple[ExistingMemoryCandidate, ...]:
+        """Return up to ``limit`` (5) active memories in the same scope and kind most similar to ``fact``."""
+        scope_predicate = (
+            agent_memories.c.project_id == project_id
+            if project_id
+            else agent_memories.c.project_id.is_(None)
+        )
+        agent_key_predicate = (
+            agent_memories.c.agent_key == agent_key
+            if agent_key
+            else agent_memories.c.agent_key.is_(None)
+        )
+        with self._engine.connect() as connection:
+            rows = [
+                dict(row)
+                for row in connection.execute(
+                    select(agent_memories).where(
+                        agent_memories.c.user_id == self._user_id,
+                        agent_memories.c.scope_type == scope_type,
+                        agent_memories.c.kind == kind,
+                        agent_memories.c.status == "active",
+                        agent_memories.c.superseded_by.is_(None),
+                        scope_predicate,
+                        agent_key_predicate,
+                    )
+                )
+                .mappings()
+                .all()
+            ]
+        if not rows:
+            return ()
+
+        fts_ranks: dict[str, float] = {}
+        sem_scores: dict[str, float] = {}
+        try:
+            self._hybrid_index.sync(rows, prune_missing=False)
+            search_limit = max(25, len(rows))
+            fts_ranks = dict(self._hybrid_index.search_lexical(fact, limit=search_limit))
+            embedder = getattr(self._hybrid_index, "_embedder", None)
+            if embedder is not None and getattr(embedder.identity, "embedder_id", "lexical") != "lexical":
+                q_vecs = embedder.embed([fact])
+                if q_vecs and q_vecs[0]:
+                    sem_hits = self._hybrid_index.search_vector(
+                        q_vecs[0],
+                        limit=search_limit,
+                        min_similarity=0.0,
+                    )
+                    sem_scores = dict(sem_hits)
+        except Exception:  # noqa: BLE001 - hybrid index issues must not block memory writes
+            pass
+
+        scored: list[tuple[tuple[int, int, float, float, int, float], ExistingMemoryCandidate]] = []
+        for row in rows:
+            mid = str(row.get("memory_id") or "")
+            if not mid:
+                continue
+            row_fact = str(row.get("fact") or "")
+            row_hash = str(row.get("text_hash") or "").strip() or compute_text_hash(row_fact)
+            exact = 1 if row_hash == text_hash else 0
+            sem = sem_scores.get(mid)
+            jac = compute_jaccard(fact, row_fact)
+            short_rep = 1 if _is_short_slot_replacement(fact, row_fact) else 0
+            fts_hit = 1 if mid in fts_ranks else 0
+            fts_score = -fts_ranks[mid] if mid in fts_ranks else 0.0
+            if not (exact or short_rep or jac > 0.0 or fts_hit or (sem is not None and sem >= 0.50)):
+                continue
+            cand = ExistingMemoryCandidate.from_any(row, semantic_similarity=sem)
+            key = (exact, short_rep, sem if sem is not None else 0.0, jac, fts_hit, fts_score)
+            scored.append((key, cand))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return tuple(cand for _, cand in scored[: max(1, int(limit))])
 
     def _find_near_duplicate(
         self,

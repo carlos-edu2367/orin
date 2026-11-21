@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
+from .conflict import ConflictResolver
+from .conflict_adjudicator import ConflictAdjudicator
 from .models_write import MemoryWriteContext, WriteDecision
 
 
@@ -46,8 +48,19 @@ class WritePolicyChain:
         return WriteDecision(action="add", target_id=None, status="active", reason="identity")
 
 
-def default_write_policy() -> WritePolicy:
-    return IdentityWritePolicy()
+def default_write_policy(
+    *,
+    adjudicator: ConflictAdjudicator | None = None,
+    llm_adjudication_enabled: bool | Callable[[], bool] | None = None,
+) -> WritePolicy:
+    return WritePolicyChain(
+        (
+            ConflictResolver(
+                adjudicator=adjudicator,
+                llm_adjudication_enabled=llm_adjudication_enabled,
+            ),
+        )
+    )
 
 
 __all__ = [

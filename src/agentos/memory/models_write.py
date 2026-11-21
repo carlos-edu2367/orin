@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import re
-from typing import Literal
+from typing import Any, Literal
 
 SourceKind = Literal["user", "agent", "tool", "web", "file", "consolidator"]
 MemoryStatus = Literal["active", "proposed", "quarantined", "superseded", "invalid", "deleted"]
@@ -47,6 +47,8 @@ class MemoryWriteContext:
     conversation_id: str | None = None
     turn_id: str | None = None
     trust: int = 1
+    existing_candidates: tuple[Any, ...] = ()
+    llm_adjudication: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
