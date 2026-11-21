@@ -38,6 +38,7 @@ class AgentActivityEventType(StrEnum):
     AGENT_CREATED = "agent.created"
     MEMORY_LEARNED = "memory.learned"
     MEMORY_CONFLICT = "memory.conflict"
+    MEMORY_QUARANTINED = "memory.quarantined"
     AGENT_MESSAGE_SENT = "agent.message_sent"
     AGENT_MESSAGE_RECEIVED = "agent.message_received"
     AGENT_MESSAGE_QUEUED = "agent.message_queued"

@@ -8,6 +8,7 @@ from typing import Any, Protocol, runtime_checkable
 from .conflict import ConflictResolver
 from .conflict_adjudicator import ConflictAdjudicator
 from .models_write import MemoryWriteContext, WriteDecision
+from .quarantine import QuarantinePolicy
 
 
 @runtime_checkable
@@ -50,11 +51,20 @@ class WritePolicyChain:
 
 def default_write_policy(
     *,
+    quarantine_enabled: bool | Callable[[], bool] = True,
+    settings_provider: Callable[[], Any] | None = None,
+    on_quarantined: Callable[[Any, MemoryWriteContext, WriteDecision], None] | None = None,
     adjudicator: ConflictAdjudicator | None = None,
     llm_adjudication_enabled: bool | Callable[[], bool] | None = None,
-) -> WritePolicy:
+) -> WritePolicyChain:
+    """Return the default composable memory write policy chain (Quarantine -> Conflict)."""
     return WritePolicyChain(
         (
+            QuarantinePolicy(
+                enabled=quarantine_enabled,
+                settings_provider=settings_provider,
+                on_quarantined=on_quarantined,
+            ),
             ConflictResolver(
                 adjudicator=adjudicator,
                 llm_adjudication_enabled=llm_adjudication_enabled,
@@ -65,6 +75,7 @@ def default_write_policy(
 
 __all__ = [
     "IdentityWritePolicy",
+    "QuarantinePolicy",
     "WritePolicy",
     "WritePolicyChain",
     "default_write_policy",

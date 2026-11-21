@@ -548,9 +548,9 @@ class MemoryConsolidator:
                     rows = []
         lines: list[str] = []
         ids: set[str] = set()
-        for row in rows[:30]:
+        for row in rows:
             status = row.get("status")
-            if status is not None and str(status) != "active":
+            if status is not None and str(status).strip().lower() != "active":
                 continue
             if row.get("superseded_by") is not None:
                 continue
@@ -562,6 +562,8 @@ class MemoryConsolidator:
             scope = str(row.get("scope") or row.get("scope_type") or "user").strip()
             ids.add(mid)
             lines.append(f"- [{mid}] ({kind}/{scope}): {fact}")
+            if len(lines) >= 30:
+                break
         return lines, ids
 
     def _collect_existing_skills(
@@ -606,7 +608,13 @@ class MemoryConsolidator:
         scope: str | None,
         is_legacy: bool,
     ) -> dict[str, Any] | None:
+        from agentos.memory.provenance import build_write_context_from_turn
+
         confidence = 0.75
+        write_ctx = build_write_context_from_turn(
+            {"is_consolidator": True, "conversation_id": self.conversation_id},
+            actor="consolidator",
+        )
         if not is_legacy and scope in VALID_MEMORY_SCOPES:
             try:
                 res = self.memory_store.save(
@@ -616,18 +624,41 @@ class MemoryConsolidator:
                     confidence=confidence,
                     source="consolidation",
                     scope_type=scope,
+                    context=write_ctx,
                 )
                 return dict(res) if isinstance(res, Mapping) else {"created": True}
             except TypeError:
-                pass
-        res = self.memory_store.save(
-            fact,
-            tags,
-            kind=kind,
-            confidence=confidence,
-            source="consolidation",
-        )
-        return dict(res) if isinstance(res, Mapping) else {"created": True}
+                try:
+                    res = self.memory_store.save(
+                        fact,
+                        tags,
+                        kind=kind,
+                        confidence=confidence,
+                        source="consolidation",
+                        scope_type=scope,
+                    )
+                    return dict(res) if isinstance(res, Mapping) else {"created": True}
+                except TypeError:
+                    pass
+        try:
+            res = self.memory_store.save(
+                fact,
+                tags,
+                kind=kind,
+                confidence=confidence,
+                source="consolidation",
+                context=write_ctx,
+            )
+            return dict(res) if isinstance(res, Mapping) else {"created": True}
+        except TypeError:
+            res = self.memory_store.save(
+                fact,
+                tags,
+                kind=kind,
+                confidence=confidence,
+                source="consolidation",
+            )
+            return dict(res) if isinstance(res, Mapping) else {"created": True}
 
     def run(
         self,

@@ -7,12 +7,13 @@ Reciprocal Rank Fusion, recency, project affinity, usage and confidence).
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 import logging
 from pathlib import Path
 import re
 from threading import Lock
+from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import inspect, insert, select, text, update
@@ -30,6 +31,7 @@ from agentos.memory.hybrid_index import MemoryHybridIndex
 from agentos.memory.models_write import (
     MemoryWriteCandidate,
     MemoryWriteContext,
+    WriteDecision,
     compute_text_hash,
     source_kind_from_legacy_source,
 )
@@ -143,6 +145,7 @@ class PostgresAgentMemoryStore:
         scope_type: str | None = None,
         agent_key: str | None = None,
         write_policy: WritePolicy | None = None,
+        settings_provider: Callable[[], Any] | None = None,
         data_dir: Path | str | None = None,
         index_path: Path | str | None = None,
         embedder: EmbeddingPort | None = None,
@@ -155,7 +158,12 @@ class PostgresAgentMemoryStore:
         self._execution_id = execution_id
         self._explicit_scope_type = scope_type
         self._agent_key = str(agent_key).strip() if agent_key and str(agent_key).strip() else None
-        self._write_policy: WritePolicy = write_policy or default_write_policy()
+        self._settings_provider: Callable[[], Any] | None = settings_provider
+        self._write_policy: WritePolicy = (
+            write_policy
+            if write_policy is not None
+            else default_write_policy(settings_provider=self._resolve_settings)
+        )
         self._lifecycle = MemoryLifecycle(engine)
         self._friend_turn_seq = 0
         self._recent_joke_turns: dict[str, int] = {}
@@ -189,6 +197,13 @@ class PostgresAgentMemoryStore:
     def lifecycle(self) -> MemoryLifecycle:
         return self._lifecycle
 
+    def set_settings_provider(self, provider: Callable[[], Any] | None) -> None:
+        """Bind a runtime settings provider (e.g. session EffectiveSettings) for policies like QuarantinePolicy."""
+        self._settings_provider = provider
+
+    def _resolve_settings(self) -> Any:
+        return self._settings_provider() if callable(self._settings_provider) else None
+
     @property
     def _scope_type(self) -> str:
         if self._explicit_scope_type:
@@ -215,6 +230,7 @@ class PostgresAgentMemoryStore:
         supersedes_id: str | None = None,
         context: MemoryWriteContext | None = None,
         agent_key: str | None = None,
+        quarantine_enabled: bool | None = None,
     ) -> dict[str, object]:
         now = datetime.now(UTC)
         normalized = " ".join(str(fact or "").split())[:MAX_FACT_CHARS]
@@ -317,6 +333,8 @@ class PostgresAgentMemoryStore:
             supersedes_id=target_supersede,
         )
         decision = self._write_policy.decide(candidate, policy_context)
+        if quarantine_enabled is False and decision.action == "quarantine":
+            decision = ConflictResolver().decide(candidate, policy_context)
 
         scope_predicate = (
             agent_memories.c.project_id == effective_project_id
@@ -476,6 +494,9 @@ class PostgresAgentMemoryStore:
                     "status": row_status,
                     "decision": decision.action,
                     "reason": decision.reason,
+                    "source_kind": effective_context.source_kind,
+                    "source_ref": effective_context.source_ref,
+                    "trust": effective_context.trust,
                 }
                 if decision.action == "conflict" and decision.target_id:
                     receipt["conflict_with"] = decision.target_id
@@ -540,7 +561,16 @@ class PostgresAgentMemoryStore:
                     if target_supersede and target_supersede != existing_id
                     else []
                 )
-                return {"memory_id": existing_id, "fact": normalized, "created": False, "superseded": superseded}
+                return {
+                    "memory_id": existing_id,
+                    "fact": normalized,
+                    "created": False,
+                    "superseded": superseded,
+                    "status": "active",
+                    "source_kind": effective_context.source_kind,
+                    "source_ref": effective_context.source_ref,
+                    "trust": effective_context.trust,
+                }
 
             # Policy-driven explicit supersede target
             if decision.action == "supersede" and decision.target_id:
@@ -637,6 +667,9 @@ class PostgresAgentMemoryStore:
                     "status": decision.status or "active",
                     "decision": "supersede",
                     "reason": decision.reason,
+                    "source_kind": effective_context.source_kind,
+                    "source_ref": effective_context.source_ref,
+                    "trust": effective_context.trust,
                 }
 
             # D-RF3: Near-duplicate creates a new version and supersedes the old one, preserving old_text in memory_events.
@@ -723,7 +756,16 @@ class PostgresAgentMemoryStore:
                     turn_id=effective_context.turn_id,
                     created_at=now,
                 )
-                return {"memory_id": memory_id, "fact": normalized, "created": True, "superseded": superseded}
+                return {
+                    "memory_id": memory_id,
+                    "fact": normalized,
+                    "created": True,
+                    "superseded": superseded,
+                    "status": decision.status or "active",
+                    "source_kind": effective_context.source_kind,
+                    "source_ref": effective_context.source_ref,
+                    "trust": effective_context.trust,
+                }
 
             memory_id = f"mem_{uuid4().hex}"
             superseded = (
@@ -790,7 +832,16 @@ class PostgresAgentMemoryStore:
                 turn_id=effective_context.turn_id,
                 created_at=now,
             )
-        return {"memory_id": memory_id, "fact": normalized, "created": True, "superseded": superseded}
+        return {
+            "memory_id": memory_id,
+            "fact": normalized,
+            "created": True,
+            "superseded": superseded,
+            "status": effective_status,
+            "source_kind": effective_context.source_kind,
+            "source_ref": effective_context.source_ref,
+            "trust": effective_context.trust,
+        }
 
     def _find_conflict_candidates(
         self,
@@ -994,12 +1045,15 @@ class PostgresAgentMemoryStore:
         *,
         conversation_id: str | None = None,
         record_usage: bool = True,
+        include_non_active: bool = False,
     ) -> dict[str, object] | None:
         """Fetch one memory by id strictly isolated to ``self._user_id``.
 
         Follows supersession chains to return the latest active successor with
         ``superseded_from: <memory_id>``; returns a clear ``memória esquecida``
         marker when the memory (or its terminal successor) was tombstoned.
+        Quarantined, proposed, and invalid entries are hidden unless
+        ``include_non_active=True`` (used by the review API).
         """
         target_id = str(memory_id or "").strip()
         if not target_id:
@@ -1022,6 +1076,8 @@ class PostgresAgentMemoryStore:
             if followed:
                 marker["superseded_from"] = target_id
             return marker
+        if not include_non_active and status != "active":
+            return None
         if status == "active" and record_usage:
             self._record_usage([terminal], conversation_id=conversation_id)
         public = self._public(terminal)
@@ -1097,7 +1153,8 @@ class PostgresAgentMemoryStore:
         rows = [
             row
             for row in self._all()
-            if row["superseded_by"] is None
+            if str(row.get("status") or "active") == "active"
+            and row["superseded_by"] is None
             and not (row.get("source") == "mechanical" and is_ephemeral_mechanical_fact(str(row.get("fact") or "")))
         ]
         if not rows:
@@ -1180,8 +1237,14 @@ class PostgresAgentMemoryStore:
         self._friend_turn_seq += 1
         now = datetime.now(UTC)
 
-        layer1_rows = [row for row in self._all() if row["superseded_by"] is None]
-        layer2_rows = [row for row in self._all_friend() if row["superseded_by"] is None]
+        layer1_rows = [
+            row for row in self._all()
+            if str(row.get("status") or "active") == "active" and row["superseded_by"] is None
+        ]
+        layer2_rows = [
+            row for row in self._all_friend()
+            if str(row.get("status") or "active") == "active" and row["superseded_by"] is None
+        ]
 
         if not layer2_rows:
             return self.relevant(task, limit=limit, conversation_id=conversation_id)

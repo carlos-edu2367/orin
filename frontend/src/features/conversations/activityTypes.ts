@@ -153,6 +153,7 @@ export type AgentActivityEventType =
   | 'context.window_learned'
   | 'memory.learned'
   | 'memory.conflict'
+  | 'memory.quarantined'
   | 'workspace.trust_required'
   | 'todo.updated'
   | 'code_mode.activated'
@@ -457,6 +458,7 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   if (
     type === 'memory.learned' ||
     type === 'memory.conflict' ||
+    type === 'memory.quarantined' ||
     type === 'notification.pushed' ||
     type === 'todo.updated' ||
     type === 'TODO_UPDATED'
