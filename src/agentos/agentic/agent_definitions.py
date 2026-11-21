@@ -243,12 +243,14 @@ VERIFIER = AgentDefinition(
     ),
     prompt=(
         "You verify work another agent says is done. Read the relevant changes, run the project's own tests, linters "
-        "and builds when they exist, and try the behaviour that was asked for. Report plainly: what you checked, what "
-        "passed, what failed (with the exact command and output), and anything you could not check. Do not fix "
-        "anything and do not change files."
+        "and builds when they exist, and try the behaviour that was asked for. Finish by calling `ReportVerification` "
+        "with `verdict` (`pass`|`fail`|`inconclusive`), `checked` (`[{command, exit_code, summary}]`), `findings` "
+        "(`[{id, severity, category, claim, evidence}]`, where `evidence` is `failing_test`/`command` with "
+        "`command`+`exit_code` or `code_ref` with `file`+`line`+`reason`; unproven findings downgrade to `unproven`), "
+        "and `unverified`. Do not fix anything and do not change files."
     ),
     origin="builtin",
-    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch", "Remember", "Recall"),
+    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch", "ReportVerification", "Remember", "Recall"),
     memory="project",
 )
 BUILTIN_DEFINITIONS = (VERIFIER,)

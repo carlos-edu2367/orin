@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "read_file", "view_file", "transcribe_pdf", "list_files", "search_files", "search_code", "glob_files",
     "project_map", "todo_write", "task_create", "task_update", "task_get", "task_list",
-    "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification",
+    "enter_plan_mode", "exit_plan_mode", "write_contract", "report_verification", "resolve_findings",
     "search_skills", "list_skills", "read_skill_resource", "recall", "check_subagent", "read_process_output",
     "preview_logs", "preview_open", "search_mcp_tools", "inspect_mcp_server", "list_mcp_servers", "list_mcp_catalog",
     "list_plugins", "search_plugin", "list_projects", "read_project_conversation", "cron_list",

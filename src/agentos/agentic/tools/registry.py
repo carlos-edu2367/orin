@@ -11,6 +11,7 @@ from agentos.agentic.tools.search.glob import SPECS as _search_glob
 from agentos.agentic.tools.search.grep import SPECS as _search_grep
 from agentos.agentic.tools.planning.plan_mode import SPECS as _planning_plan_mode
 from agentos.agentic.tools.orin.verify import SPECS as _orin_verify
+from agentos.agentic.tools.orin.resolve_findings import SPECS as _orin_resolve_findings
 from agentos.agentic.tools.planning.todo import SPECS as _planning_todo
 from agentos.agentic.tools.planning.tasks import SPECS as _planning_tasks
 from agentos.agentic.tools.web.fetch import SPECS as _web_fetch
@@ -50,6 +51,7 @@ def default_registry() -> ToolRegistry:
         *_search_grep,
         *_planning_plan_mode,
         *_orin_verify,
+        *_orin_resolve_findings,
         *_planning_todo,
         *_planning_tasks,
         *_web_fetch,

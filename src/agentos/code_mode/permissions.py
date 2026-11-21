@@ -43,6 +43,7 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "exit_plan_mode",
     "write_contract",
     "report_verification",
+    "resolve_findings",
     "use_skill",
     "search_skills",
     "recall_memory",

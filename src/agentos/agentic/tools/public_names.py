@@ -90,6 +90,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "uninstall_plugin": "UninstallPlugin",
     "write_contract": "WriteContract",
     "report_verification": "ReportVerification",
+    "resolve_findings": "ResolveFindings",
     "propose_code_session": "ProposeCodeSession",
     "manage_session": "ManageSession",
     "list_models": "ListModels",
