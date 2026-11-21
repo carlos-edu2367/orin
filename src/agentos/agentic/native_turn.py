@@ -1908,14 +1908,21 @@ class _RunnerSink:
             error_message=error_message,
         )
         removed = removed_round or removed_text
-        if removed and not self.text_parts:
-            self.had_visible_output = False
-            self._emitted_text_in_turn = False
-            self._message_wrote_text = False
-            self._last_text_ended_with_newline = True
+        if removed:
             resetter = getattr(self._runner.runtime.store, "reset_assistant_message", None)
-            if callable(resetter):
-                resetter(self._runner.turn)
+            if not self.text_parts:
+                self.had_visible_output = False
+                self._emitted_text_in_turn = False
+                self._message_wrote_text = False
+                self._last_text_ended_with_newline = True
+                if callable(resetter):
+                    resetter(self._runner.turn)
+            elif callable(resetter):
+                clean_content = "".join(self.text_parts)
+                try:
+                    resetter(self._runner.turn, content=clean_content)
+                except TypeError:
+                    pass
         return removed
 
     def _on_tool_batch_finished(self, results: list[dict[str, object]]) -> None:
@@ -2963,7 +2970,17 @@ class NativeTurnRunner:
                                         str(self.turn.get("provider") or ""),
                                         retry_after_seconds=stream_exc.retry_after_seconds,
                                         message=str(stream_exc),
+                                        resets_at=getattr(stream_exc, "resets_at", None),
                                     )
+                                except TypeError:
+                                    try:
+                                        err_sink(
+                                            str(self.turn.get("provider") or ""),
+                                            retry_after_seconds=stream_exc.retry_after_seconds,
+                                            message=str(stream_exc),
+                                        )
+                                    except Exception:  # noqa: BLE001
+                                        pass
                                 except Exception:  # noqa: BLE001
                                     pass
                         if closing_sent and self._stop_code_after_stream_error(stream_exc, executor) is None:

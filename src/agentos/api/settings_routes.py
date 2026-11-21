@@ -72,7 +72,7 @@ class AgentFile(BaseModel):
     model: str | None = Field(default=None, max_length=120)
     permission_mode: Literal["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions", "auto"] | None = None
     max_turns: int | None = Field(default=None, ge=1, le=500)
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = None
     create: bool = False  # W7-R6: a new agent; refuses (409) to replace an existing file
 
 

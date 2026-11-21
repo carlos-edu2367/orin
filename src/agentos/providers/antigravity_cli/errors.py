@@ -200,11 +200,12 @@ def classify_antigravity_error(
         retry_after = _extract_retry_after_seconds(
             raw_text, rate_limit, now=now
         )
+        resets_at = rate_limit.resets_at if rate_limit is not None else None
         notify_quota_error(
             "google-antigravity",
             retry_after_seconds=retry_after,
             message=raw_text,
-            resets_at=rate_limit.resets_at if rate_limit is not None else None,
+            resets_at=resets_at,
         )
         return CliErrorInfo(
             kind=CliErrorKind.RATE_LIMITED,
@@ -217,6 +218,7 @@ def classify_antigravity_error(
                 status_code=429,
                 exhausted=False,
                 retry_after_seconds=retry_after,
+                resets_at=resets_at,
                 error_kind=CliErrorKind.RATE_LIMITED,
             ),
         )

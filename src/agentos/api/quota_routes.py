@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import queue
+import threading
 from typing import Any, Callable
 
 from fastapi import FastAPI, Query, Request
@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .security import AuthenticatedPrincipal
 
 _SSE_HEARTBEAT_SECONDS = 15.0
+_SSE_POLL_SLICE_SECONDS = 0.5
 
 
 def _publish_quota_updated(services: Any, user_id: str, provider: str) -> None:
@@ -31,6 +32,18 @@ def _publish_quota_updated(services: Any, user_id: str, provider: str) -> None:
         return
 
 
+def _read_latest_marker(services: Any, user_id: str) -> tuple[int, str] | None:
+    svc = getattr(services, "quota_service", None)
+    store = getattr(svc, "_store", None) if svc is not None else None
+    marker_fn = getattr(store, "latest_marker", None)
+    if not callable(marker_fn):
+        return None
+    try:
+        return marker_fn(user_id)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def register_quota_routes(
     app: FastAPI,
     services: Any,
@@ -38,14 +51,15 @@ def register_quota_routes(
 ) -> None:
     """Register `GET /v1/quota` and bind `quota.updated` SSE publication."""
     subscribers: dict[str, set[queue.Queue[dict[str, Any]]]] = {}
-    sub_lock = asyncio.Lock()
+    sub_lock = threading.Lock()
 
     quota_service = getattr(services, "quota_service", None)
     subscribe_updates = getattr(quota_service, "subscribe_updates", None)
     if callable(subscribe_updates):
         def _on_quota_updated(user_id: str, provider: str) -> None:
             _publish_quota_updated(services, user_id, provider)
-            queues = list(subscribers.get(str(user_id), ()))
+            with sub_lock:
+                queues = list(subscribers.get(str(user_id), ()))
             payload = {"event": "quota.updated", "provider": provider, "user_id": str(user_id)}
             for q in queues:
                 try:
@@ -98,24 +112,49 @@ def register_quota_routes(
 
         async def _body() -> Any:
             user_id = principal.user_id
-            async with sub_lock:
+            with sub_lock:
                 subscribers.setdefault(user_id, set()).add(q)
             if poller is not None and hasattr(poller, "client_connected"):
                 poller.client_connected(user_id)
+            last_marker = await run_in_threadpool(_read_latest_marker, services, user_id)
+            last_seen_id = last_marker[0] if last_marker is not None else 0
+            idle_seconds = 0.0
+            db_check_elapsed = 0.0
             try:
                 while True:
                     if await request.is_disconnected():
                         return
                     try:
-                        event = await run_in_threadpool(q.get, True, 0.5)
+                        event = await run_in_threadpool(q.get, True, _SSE_POLL_SLICE_SECONDS)
+                        idle_seconds = 0.0
+                        db_check_elapsed = 0.0
+                        marker_now = await run_in_threadpool(_read_latest_marker, services, user_id)
+                        if marker_now is not None and marker_now[0] > last_seen_id:
+                            last_seen_id = marker_now[0]
                         yield f"event: quota.updated\ndata: {json.dumps(event)}\n\n"
                     except queue.Empty:
-                        yield f"event: heartbeat\ndata: {json.dumps({'ok': True})}\n\n"
-                        await asyncio.sleep(_SSE_HEARTBEAT_SECONDS)
+                        idle_seconds += _SSE_POLL_SLICE_SECONDS
+                        db_check_elapsed += _SSE_POLL_SLICE_SECONDS
+                        if db_check_elapsed >= 1.0:
+                            db_check_elapsed = 0.0
+                            marker = await run_in_threadpool(_read_latest_marker, services, user_id)
+                            if marker is not None and marker[0] > last_seen_id:
+                                last_seen_id = marker[0]
+                                idle_seconds = 0.0
+                                payload = {
+                                    "event": "quota.updated",
+                                    "provider": marker[1],
+                                    "user_id": str(user_id),
+                                }
+                                yield f"event: quota.updated\ndata: {json.dumps(payload)}\n\n"
+                                continue
+                        if idle_seconds >= _SSE_HEARTBEAT_SECONDS:
+                            idle_seconds = 0.0
+                            yield f"event: heartbeat\ndata: {json.dumps({'ok': True})}\n\n"
             finally:
                 if poller is not None and hasattr(poller, "client_disconnected"):
                     poller.client_disconnected(user_id)
-                async with sub_lock:
+                with sub_lock:
                     bucket = subscribers.get(user_id)
                     if bucket is not None:
                         bucket.discard(q)

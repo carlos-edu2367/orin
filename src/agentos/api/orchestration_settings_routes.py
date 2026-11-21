@@ -139,13 +139,23 @@ def orchestration_report(
     }
 
 
-def apply_orchestration_changes(root: Path | None, changes: Mapping[str, Any]) -> None:
+def apply_orchestration_changes(
+    root: Path | None,
+    changes: Mapping[str, Any],
+    *,
+    trusted: bool = False,
+) -> None:
     validated: list[tuple[str, Any]] = []
     problems: list[str] = []
+    locked_problems: list[str] = []
+    current_settings = load_effective_settings(root, trusted=trusted)
 
     for path, raw_value in changes.items():
         if path not in REGISTRY:
             problems.append(f"Configuração desconhecida: {path}")
+            continue
+        if resolve(current_settings, path).layer == "managed":
+            locked_problems.append(f"{path}: bloqueado pela política managed")
             continue
         if raw_value is None:
             validated.append((path, None))
@@ -155,6 +165,8 @@ def apply_orchestration_changes(root: Path | None, changes: Mapping[str, Any]) -
         except ValueError as error:
             problems.append(str(error))
 
+    if locked_problems:
+        raise SettingsRejected("managed_setting_locked", locked_problems, status=403)
     if problems:
         raise SettingsRejected("invalid_setting", problems)
     if not validated:
@@ -234,7 +246,7 @@ def register_orchestration_settings_routes(
         def _sync() -> dict[str, object]:
             principal = owner(request, mutable=True, purpose="settings.orchestration")
             root, trusted = folder_of(principal, payload.conversation_id, payload.project_root)
-            apply_orchestration_changes(root, payload.changes)
+            apply_orchestration_changes(root, payload.changes, trusted=trusted)
             return orchestration_report(root, trusted, group=payload.group, prefix=payload.prefix)
 
         return JSONResponse(await run_in_threadpool(_sync))

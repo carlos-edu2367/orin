@@ -35,6 +35,19 @@ SUBSCRIPTION_PROVIDERS: tuple[str, ...] = (
 # Error-only snapshots (e.g. Antigravity 429 without resets_at) expire after a reasonable grace window
 _RECENT_ERROR_MAX_AGE = timedelta(hours=6)
 
+# Process-wide notification bus keyed by store scope (database URL when available) so separate
+# QuotaService instances sharing the same database (e.g., ChatWorker + API) propagate SSE updates.
+_SHARED_LISTENERS_LOCK = threading.Lock()
+_SHARED_LISTENERS: dict[str, list[Callable[[str, str], None]]] = {}
+
+
+def _store_scope_key(store: object) -> str | None:
+    engine = getattr(store, "_engine", None)
+    url = getattr(engine, "url", None)
+    if url is not None:
+        return str(url)
+    return None
+
 
 class QuotaStorePort(Protocol):
     def add(self, user_id: str, snapshot: QuotaSnapshot) -> None: ...
@@ -91,8 +104,12 @@ class QuotaService:
             self._listeners.append(on_updated)
 
     def subscribe_updates(self, listener: Callable[[str, str], None]) -> Callable[[], None]:
+        scope_key = _store_scope_key(self._store)
         with self._lock:
             self._listeners.append(listener)
+        if scope_key is not None:
+            with _SHARED_LISTENERS_LOCK:
+                _SHARED_LISTENERS.setdefault(scope_key, []).append(listener)
 
         def _unsubscribe() -> None:
             with self._lock:
@@ -100,12 +117,33 @@ class QuotaService:
                     self._listeners.remove(listener)
                 except ValueError:
                     pass
+            if scope_key is not None:
+                with _SHARED_LISTENERS_LOCK:
+                    bucket = _SHARED_LISTENERS.get(scope_key)
+                    if bucket is not None:
+                        try:
+                            bucket.remove(listener)
+                        except ValueError:
+                            pass
+                        if not bucket:
+                            _SHARED_LISTENERS.pop(scope_key, None)
 
         return _unsubscribe
 
     def _notify(self, user_id: str, providers: set[str]) -> None:
         with self._lock:
-            listeners = tuple(self._listeners)
+            local_listeners = list(self._listeners)
+        scope_key = _store_scope_key(self._store)
+        shared_listeners: list[Callable[[str, str], None]] = []
+        if scope_key is not None:
+            with _SHARED_LISTENERS_LOCK:
+                shared_listeners = list(_SHARED_LISTENERS.get(scope_key, ()))
+        seen_ids: set[int] = set()
+        listeners: list[Callable[[str, str], None]] = []
+        for fn in (*local_listeners, *shared_listeners):
+            if id(fn) not in seen_ids:
+                seen_ids.add(id(fn))
+                listeners.append(fn)
         for provider in sorted(providers):
             for listener in listeners:
                 try:

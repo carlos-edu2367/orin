@@ -1053,6 +1053,7 @@ class AgenticTurnRuntime:
             try:
                 events = self.provider.stream(request)
             except Exception as exc:
+                self._report_quota_error(turn, exc)
                 self._effect_finished(
                     turn, provider_effect_id, state="NOT_APPLIED", error_code="PROVIDER_STREAM_NOT_STARTED"
                 )
@@ -1291,6 +1292,7 @@ class AgenticTurnRuntime:
                         emitted_text_in_turn = True
                         last_emitted_text_ended_with_newline = fin_tail.endswith("\n")
             except Exception as exc:
+                self._report_quota_error(turn, exc)
                 if not reactive_compacted and not text_parts and not calls and self._is_context_length_error(exc) and self.clock() < deadline:
                     self._effect_finished(
                         turn, provider_effect_id,
@@ -3202,6 +3204,35 @@ class AgenticTurnRuntime:
                 ],
             )
             return results
+
+    def _report_quota_error(self, turn: Mapping[str, object], exc: BaseException) -> None:
+        if not callable(self.quota_error_sink):
+            return
+        err_status = getattr(exc, "status_code", None)
+        err_kind = getattr(exc, "error_kind", None)
+        if not (
+            err_status == 429
+            or str(getattr(err_kind, "value", err_kind) or "").lower() == "rate_limited"
+        ):
+            return
+        try:
+            self.quota_error_sink(
+                str(turn.get("provider") or ""),
+                retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+                message=str(exc),
+                resets_at=getattr(exc, "resets_at", None),
+            )
+        except TypeError:
+            try:
+                self.quota_error_sink(
+                    str(turn.get("provider") or ""),
+                    retry_after_seconds=getattr(exc, "retry_after_seconds", None),
+                    message=str(exc),
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            pass
 
     def _load(self, turn_id: str) -> dict[str, object]:
         if hasattr(self.store, "load"):

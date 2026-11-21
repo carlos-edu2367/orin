@@ -157,10 +157,18 @@ def _layer_entries(settings: EffectiveSettings, path: str) -> list[tuple[str, An
         entries: list[tuple[str, Any]] = []
         for layer in settings.layers:
             raw = _get_raw(layer.data, path)
+            if raw is _MISSING and path == "effortLevel":
+                legacy = layer.data.get("effort")
+                if isinstance(legacy, str) and legacy.strip():
+                    raw = legacy.strip()
             if raw is not _MISSING and raw is not None:
                 entries.append((layer.name, raw))
         return entries
     raw = _get_raw(settings.data, path)
+    if raw is _MISSING and path == "effortLevel":
+        legacy = settings.data.get("effort")
+        if isinstance(legacy, str) and legacy.strip():
+            raw = legacy.strip()
     if raw is not _MISSING and raw is not None:
         return [(settings.provenance.get(path, "user"), raw)]
     return []
@@ -177,22 +185,69 @@ def _is_effort_choice(key: SettingKey) -> bool:
     return key.type == "choice" and key.choices is not None and all(choice in EFFORT_RANK for choice in key.choices)
 
 
+def _valid_int_map_entries(key: SettingKey, raw: Any) -> dict[str, int]:
+    cleaned: dict[str, int] = {}
+    if not isinstance(raw, Mapping):
+        return cleaned
+    for raw_k, raw_v in raw.items():
+        if not isinstance(raw_k, str) or not raw_k.strip():
+            continue
+        if isinstance(raw_v, bool) or not isinstance(raw_v, int):
+            continue
+        if key.value_minimum is not None and raw_v < key.value_minimum:
+            continue
+        if key.value_maximum is not None and raw_v > key.value_maximum:
+            continue
+        cleaned[raw_k.strip()] = int(raw_v)
+    return cleaned
+
+
+def resolve_window_overrides_split(
+    settings: EffectiveSettings,
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Split ``context.windowOverrides`` into ``(operator, project, managed)`` maps.
+
+    - ``operator``: overrides explicitly set by the operator (``user`` / ``cli``).
+    - ``project``: overrides from repository layers (``project`` / ``local``), which may only lower.
+    - ``managed``: organisation policy overrides, which always take precedence.
+    """
+    key = REGISTRY.get("context.windowOverrides")
+    if key is None:
+        return {}, {}, {}
+
+    operator_map: dict[str, int] = {}
+    project_map: dict[str, int] = {}
+    managed_map: dict[str, int] = {}
+
+    for layer_name, raw in _layer_entries(settings, "context.windowOverrides"):
+        cleaned = _valid_int_map_entries(key, raw)
+        if not cleaned:
+            continue
+        if layer_name == "managed":
+            managed_map.update(cleaned)
+        elif layer_name in {"user", "cli"}:
+            operator_map.update(cleaned)
+        elif layer_name in {"project", "local"}:
+            for map_key, val in cleaned.items():
+                if map_key not in project_map or val < project_map[map_key]:
+                    project_map[map_key] = val
+
+    return operator_map, project_map, managed_map
+
+
 def _resolve_map_lower_only(key: SettingKey, entries: list[tuple[str, Any]]) -> ResolvedSetting:
+    managed_values: dict[str, int] = {}
     best_values: dict[str, int] = {}
     best_layers: dict[str, str] = {}
     for layer_name, raw in entries:
-        if not isinstance(raw, Mapping):
+        cleaned = _valid_int_map_entries(key, raw)
+        if not cleaned:
             continue
-        for raw_k, raw_v in raw.items():
-            if not isinstance(raw_k, str) or not raw_k.strip():
-                continue
-            if isinstance(raw_v, bool) or not isinstance(raw_v, int):
-                continue
-            if key.value_minimum is not None and raw_v < key.value_minimum:
-                continue
-            if key.value_maximum is not None and raw_v > key.value_maximum:
-                continue
-            map_key = raw_k.strip()
+        if layer_name == "managed":
+            for map_key, raw_v in cleaned.items():
+                managed_values[map_key] = raw_v
+            continue
+        for map_key, raw_v in cleaned.items():
             if map_key not in best_values:
                 best_values[map_key] = raw_v
                 best_layers[map_key] = layer_name
@@ -201,6 +256,11 @@ def _resolve_map_lower_only(key: SettingKey, entries: list[tuple[str, Any]]) -> 
                 best_layers[map_key] = layer_name
             elif raw_v == best_values[map_key] and layer_name in {"cli", "managed"}:
                 best_layers[map_key] = layer_name
+
+    # Managed layer ALWAYS wins for every map subkey it defines.
+    for map_key, managed_val in managed_values.items():
+        best_values[map_key] = managed_val
+        best_layers[map_key] = "managed"
 
     if not best_values:
         return ResolvedSetting(copy.deepcopy(key.default), "default", copy.deepcopy(key.default))
@@ -226,8 +286,12 @@ def _resolve_scalar_lower_only(key: SettingKey, entries: list[tuple[str, Any]]) 
         if ok:
             per_layer[layer_name] = valid
 
+    # Managed policy ALWAYS wins over user/project/local/cli on PROJECT_LOWER_ONLY keys.
+    if "managed" in per_layer:
+        return ResolvedSetting(per_layer["managed"], "managed", copy.deepcopy(key.default))
+
     for layer_name in LAYER_ORDER:
-        if layer_name not in per_layer:
+        if layer_name == "managed" or layer_name not in per_layer:
             continue
         candidate = per_layer[layer_name]
         if not has_active:
@@ -238,7 +302,7 @@ def _resolve_scalar_lower_only(key: SettingKey, entries: list[tuple[str, Any]]) 
         if _rank(candidate) < _rank(effective):
             effective = candidate
             winning_layer = layer_name
-        elif _rank(candidate) == _rank(effective) and layer_name in {"cli", "managed"}:
+        elif _rank(candidate) == _rank(effective) and layer_name == "cli":
             winning_layer = layer_name
 
     if not has_active:
@@ -323,5 +387,6 @@ __all__ = [
     "SettingKey",
     "register",
     "resolve",
+    "resolve_window_overrides_split",
     "validate_change",
 ]

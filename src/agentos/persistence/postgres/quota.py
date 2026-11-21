@@ -99,6 +99,21 @@ class QuotaSnapshotStore:
                 out.append(_row_to_snapshot(row))
         return out
 
+    def latest_marker(self, user_id: str) -> tuple[int, str] | None:
+        """Return ``(max_id, provider)`` for the newest snapshot of ``user_id`` (for cross-process SSE polling)."""
+        t = subscription_quota_snapshots
+        stmt = (
+            select(t.c.id, t.c.provider)
+            .where(t.c.user_id == str(user_id))
+            .order_by(desc(t.c.id))
+            .limit(1)
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row:
+            return None
+        return int(row["id"]), str(row["provider"])
+
     def orin_usage(
         self,
         user_id: str,

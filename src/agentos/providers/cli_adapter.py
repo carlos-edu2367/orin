@@ -233,6 +233,7 @@ class CliErrorInfo:
     retryable: bool = False
     retry_after_seconds: float | None = None
     exception: Exception | None = None
+    resets_at: float | None = None
 
     def __post_init__(self) -> None:
         if self.exception is None:

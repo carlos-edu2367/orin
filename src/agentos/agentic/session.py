@@ -1407,6 +1407,7 @@ class TurnSession:
         self._window_detail = window_detail
         self._window_rule_index = window_rule_index
         self._cli_model_arg = cli_model_arg
+        self._agent_efforts: dict[str, tuple[str | None, str | None]] = {}
         self._learned_window_tokens = learned_window_tokens
         self._context_observation_sink = context_observation_sink
         self._context_observation_invalidator = context_observation_invalidator
@@ -1680,18 +1681,27 @@ class TurnSession:
         kwargs: dict[str, Any] = dict(
             input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens,
         )
+        target_agent_id = agent_id or self.main_agent_id
+        agent_efforts = getattr(self, "_agent_efforts", None) or {}
+        if target_agent_id in agent_efforts:
+            effort_val, effort_src = agent_efforts[target_agent_id]
+        elif target_agent_id == self.main_agent_id:
+            effort_val = getattr(self, "_active_effort", None)
+            effort_src = getattr(self, "_active_effort_source", None)
+        else:
+            effort_val, effort_src = None, None
         try:
             self.agents_store.record_usage(
-                agent_id or self.main_agent_id,
+                target_agent_id,
                 str(turn.get("provider") or ""),
                 str(turn.get("model_id") or ""),
-                effort=getattr(self, "_active_effort", None),
-                effort_source=getattr(self, "_active_effort_source", None),
+                effort=effort_val,
+                effort_source=effort_src,
                 **kwargs,
             )
         except TypeError:
             self.agents_store.record_usage(
-                agent_id or self.main_agent_id, str(turn.get("provider") or ""), str(turn.get("model_id") or ""), **kwargs,
+                target_agent_id, str(turn.get("provider") or ""), str(turn.get("model_id") or ""), **kwargs,
             )
 
     def emit_lifecycle(
@@ -2427,6 +2437,11 @@ class TurnSession:
             subagent_type=subagent_type, is_verifier=(str(subagent_type or "").lower() == "verifier"),
             settings=getattr(self, "effective_settings", None),
         ))
+        if agent_id:
+            efforts_map = getattr(self, "_agent_efforts", None)
+            if not isinstance(efforts_map, dict):
+                efforts_map = self._agent_efforts = {}
+            efforts_map[agent_id] = (resolved.level, resolved.source)
         emit_effort_events(self._record, resolved, str(model_id or ""), emit_turn_started=False, agent_id=agent_id)
         return resolved.level
 
@@ -6289,6 +6304,11 @@ class TurnSession:
             settings=getattr(self, "effective_settings", None),
         ))
         self._active_effort, self._active_effort_source = resolved.level, resolved.source
+        efforts_map = getattr(self, "_agent_efforts", None)
+        if not isinstance(efforts_map, dict):
+            efforts_map = self._agent_efforts = {}
+        if getattr(self, "main_agent_id", None):
+            efforts_map[self.main_agent_id] = (resolved.level, resolved.source)
         emit_effort_events(self._record, resolved, model)
         return resolved.level
 
@@ -6300,6 +6320,8 @@ class TurnSession:
 
     def apply_quota_fallback_before_turn(self, *, has_pending_tool_effects: bool = False):
         """Optional between-turn subscription fallback via `quota_gate` (never mid-turn)."""
+        if self.turn.get("_quota_fallback_applied"):
+            return None
         gate = getattr(self, "quota_gate", None)
         if gate is None:
             return None
@@ -6329,8 +6351,15 @@ class TurnSession:
             emit_event=_emit,
         )
         if decision is not None:
+            changed = (decision.to_provider, decision.to_model) != (provider, model_id)
             self.turn["provider"] = decision.to_provider
             self.turn["model_id"] = decision.to_model
+            if changed:
+                self._cli_model_arg = None
+                self._window_source = None
+                self._window_detail = None
+                self._window_rule_index = None
+                self._learned_window_tokens = None
         return decision
 
     def _after_completed_turn(self) -> None:

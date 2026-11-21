@@ -25,6 +25,7 @@ class ProviderTransportError(ProviderKeyRejected):
         *,
         status_code: int | None = None,
         retry_after_seconds: float | None = None,
+        resets_at: float | None = None,
         exhausted: bool = False,
         end_reason: str | None = None,
         output_tail: str = "",
@@ -37,6 +38,7 @@ class ProviderTransportError(ProviderKeyRejected):
             retry_after_seconds=retry_after_seconds,
             exhausted=exhausted,
         )
+        self.resets_at: float | None = resets_at
         self.end_reason = end_reason
         self.output_tail = output_tail
         self.stderr_tail = output_tail
@@ -115,6 +117,7 @@ def classify_result_error(
 
     if is_rate_limited:
         retry_after_seconds: float | None = None
+        resets_at: float | None = rate_limit.resets_at if rate_limit is not None else None
         message = raw_text
         if subscription_rejected and rate_limit is not None and rate_limit.resets_at is not None:
             now_ts = time.time() if now is None else float(now)
@@ -130,6 +133,7 @@ def classify_result_error(
             status_code=429,
             exhausted=False,
             retry_after_seconds=retry_after_seconds,
+            resets_at=resets_at,
             end_reason="error_result",
         )
 
@@ -249,13 +253,16 @@ def classify_result_error_info(
         else (429 if is_rate_limited else transport_err.status_code)
     )
 
+    resets_at = rate_limit.resets_at if rate_limit is not None else None
     transport_err.error_kind = kind
+    if transport_err.resets_at is None and resets_at is not None:
+        transport_err.resets_at = resets_at
     if kind == CliErrorKind.RATE_LIMITED:
         notify_quota_error(
             "anthropic-cli",
             retry_after_seconds=retry_after_seconds,
             message=str(transport_err),
-            resets_at=rate_limit.resets_at if rate_limit is not None else None,
+            resets_at=resets_at,
         )
 
     return CliErrorInfo(
@@ -265,6 +272,7 @@ def classify_result_error_info(
         retryable=retryable,
         retry_after_seconds=retry_after_seconds,
         exception=transport_err,
+        resets_at=resets_at,
     )
 
 
@@ -273,11 +281,14 @@ def error_info_to_transport_error(info: CliErrorInfo) -> ProviderTransportError:
         if info.exception.end_reason is None:
             info.exception.end_reason = "error_result"
         info.exception.error_kind = info.kind
+        if info.exception.resets_at is None and info.resets_at is not None:
+            info.exception.resets_at = info.resets_at
         return info.exception
     return ProviderTransportError(
         info.user_message,
         status_code=401 if info.kind == CliErrorKind.AUTH else info.status_code,
         retry_after_seconds=info.retry_after_seconds,
+        resets_at=info.resets_at,
         exhausted=(info.kind == CliErrorKind.AUTH),
         end_reason="error_result",
         error_kind=info.kind,

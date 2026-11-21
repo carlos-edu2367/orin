@@ -20,48 +20,47 @@ from agentos.providers.claude_cli.catalog import (
 from agentos.providers.claude_cli.effective_window import (
     MAX_OVERRIDE_TOKENS,
     MIN_OVERRIDE_TOKENS,
+    _lookup_override,
     effective_window_for,
 )
 from agentos.quota.claude_account import ClaudeAccountReader
 from agentos.settings.loader import load_effective_settings
-from agentos.settings.registry import resolve
+from agentos.settings.registry import resolve, resolve_window_overrides_split
 
 from .security import AuthenticatedPrincipal
 
 _CLAUDE_CLI_PROVIDERS: frozenset[str] = frozenset({"anthropic", "anthropic-cli"})
 
 
-def _load_window_settings(project_root: Path | None) -> tuple[dict[str, int], bool]:
+def _load_window_settings(
+    project_root: Path | None,
+    *,
+    trusted: bool = False,
+) -> tuple[dict[str, int], bool, dict[str, int], dict[str, int]]:
     try:
-        settings = load_effective_settings(project_root, trusted=project_root is not None)
-        raw_overrides = resolve(settings, "context.windowOverrides").value
-        overrides: dict[str, int] = {}
-        if isinstance(raw_overrides, Mapping):
-            for k, v in raw_overrides.items():
-                if isinstance(k, str) and k.strip() and isinstance(v, int) and not isinstance(v, bool):
-                    if MIN_OVERRIDE_TOKENS <= v <= MAX_OVERRIDE_TOKENS:
-                        overrides[k.strip()] = int(v)
+        settings = load_effective_settings(project_root, trusted=trusted)
+        operator_ov, project_ov, managed_ov = resolve_window_overrides_split(settings)
         long_ctx = bool(resolve(settings, "claudeCli.longContextWithCredits").value)
-        return overrides, long_ctx
+        return operator_ov, long_ctx, project_ov, managed_ov
     except Exception:  # noqa: BLE001 - settings load must never break the route
-        return {}, False
+        return {}, False, {}, {}
 
 
 def _override_for_model(
     provider: str,
     model_id: str,
     overrides: Mapping[str, int],
+    *,
+    project_overrides: Mapping[str, int] | None = None,
+    managed_overrides: Mapping[str, int] | None = None,
 ) -> int | None:
-    if not overrides:
-        return None
-    bare = str(model_id or "").strip().rsplit("/", 1)[-1].strip()
-    lowered = {k.lower(): v for k, v in overrides.items()}
-    for candidate in (f"{provider}/{bare}", f"{provider}/{model_id}", bare, model_id):
-        val = overrides.get(candidate)
-        if val is None:
-            val = lowered.get(candidate.lower())
-        if isinstance(val, int) and not isinstance(val, bool):
-            return int(val)
+    managed_val = _lookup_override(provider, model_id, managed_overrides)
+    if managed_val is not None:
+        return managed_val
+    op_val = _lookup_override(provider, model_id, overrides)
+    proj_val = _lookup_override(provider, model_id, project_overrides)
+    if op_val is not None:
+        return min(op_val, proj_val) if proj_val is not None else op_val
     return None
 
 
@@ -201,14 +200,32 @@ def register_context_window_routes(
                 action="context.windows.read",
                 origin=request.headers.get("origin"),
             )
-            root_path = Path(project_root) if project_root else None
-            overrides, long_ctx = _load_window_settings(root_path)
+            root_path: Path | None = None
+            trusted = False
+            if project_root and project_root.strip():
+                services.capabilities.require("host_folders")
+                from agentos.permissions.trust import WorkspaceTrustStore
+
+                root_path = Path(project_root.strip())
+                trusted = WorkspaceTrustStore().is_trusted(principal.user_id, root_path)
+
+            try:
+                loaded_settings = _load_window_settings(root_path, trusted=trusted)
+            except TypeError:
+                loaded_settings = _load_window_settings(root_path)
+            if len(loaded_settings) == 4:
+                overrides, long_ctx, project_overrides, managed_overrides = loaded_settings
+            else:
+                overrides, long_ctx = loaded_settings  # type: ignore[misc]
+                project_overrides, managed_overrides = {}, {}
+
             obs_store = _resolve_observation_store(services)
             obs_list = obs_store.list(principal.user_id) if obs_store is not None else []
             obs_by_key = {(o.provider, o.model_id): o for o in obs_list}
 
             account_state = _resolve_account_reader(services).read()
-            models = _collect_models(services, principal.user_id, obs_by_key, overrides)
+            visible_overrides = {**overrides, **managed_overrides}
+            models = _collect_models(services, principal.user_id, obs_by_key, visible_overrides)
 
             results: list[dict[str, Any]] = []
             for item in models:
@@ -231,6 +248,8 @@ def register_context_window_routes(
                     prov,
                     mdl,
                     window_overrides=overrides,
+                    project_window_overrides=project_overrides,
+                    managed_window_overrides=managed_overrides,
                     learned_limit=obs.observed_limit_tokens if obs is not None else None,
                     learned_source=obs.source if obs is not None else None,
                     account_state=account_state if is_claude else None,
@@ -238,7 +257,17 @@ def register_context_window_routes(
                     cli_catalog_window=cli_win,
                     fixed_catalog_window=fixed_win,
                 )
-                override_tokens = _override_for_model(prov, mdl, overrides)
+                override_tokens = (
+                    ew.tokens
+                    if ew.source == "override"
+                    else _override_for_model(
+                        prov,
+                        mdl,
+                        overrides,
+                        project_overrides=project_overrides,
+                        managed_overrides=managed_overrides,
+                    )
+                )
                 results.append(
                     {
                         "provider": prov,
@@ -264,7 +293,7 @@ def register_context_window_routes(
         request: Request,
     ) -> JSONResponse:
         def _forget() -> dict[str, Any]:
-            principal = principal_for(request)
+            principal = principal_for(request, mutable=True)
             services.security.check_rate_limit(
                 principal,
                 action="context.windows.write",

@@ -346,6 +346,10 @@ def load_effective_settings(
     merged: dict[str, Any] = {}
     provenance: dict[str, str] = {}
     for item in layers:
+        if isinstance(merged.get("effort"), str) and isinstance(item.data.get("effort"), Mapping):
+            if "effortLevel" not in merged:
+                merged["effortLevel"] = merged["effort"]
+                provenance["effortLevel"] = provenance.get("effort", "user")
         merged = merge_settings(merged, item.data)
         for key in _flatten(item.data):
             provenance[key] = item.name

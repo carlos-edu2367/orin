@@ -104,27 +104,33 @@ def _lookup_override(
 ) -> int | None:
     if not isinstance(window_overrides, Mapping) or not window_overrides:
         return None
-    prov = str(provider or "").strip()
-    mdl = str(model_id or "").strip()
-    bare = _strip_1m_suffix(mdl)
+    prov = str(provider or "").strip().lower()
+    mdl = str(model_id or "").strip().lower()
+    bare = _strip_1m_suffix(mdl).lower()
 
-    candidates = [
-        f"{prov}/{bare}" if prov else "",
-        f"{prov}/{mdl}" if prov else "",
-        bare,
-        mdl,
-    ]
-    lowered_map = {str(k).strip().lower(): v for k, v in window_overrides.items()}
-    for key in candidates:
-        if not key:
+    candidate_keys = {
+        key
+        for key in (
+            f"{prov}/{bare}" if prov and bare else "",
+            f"{prov}/{mdl}" if prov and mdl else "",
+            bare,
+            mdl,
+        )
+        if key
+    }
+    if not candidate_keys:
+        return None
+
+    matched: list[int] = []
+    for raw_k, raw_v in window_overrides.items():
+        if not isinstance(raw_k, str):
             continue
-        raw = window_overrides.get(key)
-        if raw is None:
-            raw = lowered_map.get(key.lower())
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            if MIN_OVERRIDE_TOKENS <= raw <= MAX_OVERRIDE_TOKENS:
-                return int(raw)
-    return None
+        if raw_k.strip().lower() not in candidate_keys:
+            continue
+        if isinstance(raw_v, int) and not isinstance(raw_v, bool):
+            if MIN_OVERRIDE_TOKENS <= raw_v <= MAX_OVERRIDE_TOKENS:
+                matched.append(int(raw_v))
+    return min(matched) if matched else None
 
 
 def _positive_int(value: Any) -> int | None:
@@ -138,6 +144,8 @@ def effective_window_for(
     model_id: str,
     *,
     window_overrides: Mapping[str, int] | None = None,
+    project_window_overrides: Mapping[str, int] | None = None,
+    managed_window_overrides: Mapping[str, int] | None = None,
     learned_limit: int | None = None,
     learned_source: str | None = None,
     account_state: ClaudeAccountState | Any | None = None,
@@ -149,16 +157,34 @@ def effective_window_for(
     prov = str(provider or "").strip().lower()
     bare = _strip_1m_suffix(model_id)
 
-    # Rule 1: Manual override (`context.windowOverrides`, 50k..1M)
-    override = _lookup_override(prov, model_id, window_overrides)
-    if override is not None:
+    # Rule 1a: Managed override ALWAYS wins (cannot be raised or lowered by user/project)
+    managed_override = _lookup_override(prov, model_id, managed_window_overrides)
+    if managed_override is not None:
         return EffectiveWindow(
-            tokens=override,
+            tokens=managed_override,
             source="override",
-            detail=f"{_format_tokens_pt(override)}, definido manualmente",
+            detail=f"{_format_tokens_pt(managed_override)}, definido pela organização",
             rule_index=1,
             cli_model_arg=None,
         )
+
+    project_override = _lookup_override(prov, model_id, project_window_overrides)
+
+    # Rule 1b: Operator manual override (`context.windowOverrides` from user/cli, 50k..1M).
+    # A project/local override may only lower an operator override, never raise it.
+    override = _lookup_override(prov, model_id, window_overrides)
+    if override is not None:
+        tokens = min(override, project_override) if project_override is not None else override
+        return EffectiveWindow(
+            tokens=tokens,
+            source="override",
+            detail=f"{_format_tokens_pt(tokens)}, definido manualmente",
+            rule_index=1,
+            cli_model_arg=None,
+        )
+
+    # Compute base effective window from Rules 2..6 before applying any project-only lower bound.
+    base_window: EffectiveWindow | None = None
 
     # Rule 2: Active learned window from overflow error (E-RF13)
     learned = _positive_int(learned_limit)
@@ -167,7 +193,7 @@ def effective_window_for(
             detail = f"{_format_tokens_pt(learned)}, estimado após erro do modelo"
         else:
             detail = f"{_format_tokens_pt(learned)}, aprendido após erro do modelo"
-        return EffectiveWindow(
+        base_window = EffectiveWindow(
             tokens=learned,
             source="learned",
             detail=detail,
@@ -177,21 +203,21 @@ def effective_window_for(
 
     # Rule 3: Claude CLI account credits rule (E-RF28.3 & E-RF31)
     cli_win = _positive_int(cli_catalog_window)
-    if prov in _CLAUDE_CLI_PROVIDERS and account_state is not None:
+    if base_window is None and prov in _CLAUDE_CLI_PROVIDERS and account_state is not None:
         overage_models = getattr(account_state, "overage_models", ()) or ()
         credits_on = account_credits_enabled(account_state)
         if overage_models and is_overage_model(bare, overage_models):
             if credits_on is False:
-                return EffectiveWindow(
+                base_window = EffectiveWindow(
                     tokens=ACCOUNT_CREDITS_CLAMP_WINDOW,
                     source="account_credits",
                     detail="200 mil, limite da conta sem créditos",
                     rule_index=3,
                     cli_model_arg=None,
                 )
-            if credits_on is True and bool(long_context_with_credits):
+            elif credits_on is True and bool(long_context_with_credits):
                 tokens_1m = cli_win if cli_win is not None else LONG_CONTEXT_1M_WINDOW
-                return EffectiveWindow(
+                base_window = EffectiveWindow(
                     tokens=tokens_1m,
                     source="credits_1m",
                     detail=f"{_format_tokens_pt(tokens_1m)}, créditos de uso ativos (1M)",
@@ -200,8 +226,8 @@ def effective_window_for(
                 )
 
     # Rule 4: Cached CLI catalog (`runtime.max_input_tokens`)
-    if cli_win is not None:
-        return EffectiveWindow(
+    if base_window is None and cli_win is not None:
+        base_window = EffectiveWindow(
             tokens=cli_win,
             source="cli_catalog",
             detail=f"{_format_tokens_pt(cli_win)}, catálogo do CLI",
@@ -211,8 +237,8 @@ def effective_window_for(
 
     # Rule 5: Orin fixed catalog table
     fixed_win = _positive_int(fixed_catalog_window)
-    if fixed_win is not None:
-        return EffectiveWindow(
+    if base_window is None and fixed_win is not None:
+        base_window = EffectiveWindow(
             tokens=fixed_win,
             source="fixed_catalog",
             detail=f"{_format_tokens_pt(fixed_win)}, catálogo do Orin",
@@ -221,13 +247,26 @@ def effective_window_for(
         )
 
     # Rule 6: Conservative fallback (200k)
-    return EffectiveWindow(
-        tokens=DEFAULT_FALLBACK_WINDOW,
-        source="fallback",
-        detail="200 mil, padrão",
-        rule_index=6,
-        cli_model_arg=None,
-    )
+    if base_window is None:
+        base_window = EffectiveWindow(
+            tokens=DEFAULT_FALLBACK_WINDOW,
+            source="fallback",
+            detail="200 mil, padrão",
+            rule_index=6,
+            cli_model_arg=None,
+        )
+
+    # A project/local override can NEVER raise the effective window above Rules 2..6; it may only lower it.
+    if project_override is not None and project_override < base_window.tokens:
+        return EffectiveWindow(
+            tokens=project_override,
+            source="override",
+            detail=f"{_format_tokens_pt(project_override)}, limitado pelo projeto",
+            rule_index=1,
+            cli_model_arg=None,
+        )
+
+    return base_window
 
 
 __all__ = [

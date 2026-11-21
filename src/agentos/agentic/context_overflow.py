@@ -16,7 +16,8 @@ _OVERFLOW_TEXT_NEEDLES = (
     "prompt is too long",
     "maximum context length",
     "too many tokens",
-    "context window",
+    "exceeds the context window",
+    "context window exceeded",
     "request too large",
     "input is too long",
 )
@@ -121,6 +122,57 @@ def is_synthetic_overflow_text(
     return False
 
 
+def _strip_synthetic_suffix_from_text(
+    text: str,
+    *,
+    synthetic_error_text: str | None = None,
+    error_message: str | None = None,
+) -> tuple[str, bool]:
+    """Strip a leaked trailing overflow error suffix from ``text`` while preserving legitimate prefix text."""
+    for candidate in (synthetic_error_text, error_message):
+        cand = str(candidate or "").strip()
+        if not cand:
+            continue
+        lower_text = text.rstrip()
+        if lower_text.lower().endswith(cand.lower()):
+            prefix = lower_text[: len(lower_text) - len(cand)].rstrip()
+            return prefix, True
+
+    # Also check the trailing non-empty line(s) separated by newline(s)
+    stripped_right = text.rstrip()
+    nl_idx = stripped_right.rfind("\n")
+    if nl_idx != -1:
+        tail = stripped_right[nl_idx + 1 :].strip()
+        if tail and is_synthetic_overflow_text(
+            tail,
+            synthetic_error_text=synthetic_error_text,
+            error_message=error_message,
+        ):
+            prefix = stripped_right[:nl_idx].rstrip()
+            return prefix, True
+
+    return text, False
+
+
+def _starts_like_synthetic_overflow(
+    text: str,
+    *,
+    synthetic_error_text: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    norm = _normalize_text(text)
+    if not norm:
+        return True
+    for candidate in (synthetic_error_text, error_message):
+        cand_norm = _normalize_text(candidate)
+        if cand_norm and (norm == cand_norm or cand_norm.startswith(norm) or norm.startswith(cand_norm)):
+            return True
+    for needle in _OVERFLOW_TEXT_NEEDLES:
+        if norm.startswith(needle) or needle.startswith(norm):
+            return True
+    return False
+
+
 def strip_synthetic_error_from_parts(
     parts: list[str],
     *,
@@ -129,26 +181,68 @@ def strip_synthetic_error_from_parts(
 ) -> bool:
     """Remove leaked synthetic/overflow error chunks from ``parts`` in place.
 
+    Preserves legitimate assistant text emitted in earlier rounds and only strips
+    trailing synthetic/overflow chunks or a trailing leaked error suffix.
     Returns True when any text was removed.
     """
     if not parts:
         return False
-    joined = "".join(parts)
-    if is_synthetic_overflow_text(
-        joined,
-        synthetic_error_text=synthetic_error_text,
-        error_message=error_message,
-    ):
-        parts.clear()
-        return True
+
     removed = False
+
+    # 1. Pop whole trailing chunks that are themselves synthetic overflow errors.
     while parts and is_synthetic_overflow_text(
         parts[-1],
         synthetic_error_text=synthetic_error_text,
         error_message=error_message,
     ):
+        # Guard: if parts[-1] actually contains legitimate prefix text plus a trailing error suffix,
+        # trim only the suffix rather than dropping legitimate text.
+        trimmed, trimmed_ok = _strip_synthetic_suffix_from_text(
+            parts[-1],
+            synthetic_error_text=synthetic_error_text,
+            error_message=error_message,
+        )
+        if trimmed_ok and trimmed:
+            parts[-1] = trimmed
+            removed = True
+            break
         parts.pop()
         removed = True
+
+    # 2. Handle a synthetic overflow error split across multiple small trailing streaming chunks
+    #    (e.g. ["Analisando...", "\n\nPrompt ", "is too long"]) without wiping earlier legitimate parts.
+    if parts:
+        for idx in range(len(parts) - 1, -1, -1):
+            tail_joined = "".join(parts[idx:])
+            if is_synthetic_overflow_text(
+                tail_joined,
+                synthetic_error_text=synthetic_error_text,
+                error_message=error_message,
+            ):
+                if _starts_like_synthetic_overflow(
+                    parts[idx],
+                    synthetic_error_text=synthetic_error_text,
+                    error_message=error_message,
+                ):
+                    del parts[idx:]
+                    removed = True
+                    break
+
+    # 3. Trim a leaked trailing error suffix concatenated onto the last legitimate chunk.
+    if parts:
+        trimmed, trimmed_ok = _strip_synthetic_suffix_from_text(
+            parts[-1],
+            synthetic_error_text=synthetic_error_text,
+            error_message=error_message,
+        )
+        if trimmed_ok:
+            if trimmed:
+                parts[-1] = trimmed
+            else:
+                parts.pop()
+            removed = True
+
     return removed
 
 

@@ -3010,13 +3010,13 @@ class PostgresChatStore:
         for chunk in _chunks(text, 480):
             self._activity(turn, AgentActivityEventType.ASSISTANT_DELTA, "Resposta em andamento", {"content": chunk, "message_id": str(turn["assistant_message_id"])})
 
-    def reset_assistant_message(self, turn: dict[str, object]) -> None:
+    def reset_assistant_message(self, turn: dict[str, object], *, content: str = "") -> None:
         now = datetime.now(UTC)
         with self._engine.begin() as c:
             c.execute(
                 update(conversation_messages)
                 .where(conversation_messages.c.message_id == turn["assistant_message_id"])
-                .values(content="", status="streaming", updated_at=now)
+                .values(content=content, status="streaming", updated_at=now)
             )
             c.execute(
                 insert(conversation_events).values(
@@ -3024,7 +3024,7 @@ class PostgresChatStore:
                     user_id=turn["user_id"],
                     event_type="message.reset",
                     message_id=turn["assistant_message_id"],
-                    payload={"content": ""},
+                    payload={"content": content},
                     created_at=now,
                 )
             )

@@ -214,10 +214,16 @@ class _RuntimeStore:
         self._worker._refresh_heartbeat_if_due()
         self._store.delta(turn, text)
 
-    def reset_assistant_message(self, turn: dict[str, object]) -> None:
+    def reset_assistant_message(self, turn: dict[str, object], *, content: str = "") -> None:
         resetter = getattr(self._store, "reset_assistant_message", None)
         if callable(resetter):
-            resetter(turn)
+            if content:
+                try:
+                    resetter(turn, content=content)
+                except TypeError:
+                    resetter(turn)
+            else:
+                resetter(turn)
 
     def finish(self, turn: dict[str, object], *, failed: bool = False, code: str | None = None) -> None:
         if not self._worker._kernel_manages(turn):
@@ -458,6 +464,7 @@ class ChatWorker:
         runtime_settings: AgentRuntimeSettingsStore | None = None,
         retrieval_registry: RetrievalRegistry | None = None,
         capabilities: InstanceCapabilities | None = None,
+        quota_service: object | None = None,
     ) -> None:
         self.store, self._executions, self._queries = store, ExecutionApplicationAdapter(store._engine), ExecutionQueryAdapter(store._engine)
         self._journal = PostgresExecutionJournal(store._engine)
@@ -467,6 +474,7 @@ class ChatWorker:
         self._workspace_root = workspace_root
         self._enable_subagents = enable_subagents
         self._runtime_settings = runtime_settings or AgentRuntimeSettingsStore()
+        self._quota_service = quota_service
         # A project's retrieval index survives across turns (and
         # across every conversation about that project): building it fresh per
         # turn would open a new sqlite connection, a new embedder HTTP client
@@ -1040,23 +1048,34 @@ class ChatWorker:
             capabilities = [item.strip() for item in capabilities.split(",")]
         return tuple(str(item) for item in capabilities if str(item).strip())
 
-    def _context_window_settings(self, turn: dict[str, object]) -> tuple[dict[str, int], bool]:
-        try:
-            from agentos.settings.loader import load_effective_settings
-            from agentos.settings.registry import resolve
+    def _load_turn_settings(self, turn: dict[str, object]):
+        from agentos.permissions.trust import WorkspaceTrustStore
+        from agentos.settings.loader import load_effective_settings
 
-            root = getattr(self, "_workspace_root", None)
-            settings = load_effective_settings(Path(root) if root else None, trusted=root is not None)
-            raw_overrides = resolve(settings, "context.windowOverrides").value
-            overrides: dict[str, int] = {}
-            if isinstance(raw_overrides, Mapping):
-                for key, value in raw_overrides.items():
-                    if isinstance(key, str) and key.strip() and isinstance(value, int) and not isinstance(value, bool):
-                        overrides[key.strip()] = int(value)
+        raw_root = turn.get("workspace_root_path")
+        root_path: Path | None = None
+        if isinstance(raw_root, str) and raw_root.strip():
+            root_path = Path(raw_root.strip())
+        user_id = str(turn.get("user_id") or "")
+        trusted = (
+            WorkspaceTrustStore().is_trusted(user_id, root_path)
+            if root_path is not None and user_id
+            else False
+        )
+        return load_effective_settings(root_path, trusted=trusted)
+
+    def _context_window_settings(
+        self, turn: dict[str, object]
+    ) -> tuple[dict[str, int], bool, dict[str, int], dict[str, int]]:
+        try:
+            from agentos.settings.registry import resolve, resolve_window_overrides_split
+
+            settings = self._load_turn_settings(turn)
+            operator_ov, project_ov, managed_ov = resolve_window_overrides_split(settings)
             long_ctx = bool(resolve(settings, "claudeCli.longContextWithCredits").value)
-            return overrides, long_ctx
+            return operator_ov, long_ctx, project_ov, managed_ov
         except Exception:
-            return {}, False
+            return {}, False, {}, {}
 
     def _claude_account_state(self):
         try:
@@ -1100,7 +1119,12 @@ class ChatWorker:
         provider = str(turn.get("provider") or "").strip()
         model_id = str(turn.get("model_id") or "").strip()
         user_id = str(turn.get("user_id") or "").strip()
-        overrides, long_ctx_with_credits = self._context_window_settings(turn)
+        loaded_cw = self._context_window_settings(turn)
+        if len(loaded_cw) == 4:
+            overrides, long_ctx_with_credits, project_overrides, managed_overrides = loaded_cw
+        else:
+            overrides, long_ctx_with_credits = loaded_cw  # type: ignore[misc]
+            project_overrides, managed_overrides = {}, {}
 
         is_claude_cli = False
         if provider == "anthropic":
@@ -1163,6 +1187,8 @@ class ChatWorker:
                 provider,
                 model_id,
                 window_overrides=overrides,
+                project_window_overrides=project_overrides,
+                managed_window_overrides=managed_overrides,
                 learned_limit=learned_limit,
                 learned_source=learned_source,
                 account_state=account_state,
@@ -1181,11 +1207,13 @@ class ChatWorker:
                     ew = _dc_replace(ew, tokens=budget)
             return ew
 
-        if overrides or learned_limit is not None or row_window is not None:
+        if overrides or project_overrides or managed_overrides or learned_limit is not None or row_window is not None:
             ew = effective_window_for(
                 provider,
                 model_id,
                 window_overrides=overrides,
+                project_window_overrides=project_overrides,
+                managed_window_overrides=managed_overrides,
                 learned_limit=learned_limit,
                 learned_source=learned_source,
                 account_state=None,
@@ -1957,6 +1985,8 @@ class ChatWorker:
         except Exception:
             _LOGGER.exception("could not build memory embedder for %s", turn.get("user_id"))
             memory_embedder = None
+        quota_kwargs = self._quota_session_kwargs(engine, turn)
+        turn = self._apply_quota_fallback_before_runtime(engine, turn, quota_kwargs)
         effective_window = self._effective_window_for(turn)
         effective_window_tokens = effective_window.tokens if effective_window is not None else None
         session = TurnSession(
@@ -2036,7 +2066,7 @@ class ChatWorker:
             model_capabilities=self._catalog_capabilities_for(turn),
             fallback_provider_factory=lambda model_id: self._provider_transport({**turn, "model_id": model_id}),
             read_file_state=self._read_states.state_for(str(turn["user_id"]), str(turn["conversation_id"])),
-            **self._quota_session_kwargs(engine, turn),
+            **quota_kwargs,
             **self._context_window_session_kwargs(engine, turn, effective_window),
         )
         return session.build_runtime()
@@ -2096,14 +2126,92 @@ class ChatWorker:
             _LOGGER.debug("context observation wiring unavailable for turn %s", turn.get("turn_id"), exc_info=True)
         return kwargs
 
+    def _apply_quota_fallback_before_runtime(
+        self,
+        engine,
+        turn: dict[str, object],
+        quota_kwargs: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Run between-turn quota fallback BEFORE computing window limits, capabilities, or cli_model_arg."""
+        gate = quota_kwargs.get("quota_gate")
+        select_fn = getattr(gate, "select_fallback", None)
+        if not callable(select_fn):
+            return turn
+        user_id = str(turn.get("user_id") or "")
+        provider = str(turn.get("provider") or "")
+        model_id = str(turn.get("model_id") or "")
+        if not user_id or not provider or not model_id:
+            return turn
+        try:
+            settings = self._load_turn_settings(turn)
+        except Exception:
+            settings = None
+
+        def _emit(event_type: str, payload: dict[str, object]) -> None:
+            if event_type == AgentActivityEventType.QUOTA_FALLBACK_APPLIED.value:
+                try:
+                    self.store.record(
+                        turn,
+                        AgentActivityEventType.QUOTA_FALLBACK_APPLIED,
+                        f"Assinatura esgotada em {payload.get('from_provider')}; iniciando turno em {payload.get('to_provider')}/{payload.get('to_model')}",
+                        payload,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        try:
+            has_pending = bool(self.has_unresolved_tool_effects(turn))
+        except Exception:
+            has_pending = False
+
+        try:
+            decision = select_fn(
+                user_id,
+                provider,
+                model_id,
+                settings=settings,
+                has_pending_tool_effects=has_pending,
+                emit_event=_emit,
+            )
+        except Exception:
+            _LOGGER.debug("pre-runtime quota fallback check failed for turn %s", turn.get("turn_id"), exc_info=True)
+            return turn
+
+        if decision is None:
+            return turn
+
+        updated = {
+            **turn,
+            "provider": decision.to_provider,
+            "model_id": decision.to_model,
+            "_quota_fallback_applied": True,
+        }
+        turn_id = turn.get("turn_id")
+        if turn_id and engine is not None:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        update(conversation_turns)
+                        .where(conversation_turns.c.turn_id == str(turn_id))
+                        .values(
+                            provider=str(decision.to_provider),
+                            model_id=str(decision.to_model),
+                        )
+                    )
+            except Exception:
+                _LOGGER.debug("could not persist fallback provider/model on turn %s", turn_id, exc_info=True)
+        return updated
+
     def _quota_session_kwargs(self, engine, turn: dict[str, object]) -> dict[str, object]:
         try:
             from agentos.persistence.postgres.quota import QuotaSnapshotStore
             from agentos.quota.policy import QuotaPolicy
             from agentos.quota.service import QuotaService
 
-            qstore = QuotaSnapshotStore(engine)
-            qservice = QuotaService(qstore)
+            qservice = getattr(self, "_quota_service", None)
+            if qservice is None:
+                qstore = QuotaSnapshotStore(engine)
+                qservice = QuotaService(qstore)
             user_id = str(turn.get("user_id") or "")
 
             def _quota_sink(provider_name: str, state) -> None:
