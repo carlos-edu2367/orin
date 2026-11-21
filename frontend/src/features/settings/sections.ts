@@ -30,6 +30,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'providers', label: 'Providers', path: '/settings/providers', lede: 'Configure ou revogue o acesso de cada provider. A chave nunca é reexibida depois do envio.', badge: 'providers' },
       { id: 'vision', label: 'Leitura visual', path: '/settings/vision', lede: 'Qual modelo lê imagens e páginas escaneadas quando o modelo do turno não enxerga.' },
       { id: 'media', label: 'Geração de mídia', path: '/settings/media', lede: 'Qual provider e modelo padrão geram imagens, áudios e vídeos nas conversas.' },
+      { id: 'quota-effort', label: 'Cota e esforço', path: '/settings/quota-effort', lede: 'Esforço de raciocínio, limites de cota das assinaturas e janela de contexto por modelo.' },
     ],
   },
   {

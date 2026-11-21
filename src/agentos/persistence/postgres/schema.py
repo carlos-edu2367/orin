@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     create_engine,
+    desc,
     ForeignKeyConstraint,
     text,
 )
@@ -622,6 +623,7 @@ conversation_turns = Table(
     Column("turn_kind", String(16), nullable=True),
     # W6: the options `orin code` attached to the turn (agentos.code_mode.cli_options), as JSON; NULL otherwise.
     Column("cli_options", Text(), nullable=True),
+    Column("effort", String(16), nullable=True),
     Column("started_at", DateTime(timezone=True)), Column("finished_at", DateTime(timezone=True)), Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("user_id", "idempotency_key", name="uq_conversation_turn_idempotency"),
 )
@@ -1287,6 +1289,44 @@ Index(
     discord_interaction_bindings.c.expires_at,
 )
 
+subscription_quota_snapshots = Table(
+    "subscription_quota_snapshots",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("provider", String(64), nullable=False),
+    Column("window_kind", String(32), nullable=False),
+    Column("used_percent", Float, nullable=True),
+    Column("status", String(24), nullable=False),
+    Column("resets_at", DateTime(timezone=True), nullable=True),
+    Column("source", String(32), nullable=False),
+    Column("scope_model", String(64), nullable=True),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("raw", JSON, nullable=True),
+)
+Index(
+    "ix_subscription_quota_snapshots_lookup",
+    subscription_quota_snapshots.c.user_id,
+    subscription_quota_snapshots.c.provider,
+    subscription_quota_snapshots.c.window_kind,
+    desc(subscription_quota_snapshots.c.observed_at),
+)
+
+model_context_observations = Table(
+    "model_context_observations",
+    metadata,
+    Column("user_id", String(255), primary_key=True),
+    Column("provider", String(64), primary_key=True),
+    Column("model_id", String(128), primary_key=True),
+    Column("observed_limit_tokens", Integer, nullable=False),
+    Column("source", String(16), nullable=False),
+    Column("first_message_tokens", Integer, nullable=True),
+    Column("cli_version", String(32), nullable=True),
+    Column("account_credits_on", Boolean, nullable=True),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("invalidated_at", DateTime(timezone=True), nullable=True),
+)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -1343,5 +1383,7 @@ __all__ = [
     "discord_bot_configs",
     "friend_session_watches",
     "discord_interaction_bindings",
+    "subscription_quota_snapshots",
+    "model_context_observations",
     "create_engine_for_tests",
 ]

@@ -3255,6 +3255,8 @@ def create_app(services: ApiServices) -> FastAPI:
         return Path(getattr(workspace, "root", workspace))
 
     register_settings_routes(app, services, principal_for, conversation_root)
+    from .orchestration_settings_routes import register_orchestration_settings_routes
+    register_orchestration_settings_routes(app, services, principal_for, conversation_root)
     register_conversation_routes(app, services, principal_for, conversation_root)
     from .friend_routes import register_friend_routes
     register_friend_routes(app, services, principal_for)

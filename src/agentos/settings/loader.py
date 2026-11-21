@@ -29,8 +29,23 @@ ALWAYS_IGNORED_FROM_PROJECT = (
     "managedMcpServers",
     "autoMode.model",  # the classifier model is operator policy: a repository never picks it
     "fallbackModel",  # which model a turn falls back to is the user's decision (cost, provider)
-    "effort",  # reasoning effort is billed to the user
+    "effort",  # reasoning effort is billed to the user (scalar blocked; dict filtered to maxForSubagents only)
     "effortLevel",
+    "effortByModel",
+    "quota",
+    "claudeCli",
+    "friend",
+    "goal",
+    "pipelines.agentMayStart",
+    "orchestration.verifier.modelPolicy",
+    "orchestration.verifier.explicit",
+    "orchestration.verifier.effort",
+    "orchestration.verifier.includeSubagents",
+    "orchestration.modelTiers",
+    "orchestration.taskBoard",
+    "orchestration.background",
+    "orchestration.stall.autoCancel",
+    "orchestration.agentMessages.continueOnUnread",
     "autoDreamEnabled",  # background consolidation spends the user's tokens
     "permissions.nonInteractiveAsk",  # whether an unattended run may skip a confirmation
     # Approving a repository's own .mcp.json servers is the person's decision, never the repository's (trust is not consent).
@@ -57,7 +72,15 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "disableAllHooks",
 )
 # A repository can never turn these on: it may only switch them off (a restriction).
-PROJECT_TRUE_IGNORED = ("permissions.allowBypassPermissionsMode",)
+PROJECT_TRUE_IGNORED = (
+    "permissions.allowBypassPermissionsMode",
+    "orchestration.verifier.enabled",
+    "orchestration.selfVerify.enabled",
+    "orchestration.worktree.enabled",
+    "pipelines.enabled",
+    "orchestration.agentMessages.parentTool",
+)
+_PROJECT_ALLOWED_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max", "ultra"})
 # A repository can never turn these off: it may only switch them on (a restriction).
 PROJECT_FALSE_IGNORED = ("disableAllHooks",)
 # Restriction keys a repository may set, but only to the restrictive value listed.
@@ -94,13 +117,24 @@ def _get(data: Mapping[str, Any], dotted: str) -> Any:
 
 def _drop(data: dict[str, Any], dotted: str) -> None:
     parts = _split(dotted)
+    if not parts:
+        return
+    parents: list[tuple[dict[str, Any], str]] = []
     current: Any = data
     for part in parts[:-1]:
-        current = current.get(part) if isinstance(current, dict) else None
-        if not isinstance(current, dict):
+        nxt = current.get(part) if isinstance(current, dict) else None
+        if not isinstance(nxt, dict):
             return
-    if isinstance(current, dict):
+        parents.append((current, part))
+        current = nxt
+    if isinstance(current, dict) and parts[-1] in current:
         current.pop(parts[-1], None)
+        for parent, key in reversed(parents):
+            child = parent.get(key)
+            if isinstance(child, dict) and not child:
+                parent.pop(key, None)
+            else:
+                break
 
 
 def _drop_nulls(value: Any) -> Any:
@@ -118,8 +152,16 @@ def _filter_project(data: dict[str, Any], *, trusted: bool) -> tuple[dict[str, A
     Also returns the keys dropped only because the workspace is not trusted yet.
     """
     filtered = _drop_nulls(copy.deepcopy(data))
+    raw_effort = filtered.get("effort")
+    preserved_max_subagents: str | None = None
+    if isinstance(raw_effort, dict):
+        candidate = raw_effort.get("maxForSubagents")
+        if isinstance(candidate, str) and candidate in _PROJECT_ALLOWED_EFFORT_LEVELS:
+            preserved_max_subagents = candidate
     for key in ALWAYS_IGNORED_FROM_PROJECT:
         _drop(filtered, key)
+    if preserved_max_subagents is not None:
+        filtered["effort"] = {"maxForSubagents": preserved_max_subagents}
     awaiting_trust: list[str] = []
     if not trusted:
         for key in UNTRUSTED_IGNORED_FROM_PROJECT:

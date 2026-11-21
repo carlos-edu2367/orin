@@ -1,0 +1,168 @@
+.orch-settings {
+  display: grid;
+  gap: 18px;
+}
+
+.orch-settings__group {
+  display: grid;
+  gap: 10px;
+}
+
+.orch-settings__group-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.orch-settings__list {
+  display: grid;
+  gap: 10px;
+}
+
+.orch-settings__row {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--ink);
+}
+
+.orch-settings__row.is-locked {
+  opacity: 0.85;
+}
+
+.orch-settings__row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.orch-settings__meta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.orch-settings__label {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.orch-settings__description {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.orch-settings__path {
+  font: 11px/1.4 var(--mono, monospace);
+  color: var(--muted);
+}
+
+.orch-settings__badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.orch-settings__control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.orch-settings__control input[type='number'],
+.orch-settings__control input[type='text'],
+.orch-settings__control select {
+  min-width: 160px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.orch-settings__switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.orch-settings__collection {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+}
+
+.orch-settings__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.orch-settings__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--raised);
+}
+
+.orch-settings__item code {
+  font: 12px/1.4 var(--mono, monospace);
+  overflow-wrap: anywhere;
+}
+
+.orch-settings__add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.orch-settings__add-row input,
+.orch-settings__add-row select {
+  flex: 1 1 160px;
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 8px;
+  padding: 7px 10px;
+  background: var(--raised);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.orch-settings__reset {
+  font-size: 12px;
+  padding: 3px 9px;
+}
+
+.orch-settings__slots {
+  display: grid;
+  gap: 16px;
+}
+
+.orch-settings__status {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  color: var(--signal);
+}

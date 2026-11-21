@@ -643,6 +643,7 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
     for table, column, ddl in (
         ("conversation_turns", "turn_kind", "VARCHAR(16)"),
         ("conversation_turns", "cli_options", "TEXT"),
+        ("conversation_turns", "effort", "VARCHAR(16)"),
         ("conversation_dispatches", "lease_renewed_at", timestamp),
         ("conversation_input_queue", "idempotency_key", "VARCHAR(255)"),
     ):
