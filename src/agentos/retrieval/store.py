@@ -419,6 +419,51 @@ class SqliteChunkStore:
                 for row in self._connection.execute("SELECT path, content_hash, mtime_ns, size_bytes FROM files")
             }
 
+    def file_state(self, path: str) -> tuple[int, int] | None:
+        """Return ``(mtime_ns, size_bytes)`` recorded for ``path``, or ``None``."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT mtime_ns, size_bytes FROM files WHERE path = ?",
+                (path,),
+            ).fetchone()
+            if row is None:
+                return None
+            return (int(row["mtime_ns"]), int(row["size_bytes"]))
+
+    def file_record(self, path: str) -> tuple[str, int, int] | None:
+        """Return ``(content_hash, mtime_ns, size_bytes)`` recorded for ``path``, or ``None``."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT content_hash, mtime_ns, size_bytes FROM files WHERE path = ?",
+                (path,),
+            ).fetchone()
+            if row is None:
+                return None
+            return (str(row["content_hash"]), int(row["mtime_ns"]), int(row["size_bytes"]))
+
+    def update_file_stat(self, path: str, *, mtime_ns: int, size_bytes: int) -> None:
+        """Refresh ``mtime_ns`` and ``size_bytes`` when content hash is unchanged."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE files SET mtime_ns = ?, size_bytes = ? WHERE path = ?",
+                (mtime_ns, size_bytes, path),
+            )
+
+    def chunks_of_file(self, path: str) -> list[Chunk]:
+        """Return every indexed chunk of ``path``, ordered by start line."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM chunks WHERE path = ? ORDER BY start_line ASC, end_line ASC",
+                (path,),
+            )
+            return [
+                Chunk(
+                    path=row["path"], start_line=row["start_line"], end_line=row["end_line"],
+                    symbol=row["symbol"], kind=row["kind"], text=row["text"],
+                )
+                for row in rows
+            ]
+
     def chunks_by_id(self, chunk_ids: list[str]) -> dict[str, Chunk]:
         if not chunk_ids:
             return {}
