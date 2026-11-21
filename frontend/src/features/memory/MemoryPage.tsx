@@ -15,6 +15,7 @@ import {
   type MemorySemanticScope,
 } from '../../api/memory'
 import { SettingsPage } from '../settings/SettingsPage'
+import { InstructionLintPanel } from './InstructionLintPanel'
 
 type MemoryCardItem = {
   id: string
@@ -355,6 +356,8 @@ export function MemoryPage({
           + Adicionar lembrança
         </button>
       </div>
+
+      <InstructionLintPanel client={client} projectId={projectId} />
 
       <div className="memory-ref11__search-row">
         <input
