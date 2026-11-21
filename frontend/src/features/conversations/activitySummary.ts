@@ -994,6 +994,14 @@ function soloGroup(event: ConversationActivityEvent): ActivityGroup {
   return group
 }
 
+export function isVerifierEvent(event: ConversationActivityEvent): boolean {
+  return (
+    event.type === 'verifier.model_selected' ||
+    event.type === 'verifier.started' ||
+    event.type === 'verifier.finished'
+  )
+}
+
 export function isCodeModeEvent(event: ConversationActivityEvent): boolean {
   return event.type.startsWith('code_mode.') && !event.toolPermission
 }
@@ -1075,6 +1083,9 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
 }
 
 export function groupingKey(event: ConversationActivityEvent): string {
+  if (isVerifierEvent(event)) {
+    return `verifier:${event.agentId}:${event.turnId ?? ''}`
+  }
   if (isFriendQueuedInputEvent(event)) {
     const queueId = typeof event.payload?.queue_id === 'string' ? event.payload.queue_id : event.eventId
     return `queued-input:friend:${event.agentId}:${event.turnId ?? ''}:${queueId}`
@@ -1164,6 +1175,7 @@ export function processExitedLabel(event: ConversationActivityEvent): string {
 
 export function groupLabel(group: ActivityGroup): string {
   const first = group.events[0]
+  if (first && isVerifierEvent(first)) return 'Verificação independente'
   if (group.kind === 'tool') return toolGroupLabel(group)
   if (group.kind === 'agent') return agentLabel(first)
   if (group.kind === 'artifact') return first.label ? `Criou ${first.label}` : 'Criou um artefato'
@@ -1218,6 +1230,7 @@ export function activityStateLabel(state: ActivityState): string {
     case 'failed': return 'Falhou'
     case 'cancelled': return 'Cancelada'
     case 'completed': return 'Concluída'
+    case 'completed_with_caveats': return 'Concluído com pendências'
     default: return 'Em andamento'
   }
 }

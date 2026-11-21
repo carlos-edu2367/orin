@@ -14,6 +14,7 @@ import {
   isRenderable,
   isSubagentCoordinationOrWaitEvent,
   isSubagentDelegationFailed,
+  isVerifierEvent,
   isWaitingModelEvent,
   normalizeGeneratingArgumentsEvent,
 } from './activitySummary'
@@ -346,6 +347,7 @@ export function buildTurnTimeline(
     agentName?: string
   } | null = null
   const renderedCodeRuns = new Set<string>()
+  const verifierItems = new Map<string, TimelineActivityItem>()
   const subagentWaveItems = new Map<string, TimelineActivityItem>()
   const settledWaveSubagents = new Set<string>()
 
@@ -650,6 +652,35 @@ export function buildTurnTimeline(
       }
     }
     const key = groupingKey(event)
+    if (isVerifierEvent(event)) {
+      flushGroup()
+      const existing = verifierItems.get(key)
+      if (existing) {
+        applyEventToGroup(existing.group, event)
+        existing.event = event
+        continue
+      }
+      const verifierGroup: ActivityGroup = {
+        id: key,
+        kind: event.kind,
+        state: event.state,
+        label: 'Verificação independente',
+        count: 1,
+        events: [event],
+        agentId: event.agentId,
+        agentName: event.agentName,
+        failed: event.state === 'failed',
+      }
+      const nextItem: TimelineActivityItem = {
+        id: `activity:${verifierGroup.id}:${event.originEventId ?? event.eventId}`,
+        kind: 'activity',
+        group: verifierGroup,
+        event,
+      }
+      items.push(nextItem)
+      verifierItems.set(key, nextItem)
+      continue
+    }
     if (subagentEvent && event.kind === 'tool' && key.startsWith('tool:')) {
       flushGroup()
       const delegationFailed = isSubagentDelegationFailed(
@@ -849,7 +880,10 @@ export function buildMessageTimelines(
     if (!turnId) continue
     const content = message.content ?? ''
     const isMsgCompleted =
-      message.status === 'completed' || message.status === 'failed' || message.status === 'cancelled'
+      message.status === 'completed' ||
+      message.status === 'completed_with_caveats' ||
+      message.status === 'failed' ||
+      message.status === 'cancelled'
     const rawTurnEvents = hasAnyTurnId ? (eventsByTurn.get(turnId) ?? EMPTY_TURN_EVENTS) : events
 
     seenMessageIds?.add(message.message_id)

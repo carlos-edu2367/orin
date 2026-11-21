@@ -9,9 +9,11 @@ import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation } f
 import { AgentMessagesSettingsBlock } from './AgentMessagesSettingsBlock'
 import { FriendDeliverySettingsBlock } from './FriendDeliverySettingsBlock'
 import { SettingsSection } from './SettingsSection'
+import { VerifierMetricsTable } from './VerifierMetricsTable'
+import { VerifierSettingsBlocks } from './VerifierSettingsBlocks'
 import './orchestrationSettings.css'
 
-const GROUPS_QUERY = 'messages,friend'
+const GROUPS_QUERY = 'messages,friend,verifier'
 
 export function OrchestrationSection({ client }: { client?: ApiClient }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
@@ -69,6 +71,10 @@ export function OrchestrationSection({ client }: { client?: ApiClient }) {
     [apiClient, conversationId],
   )
 
+  const verifierItems = useMemo(
+    () => (report?.items ?? []).filter((item) => item.group === 'verifier'),
+    [report],
+  )
   const messageItems = useMemo(
     () => (report?.items ?? []).filter((item) => item.group === 'messages'),
     [report],
@@ -95,6 +101,27 @@ export function OrchestrationSection({ client }: { client?: ApiClient }) {
 
       {report && (
         <div className="orch-settings__slots">
+          {verifierItems.length > 0 && (
+            <div data-testid="orchestration-section-verifier">
+              <VerifierSettingsBlocks
+                items={verifierItems}
+                busy={saving}
+                onSave={handleSave}
+              />
+            </div>
+          )}
+
+          {verifierItems.length > 0 && (
+            <div data-testid="orchestration-section-verifier-metrics">
+              <Card title="Métricas do verificador" id="orchestration-heading-verifier-metrics">
+                <p className="code-settings__muted">
+                  Acompanhe o desempenho por par autor → revisor para calibrar a tabela de famílias e níveis.
+                </p>
+                <VerifierMetricsTable client={apiClient} />
+              </Card>
+            </div>
+          )}
+
           <div data-testid="orchestration-section-messages">
             <Card title="Mensagens a subagentes" id="orchestration-heading-messages">
               <p className="code-settings__muted">

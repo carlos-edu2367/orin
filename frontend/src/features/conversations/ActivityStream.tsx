@@ -7,6 +7,7 @@ import { AgentBirth } from './AgentBirth'
 import { AgentExchange } from './AgentExchange'
 import type { AgentMessagesState } from './agentMessages'
 import { CodeModeCard } from './CodeModeCard'
+import { VerificationCard } from './VerificationCard'
 import { CodeSessionProposalCard, type CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import {
   extractFriendDeliveryFromEvent,
@@ -201,6 +202,7 @@ export function renderActivityGroup(
       />
     )
   }
+  if (first.type.startsWith('verifier.')) return <VerificationCard group={group} />
   if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
   if (first.type === 'workspace.trust_required' && conversationId) {
     return <>{group.events.map((event) => <WorkspaceTrustCard key={event.eventId} event={event} conversationId={conversationId} />)}</>

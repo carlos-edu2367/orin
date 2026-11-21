@@ -350,6 +350,16 @@ Quando um turno encontra erro de estouro de janela de contexto (por exemplo `"Pr
 
 A troca de assinatura por política de cota (`quota.fallback.enabled`) só ocorre entre turnos (nunca no meio de um turno com efeitos de ferramenta pendentes) e emite `quota.fallback_applied`.
 
+### Verificação independente e contratos de subagentes (Pacote A)
+
+Na 0.13, a delegação de subagentes e o gate de verificação de entrega passam a obedecer aos contratos explícitos abaixo:
+
+- **Contrato `Agent` com `provider`:** a ferramenta `Agent` aceita `provider` (além de `model_id` e `effort`) para instanciar um subagente em provedor/CLI diferente do agente pai (por exemplo, pai no Claude CLI invocando subagente em `openai-codex` ou `google-antigravity`), mantendo resolução de família estritamente pelo identificador do modelo e nunca pelo provedor hospedeiro.
+- **Desligamento padrão da auto-verificação (`orchestration.selfVerify.enabled = false`):** antes da 0.13 a rodada extra de auto-verificação após edições era automática; a partir da 0.13 ela nasce desligada por padrão (`false`) e só executa quando explicitamente habilitada pelo usuário (e quando o verificador independente não atuou no turno — o gate nunca executa ambos em sequência).
+- **Ferramenta `report_verification` (exclusiva do revisor `verifier`):** formaliza o relatório da revisão independente com `verdict` (`pass`, `fail`, `inconclusive`), comandos verificados (`checked`), achados (`findings`) e pontos `unverified`. Todo achado exige evidência objetiva (`failing_test`, `command` ou `code_ref`); sem prova válida, o achado é rebaixado para `severity = "unproven"` e não bloqueia o turno. Um veredito `pass` com achado `blocker` provado é recusado pelo validador.
+- **Ferramenta `resolve_findings` (obrigatória para o implementador diante de bloqueios provados):** quando existem achados `blocker` ou `major` com prova, o implementador não pode concluir o turno sem responder explicitamente a cada achado (`confirmed`, `rejected` com justificativa, ou `fixed`). Achados marcados como `fixed` disparam nova rodada de verificação até `orchestration.verifier.maxRounds`; esgotado o limite com achados bloqueantes ainda abertos ou confirmados sem correção, o turno encerra no estado explícito `completed_with_caveats` ("Concluído com pendências").
+- **Métricas locais por par (`verification_reviews` / `verification_findings`):** cada revisão (incluindo revisões puladas com `verdict = "skipped"`) é registrada por `user_id` via porta `ReviewRecorder`, alimentando `GET /v1/orchestration/verifier/metrics` sem inventar custo (`cost_usd = NULL` quando a assinatura não reporta).
+
 ## Fluxo normal
 
 1. Uma intenção autorizada entra com correlação e idempotência.
@@ -405,6 +415,9 @@ A troca de assinatura por política de cota (`quota.fallback.enabled`) só ocorr
 | `agent.message_forwarded` | mensagem não lida pelo subagente (por término, parada ou fim do orçamento de ações) foi repassada ao agente pai |
 | `agent.message_expired` | mensagem enfileirada para subagente expirou antes de ser entregue |
 | `friend.delivery_status` | confirmação assíncrona da entrega de mensagem enviada pelo Orin Friend a uma sessão alvo (`injected`, `promoted` ou `blocked`) |
+| `verifier.model_selected` | política de seleção escolheu o par provedor/modelo/esforço (ou registrou `fallback_step = 4` sem modelo disponível) para o verificador independente |
+| `verifier.started` | rodada do verificador independente foi iniciada com aviso visível de provedor, modelo, esforço, motivo do disparo (`trigger_reason`) e contagem de arquivos/linhas (`lines_known`) |
+| `verifier.finished` | rodada do verificador independente terminou com `verdict` (`pass`, `fail`, `inconclusive` ou `skipped`), comandos verificados (`checked`), achados estruturados (`findings`) e contadores de bloqueio/sem prova |
 
 Events pertencentes à máquina de estados, como `ExecutionStarted`, `ExecutionFinished`, `ExecutionFailed` e `ExecutionCancelled`, continuam sob ownership do Kernel. Os Events desta RFC carregam `execution_id` quando vinculados a uma tentativa e sempre preservam owner, Workspace, correlação, causalidade e classificação.
 
