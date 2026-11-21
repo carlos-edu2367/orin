@@ -16,6 +16,7 @@ class AgentActivityEventType(StrEnum):
     MODEL_ROUTING_STARTED = "model.routing_started"
     CONTEXT_UPDATED = "context.updated"
     CONTEXT_COMPACTED = "context.compacted"
+    CONTEXT_OVERFLOW_COMPACTED = "context.overflow_compacted"
     ASSISTANT_DELTA = "assistant.delta"
     AGENT_THOUGHT_DELTA = "agent.thought_delta"
     ASSISTANT_COMPLETED = "assistant.completed"

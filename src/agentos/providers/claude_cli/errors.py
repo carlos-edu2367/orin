@@ -28,6 +28,7 @@ class ProviderTransportError(ProviderKeyRejected):
         end_reason: str | None = None,
         output_tail: str = "",
         exit_code: int | None = None,
+        error_kind: CliErrorKind | str | None = None,
     ) -> None:
         super().__init__(
             message,
@@ -39,6 +40,7 @@ class ProviderTransportError(ProviderKeyRejected):
         self.output_tail = output_tail
         self.stderr_tail = output_tail
         self.exit_code = exit_code
+        self.error_kind: CliErrorKind | str | None = error_kind
 
 
 class NativeLoopUnavailable(ProviderTransportError):
@@ -246,6 +248,8 @@ def classify_result_error_info(
         else (429 if is_rate_limited else transport_err.status_code)
     )
 
+    transport_err.error_kind = kind
+
     return CliErrorInfo(
         kind=kind,
         status_code=status_out,
@@ -260,6 +264,7 @@ def error_info_to_transport_error(info: CliErrorInfo) -> ProviderTransportError:
     if isinstance(info.exception, ProviderTransportError):
         if info.exception.end_reason is None:
             info.exception.end_reason = "error_result"
+        info.exception.error_kind = info.kind
         return info.exception
     return ProviderTransportError(
         info.user_message,
@@ -267,6 +272,7 @@ def error_info_to_transport_error(info: CliErrorInfo) -> ProviderTransportError:
         retry_after_seconds=info.retry_after_seconds,
         exhausted=(info.kind == CliErrorKind.AUTH),
         end_reason="error_result",
+        error_kind=info.kind,
     )
 
 

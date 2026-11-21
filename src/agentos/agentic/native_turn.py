@@ -55,6 +55,14 @@ from agentos.providers.cli_tools_mcp import (
 )
 
 from . import phases, transcript
+from .context_overflow import (
+    format_context_overflow_message,
+    is_context_overflow_error,
+    is_zero_usage,
+    strip_synthetic_error_from_messages,
+    strip_synthetic_error_from_parts,
+)
+from .events import AgentActivityEventType
 from .lifecycle import HookEvent
 from .reminders import VOLATILE_REMINDER_CHARS, render_reminders, system_reminder
 from .runtime import (
@@ -1867,6 +1875,33 @@ class _RunnerSink:
         self._flush_residual_tool_filter()
         return strip_residual_tool_protocol_blocks("".join(self.text_parts)).strip()
 
+    def discard_synthetic_error_text(
+        self,
+        *,
+        synthetic_error_text: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        removed_round = strip_synthetic_error_from_parts(
+            self._round_text_parts,
+            synthetic_error_text=synthetic_error_text,
+            error_message=error_message,
+        )
+        removed_text = strip_synthetic_error_from_parts(
+            self.text_parts,
+            synthetic_error_text=synthetic_error_text,
+            error_message=error_message,
+        )
+        removed = removed_round or removed_text
+        if removed and not self.text_parts:
+            self.had_visible_output = False
+            self._emitted_text_in_turn = False
+            self._message_wrote_text = False
+            self._last_text_ended_with_newline = True
+            resetter = getattr(self._runner.runtime.store, "reset_assistant_message", None)
+            if callable(resetter):
+                resetter(self._runner.turn)
+        return removed
+
     def _on_tool_batch_finished(self, results: list[dict[str, object]]) -> None:
         self._flush_residual_tool_filter()
         self._residual_tool_filter = ResidualToolTextStreamFilter()
@@ -2099,8 +2134,17 @@ class _RunnerSink:
             message_id=message_id,
         )
 
-    def on_assistant_usage(self, message_id: str, usage: CliUsage) -> None:
+    def on_assistant_usage(
+        self,
+        message_id: str,
+        usage: CliUsage,
+        *,
+        is_error: bool = False,
+    ) -> None:
         self._note_cli_event()
+        zero_usage = is_zero_usage(usage)
+        if is_error and zero_usage:
+            return
         msg_key = str(message_id or "").strip()
         if msg_key:
             self.on_message_id(msg_key)
@@ -2171,6 +2215,8 @@ class _RunnerSink:
                     except Exception:  # noqa: BLE001 - the abort code is what stops the turn
                         pass
 
+        if zero_usage:
+            return
         limit = (
             self._runner.runtime.limits.context_window_tokens
             or self._runner.runtime.limits.max_context_tokens
@@ -2241,6 +2287,7 @@ class NativeTurnRunner:
         self.iteration = 1
         self.last_context: dict[str, object] = {}
         self.clock: Callable[[], Any] = runtime.clock
+        self._reactive_compacted: bool = False
 
     def _effective_permission_mode(self) -> str | None:
         """The mode the turn's tools enforce now (plan mode included), for the CLI's system prompt."""
@@ -3212,6 +3259,24 @@ class NativeTurnRunner:
                     return self.runtime._cancel(
                         self.turn, process_count, executor.action_count
                     )
+                if is_context_overflow_error(exc, self.runtime):
+                    if self._recover_context_overflow(
+                        exc, executor, sink, provider_effect_id, tool_schemas
+                    ):
+                        initial_user_images_pending = False
+                        resume_session_id = None
+                        user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        continue
+                    return self._fail_context_overflow(
+                        exc,
+                        provider_effect_id=provider_effect_id,
+                        process_count=process_count,
+                        executor=executor,
+                        sink=sink,
+                    )
                 recorder = getattr(self.provider, "record_native_unavailable", None)
                 if callable(recorder):
                     try:
@@ -3268,6 +3333,24 @@ class NativeTurnRunner:
                     self.runtime._life(self.turn, "running")
                     next_process = True
                     continue
+                if is_context_overflow_error(exc, self.runtime):
+                    if self._recover_context_overflow(
+                        exc, executor, sink, provider_effect_id, tool_schemas
+                    ):
+                        initial_user_images_pending = False
+                        resume_session_id = None
+                        user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        continue
+                    return self._fail_context_overflow(
+                        exc,
+                        provider_effect_id=provider_effect_id,
+                        process_count=process_count,
+                        executor=executor,
+                        sink=sink,
+                    )
                 self._drain_in_flight_tools(executor)
                 if self._stream_did_work(sink, executor):
                     resumed, pause_result = self._handle_stream_interrupted(
@@ -3402,6 +3485,104 @@ class NativeTurnRunner:
             }
         )
         return True
+
+    def _discard_overflow_error_text(
+        self,
+        exc: BaseException,
+        executor: RuntimeToolExecutor,
+        sink: _RunnerSink,
+    ) -> None:
+        syn_text = getattr(exc, "synthetic_error_text", None) or getattr(
+            executor.handle, "synthetic_error_text", None
+        )
+        err_msg = str(exc or "")
+        sink.discard_synthetic_error_text(
+            synthetic_error_text=syn_text, error_message=err_msg
+        )
+        strip_synthetic_error_from_messages(
+            self.messages, synthetic_error_text=syn_text, error_message=err_msg
+        )
+
+    def _recover_context_overflow(
+        self,
+        exc: BaseException,
+        executor: RuntimeToolExecutor,
+        sink: _RunnerSink,
+        provider_effect_id: str | None,
+        tool_schemas: list[dict[str, object]],
+    ) -> bool:
+        if not is_context_overflow_error(exc, self.runtime) or self._reactive_compacted:
+            return False
+        self._reactive_compacted = True
+        self._drain_in_flight_tools(executor)
+        self._discard_overflow_error_text(exc, executor, sink)
+        before_tokens = (
+            self.runtime._estimated_tokens({"messages": self.messages, "tools": tool_schemas})
+            + self.runtime._prompt_overhead_tokens()
+        )
+        self.runtime._age_tool_results(self.messages, keep_recent=0)
+        self.runtime._release_read_stubs(self.messages)
+        try:
+            compacted = bool(self.runtime._compact_keeping_recent(self.messages, self.turn))
+        except Exception:  # noqa: BLE001 - reactive compaction failure becomes a clean CONTEXT_LENGTH_EXCEEDED
+            _LOGGER.warning("native turn: reactive context-overflow compaction failed", exc_info=True)
+            return False
+        after_tokens = (
+            self.runtime._estimated_tokens({"messages": self.messages, "tools": tool_schemas})
+            + self.runtime._prompt_overhead_tokens()
+        )
+        if not compacted and after_tokens >= before_tokens:
+            return False
+        self.runtime._effect_finished(
+            self.turn,
+            provider_effect_id,
+            state="NOT_APPLIED",
+            error_code="CONTEXT_LENGTH_EXCEEDED_COMPACTING",
+        )
+        payload = {"before_tokens": before_tokens, "after_tokens": after_tokens}
+        recorder = getattr(self.runtime.store, "record", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    self.turn,
+                    AgentActivityEventType.CONTEXT_OVERFLOW_COMPACTED,
+                    "Contexto compactado após estouro de limite",
+                    payload,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        self.runtime._life(
+            self.turn,
+            AgentActivityEventType.CONTEXT_OVERFLOW_COMPACTED.value,
+            **payload,
+        )
+        return True
+
+    def _fail_context_overflow(
+        self,
+        exc: BaseException,
+        *,
+        provider_effect_id: str | None,
+        process_count: int,
+        executor: RuntimeToolExecutor,
+        sink: _RunnerSink,
+    ) -> AgenticRunResult:
+        self._drain_in_flight_tools(executor)
+        self._discard_overflow_error_text(exc, executor, sink)
+        message = format_context_overflow_message(str(exc or ""))
+        self.turn["error_message"] = message
+        self.runtime._effect_finished(
+            self.turn,
+            provider_effect_id,
+            state="NOT_APPLIED",
+            error_code="CONTEXT_LENGTH_EXCEEDED",
+        )
+        return self.runtime._fail(
+            self.turn,
+            "CONTEXT_LENGTH_EXCEEDED",
+            process_count,
+            executor.action_count,
+        )
 
     def _drain_in_flight_tools(self, executor: RuntimeToolExecutor) -> None:
         """Let tool calls still running in Orin finish before deciding how a dead CLI process goes on.

@@ -144,6 +144,7 @@ export type AgentActivityEventType =
   | 'tool.permission_required'
   | 'artifact.created'
   | 'context.updated'
+  | 'context.overflow_compacted'
   | 'memory.learned'
   | 'workspace.trust_required'
   | 'todo.updated'

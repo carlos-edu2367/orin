@@ -7,12 +7,17 @@ import pytest
 
 from agentos.agentic.retry import is_retryable
 from agentos.agentic.runtime import AgenticTurnRuntime
+from agentos.providers.antigravity_cli.errors import classify_antigravity_error
 from agentos.providers.claude_cli.errors import (
     ProviderTransportError,
     RateLimitState,
     classify_result_error,
+    classify_result_error_info,
+    error_info_to_transport_error,
     format_reset_local,
 )
+from agentos.providers.cli_adapter import CliErrorKind
+from agentos.providers.codex_cli.errors import classify_codex_error
 from agentos.providers.claude_cli.stream import CliResult, CliUsage
 
 T = 1_793_200_000.0
@@ -121,3 +126,44 @@ def test_rate_limit_handles_millis_and_overflow_timestamps() -> None:
     )
     assert rl_ms.resets_at == pytest.approx(T + 600)
     assert format_reset_local(1e20) == "horário indisponível"
+
+
+def test_error_info_to_transport_error_preserves_error_kind_for_claude() -> None:
+    overflow = error_info_to_transport_error(
+        classify_result_error_info(_result(api_error_status=None, text="Prompt is too long"), None, now=T)
+    )
+    assert overflow.error_kind == CliErrorKind.CONTEXT_OVERFLOW
+
+    rate_limited = error_info_to_transport_error(
+        classify_result_error_info(_result(api_error_status=429, text="rate limited"), None, now=T)
+    )
+    assert rate_limited.error_kind == CliErrorKind.RATE_LIMITED
+
+    auth = error_info_to_transport_error(
+        classify_result_error_info(_result(api_error_status=401, text="unauthorized"), None, now=T)
+    )
+    assert auth.error_kind == CliErrorKind.AUTH
+
+    fatal = error_info_to_transport_error(
+        classify_result_error_info(_result(api_error_status=None, text="unknown fatal failure"), None, now=T)
+    )
+    assert fatal.error_kind == CliErrorKind.FATAL
+
+
+def test_codex_and_antigravity_errors_preserve_error_kind() -> None:
+    codex_info = classify_codex_error(
+        _result(api_error_status=None, text="maximum context length exceeded"), None, now=T
+    )
+    assert codex_info.kind == CliErrorKind.CONTEXT_OVERFLOW
+    assert isinstance(codex_info.exception, ProviderTransportError)
+    assert codex_info.exception.error_kind == CliErrorKind.CONTEXT_OVERFLOW
+    assert error_info_to_transport_error(codex_info).error_kind == CliErrorKind.CONTEXT_OVERFLOW
+
+    agy_info = classify_antigravity_error(
+        _result(api_error_status=None, text="Prompt is too long for model"), None, now=T
+    )
+    assert agy_info.kind == CliErrorKind.CONTEXT_OVERFLOW
+    assert isinstance(agy_info.exception, ProviderTransportError)
+    assert agy_info.exception.error_kind == CliErrorKind.CONTEXT_OVERFLOW
+    assert error_info_to_transport_error(agy_info).error_kind == CliErrorKind.CONTEXT_OVERFLOW
+
