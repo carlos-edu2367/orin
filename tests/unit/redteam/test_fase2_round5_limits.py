@@ -59,6 +59,7 @@ def test_max_turns_is_a_cap_for_the_whole_turn_not_per_follow_up_message(tmp_pat
     rt, store, prov = _rt(
         tmp_path, [_r1, _r2, _r3],
         phase_controller=PhaseController(),
+        effective_settings={"orchestration": {"selfVerify": {"enabled": True}}},
         limits=AgenticLimits(max_iterations=None, max_actions=None, max_turns=3, context_window_tokens=1_000_000),
     )
     rt.toolset._changed_paths.add("a.py")  # type: ignore[union-attr]

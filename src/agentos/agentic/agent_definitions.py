@@ -33,7 +33,7 @@ DEFAULT_MODEL_ALIASES: Mapping[str, str] = {
     "haiku": "claude-haiku-5-5",
     "sonnet": "claude-sonnet-5-5",
     "opus": "claude-opus-5-5",
-    "fable": "claude-fable-5-1",
+    "fable": "claude-fable-5-2",
 }
 # Least to most permissive. dontAsk refuses whatever would prompt, so it ranks with plan mode below the default.
 # Names of Orin's builtin agents. A repository may not replace them (a read-only Explore stays read-only); a

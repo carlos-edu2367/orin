@@ -871,7 +871,8 @@ def test_production_settings_reject_localhost_trust_outside_local_environments(e
         )
 
 
-def test_localhost_trust_requires_a_built_frontend_directory() -> None:
+def test_localhost_trust_requires_a_built_frontend_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("WEB_DIST_DIR", raising=False)
     with pytest.raises(ValueError, match="WEB_DIST_DIR"):
         ProductionSettings(
             DATABASE_URL="postgresql+psycopg://user:password@localhost/agentos",

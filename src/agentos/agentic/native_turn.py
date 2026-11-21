@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, is_dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 import hashlib
@@ -4111,11 +4111,12 @@ class NativeTurnRunner:
                 _LOGGER.debug("context observation learn failed for %s/%s", provider, model_id, exc_info=True)
 
         cur_limits = self.runtime.limits
-        self.runtime.limits = replace(
-            cur_limits,
-            context_window_tokens=learned_tokens,
-            max_context_tokens=max(1_000, min(cur_limits.max_context_tokens, learned_tokens)),
-        )
+        if is_dataclass(cur_limits) and not isinstance(cur_limits, type):
+            self.runtime.limits = replace(
+                cur_limits,
+                context_window_tokens=learned_tokens,
+                max_context_tokens=max(1_000, min(cur_limits.max_context_tokens, learned_tokens)),
+            )
         self.runtime.learned_window_tokens = learned_tokens
         self.runtime.window_source = "learned"
         self.runtime.window_detail = (
@@ -4149,7 +4150,7 @@ class NativeTurnRunner:
 
     def _invalidate_superseded_learned_window(self, sink: _RunnerSink) -> None:
         learned_limit = self.runtime.learned_window_tokens
-        if learned_limit is None or learned_limit <= 0:
+        if not isinstance(learned_limit, (int, float)) or isinstance(learned_limit, bool) or learned_limit <= 0:
             return
         observed_used = max(
             int(getattr(sink, "max_context_used_tokens", 0) or 0),
@@ -4178,11 +4179,12 @@ class NativeTurnRunner:
         self._drain_in_flight_tools(executor)
         self._discard_overflow_error_text(exc, executor, sink)
         cur_limits = self.runtime.limits
-        self.runtime.limits = replace(
-            cur_limits,
-            context_window_tokens=200_000,
-            max_context_tokens=max(1_000, min(cur_limits.max_context_tokens, 200_000)),
-        )
+        if is_dataclass(cur_limits) and not isinstance(cur_limits, type):
+            self.runtime.limits = replace(
+                cur_limits,
+                context_window_tokens=200_000,
+                max_context_tokens=max(1_000, min(cur_limits.max_context_tokens, 200_000)),
+            )
         self.runtime.window_source = "account_credits"
         self.runtime.window_detail = "200 mil, limite da conta sem créditos"
         self.runtime.window_rule_index = 3
