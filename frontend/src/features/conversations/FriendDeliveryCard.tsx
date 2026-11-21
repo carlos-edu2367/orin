@@ -224,7 +224,7 @@ export function FriendDeliveryCard({
         turnId: response && typeof response.turn_id === 'string' ? response.turn_id : null,
       })
     } catch (caught: unknown) {
-      if (caught instanceof ApiError && caught.status === 404) {
+      if (caught instanceof ApiError && (caught.status === 404 || caught.status === 409)) {
         setDeferError('O turno em andamento já leu esta mensagem.')
       } else {
         setDeferError('Não foi possível deixar a mensagem para depois do turno.')

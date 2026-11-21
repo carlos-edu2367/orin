@@ -699,6 +699,7 @@ class ProjectTools:
         from agentos.agentic.tools.orin.session_delivery import deliver_to_session
 
         friend_cid = str(getattr(self, "_conversation_id", "") or "").strip() or None
+        origin_turn_id = str(getattr(self, "turn_id", "") or "").strip() or None
         tool_call_id = getattr(self, "_active_invocation_id", None)
         ws_root = getattr(getattr(self, "workspace", None), "root", None)
         try:
@@ -710,6 +711,7 @@ class ProjectTools:
                 delivery=delivery,
                 origin=origin,
                 origin_conversation_id=friend_cid,
+                origin_turn_id=origin_turn_id,
                 tool_call_id=tool_call_id,
                 requested_provider=requested_provider,
                 requested_model_id=requested_model_id,
@@ -1525,11 +1527,6 @@ class ProjectTools:
                 )
                 effective_provider = resolved_prov or conv.get("provider") or self._default_provider
                 effective_model = resolved_mod or conv.get("model_id") or self._default_model_id
-                if permission_mode is not None and effective_perm != default_perm and callable(getattr(self._chat_store, "set_permission_mode", None)):
-                    try:
-                        self._chat_store.set_permission_mode(clean_cid, self._project_user_id, effective_perm)
-                    except Exception:
-                        pass
             else:
                 effective_provider = conv.get("provider") or self._default_provider
                 effective_model = conv.get("model_id") or self._default_model_id
@@ -1549,6 +1546,16 @@ class ProjectTools:
                 requested_model_id=model_id,
                 requested_permission_mode=permission_mode,
             )
+            if (
+                result.delivery == "new_turn"
+                and permission_mode is not None
+                and effective_perm != default_perm
+                and callable(getattr(self._chat_store, "set_permission_mode", None))
+            ):
+                try:
+                    self._chat_store.set_permission_mode(clean_cid, self._project_user_id, effective_perm)
+                except Exception:
+                    pass
             payload = {
                 "action": "send_message",
                 "conversation_id": clean_cid,

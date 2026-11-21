@@ -9,9 +9,14 @@ import logging
 import threading
 from typing import Any, Literal
 
-from sqlalchemy import insert
+from sqlalchemy import func, insert, select
 
-from agentos.persistence.postgres.schema import conversation_events
+from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
+from agentos.persistence.postgres.schema import (
+    conversation_activity_events,
+    conversation_events,
+    conversation_turns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,8 @@ class FriendDeliveryWatcherRegistry:
         self._subscribers: list[Callable[[FriendDeliveryNotification], Any]] = []
         self._reminder_queues: dict[str, Any] = {}
         self._watch_callbacks: dict[str, Callable[..., Any]] = {}
+        self._pending_reminders: dict[str, list[FriendDeliveryNotification]] = {}
+        self._drained_durable_keys: dict[str, set[tuple[str, str]]] = {}
         self._history: deque[FriendDeliveryNotification] = deque(maxlen=_MAX_HISTORY)
         self._emitted_keys: deque[tuple[str, str]] = deque(maxlen=_MAX_HISTORY * 4)
         self._emitted_set: set[tuple[str, str]] = set()
@@ -106,6 +113,110 @@ class FriendDeliveryWatcherRegistry:
                 self._reminder_queues[clean_fcid] = reminder_queue
             if callable(on_watch_notify):
                 self._watch_callbacks[clean_fcid] = on_watch_notify
+
+    def unregister_target(
+        self,
+        *,
+        friend_conversation_id: str | None,
+        reminder_queue: Any = None,
+    ) -> None:
+        clean_fcid = str(friend_conversation_id or "").strip()
+        if not clean_fcid:
+            return
+        with self._lock:
+            current = self._reminder_queues.get(clean_fcid)
+            if reminder_queue is None or current is reminder_queue:
+                self._reminder_queues.pop(clean_fcid, None)
+
+    def drain_pending_for_friend(
+        self,
+        friend_conversation_id: str | None,
+        reminder_queue: Any,
+        *,
+        store: Any = None,
+        user_id: str | None = None,
+    ) -> int:
+        """Deliver any buffered or durably persisted Friend delivery confirmations into ``reminder_queue``."""
+        clean_fcid = str(friend_conversation_id or "").strip()
+        if not clean_fcid or reminder_queue is None or not callable(getattr(reminder_queue, "add", None)):
+            return 0
+        added = 0
+        seen_keys: set[tuple[str, str]] = set()
+        with self._lock:
+            buffered = self._pending_reminders.pop(clean_fcid, [])
+            already_drained = self._drained_durable_keys.setdefault(clean_fcid, set())
+            for item in buffered:
+                key_pair = (item.queue_id, item.status)
+                if key_pair in seen_keys:
+                    continue
+                seen_keys.add(key_pair)
+                already_drained.add(key_pair)
+        for item in buffered:
+            try:
+                if reminder_queue.add(
+                    "friend_delivery",
+                    item.summary,
+                    key=f"friend_delivery:{item.queue_id}:{item.status}",
+                ):
+                    added += 1
+            except Exception:  # noqa: BLE001
+                logger.debug("Failed to drain buffered friend delivery reminder", exc_info=True)
+
+        # Durable fallback: recover delivery_status activity events recorded after the Friend turn ended
+        # (including across process restarts when the in-memory buffer is empty).
+        engine = getattr(store, "_engine", None) if store is not None else None
+        clean_uid = str(user_id or "").strip()
+        if engine is not None and clean_uid:
+            try:
+                with engine.connect() as conn:
+                    last_finished_row = (
+                        conn.execute(
+                            select(conversation_turns.c.finished_at)
+                            .where(
+                                conversation_turns.c.conversation_id == clean_fcid,
+                                conversation_turns.c.user_id == clean_uid,
+                                conversation_turns.c.finished_at.is_not(None),
+                            )
+                            .order_by(conversation_turns.c.finished_at.desc())
+                            .limit(1)
+                        )
+                        .first()
+                    )
+                    stmt = select(
+                        conversation_activity_events.c.summary,
+                        conversation_activity_events.c.payload,
+                        conversation_activity_events.c.created_at,
+                    ).where(
+                        conversation_activity_events.c.conversation_id == clean_fcid,
+                        conversation_activity_events.c.user_id == clean_uid,
+                        conversation_activity_events.c.event_type == AgentActivityEventType.FRIEND_DELIVERY_STATUS.value,
+                    )
+                    if last_finished_row is not None and last_finished_row[0] is not None:
+                        stmt = stmt.where(conversation_activity_events.c.created_at >= last_finished_row[0])
+                    rows = conn.execute(stmt.order_by(conversation_activity_events.c.id.asc()).limit(32)).mappings().all()
+                for row in rows:
+                    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                    qid = str(payload.get("queue_id") or "").strip()
+                    st = str(payload.get("status") or "").strip()
+                    summary_text = str(row.get("summary") or payload.get("summary") or "").strip()
+                    if not qid or not st or not summary_text:
+                        continue
+                    key_pair = (qid, st)
+                    with self._lock:
+                        drained_set = self._drained_durable_keys.setdefault(clean_fcid, set())
+                        if key_pair in seen_keys or key_pair in drained_set:
+                            continue
+                        drained_set.add(key_pair)
+                        seen_keys.add(key_pair)
+                    if reminder_queue.add(
+                        "friend_delivery",
+                        summary_text,
+                        key=f"friend_delivery:{qid}:{st}",
+                    ):
+                        added += 1
+            except Exception:  # noqa: BLE001
+                logger.debug("Could not recover durable friend delivery reminders", exc_info=True)
+        return added
 
     def subscribe(self, callback: Callable[[FriendDeliveryNotification], Any]) -> Callable[[], None]:
         with self._lock:
@@ -203,10 +314,18 @@ class FriendDeliveryWatcherRegistry:
         except Exception:  # noqa: BLE001
             logger.debug("Failed to push friend delivery reminder to milestone watcher", exc_info=True)
 
+        if not delivered_queues and clean_fcid:
+            with self._lock:
+                pending_list = self._pending_reminders.setdefault(clean_fcid, [])
+                if not any(p.queue_id == clean_qid and p.status == status for p in pending_list):
+                    pending_list.append(notification)
+                    if len(pending_list) > 64:
+                        del pending_list[:-64]
+
         # 2) Persist an observable SSE event on the Friend conversation (best-effort)
         engine = getattr(store, "_engine", None) if store is not None else None
         if engine is not None and clean_fcid:
-            self._record_friend_conversation_event(engine, clean_fcid, notification)
+            self._record_friend_conversation_event(store, engine, clean_fcid, notification)
             if status == STATUS_PROMOTED and notification.new_turn_id and clean_uid:
                 self._refresh_session_watch(
                     engine,
@@ -240,14 +359,97 @@ class FriendDeliveryWatcherRegistry:
 
     @staticmethod
     def _record_friend_conversation_event(
+        store: Any,
         engine: Any,
         friend_conversation_id: str,
         notification: FriendDeliveryNotification,
     ) -> None:
         if not notification.user_id:
             return
+        now = datetime.now(UTC)
+        payload = notification.as_payload()
+
+        # Primary: record into conversation_activity_events so SSE (/v1/conversations/{id}/events)
+        # and reload snapshots (snapshot_queries.py) deliver friend.delivery_status live to FriendDeliveryCard.
         try:
-            now = datetime.now(UTC)
+            friend_turn: dict[str, object] | None = None
+            latest_fn = getattr(store, "_latest_turn_for_conversation", None)
+            if callable(latest_fn):
+                friend_turn = latest_fn(friend_conversation_id, notification.user_id)
+            elif engine is not None:
+                with engine.connect() as conn:
+                    row = (
+                        conn.execute(
+                            select(conversation_turns)
+                            .where(
+                                conversation_turns.c.conversation_id == friend_conversation_id,
+                                conversation_turns.c.user_id == notification.user_id,
+                            )
+                            .order_by(conversation_turns.c.created_at.desc())
+                            .limit(1)
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    friend_turn = dict(row) if row is not None else None
+
+            if friend_turn is None:
+                synthetic_tid = f"friend-delivery:{friend_conversation_id}"
+                friend_turn = {
+                    "conversation_id": friend_conversation_id,
+                    "user_id": notification.user_id,
+                    "turn_id": synthetic_tid,
+                    "execution_id": f"exec:{synthetic_tid}",
+                }
+
+            activity_fn = getattr(store, "_activity", None)
+            if getattr(store, "activity_store", None) is not None and callable(activity_fn):
+                activity_fn(
+                    friend_turn,
+                    AgentActivityEventType.FRIEND_DELIVERY_STATUS,
+                    notification.summary,
+                    payload,
+                )
+            elif engine is not None:
+                from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
+
+                act_store = PostgresAgenticActivityStore(engine, "orin-friend-delivery-cursor")
+                tid = str(friend_turn["turn_id"])
+                exec_id = str(friend_turn.get("execution_id") or f"exec:{tid}")
+                agent_id = f"agent:{friend_conversation_id}:main"
+                for _ in range(16):
+                    with engine.connect() as conn:
+                        cur_seq = conn.execute(
+                            select(func.max(conversation_activity_events.c.sequence)).where(
+                                conversation_activity_events.c.turn_id == tid
+                            )
+                        ).scalar()
+                    seq = int(cur_seq or 0) + 1
+                    try:
+                        act_store.record_event(
+                            AgentActivityEvent(
+                                event_id=f"activity:{tid}:{seq}",
+                                conversation_id=friend_conversation_id,
+                                turn_id=tid,
+                                execution_id=exec_id,
+                                user_id=notification.user_id,
+                                agent_id=agent_id,
+                                parent_agent_id=None,
+                                event_type=AgentActivityEventType.FRIEND_DELIVERY_STATUS,
+                                sequence=seq,
+                                summary=notification.summary[:512] or "Entrega do Friend",
+                                payload=payload,
+                                created_at=now,
+                            )
+                        )
+                        break
+                    except ValueError:
+                        continue
+        except Exception:  # noqa: BLE001
+            logger.debug("Could not persist friend.delivery_status activity event", exc_info=True)
+
+        # Secondary audit row in conversation_events (for legacy fallback stores without activity_store).
+        try:
             with engine.begin() as conn:
                 conn.execute(
                     insert(conversation_events).values(
@@ -255,7 +457,7 @@ class FriendDeliveryWatcherRegistry:
                         user_id=notification.user_id,
                         event_type="friend.delivery_status",
                         message_id=None,
-                        payload=notification.as_payload(),
+                        payload=payload,
                         created_at=now,
                     )
                 )
@@ -306,6 +508,32 @@ def register_friend_delivery_target(
         friend_conversation_id=friend_conversation_id,
         reminder_queue=reminder_queue,
         on_watch_notify=on_watch_notify,
+    )
+
+
+def unregister_friend_delivery_target(
+    *,
+    friend_conversation_id: str | None,
+    reminder_queue: Any = None,
+) -> None:
+    _GLOBAL_WATCHER.unregister_target(
+        friend_conversation_id=friend_conversation_id,
+        reminder_queue=reminder_queue,
+    )
+
+
+def drain_pending_friend_deliveries(
+    *,
+    friend_conversation_id: str | None,
+    reminder_queue: Any,
+    store: Any = None,
+    user_id: str | None = None,
+) -> int:
+    return _GLOBAL_WATCHER.drain_pending_for_friend(
+        friend_conversation_id,
+        reminder_queue,
+        store=store,
+        user_id=user_id,
     )
 
 
@@ -380,9 +608,11 @@ __all__ = [
     "STATUS_BLOCKED",
     "STATUS_INJECTED",
     "STATUS_PROMOTED",
+    "drain_pending_friend_deliveries",
     "get_friend_delivery_watcher",
     "notify_friend_delivery_blocked",
     "notify_friend_delivery_injected",
     "notify_friend_delivery_promoted",
     "register_friend_delivery_target",
+    "unregister_friend_delivery_target",
 ]

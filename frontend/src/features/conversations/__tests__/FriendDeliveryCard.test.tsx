@@ -237,4 +237,103 @@ describe('FriendDeliveryCard (WS-B9a)', () => {
     })
     expect(deliveredSummary).toContain('Entregue')
   })
+
+  it('keeps FriendDeliveryCard visible when preceded by other tools and renders multiple consecutive deliveries (Red Team #8)', () => {
+    const events: ConversationActivityEvent[] = [
+      {
+        eventId: 'ev-list-1',
+        cursor: '20',
+        type: 'tool.finished',
+        kind: 'tool',
+        state: 'completed',
+        agentId: 'friend-main',
+        turnId: 'turn-friend-1',
+        toolName: 'list_projects',
+        summary: 'Projetos listados',
+      },
+      {
+        eventId: 'ev-send-1',
+        cursor: '21',
+        type: 'tool.finished',
+        kind: 'tool',
+        state: 'completed',
+        agentId: 'friend-main',
+        turnId: 'turn-friend-1',
+        toolName: 'manage_session',
+        summary: 'Mensagem enviada para a sessão target-a',
+        payload: {
+          action: 'send_message',
+          conversation_id: 'target-a',
+          queue_id: 'q-a',
+          turn_id: 'turn-a',
+          delivery: 'pending_in_turn',
+        },
+      },
+      {
+        eventId: 'ev-send-2',
+        cursor: '22',
+        type: 'tool.finished',
+        kind: 'tool',
+        state: 'completed',
+        agentId: 'friend-main',
+        turnId: 'turn-friend-1',
+        toolName: 'manage_session',
+        summary: 'Mensagem enviada para a sessão target-b',
+        payload: {
+          action: 'send_message',
+          conversation_id: 'target-b',
+          turn_id: 'turn-b',
+          delivery: 'new_turn',
+        },
+      },
+    ]
+
+    render(
+      <TurnTimeline
+        events={events}
+        conversationId="friend-conv-1"
+        mode="friend"
+      />,
+    )
+
+    const cards = screen.getAllByTestId('friend-delivery-card')
+    expect(cards).toHaveLength(2)
+    const statuses = screen.getAllByTestId('friend-delivery-status').map((el) => el.textContent)
+    expect(statuses).toEqual(['Aguardando o próximo ponto seguro', 'Novo turno iniciado'])
+  })
+
+  it('shows "O turno em andamento já leu esta mensagem." when defer endpoint returns HTTP 409 (Red Team #8)', async () => {
+    const user = userEvent.setup()
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      jsonResponse(
+        {
+          error: {
+            code: 'QUEUED_INPUT_NOT_PENDING',
+            message: 'A mensagem já foi lida pelo turno em andamento.',
+          },
+        },
+        409,
+      ),
+    )
+    const client = new ApiClient({ fetchImpl: fetchMock })
+
+    const delivery: FriendDeliveryItem = {
+      id: 'q-409',
+      targetConversationId: 'target-conv-409',
+      queueId: 'q-409',
+      turnId: 'turn-live-409',
+      status: 'pending_in_turn',
+      summary: 'Mensagem enviada para a sessão',
+    }
+
+    render(<FriendDeliveryCard delivery={delivery} client={client} />)
+
+    await user.click(screen.getByRole('button', { name: /Deixar para depois do turno/i }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe(
+        'O turno em andamento já leu esta mensagem.',
+      )
+    })
+  })
 })

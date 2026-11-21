@@ -119,7 +119,7 @@ def test_send_message_default_now_on_running_turn_queues_in_turn_without_new_tur
     assert row["origin"] == "friend"
     assert row["origin_conversation_id"] == "conv-friend-1"
     assert row["state"] == "pending"
-    assert row["idempotency_key"] == "friend:call-live-1"
+    assert row["idempotency_key"] == "friend:conv-friend-1:call-live-1"
 
 
 def test_send_message_without_live_turn_creates_new_turn(tmp_path: Path) -> None:

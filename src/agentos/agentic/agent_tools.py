@@ -881,13 +881,34 @@ class AgentToolset(
         invocation_id: str | None = None,
         hook_permission: str | None = None,
     ) -> ToolOutcome:
+        prev_inv_id = getattr(self, "_active_invocation_id", None)
+        self._active_invocation_id = call_id or invocation_id
+        try:
+            return self._invoke_unobserved_inner(
+                name,
+                arguments,
+                call_id=call_id,
+                invocation_id=invocation_id,
+                hook_permission=hook_permission,
+            )
+        finally:
+            self._active_invocation_id = prev_inv_id
+
+    def _invoke_unobserved_inner(
+        self,
+        name: str,
+        arguments: Mapping[str, Any],
+        *,
+        call_id: str | None = None,
+        invocation_id: str | None = None,
+        hook_permission: str | None = None,
+    ) -> ToolOutcome:
         requested_name = name
         name = self.key_for(name)
         try:
             arguments = _public_arguments_in(name, dict(arguments or {}))
         except Exception:  # noqa: BLE001 - a model-chosen value must never crash the turn
             return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {requested_name}.", {}, "INVALID_ARGUMENTS")
-        self._active_invocation_id = call_id or invocation_id or getattr(self, "_active_invocation_id", None)
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
         if self._read_only_mode and name in {

@@ -1080,13 +1080,11 @@ class _AgentControlWatcher:
             sender_name = self._resolve_sender_name(sender_kind, sender_agent_id)
             msg_text = self._message_text(content, sender_kind=sender_kind, sender_name=sender_name)
             # A subagent that is stopping, or whose queue is full, would never read it: forward instead.
-            if self.stopped_by_user or not self.reminders.add(
-                "user_message",
-                msg_text,
-                key=f"user-msg:{control_id}",
-            ):
+            if self.stopped_by_user:
                 self._forward(control_id, content, sender_kind=sender_kind, sender_agent_id=sender_agent_id)
                 return
+            # Register queued metadata and 'injected' outcome BEFORE publishing to reminders so a
+            # concurrent subagent drain + ack_control() can never race ahead and be overwritten back to 'injected'.
             self._queued_messages[control_id] = {
                 "content": content,
                 "sender_kind": sender_kind,
@@ -1094,6 +1092,14 @@ class _AgentControlWatcher:
                 "text": msg_text,
             }
             self._set_outcome(control_id, "injected")
+            if not self.reminders.add(
+                "user_message",
+                msg_text,
+                key=f"user-msg:{control_id}",
+            ):
+                self._queued_messages.pop(control_id, None)
+                self._forward(control_id, content, sender_kind=sender_kind, sender_agent_id=sender_agent_id)
+                return
             if self._record_activity is not None:
                 summary_text = (
                     f"Você enviou uma mensagem para {self.clean}"
@@ -1746,6 +1752,7 @@ class TurnSession:
         self._subagent_records: dict[str, dict[str, object]] = {}
         self._background_subagents: dict[str, dict[str, Any]] = {}
         self._active_watchers: dict[str, _AgentControlWatcher] = {}
+        self._watcher_closed: set[str] = set()
         self._teammate_control_meta: dict[str, dict[str, str]] = {}
         self._main_toolset_ref: Any = None
         self._bg_subagent_executor: ThreadPoolExecutor | None = None
@@ -3261,6 +3268,7 @@ class TurnSession:
                     **routing,
                 )
                 reg_entry.future = future
+                self._watcher_closed.discard(agent_id)
                 self._background_subagents[agent_id] = {
                     "future": future,
                     "agent_id": agent_id,
@@ -3269,6 +3277,8 @@ class TurnSession:
                     "cancel": cancel,
                     "output_file": output_file,
                 }
+            # Synchronously refresh parent toolset before returning so SendMessage is visible immediately.
+            self._refresh_toolsets_for_children(caller)
             return ToolOutcome(
                 "succeeded",
                 f"Iniciou {clean} em segundo plano",
@@ -3370,14 +3380,20 @@ class TurnSession:
         from . import transcript
 
         texts: list[str] = []
+        bus = getattr(self, "lifecycle", None)
         for candidate in (getattr(self, "store", None), getattr(self, "chat_store", None)):
             if candidate is None:
                 continue
             claim = getattr(candidate, "claim_queued_inputs", None)
             if not callable(claim):
                 continue
+            deferred_friend_ack = False
             try:
-                items = list(claim(self.turn) or ())
+                try:
+                    items = list(claim(self.turn, notify_friend=False) or ())
+                    deferred_friend_ack = True
+                except TypeError:
+                    items = list(claim(self.turn) or ())
             except Exception:  # noqa: BLE001
                 continue
             if not items:
@@ -3391,8 +3407,42 @@ class TurnSession:
                 origin_cid = (item or {}).get("origin_conversation_id") or None
                 if not text:
                     continue
+                decision = None
+                if bus is not None:
+                    try:
+                        decision = bus.emit(HookEvent.USER_PROMPT_SUBMIT, prompt=text)
+                    except Exception:  # noqa: BLE001 - lifecycle never breaks a turn
+                        decision = None
+                if decision is not None and (decision.blocked or decision.stop):
+                    reason = decision.reason or decision.stop_reason or "blocked by hook"
+                    marker = getattr(candidate, "mark_queued_input_blocked", None)
+                    if callable(marker):
+                        try:
+                            try:
+                                marker(queue_id, reason=reason)
+                            except TypeError:
+                                marker(queue_id)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    delta_fn = getattr(candidate, "delta", None)
+                    if callable(delta_fn):
+                        try:
+                            delta_fn(self.turn, f"\n\n⚠️ Mensagem da fila bloqueada por um hook: {reason}\n\n")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    continue
+                extra = [
+                    entry
+                    for entry in (decision.additional_context if decision is not None else [])
+                    if entry
+                ]
                 injected_text = format_friend_injected_text(text) if origin == "friend" else text
-                texts.append(injected_text)
+                content = (
+                    f"{injected_text}\n\n{system_reminder(chr(10).join(extra))}"
+                    if extra
+                    else injected_text
+                )
+                texts.append(content)
                 step_payload: dict[str, object] = {"content": injected_text}
                 life_kwargs: dict[str, object] = {"queued_text": text[:2000], "queue_id": queue_id}
                 if origin == "friend":
@@ -3413,7 +3463,14 @@ class TurnSession:
                         life(self.turn, "queued_input", **life_kwargs)
                     except Exception:  # noqa: BLE001
                         pass
-            if texts:
+                if deferred_friend_ack and origin == "friend":
+                    confirm = getattr(candidate, "confirm_queued_input_injected", None)
+                    if callable(confirm):
+                        try:
+                            confirm(self.turn, item)
+                        except Exception:  # noqa: BLE001
+                            pass
+            if items:
                 break
         return texts
 
@@ -3517,6 +3574,7 @@ class TurnSession:
                     "cancel": cancel,
                     "output_file": output_file,
                 }
+            self._refresh_toolsets_for_children(caller)
             return ToolOutcome(
                 "succeeded",
                 f"{clean} continua em segundo plano",
@@ -3640,6 +3698,7 @@ class TurnSession:
             on_delivered_teammate_message=self._clear_teammate_control_meta,
         )
         with self._subagent_lock:
+            self._watcher_closed.discard(agent_id)
             self._active_watchers[agent_id] = watcher
         self._refresh_toolsets_for_children(caller)
         slot = _SubagentSlot(self._subagent_semaphore)
@@ -3706,6 +3765,7 @@ class TurnSession:
                 with self._subagent_lock:
                     if self._active_watchers.get(agent_id) is watcher:
                         self._active_watchers.pop(agent_id, None)
+                    self._watcher_closed.add(agent_id)
                 watcher.finalize()
                 self._refresh_toolsets_for_children(caller)
             finally:
@@ -4281,6 +4341,7 @@ class TurnSession:
                     bg_summary,
                     conversation_id=str(self.turn.get("conversation_id") or ""),
                 )
+            self._refresh_toolsets_for_children(kwargs.get("caller"))
         self._teammate_idle(name, str(record.get("team_name") or "team"), outcome, unread=unread)
         return outcome
 
@@ -4422,41 +4483,53 @@ class TurnSession:
                     if sender == "lead"
                     else str(roster.get(sender, {}).get("agent_id") or "")
                 )
-                control_id = self._agent_controls().post_message(
-                    user_id,
-                    conversation_id,
-                    mate_agent_id,
-                    text,
-                    sender_kind="parent",
-                    sender_agent_id=sender_agent_id or None,
-                )
                 with self._team_lock:
+                    control_id = self._agent_controls().post_message(
+                        user_id,
+                        conversation_id,
+                        mate_agent_id,
+                        text,
+                        sender_kind="parent",
+                        sender_agent_id=sender_agent_id or None,
+                    )
                     self._teammate_control_meta[control_id] = {
                         "team_name": str(mate.get("team_name") or ""),
                         "sender": sender,
                         "recipient": target,
                         "summary": str(summary or ""),
                     }
-                self._emit_agent_message_event(
-                    "agent.message_queued",
-                    {
-                        "control_id": control_id,
-                        "agent_id": mate_agent_id,
-                        "sender_kind": "parent",
-                        **({"sender_agent_id": sender_agent_id} if sender_agent_id else {}),
-                        "preview": text[:200],
-                        "state": "queued",
-                    },
-                )
-                return ToolOutcome(
-                    "succeeded",
-                    f"Mensagem na fila de {target}",
-                    f"Queued for running teammate {target}; it will read it at its next safe checkpoint.",
-                    {"to": target, "status": "queued", "control_id": control_id, "agent_id": mate_agent_id, "tool_kind": "agent"},
-                )
+                # Race guard: if the watcher finalized right as we posted, withdraw and route to mailbox.
+                withdrawn = False
+                if not self._is_subagent_running(mate_agent_id):
+                    withdraw_fn = getattr(self._agent_controls(), "withdraw", None)
+                    if callable(withdraw_fn) and withdraw_fn(control_id):
+                        withdrawn = True
+                        with self._team_lock:
+                            self._teammate_control_meta.pop(control_id, None)
+                if not withdrawn:
+                    self._emit_agent_message_event(
+                        "agent.message_queued",
+                        {
+                            "control_id": control_id,
+                            "agent_id": mate_agent_id,
+                            "sender_kind": "parent",
+                            **({"sender_agent_id": sender_agent_id} if sender_agent_id else {}),
+                            "preview": text[:200],
+                            "state": "queued",
+                        },
+                    )
+                    return ToolOutcome(
+                        "succeeded",
+                        f"Mensagem na fila de {target}",
+                        f"Queued for running teammate {target}; it will read it at its next safe checkpoint.",
+                        {"to": target, "status": "queued", "control_id": control_id, "agent_id": mate_agent_id, "tool_kind": "agent"},
+                    )
             mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
-            return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
-        mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
+            # If the teammate became idle right between _claim_teammate() and mailbox.post(), wake it up now.
+            if not self._claim_teammate(target):
+                return ToolOutcome("succeeded", f"Mensagem na fila de {target}", f"Queued: {target} reads it when it finishes its current task.", {"to": target, "status": "queued", "tool_kind": "agent"})
+        else:
+            mailbox.post(user_id=user_id, conversation_id=conversation_id, team_name=mate["team_name"], sender=sender, recipient=target, content=text, summary=summary)
         taken: list[str] = []
         try:
             task, taken = self._take_team_mail(target)
@@ -4548,10 +4621,14 @@ class TurnSession:
         with self._subagent_lock:
             if clean_id in self._active_watchers:
                 return True
+            if clean_id in self._watcher_closed:
+                return False
             bg_entry = self._background_subagents.get(clean_id)
             if bg_entry is not None:
                 fut = bg_entry.get("future")
                 return fut is not None and not fut.done()
+            if clean_id in self._subagent_records:
+                return False
         conv_id = str(self.turn.get("conversation_id") or "")
         reg_entry = BACKGROUND_AGENTS.get(conv_id, clean_id)
         if reg_entry is not None:
@@ -6054,6 +6131,18 @@ class TurnSession:
         return _check
 
     def _close_hook_dispatcher(self) -> None:
+        if self.conversation_mode == "friend" and self.conversation_id:
+            try:
+                from agentos.agentic.tools.orin.friend_delivery_watch import (
+                    unregister_friend_delivery_target,
+                )
+
+                unregister_friend_delivery_target(
+                    friend_conversation_id=self.conversation_id,
+                    reminder_queue=self._reminders,
+                )
+            except Exception:  # noqa: BLE001
+                pass
         relay, self._sdk_relay = getattr(self, "_sdk_relay", None), None
         if relay is not None:
             from agentos.mcp.transport_sdk import unregister_relay
@@ -7215,6 +7304,26 @@ class TurnSession:
         friend_mood = ""
         friend_memories: list[dict[str, object]] = []
         if self.conversation_mode == "friend" and not prompt_blocked:
+            if active_conv_id:
+                try:
+                    from agentos.agentic.tools.orin.friend_delivery_watch import (
+                        drain_pending_friend_deliveries,
+                        register_friend_delivery_target,
+                    )
+
+                    register_friend_delivery_target(
+                        friend_conversation_id=active_conv_id,
+                        reminder_queue=self._reminders,
+                        on_watch_notify=self.on_session_watch,
+                    )
+                    drain_pending_friend_deliveries(
+                        friend_conversation_id=active_conv_id,
+                        reminder_queue=self._reminders,
+                        store=self.chat_store or self.store,
+                        user_id=active_user_id or None,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("friend delivery target registration/drain failed", exc_info=True)
             if self.friend_persona_store is not None:
                 try:
                     sync_fn = getattr(self.friend_persona_store, "sync_from_disk_if_modified", None)

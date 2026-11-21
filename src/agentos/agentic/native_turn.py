@@ -681,7 +681,7 @@ class RuntimeToolExecutor(ToolExecutor):
                 offered_tools=getattr(runtime, "offered_tools", None),
                 withheld_tools=getattr(runtime, "withheld_tools", ()),
             )
-        self._last_discovered_snapshot: tuple[frozenset[str], frozenset[str], bool] = (
+        self._last_discovered_snapshot: tuple[frozenset[str], frozenset[str], bool, frozenset[str]] = (
             self._snapshot_discovered()
         )
         if tool_schemas is None:
@@ -772,6 +772,7 @@ class RuntimeToolExecutor(ToolExecutor):
         active_mcp = set(getattr(toolset, "active_mcp_tool_names", ()) or ())
         withheld = getattr(self.runtime, "withheld_tools", ()) or ()
         offered = getattr(self.runtime, "offered_tools", None)
+        self._maybe_refresh_live_specs()
         if internal_name in withheld or raw_name in withheld:
             return False
         if (
@@ -907,17 +908,89 @@ class RuntimeToolExecutor(ToolExecutor):
         self._valid_public_names = pub_names
         self._valid_internal_names = int_names
 
-    def _snapshot_discovered(self) -> tuple[frozenset[str], frozenset[str], bool]:
+    def _snapshot_discovered(self) -> tuple[frozenset[str], frozenset[str], bool, frozenset[str]]:
         toolset = getattr(self.runtime, "toolset", None)
         discovered = frozenset(getattr(toolset, "discovered_tool_names", ()) or ())
         active_mcp = frozenset(getattr(toolset, "active_mcp_tool_names", ()) or ())
-        # Entering or leaving Plan Mode changes what tools/list offers (exit_plan_mode), so it counts as a change.
-        return discovered, active_mcp, bool(getattr(toolset, "_plan_mode_active", False))
+        defined_fn = getattr(toolset, "definitions", None)
+        if callable(defined_fn):
+            try:
+                defined = frozenset(
+                    str(getattr(item, "name", "") or "")
+                    for item in (defined_fn() or ())
+                    if getattr(item, "name", None)
+                )
+            except Exception:  # noqa: BLE001
+                defined = frozenset()
+        else:
+            defined = frozenset()
+        # Entering/leaving Plan Mode or spawning/finishing children changes what tools/list offers.
+        return discovered, active_mcp, bool(getattr(toolset, "_plan_mode_active", False)), defined
+
+    def _maybe_refresh_live_specs(self) -> bool:
+        if getattr(self.runtime, "toolset", None) is None:
+            return False
+        current = self._snapshot_discovered()
+        if current == self._last_discovered_snapshot:
+            return False
+        with self._commit_lock:
+            current = self._snapshot_discovered()
+            if current == self._last_discovered_snapshot:
+                return False
+            self._tool_schemas = self._compute_live_schemas()
+            self._last_discovered_snapshot = current
+            self._build_specs()
+            return True
 
     def _compute_live_schemas(self) -> list[dict[str, object]]:
-        raw_schemas = self.runtime._tool_schemas(
-            self.turn, allow_deferral=self._allow_deferral
+        raw_schemas = list(
+            self.runtime._tool_schemas(
+                self.turn, allow_deferral=self._allow_deferral
+            )
         )
+        # For CLI providers that do not re-fetch tools/list (tool_list_changed=False),
+        # advertise SendMessage on initial boot when the agent can message teammates or children.
+        if not self._allow_deferral:
+            toolset = getattr(self.runtime, "toolset", None)
+            withheld = getattr(self.runtime, "withheld_tools", ()) or ()
+            offered = getattr(self.runtime, "offered_tools", None)
+            if (
+                toolset is not None
+                and "send_message" not in withheld
+                and (offered is None or "send_message" in offered)
+                and (
+                    (
+                        bool(getattr(toolset, "_parent_message_tool_enabled", False))
+                        and getattr(toolset, "_send_agent_message", None) is not None
+                    )
+                    or getattr(toolset, "_send_team_message", None) is not None
+                )
+            ):
+                present_names = {
+                    str(
+                        (s.get("function") if isinstance(s.get("function"), Mapping) else s).get(
+                            "name", ""
+                        )
+                    )
+                    for s in raw_schemas
+                    if isinstance(s, Mapping)
+                }
+                if "send_message" not in present_names:
+                    from agentos.agentic.tools.agents.team import (
+                        _send_message_description,
+                        _send_message_schema,
+                    )
+
+                    raw_schemas.append(
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "send_message",
+                                "description": _send_message_description(toolset),
+                                "parameters": _send_message_schema(toolset),
+                            },
+                        }
+                    )
         if self.runtime.phases is not None:
             try:
                 all_raw = list(self.runtime.toolset.schemas())
@@ -1072,6 +1145,7 @@ class RuntimeToolExecutor(ToolExecutor):
                 offered_tools=getattr(self.runtime, "offered_tools", None),
                 withheld_tools=getattr(self.runtime, "withheld_tools", ()),
             )
+        self._maybe_refresh_live_specs()
         active_mcp = set(getattr(toolset, "active_mcp_tool_names", ()) or ())
         withheld = getattr(self.runtime, "withheld_tools", ()) or ()
         offered = getattr(self.runtime, "offered_tools", None)
@@ -2457,13 +2531,23 @@ class NativeTurnRunner:
         window: list[dict[str, object]] | None = None,
         *,
         _allow_pre_compact: bool = True,
+        _pending_reminders: list[Any] | None = None,
     ) -> list[dict[str, Any]]:
-        self.runtime._check_external_changes(self.turn)
-        self.runtime._add_periodic_reminders()
-        try:
-            pending_reminders = self.runtime.reminders.drain()
-        except Exception:
-            pending_reminders = []
+        if _pending_reminders is None:
+            self.runtime._check_external_changes(self.turn)
+            self.runtime._add_periodic_reminders()
+            try:
+                pending_reminders = list(self.runtime.reminders.drain())
+            except Exception:
+                pending_reminders = []
+        else:
+            pending_reminders = list(_pending_reminders)
+            try:
+                extra_reminders = self.runtime.reminders.drain()
+                if extra_reminders:
+                    pending_reminders.extend(extra_reminders)
+            except Exception:
+                pass
         reminder_body = render_reminders(pending_reminders)
 
         source_msgs = window if window is not None else self.messages
@@ -2590,6 +2674,7 @@ class NativeTurnRunner:
                         tool_schemas,
                         window=refreshed_window,
                         _allow_pre_compact=False,
+                        _pending_reminders=pending_reminders,
                     )
             if total_prior_chars > prior_char_budget:
                 tool_use_span_re = re.compile(

@@ -1097,6 +1097,20 @@ export function groupingKey(event: ConversationActivityEvent): string {
     // disappears inside a collapsed group.
     if (event.pluginApproval) return `approval:plugin:${event.agentId}:${event.turnId ?? ''}:${event.invocationId ?? event.eventId}`
     if (event.mcpApproval || event.questions) return `approval:user:${event.agentId}:${event.turnId ?? ''}:${event.invocationId ?? event.eventId}`
+    if (
+      (event.toolName === 'manage_session' ||
+        event.toolName === 'control_code_session' ||
+        event.payload?.action === 'send_message') &&
+      event.payload?.action === 'send_message' &&
+      typeof event.payload?.delivery === 'string'
+    ) {
+      const deliveryKey =
+        (typeof event.payload?.queue_id === 'string' && event.payload.queue_id) ||
+        (typeof event.payload?.turn_id === 'string' && event.payload.turn_id) ||
+        event.invocationId ||
+        event.eventId
+      return `friend-delivery:${event.agentId}:${event.turnId ?? ''}:${deliveryKey}`
+    }
     // A tool sequence is one visible thought: moving from a file read to a
     // command or a web lookup should update the same line, not make the chat
     // look like a terminal log. The user can still open the card to see each

@@ -234,12 +234,13 @@ class AgentControlStore:
         if clean_outcome == "delivered":
             self.mark_delivered(cid)
             return
+        stmt = update(conversation_agent_controls).where(
+            conversation_agent_controls.c.control_id == cid
+        )
+        if clean_outcome == "injected":
+            stmt = stmt.where(conversation_agent_controls.c.outcome.is_(None))
         with self._engine.begin() as connection:
-            connection.execute(
-                update(conversation_agent_controls)
-                .where(conversation_agent_controls.c.control_id == cid)
-                .values(outcome=clean_outcome)
-            )
+            connection.execute(stmt.values(outcome=clean_outcome))
 
     def mark_delivered(self, control_id: str, *, delivered_at: datetime | None = None) -> bool:
         """Idempotently transition a control to ``delivered`` and stamp UTC ``delivered_at``.
@@ -423,6 +424,8 @@ class InMemoryAgentControls:
         with self._lock:
             for row in self._rows:
                 if row["control_id"] == str(control_id):
+                    if clean_outcome == "injected" and row.get("outcome") is not None:
+                        continue
                     row["outcome"] = clean_outcome
 
     def mark_delivered(self, control_id: str, *, delivered_at: datetime | None = None) -> bool:

@@ -74,6 +74,7 @@ class AgentActivityEventType(StrEnum):
     SPEAK_INTERRUPTED = "speak.interrupted"
     SPEAK_FINISHED = "speak.finished"
     CODE_SESSION_PROGRESS = "code_session.progress"
+    FRIEND_DELIVERY_STATUS = "friend.delivery_status"
     QUOTA_UPDATED = "quota.updated"
     QUOTA_FALLBACK_APPLIED = "quota.fallback_applied"
 

@@ -44,7 +44,7 @@ ALWAYS_LOADED_CODE_TOOLS: frozenset[str] = frozenset({
 FOLLOW_UP_TOOLS: Mapping[str, tuple[str, ...]] = {
     "run_command": ("read_process_output", "stop_process", "preview_open"),
     "powershell": ("read_process_output", "stop_process", "preview_open"),
-    "run_subagent": ("check_subagent",),
+    "run_subagent": ("check_subagent", "send_message"),
     "enter_plan_mode": ("exit_plan_mode",),
     "preview_start": ("preview_logs", "preview_open"),
     "search_conversations": ("read_project_conversation",),
