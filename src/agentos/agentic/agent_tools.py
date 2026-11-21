@@ -1322,6 +1322,10 @@ class AgentToolset(
         """
         return self._change_events
 
+    def changed_paths(self) -> tuple[str, ...]:
+        """Workspace-relative paths modified during this turn (sorted)."""
+        return tuple(sorted(self._changed_paths))
+
     def code_verification_status(self) -> Literal["verified", "unverified", "not_applicable"]:
         """Report whether workspace changes in Code mode have been verified this turn."""
         if not self._code_mode_active or not self._changed_paths:
