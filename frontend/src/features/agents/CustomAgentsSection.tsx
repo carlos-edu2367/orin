@@ -6,6 +6,7 @@ import {
   deleteCustomAgent,
   listCustomAgents,
   updateCustomAgent,
+  type AgentMemoryMode,
   type CustomAgent,
   type CustomAgentDraft,
 } from '../../api/customAgents'
@@ -15,6 +16,12 @@ import { clampEffort } from '../conversations/useEffortSelection'
 import { ErrorNote, type describeError } from '../codeSettings/shared'
 
 export const AGENT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
+const AGENT_MEMORY_MODES: ReadonlyArray<{ id: AgentMemoryMode; label: string }> = [
+  { id: 'project', label: 'Projeto (project)' },
+  { id: 'user', label: 'Usuário (user)' },
+  { id: 'local', label: 'Local (local)' },
+  { id: 'none', label: 'Nenhuma (none)' },
+]
 const RESERVED = new Set(['explore', 'plan', 'general-purpose', 'general', 'fork', 'verifier'])
 const TOOL_NAME = /^[A-Za-z_][\w.:*-]*$/
 const PERMISSION_MODES: ReadonlyArray<{ id: string; label: string }> = [
@@ -81,12 +88,13 @@ export type AgentForm = {
   effort: string
   permissionMode: string
   maxTurns: string
+  memory?: AgentMemoryMode
   enabled: boolean
 }
 
 const EMPTY: AgentForm = {
   name: '', description: '', prompt: '', provider: '', models: [], tools: '', disallowed: '', effort: '',
-  permissionMode: '', maxTurns: '', enabled: true,
+  permissionMode: '', maxTurns: '', memory: 'project', enabled: true,
 }
 
 /** Starting points for a new agent: they fill what to do and which tools, never a provider (that is the person's). */
@@ -193,6 +201,7 @@ export function draftOf(form: AgentForm): CustomAgentDraft {
     effort: form.effort || null,
     permissionMode: form.permissionMode || null,
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null,
+    memory: form.memory || 'project',
     enabled: form.enabled,
   }
 }
@@ -202,6 +211,7 @@ function formOf(agent: CustomAgent): AgentForm {
     name: agent.name, description: agent.description, prompt: agent.prompt, provider: agent.provider ?? '',
     models: [...agent.models], tools: (agent.tools ?? []).join(', '), disallowed: agent.disallowedTools.join(', '),
     effort: agent.effort ?? '', permissionMode: agent.permissionMode ?? '', maxTurns: agent.maxTurns ? String(agent.maxTurns) : '',
+    memory: agent.memory ?? 'project',
     enabled: agent.enabled,
   }
 }
@@ -701,6 +711,24 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                     <input inputMode="numeric" value={form.maxTurns} placeholder="Sem limite próprio" aria-label="Máximo de turnos"
                       onChange={(event) => set({ maxTurns: event.target.value.replace(/\D/g, '') })} />
                     <FieldHint id="agent-turns-hint" error={problemOf('maxTurns')} />
+                  </label>
+                  <label className="agents-studio__field">
+                    <span className="agents-studio__label">Memória</span>
+                    <select
+                      value={form.memory ?? 'project'}
+                      aria-label="Memória"
+                      aria-describedby="agent-memory-hint"
+                      onChange={(event) => set({ memory: event.target.value as AgentMemoryMode })}
+                    >
+                      {AGENT_MEMORY_MODES.map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FieldHint id="agent-memory-hint">
+                      Sem efeito enquanto a memória por agente estiver desligada
+                    </FieldHint>
                   </label>
                 </div>
               </details>

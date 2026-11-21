@@ -3299,6 +3299,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_context_window_routes(app, services, principal_for)
     from .memory_lint_routes import register_memory_lint_routes
     register_memory_lint_routes(app, services, principal_for)
+    from .memory_review_routes import register_memory_review_routes
+    register_memory_review_routes(app, services, principal_for)
     from .agent_message_routes import register_agent_message_routes
     register_agent_message_routes(app, services, principal_for, require_port, _jsonable)
     from agentos.live_voice.session import register_live_voice_routes

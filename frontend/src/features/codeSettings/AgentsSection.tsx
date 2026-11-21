@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { EFFORT_LEVELS, listProviderModels, PROVIDER_NAMES, type EffortLevel, type ProviderModel } from '../../api/providers'
-import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft } from '../../api/settings'
+import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft, type AgentMemoryMode } from '../../api/settings'
 import { SettingsSection } from '../settings/SettingsSection'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation, useLoaded, useSettingsClient } from './shared'
 
 export const AGENT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'auto'] as const
+const MEMORY_MODES: ReadonlyArray<{ id: AgentMemoryMode; label: string }> = [
+  { id: 'project', label: 'Projeto (project)' },
+  { id: 'user', label: 'Usuário (user)' },
+  { id: 'local', label: 'Local (local)' },
+  { id: 'none', label: 'Nenhuma (none)' },
+]
 const ORIGIN: Record<string, string> = { user: 'usuário', project: 'projeto', plugin: 'plugin', builtin: 'do Orin', cli: 'linha de comando', orin: 'Biblioteca' }
 
 export function acceptedEffortsForModelInput(modelInput: string, catalogModels: readonly ProviderModel[]): readonly EffortLevel[] {
@@ -33,9 +39,9 @@ export function acceptedEffortsForModelInput(modelInput: string, catalogModels: 
   return allDeclared ? [] : EFFORT_LEVELS
 }
 
-type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string }
+type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string; memory?: AgentMemoryMode }
 
-const EMPTY: Form = { name: '', scope: 'user', description: '', prompt: '', tools: '', disallowed: '', model: '', permissionMode: '', maxTurns: '', effort: '' }
+const EMPTY: Form = { name: '', scope: 'user', description: '', prompt: '', tools: '', disallowed: '', model: '', permissionMode: '', maxTurns: '', effort: '', memory: 'project' }
 
 function names(text: string): string[] {
   return text.split(/[,\n]/).map((item) => item.trim()).filter(Boolean)
@@ -59,6 +65,7 @@ export function draftOf(form: Form): AgentDraft {
     scope: form.scope, description: form.description.trim(), prompt: form.prompt, tools: tools.length > 0 ? tools : null,
     disallowedTools: names(form.disallowed), model: form.model.trim() || null, permissionMode: form.permissionMode || null,
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null, effort: form.effort || null,
+    ...(form.memory ? { memory: form.memory } : {}),
   }
 }
 
@@ -67,6 +74,7 @@ function formOf(agent: AgentDefinition): Form {
     name: agent.name, scope: agent.origin === 'project' ? 'project' : 'user', description: agent.description, prompt: agent.prompt,
     tools: (agent.tools ?? []).join(', '), disallowed: agent.disallowedTools.join(', '), model: agent.model ?? '',
     permissionMode: agent.permissionMode ?? '', maxTurns: agent.maxTurns ? String(agent.maxTurns) : '', effort: agent.effort ?? '',
+    memory: agent.memory ?? 'project',
   }
 }
 
@@ -240,6 +248,18 @@ export function AgentsSection() {
                 <option value="">O da conversa</option>
                 {acceptedEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
               </select>
+            </label>
+            <label>Memória
+              <select
+                value={form.memory ?? 'project'}
+                aria-label="Memória"
+                onChange={(event) => set({ memory: event.target.value as AgentMemoryMode })}
+              >
+                {MEMORY_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+              </select>
+              <span className="code-settings__muted">
+                Sem efeito enquanto a memória por agente estiver desligada
+              </span>
             </label>
             {tried && problems.length > 0 && (
               <ul className="code-settings__problems code-settings__wide" role="status">{problems.map((problem) => <li key={problem}>{problem}</li>)}</ul>

@@ -99,13 +99,15 @@ def test_hooks_are_listed_and_saved_after_validation(tmp_path: Path) -> None:
 def test_an_agent_is_written_read_back_and_deleted(tmp_path: Path) -> None:
     client = _client(tmp_path)
     body = {"scope": "user", "description": "Reviews: carefully", "prompt": "Review the diff.", "tools": ["Read", "Grep", "Bash"],
-            "model": "sonnet", "max_turns": 5, "effort": "high"}
+            "model": "sonnet", "max_turns": 5, "effort": "high", "memory": "local"}
     saved = client.put("/v1/settings/agents/code-reviewer", headers=AUTH, json=body)
     assert saved.status_code == 200, saved.text
     agent = next(item for item in saved.json()["agents"] if item["name"] == "code-reviewer")
     assert agent["editable"] and agent["description"] == "Reviews: carefully" and agent["prompt"] == "Review the diff."
     assert agent["tools"] == ["Read", "Grep", "Bash"]
+    assert agent["memory"] == "local"
     assert client.put("/v1/settings/agents/x", headers=AUTH, json={**body, "tools": ["Bash(git diff:*)"]}).status_code == 422
+    assert client.put("/v1/settings/agents/x", headers=AUTH, json={**body, "memory": "invalid"}).status_code == 422
     assert agent["model"] == "sonnet" and agent["effort"] == "high"
     assert client.put("/v1/settings/agents/verifier", headers=AUTH, json=body).status_code == 422  # a builtin name
     assert client.put("/v1/settings/agents/Bad Name", headers=AUTH, json=body).status_code == 422

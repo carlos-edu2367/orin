@@ -78,7 +78,8 @@ Private, Workspace e User Memory definem ownership e visibilidade. Semantic Memo
 | `PRIVATE` | pertence a um `agent_id` dentro de um usuário e, quando aplicável, Workspace | somente o Agent proprietário; compartilhamento exige Grant explícito, mínimo e revogável |
 | `WORKSPACE` | conhecimento do projeto identificado por `workspace_id` | Agents e atores autorizados naquele Workspace e finalidade |
 | `USER` | preferências e conhecimento pertencentes a `user_id`, não vinculados a um projeto específico | acesso por política do usuário; exposição a um Workspace é explícita e filtrada |
-| `SEMANTIC` | fatos, conceitos, relações ou sínteses recuperáveis por significado | mantém `base_scope` `PRIVATE`, `WORKSPACE` ou `USER`; indexação jamais remove ownership ou classificação |
+| `AGENT` (`scope_type = agent`) | conhecimento operacional próprio de um subagente identificado por `agent_key` (Orin 0.13, D-RF9) | escopo definido pelo campo `memory` do agente (`project`, `user`, `local` ou `none`); ativo apenas quando `memory.agent.enabled = true`; invisível ao prompt do pai e a outros projetos quando em `project` ou `local` |
+| `SEMANTIC` | fatos, conceitos, relações ou sínteses recuperáveis por significado | mantém `base_scope` `PRIVATE`, `WORKSPACE`, `USER` ou `AGENT`; indexação jamais remove ownership ou classificação |
 
 User Memory NÃO DEVE ser usada como ponte silenciosa entre Workspaces. Quando conteúdo de User Memory for disponibilizado a uma `Execution` de Workspace, a autorização declara finalidade, campos permitidos e duração. Private Memory de um Agent não é herdada por Agent filho, colaborador ou Orchestrator.
 
@@ -394,6 +395,21 @@ RetentionReceipt {
 Uma escrita é permitida somente quando a finalidade, a fonte e o escopo estão explícitos. Política PODE exigir consentimento, revisão humana ou confiança mínima. Conteúdo derivado preserva todas as fontes e transformações. Se a evidência for contraditória, a Memory registra a incerteza ou referências conflitantes; não inventa consenso.
 
 Leitura valida o ator antes de resolver conteúdo. O `ContextManager` recebe `AuthorizedMemory` ou referências já filtradas, ainda sujeito ao seu próprio orçamento e sanidade. Leitura não renova retenção automaticamente, não muda confiança e não promove a Memory a instrução.
+
+## Ciclo de vida, proveniência verificada, tombstones e trilha `memory_events` (Orin 0.13)
+
+A partir da 0.13 (Pacote D, migração `0064_memory_lifecycle_and_agent_scope`), `agent_memories` adota ciclo de vida explícito de estados, proveniência verificada pelo runtime e auditoria append-only em `memory_events`:
+
+- **Estados de `agent_memories.status`:**
+  - `active`: elegível para pré-carregamento no prompt, `Recall` e consolidação. Índice parcial único (`uq_agent_memories_active_hash`) impede duplicata ativa com o mesmo `text_hash` no mesmo escopo.
+  - `proposed`: proposta ainda não promovida (escrita por subagente em escopo `agent` ou conflito detectado contra memória ativa). Nunca entra no prompt de ninguém até aprovação ou promoção verificada; propostas não promovidas expiram em 14 dias (`status = invalid`, evento `expired`).
+  - `quarantined`: memória originada de fonte externa (`source_kind` em `tool`, `web` ou `file`) quando `memory.quarantine.enabled = true` (padrão). Fica fora do prompt e da consolidação até aprovação explícita do usuário na aba "Para revisar".
+  - `superseded`: substituída atomicamente por nova memória (`superseded_by` preenchido e `invalid_at` gravado), preservando texto anterior em `memory_events` e permitindo resolução de cadeia em `get_memory`.
+  - `invalid`: rejeitada pelo usuário ou expirada (`invalid_at` preenchido).
+  - `deleted` (tombstone): resultado de `forget`. O texto é apagado (`fact = ''`), `text_hash` é preservado, `invalid_at` é gravado e um evento `forgotten` é registrado **sem** `old_text` nem `new_text`. O aprendizado automático verifica o tombstone e não recria o fato; apenas `Remember` explícito do usuário pode recriá-lo. `POST /v1/memory/{id}/restore` recusa com HTTP 409 qualquer tombstone sem texto. Tombstones são purgados fisicamente após `memory.tombstoneRetentionDays` (padrão 90 dias).
+- **Proveniência verificada pelo runtime:** `source_kind` (`user`, `agent`, `tool`, `web`, `file`), `source_ref`, `trust`, `valid_from` e `invalid_at` são atribuídos pelo runtime conforme o contexto real de chamada — o modelo não pode elevar a própria origem para `user`. Memória com `source_kind = user` só é superada automaticamente por outra do usuário; contradição de agente contra usuário gera `proposed` + evento `conflict` para decisão humana (`keep_new`, `keep_old`, `keep_both`).
+- **Auditoria em `memory_events`:** tabela append-only por `memory_id` e `user_id` registrando eventos cronológicos `created`, `updated`, `proposed`, `promoted`, `quarantined`, `approved`, `rejected`, `conflict`, `superseded`, `forgotten`, `restored` e `expired`. A rota `GET /v1/memory/{id}/history` nunca expõe `old_text` de eventos `forgotten`.
+- **Escopo `agent` (`agent_key`):** quando `memory.agent.enabled = true`, agentes customizados (padrão `project`) e o `verifier` (`project`) armazenam memórias em `scope_type = 'agent'` com `agent_key = <nome>`. A chave segue o modo `memory` da definição: `project` = `(user_id, project_id, agent_key)`, `user` = `(user_id, agent_key)`, `local` = `(user_id, hash da raiz do workspace, agent_key)` (também usado em conversas sem projeto) e `none` desliga para aquele agente.
 
 ## Retenção, invalidamento e exclusão
 

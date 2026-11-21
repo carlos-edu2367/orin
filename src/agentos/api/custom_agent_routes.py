@@ -42,6 +42,7 @@ class CustomAgentFields(BaseModel):
     effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = None
     permission_mode: Literal["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions", "auto"] | None = None
     max_turns: int | None = Field(default=None, ge=1, le=500)
+    memory: Literal["project", "user", "local", "none"] | None = None
     enabled: bool = True
 
 
@@ -122,6 +123,7 @@ def validate(store: UserAgentStore, user_id: str, name: str, body: CustomAgentFi
         "effort": body.effort,
         "permission_mode": body.permission_mode,
         "max_turns": body.max_turns,
+        "memory": body.memory,
         "enabled": body.enabled,
     }
     return values, problems

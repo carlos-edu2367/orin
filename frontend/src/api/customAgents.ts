@@ -1,6 +1,8 @@
 import type { ApiClient } from './client'
 import { bool, list, optStr, rec, str, strings } from './parse'
 
+export type AgentMemoryMode = 'project' | 'user' | 'local' | 'none'
+
 /** A subagent the person made in the interface (`/v1/custom-agents`), stored for their Orin user. */
 export type CustomAgent = {
   name: string
@@ -16,6 +18,7 @@ export type CustomAgent = {
   effort: string | null
   permissionMode: string | null
   maxTurns: number | null
+  memory?: AgentMemoryMode | null
   enabled: boolean
   updatedAt: string | null
 }
@@ -36,6 +39,10 @@ export function parseCustomAgent(value: unknown): CustomAgent | null {
     effort: optStr(agent.effort),
     permissionMode: optStr(agent.permission_mode),
     maxTurns: typeof agent.max_turns === 'number' ? agent.max_turns : null,
+    memory:
+      agent.memory === 'project' || agent.memory === 'user' || agent.memory === 'local' || agent.memory === 'none'
+        ? agent.memory
+        : null,
     enabled: agent.enabled === undefined ? true : bool(agent.enabled),
     updatedAt: optStr(agent.updated_at),
   }
@@ -58,6 +65,7 @@ function body(draft: CustomAgentDraft): Record<string, unknown> {
     effort: draft.effort,
     permission_mode: draft.permissionMode,
     max_turns: draft.maxTurns,
+    ...(draft.memory !== undefined ? { memory: draft.memory } : {}),
     enabled: draft.enabled,
   }
 }

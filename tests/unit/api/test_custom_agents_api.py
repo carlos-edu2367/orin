@@ -198,3 +198,24 @@ def test_the_store_keeps_rows_per_user(tmp_path: Path) -> None:
     assert [item["description"] for item in store.list("user-1")] == ["d"]
     assert store.definitions("user-2")[0].description == "d2"
     engine.dispose()
+
+
+def test_custom_agent_persists_and_validates_memory_scope(env) -> None:
+    client, engine = env
+    created = client.post("/v1/custom-agents", json={**REVISOR, "memory": "local"}, headers=AUTH)
+    assert created.status_code == 201, created.text
+    assert created.json()["agent"]["memory"] == "local"
+
+    listed = client.get("/v1/custom-agents", headers=AUTH).json()["agents"]
+    assert listed[0]["memory"] == "local"
+
+    body = {key: value for key, value in REVISOR.items() if key != "name"}
+    updated = client.put("/v1/custom-agents/revisor", json={**body, "memory": "none"}, headers=AUTH)
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["agent"]["memory"] == "none"
+
+    store = UserAgentStore(engine)
+    assert store.definitions("user-1")[0].memory == "none"
+
+    bad = client.put("/v1/custom-agents/revisor", json={**body, "memory": "invalid_scope"}, headers=AUTH)
+    assert bad.status_code == 422

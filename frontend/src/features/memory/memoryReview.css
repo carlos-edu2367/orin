@@ -1,0 +1,311 @@
+.memory-review {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.memory-review__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.memory-review__tabs {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memory-review__tab {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.14));
+  background: transparent;
+  color: inherit;
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memory-review__tab.is-active {
+  background: var(--surface-active, rgba(255, 255, 255, 0.12));
+  border-color: var(--accent, #7c8cff);
+  font-weight: 600;
+}
+
+.memory-review__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.12));
+}
+
+.memory-review__agent-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.memory-review__agent-filter select {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.16));
+  border-radius: 8px;
+  padding: 5px 10px;
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.04));
+  color: inherit;
+  font-size: 0.85rem;
+}
+
+.memory-review__list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.memory-review__card {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.memory-review__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-review__chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.memory-review__chip {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.16));
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.05));
+}
+
+.memory-review__chip--conflict {
+  border-color: rgba(245, 158, 11, 0.55);
+}
+
+.memory-review__chip--quarantined {
+  border-color: rgba(239, 68, 68, 0.55);
+}
+
+.memory-review__fact {
+  margin: 0;
+  font-size: 0.94rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.memory-review__fact--erased {
+  font-style: italic;
+  opacity: 0.75;
+}
+
+.memory-review__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-review__btn {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.18));
+  background: transparent;
+  color: inherit;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 0.84rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.memory-review__btn--primary {
+  background: var(--accent, #5b6ee1);
+  border-color: var(--accent, #5b6ee1);
+  color: #ffffff;
+}
+
+.memory-review__btn--danger {
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.memory-review__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.memory-conflict-card {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.memory-conflict-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.memory-conflict-card__title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.memory-conflict-card__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.memory-conflict-card__pane {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-conflict-card__pane-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.75;
+}
+
+.memory-conflict-card__meta {
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+.memory-history-drawer__backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 60;
+}
+
+.memory-history-drawer {
+  width: min(460px, 100vw);
+  height: 100%;
+  background: var(--surface-panel, #161822);
+  color: inherit;
+  border-left: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.14));
+  padding: 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.memory-history-drawer__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.memory-history-drawer__timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.memory-history-drawer__event {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+}
+
+.memory-history-drawer__event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.memory-history-drawer__event-meta {
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+.memory-settings-panel {
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: 12px;
+  padding: 16px;
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.02));
+}
+
+.memory-settings-panel__header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.memory-settings-panel__header p {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.memory-settings-panel__notice {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 0.83rem;
+  line-height: 1.45;
+  margin: 6px 0 0;
+}
+
+@media (max-width: 720px) {
+  .memory-conflict-card__columns {
+    grid-template-columns: 1fr;
+  }
+}

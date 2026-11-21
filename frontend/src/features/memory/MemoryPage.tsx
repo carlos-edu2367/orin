@@ -16,6 +16,8 @@ import {
 } from '../../api/memory'
 import { SettingsPage } from '../settings/SettingsPage'
 import { InstructionLintPanel } from './InstructionLintPanel'
+import { MemoryReviewTab } from './MemoryReviewTab'
+import { MemorySettingsPanel } from './MemorySettingsPanel'
 
 type MemoryCardItem = {
   id: string
@@ -359,132 +361,145 @@ export function MemoryPage({
 
       <InstructionLintPanel client={client} projectId={projectId} />
 
-      <div className="memory-ref11__search-row">
-        <input
-          id="memory-search"
-          type="search"
-          className="memory-ref11__search-input"
-          aria-label="Buscar memórias"
-          placeholder="Buscar lembranças..."
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      </div>
-
-      {error && <p role="alert">Não foi possível carregar as memórias.</p>}
-
-      <div className="memory-ref11__master-detail">
-        <div className="memory-cards-list" data-testid="memory-cards-list">
-          {visibleCards.length === 0 ? (
-            <p className="memory-empty-state" data-testid="memory-empty-state">
-              Nenhuma memória salva neste filtro.
-            </p>
-          ) : (
-            visibleCards.map((item) => {
-              const isSelected = !isCreating && selectedCard?.id === item.id
-              const tagMod = getTagModifierClass(item.semanticScope)
-              return (
-                <article
-                  key={item.id}
-                  className={`memory-card-v6${isSelected ? ' is-selected' : ''}`}
-                  onClick={() => handleSelectCard(item)}
-                >
-                  <div className="memory-card-v6__content">
-                    <h3 className="memory-card-v6__title">{item.title}</h3>
-                    <div className="memory-card-v6__meta">
-                      <span className={`memory-card-v6__tag ${tagMod}`}>{item.scopeLabel}</span>
-                      <span>{item.metaLabel}</span>
-                    </div>
-                  </div>
-                  <div className="memory-card-v6__actions">
-                    <button
-                      type="button"
-                      className="memory-card-v6__edit-btn"
-                      aria-label={`Editar ${item.title}`}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        handleSelectCard(item)
-                      }}
-                    >
-                      ✎ Editar
-                    </button>
-                    <button
-                      type="button"
-                      className="memory-card-v6__more-btn"
-                      aria-label={`Opções de ${item.title}`}
-                      onClick={(event) => {
-                        event.stopPropagation()
-                        handleSelectCard(item)
-                      }}
-                    >
-                      •••
-                    </button>
-                  </div>
-                </article>
-              )
-            })
-          )}
-        </div>
-
-        <aside
-          className="memory-inspector"
-          data-testid="memory-inspector"
-          aria-label="Editar lembrança"
-        >
-          <h2 className="memory-inspector__title">Editar lembrança</h2>
-
-          <div className="memory-inspector__field">
-            <label htmlFor="memory-inspector-textarea">Lembrança</label>
-            <textarea
-              ref={textareaRef}
-              id="memory-inspector-textarea"
-              className="memory-inspector__textarea"
-              aria-label="Texto da lembrança"
-              maxLength={200}
-              value={draftText}
-              onChange={(event) => setDraftText(event.target.value.slice(0, 200))}
-            />
-            <div className="memory-inspector__counter" data-testid="memory-char-counter">
-              {draftText.length} / 200 caracteres
+      <MemoryReviewTab
+        client={client}
+        projectId={projectId}
+        onMutated={() => {
+          void load()
+        }}
+        activeContent={
+          <>
+            <div className="memory-ref11__search-row">
+              <input
+                id="memory-search"
+                type="search"
+                className="memory-ref11__search-input"
+                aria-label="Buscar memórias"
+                placeholder="Buscar lembranças..."
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+              />
             </div>
-          </div>
 
-          <div className="memory-inspector__field">
-            <label htmlFor="memory-inspector-scope">Escopo</label>
-            <select
-              id="memory-inspector-scope"
-              className="memory-inspector__select"
-              aria-label="Escopo"
-              value={draftScope}
-              onChange={(event) => setDraftScope(event.target.value as MemoryScopeLabel)}
-            >
-              <option value="Trabalho">Trabalho</option>
-              <option value="Friend">Friend</option>
-              <option value="Por projeto">Por projeto</option>
-            </select>
-          </div>
+            {error && <p role="alert">Não foi possível carregar as memórias.</p>}
 
-          <div className="memory-inspector__actions">
-            <button
-              type="button"
-              className="memory-inspector__forget-btn"
-              data-testid="memory-forget-button"
-              onClick={handleForget}
-            >
-              Esquecer
-            </button>
-            <button
-              type="button"
-              className="memory-inspector__save-btn"
-              data-testid="memory-save-button"
-              onClick={handleSave}
-              disabled={!draftText.trim()}
-            >
-              Salvar
-            </button>
-          </div>
-        </aside>
-      </div>
+            <div className="memory-ref11__master-detail">
+              <div className="memory-cards-list" data-testid="memory-cards-list">
+                {visibleCards.length === 0 ? (
+                  <p className="memory-empty-state" data-testid="memory-empty-state">
+                    Nenhuma memória salva neste filtro.
+                  </p>
+                ) : (
+                  visibleCards.map((item) => {
+                    const isSelected = !isCreating && selectedCard?.id === item.id
+                    const tagMod = getTagModifierClass(item.semanticScope)
+                    return (
+                      <article
+                        key={item.id}
+                        className={`memory-card-v6${isSelected ? ' is-selected' : ''}`}
+                        onClick={() => handleSelectCard(item)}
+                      >
+                        <div className="memory-card-v6__content">
+                          <h3 className="memory-card-v6__title">{item.title}</h3>
+                          <div className="memory-card-v6__meta">
+                            <span className={`memory-card-v6__tag ${tagMod}`}>{item.scopeLabel}</span>
+                            <span>{item.metaLabel}</span>
+                          </div>
+                        </div>
+                        <div className="memory-card-v6__actions">
+                          <button
+                            type="button"
+                            className="memory-card-v6__edit-btn"
+                            aria-label={`Editar ${item.title}`}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              handleSelectCard(item)
+                            }}
+                          >
+                            ✎ Editar
+                          </button>
+                          <button
+                            type="button"
+                            className="memory-card-v6__more-btn"
+                            aria-label={`Opções de ${item.title}`}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              handleSelectCard(item)
+                            }}
+                          >
+                            •••
+                          </button>
+                        </div>
+                      </article>
+                    )
+                  })
+                )}
+              </div>
+
+              <aside
+                className="memory-inspector"
+                data-testid="memory-inspector"
+                aria-label="Editar lembrança"
+              >
+                <h2 className="memory-inspector__title">Editar lembrança</h2>
+
+                <div className="memory-inspector__field">
+                  <label htmlFor="memory-inspector-textarea">Lembrança</label>
+                  <textarea
+                    ref={textareaRef}
+                    id="memory-inspector-textarea"
+                    className="memory-inspector__textarea"
+                    aria-label="Texto da lembrança"
+                    maxLength={200}
+                    value={draftText}
+                    onChange={(event) => setDraftText(event.target.value.slice(0, 200))}
+                  />
+                  <div className="memory-inspector__counter" data-testid="memory-char-counter">
+                    {draftText.length} / 200 caracteres
+                  </div>
+                </div>
+
+                <div className="memory-inspector__field">
+                  <label htmlFor="memory-inspector-scope">Escopo</label>
+                  <select
+                    id="memory-inspector-scope"
+                    className="memory-inspector__select"
+                    aria-label="Escopo"
+                    value={draftScope}
+                    onChange={(event) => setDraftScope(event.target.value as MemoryScopeLabel)}
+                  >
+                    <option value="Trabalho">Trabalho</option>
+                    <option value="Friend">Friend</option>
+                    <option value="Por projeto">Por projeto</option>
+                  </select>
+                </div>
+
+                <div className="memory-inspector__actions">
+                  <button
+                    type="button"
+                    className="memory-inspector__forget-btn"
+                    data-testid="memory-forget-button"
+                    onClick={handleForget}
+                  >
+                    Esquecer
+                  </button>
+                  <button
+                    type="button"
+                    className="memory-inspector__save-btn"
+                    data-testid="memory-save-button"
+                    onClick={handleSave}
+                    disabled={!draftText.trim()}
+                  >
+                    Salvar
+                  </button>
+                </div>
+              </aside>
+            </div>
+          </>
+        }
+      />
+
+      {!projectId && <MemorySettingsPanel client={client} />}
     </section>
   )
 

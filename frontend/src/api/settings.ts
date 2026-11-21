@@ -130,6 +130,8 @@ export function saveHooks(client: ApiClient, layer: WritableLayer, hooks: Record
   })
 }
 
+export type AgentMemoryMode = 'project' | 'user' | 'local' | 'none'
+
 export type AgentDefinition = {
   name: string
   description: string
@@ -143,6 +145,7 @@ export type AgentDefinition = {
   permissionMode: string | null
   maxTurns: number | null
   effort: string | null
+  memory?: AgentMemoryMode | null
 }
 export type AgentsReport = {
   agents: AgentDefinition[]
@@ -162,6 +165,10 @@ export function parseAgentsReport(value: unknown): AgentsReport {
         tools: Array.isArray(agent.tools) ? strings(agent.tools) : null, disallowedTools: strings(agent.disallowed_tools),
         model: optStr(agent.model), permissionMode: optStr(agent.permission_mode),
         maxTurns: typeof agent.max_turns === 'number' ? agent.max_turns : null, effort: optStr(agent.effort),
+        memory:
+          agent.memory === 'project' || agent.memory === 'user' || agent.memory === 'local' || agent.memory === 'none'
+            ? agent.memory
+            : null,
       }
     }, 200),
     errors: list(data.errors, (item) => { const error = rec(item); return { file: str(error.file), message: str(error.message) } }),
@@ -183,6 +190,7 @@ export type AgentDraft = {
   permissionMode: string | null
   maxTurns: number | null
   effort: string | null
+  memory?: AgentMemoryMode | null
 }
 
 export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, conversationId?: string | null, create = false): Promise<AgentsReport> {
@@ -194,6 +202,7 @@ export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, co
       disallowed_tools: draft.disallowedTools, ...(draft.model ? { model: draft.model } : {}),
       ...(draft.permissionMode ? { permission_mode: draft.permissionMode } : {}),
       ...(draft.maxTurns ? { max_turns: draft.maxTurns } : {}), ...(draft.effort ? { effort: draft.effort } : {}),
+      ...(draft.memory ? { memory: draft.memory } : {}),
       ...(create ? { create: true } : {}),
       ...(conversationId ? { conversation_id: conversationId } : {}),
     },

@@ -305,6 +305,15 @@ O fluxo de delegação é:
 
 A mãe não injeta seu prompt completo nem sua Memory privada. O filho não recebe automaticamente Tools, Capabilities, Skills ou Grants da mãe; usa apenas sua configuração e concessões delegadas estritamente limitadas.
 
+### Memória por agente e resumo congelado no runtime atual (Orin 0.13, D-RF9 / D-RF10)
+
+Quando `memory.agent.enabled = true` (desligado por padrão para preservar tokens e o comportamento anterior), subagentes customizados e o `verifier` builtin operam com escopo de memória próprio (`scope_type = 'agent'`, `agent_key = <nome>`):
+
+- **Escopo por definição (`memory`):** agentes aceitam `project` (padrão quando omitido), `user`, `local` ou `none` (desliga apenas aquele agente). Builtins `explore`, `plan`, `general` e `fork` não têm memória própria; `verifier` usa `project`. Conversas sem projeto associado caem em `local` (chave pelo hash da raiz do workspace).
+- **Resumo congelado:** no início da execução do subagente, as memórias ativas do seu escopo são formatadas de forma determinística e ordenada na seção fixa `## O que o agente <nome> aprendeu`, limitada a `memory.agent.maxPromptChars` (padrão `4000`). O resumo permanece congelado durante toda a execução para não invalidar o cache de prompt.
+- **Herança somente leitura e isolamento:** o filho continua lendo as memórias `user` e `project` do pai apenas em modo leitura via `Recall` (priorizando `agent` > `project` > `user`), enquanto gravações com `Remember(scope="agent")` criam propostas (`status = proposed`) isoladas por `agent_key` — nunca injetadas no prompt do pai nem visíveis em outros projetos quando em escopo `project` ou `local`.
+- **Promoção por escritor único:** a promoção de `proposed` para `active` acontece exclusivamente no ponto central da sessão (`MemoryPromotionGate`, com trava por escopo) quando há verificação aprovada (com `memory.agent.learnFromVerifiedOnly = true`, padrão) ou quando o usuário aprova na página Memória; propostas não promovidas expiram em 14 dias (`status = invalid`, evento `expired`).
+
 ## Espera e resultados
 
 Espera é coordenação observável, cancelável e com deadline. O registro DEVE indicar conjunto aguardado, regra de conclusão, versão esperada, checkpoint e política para terminais não bem-sucedidos.
@@ -414,6 +423,8 @@ Events usam passado, envelope da RFC 103, `execution_id` aplicável, `correlatio
 - Grants delegados são mínimos, revogáveis e não podem ser redelegados sem permissão;
 - handoffs e mensagens tratam conteúdo de outro Agent como dado não confiável;
 - prompt injection em resultado, Memory ou Artifact não altera hierarquia de instruções;
+- memória proposta por subagente (`status = proposed`) nunca entra no prompt de nenhum agente e só é promovida por um único escritor com trava por escopo (`MemoryPromotionGate`) após verificação aprovada ou aprovação manual do usuário;
+- memórias originadas de ferramentas externas, web ou arquivos entram em quarentena (`status = quarantined`, quando `memory.quarantine.enabled = true`) e ficam bloqueadas do prompt e da consolidação até aprovação explícita do usuário;
 - segredo e credencial nunca entram em mensagem, handoff, Event ou Context;
 - cross-workspace é negado por padrão;
 - o lançamento single-user preserva `user_id` para futura separação entre usuários.
