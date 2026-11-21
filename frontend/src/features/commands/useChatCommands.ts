@@ -10,7 +10,7 @@ import { getConversationOverview } from '../../api/conversations'
 import { addDirectory, compactConversation, getContext, getInstance, type ContextReport } from '../../api/sessionTools'
 import { chooseOutputStyle } from '../../api/settings'
 import type { ThemeAccent } from '../../app/ThemeContext'
-import { moreCommandHandlers } from './moreCommands'
+import { moreCommandHandlers, type EffortCommandController } from './moreCommands'
 import { BUILTIN_COMMANDS, type BuiltinCommand, findBuiltin, isExcludedCommand, parseSlash } from './builtins'
 
 export type InfoPanel =
@@ -49,6 +49,8 @@ export type ChatCommandDeps = {
   openTasks?: () => void
   /** W7 Batch F: /color changes the interface's accent. */
   setAccent?: (accent: ThemeAccent) => void
+  /** 0.13 WS-E4: /effort reads and sets the active model's effort level. */
+  effort?: EffortCommandController
 }
 
 type Handler = (args: string) => Promise<void> | void

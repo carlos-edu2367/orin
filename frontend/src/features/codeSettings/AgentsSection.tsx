@@ -1,13 +1,37 @@
-import { useCallback, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
+import { EFFORT_LEVELS, listProviderModels, PROVIDER_NAMES, type EffortLevel, type ProviderModel } from '../../api/providers'
 import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft } from '../../api/settings'
 import { SettingsSection } from '../settings/SettingsSection'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation, useLoaded, useSettingsClient } from './shared'
 
 export const AGENT_NAME = /^[a-z0-9][a-z0-9_-]{0,63}$/
 const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions', 'auto'] as const
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 const ORIGIN: Record<string, string> = { user: 'usuário', project: 'projeto', plugin: 'plugin', builtin: 'do Orin', cli: 'linha de comando', orin: 'Biblioteca' }
+
+export function acceptedEffortsForModelInput(modelInput: string, catalogModels: readonly ProviderModel[]): readonly EffortLevel[] {
+  const clean = modelInput.trim().toLowerCase()
+  if (!clean || catalogModels.length === 0) return EFFORT_LEVELS
+  const matched = catalogModels.filter((item) => {
+    const bare = item.model_id.toLowerCase()
+    const qualified = `${item.provider}/${item.model_id}`.toLowerCase()
+    return bare === clean || qualified === clean
+  })
+  if (matched.length === 0) return EFFORT_LEVELS
+  const union = new Set<EffortLevel>()
+  let allDeclared = true
+  for (const model of matched) {
+    if (!Array.isArray(model.supported_efforts)) {
+      allDeclared = false
+      continue
+    }
+    for (const level of model.supported_efforts) {
+      if ((EFFORT_LEVELS as readonly string[]).includes(level)) union.add(level)
+    }
+  }
+  if (union.size > 0) return EFFORT_LEVELS.filter((level) => union.has(level))
+  return allDeclared ? [] : EFFORT_LEVELS
+}
 
 type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string }
 
@@ -61,6 +85,27 @@ export function AgentsSection() {
   const [error, setError] = useState<ReturnType<typeof describeError> | null>(null)
   const [confirming, setConfirming] = useState<string | null>(null)
   const [tried, setTried] = useState(false)
+  const [catalogModels, setCatalogModels] = useState<ProviderModel[]>([])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    void Promise.allSettled(
+      PROVIDER_NAMES.map((provider) => listProviderModels(client, provider, controller.signal)),
+    ).then((results) => {
+      if (controller.signal.aborted) return
+      const loaded: ProviderModel[] = []
+      for (const result of results) {
+        if (result.status === 'fulfilled') loaded.push(...result.value)
+      }
+      setCatalogModels(loaded)
+    })
+    return () => controller.abort()
+  }, [client])
+
+  const acceptedEfforts = useMemo(
+    () => acceptedEffortsForModelInput(form?.model ?? '', catalogModels),
+    [catalogModels, form?.model],
+  )
 
   const problems = form ? agentFormProblems(form) : []
   const set = (patch: Partial<Form>) => setForm((current) => (current ? { ...current, ...patch } : current))
@@ -187,9 +232,13 @@ export function AgentsSection() {
               <input inputMode="numeric" value={form.maxTurns} onChange={(event) => set({ maxTurns: event.target.value.replace(/\D/g, '') })} />
             </label>
             <label>Esforço
-              <select value={form.effort} onChange={(event) => set({ effort: event.target.value })}>
+              <select
+                value={acceptedEfforts.includes(form.effort as EffortLevel) ? form.effort : ''}
+                disabled={acceptedEfforts.length === 0}
+                onChange={(event) => set({ effort: event.target.value })}
+              >
                 <option value="">O da conversa</option>
-                {EFFORTS.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+                {acceptedEfforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
               </select>
             </label>
             {tried && problems.length > 0 && (

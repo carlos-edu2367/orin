@@ -4,6 +4,9 @@ import { invalidResponseError } from './errors'
 export const PROVIDER_NAMES = ['openai', 'openai-codex', 'anthropic', 'google-antigravity', 'openrouter', 'nvidia', 'opencode', 'omniroute', 'ollama'] as const
 export type ProviderName = (typeof PROVIDER_NAMES)[number]
 
+export const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const
+export type EffortLevel = (typeof EFFORT_LEVELS)[number]
+
 /**
  * The gateway (`src/agentos/api/gateway.py` `_provider_public`) strips any field
  * whose name contains api_key/secret/token/password/credential (case-insensitive)
@@ -59,6 +62,8 @@ export type ProviderModel = {
   is_custom: boolean
   refreshed_at: string | null
   route_kind: 'model' | 'auto'
+  supported_efforts?: EffortLevel[]
+  default_effort?: EffortLevel | null
 }
 
 function providerPath(provider: ProviderName | string): string {
@@ -639,7 +644,29 @@ function parseProviderModel(value: unknown): ProviderModel {
     is_custom: data.is_custom === true,
     refreshed_at: nullableString(data.refreshed_at),
     route_kind: data.route_kind === 'auto' ? 'auto' : 'model',
+    supported_efforts: parseEffortLevels(data.supported_efforts),
+    default_effort: parseEffortLevel(data.default_effort),
   }
+}
+
+function parseEffortLevel(value: unknown): EffortLevel | null {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim().toLowerCase()
+  return (EFFORT_LEVELS as readonly string[]).includes(normalized) ? (normalized as EffortLevel) : null
+}
+
+function parseEffortLevels(value: unknown): EffortLevel[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<EffortLevel>()
+  const result: EffortLevel[] = []
+  for (const item of value) {
+    const level = parseEffortLevel(item)
+    if (level && !seen.has(level)) {
+      seen.add(level)
+      result.push(level)
+    }
+  }
+  return result
 }
 
 function parsePricing(value: unknown): ProviderModel['pricing'] {
