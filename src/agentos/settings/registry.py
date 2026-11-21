@@ -138,11 +138,84 @@ def _validate_value(key: SettingKey, value: Any, *, allow_none_if_nullable: bool
                 if not isinstance(raw_v, str):
                     raise ValueError(f"{key.path}[{map_key}]: esperado texto")
                 cleaned_map[map_key] = raw_v
+            elif key.item_type == "model_tier":
+                cleaned_map[map_key] = _validate_model_tier_entry(key, map_key, raw_v)
             else:
                 cleaned_map[map_key] = copy.deepcopy(raw_v)
         return cleaned_map
 
+    if key.type == "object":
+        if not isinstance(value, Mapping):
+            raise ValueError(f"{key.path}: esperado objeto")
+        if key.item_type == "verifier_explicit":
+            return _validate_verifier_explicit(key, value)
+        return copy.deepcopy(dict(value))
+
     raise ValueError(f"{key.path}: tipo de configuração desconhecido '{key.type}'")
+
+
+def _validate_verifier_explicit(key: SettingKey, value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed_fields = {"provider", "model", "effort"}
+    extra_fields = set(value.keys()) - allowed_fields
+    if extra_fields:
+        extras = ", ".join(sorted(str(f) for f in extra_fields))
+        raise ValueError(f"{key.path}: campos não suportados: {extras}")
+
+    raw_provider = value.get("provider")
+    raw_model = value.get("model")
+    if not isinstance(raw_provider, str) or not raw_provider.strip():
+        raise ValueError(f"{key.path}.provider: esperado texto não vazio")
+    if not isinstance(raw_model, str) or not raw_model.strip():
+        raise ValueError(f"{key.path}.model: esperado texto não vazio")
+
+    cleaned: dict[str, Any] = {
+        "provider": raw_provider.strip(),
+        "model": raw_model.strip(),
+    }
+    if "effort" in value and value["effort"] is not None:
+        raw_effort = value["effort"]
+        if not isinstance(raw_effort, str) or raw_effort not in EFFORT_LEVELS:
+            allowed = ", ".join(EFFORT_LEVELS)
+            raise ValueError(f"{key.path}.effort: valor inválido; opções permitidas: {allowed}")
+        cleaned["effort"] = raw_effort
+    return cleaned
+
+
+def _validate_model_tier_entry(key: SettingKey, map_key: str, raw_v: Any) -> dict[str, Any]:
+    from agentos.agentic.model_tiers import family_of
+
+    def _check_tier(raw_tier: Any) -> int:
+        if isinstance(raw_tier, bool) or not isinstance(raw_tier, int):
+            raise ValueError(f"{key.path}[{map_key}].tier: esperado número inteiro")
+        if key.value_minimum is not None and raw_tier < key.value_minimum:
+            raise ValueError(f"{key.path}[{map_key}].tier: valor mínimo é {key.value_minimum}")
+        if key.value_maximum is not None and raw_tier > key.value_maximum:
+            raise ValueError(f"{key.path}[{map_key}].tier: valor máximo é {key.value_maximum}")
+        return int(raw_tier)
+
+    if isinstance(raw_v, int) and not isinstance(raw_v, bool):
+        tier = _check_tier(raw_v)
+        return {"family": family_of("", map_key), "tier": tier}
+
+    if isinstance(raw_v, Mapping):
+        allowed_fields = {"family", "tier"}
+        extra_fields = set(raw_v.keys()) - allowed_fields
+        if extra_fields:
+            extras = ", ".join(sorted(str(f) for f in extra_fields))
+            raise ValueError(f"{key.path}[{map_key}]: campos não suportados: {extras}")
+        if "tier" not in raw_v:
+            raise ValueError(f"{key.path}[{map_key}].tier: obrigatório")
+        tier = _check_tier(raw_v["tier"])
+        if "family" in raw_v:
+            raw_family = raw_v["family"]
+            if not isinstance(raw_family, str) or not raw_family.strip():
+                raise ValueError(f"{key.path}[{map_key}].family: esperado texto não vazio")
+            family = raw_family.strip().lower()
+        else:
+            family = family_of("", map_key)
+        return {"family": family, "tier": tier}
+
+    raise ValueError(f"{key.path}[{map_key}]: esperado inteiro ou objeto {{family, tier}}")
 
 
 def validate_change(path: str, value: Any) -> Any:
@@ -290,8 +363,19 @@ def _resolve_scalar_lower_only(key: SettingKey, entries: list[tuple[str, Any]]) 
     if "managed" in per_layer:
         return ResolvedSetting(per_layer["managed"], "managed", copy.deepcopy(key.default))
 
+    # User sets the baseline (may raise or lower above default); without user, a non-null
+    # default acts as the baseline so project/local can only lower it, never raise it.
+    if "user" in per_layer:
+        effective = per_layer["user"]
+        winning_layer = "user"
+        has_active = True
+    elif key.default is not None:
+        effective = copy.deepcopy(key.default)
+        winning_layer = "default"
+        has_active = True
+
     for layer_name in LAYER_ORDER:
-        if layer_name == "managed" or layer_name not in per_layer:
+        if layer_name in {"user", "managed"} or layer_name not in per_layer:
             continue
         candidate = per_layer[layer_name]
         if not has_active:
@@ -375,10 +459,11 @@ def resolve(settings: EffectiveSettings, path: str) -> ResolvedSetting:
     return ResolvedSetting(effective, winning_layer, copy.deepcopy(key.default))
 
 
-# Register built-in Package E, Messages and Package D memory keys on module import.
+# Register built-in Package E, Messages, Package D memory and Package A verifier keys on module import.
 from . import keys_effort_quota as _keys_effort_quota  # noqa: E402, F401
 from . import keys_memory as _keys_memory  # noqa: E402, F401
 from . import keys_messages as _keys_messages  # noqa: E402, F401
+from . import keys_verifier as _keys_verifier  # noqa: E402, F401
 
 __all__ = [
     "EFFORT_LEVELS",
