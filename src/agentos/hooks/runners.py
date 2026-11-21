@@ -174,6 +174,16 @@ def _accepts_cancel(agent: Callable[..., Any]) -> bool:
     return len(positional) >= 2 or any(item.kind is item.VAR_POSITIONAL for item in parameters)
 
 
+def _accepts_kwarg(agent: Callable[..., Any], name: str) -> bool:
+    try:
+        parameters = inspect.signature(agent).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in parameters:
+        return True
+    return any(item.kind is item.VAR_KEYWORD for item in parameters.values())
+
+
 class _BoundedRunner:
     """One small worker pool per runner. Its lifetime is the dispatcher's, closed by ``close``."""
 
@@ -225,14 +235,24 @@ class AgentHookRunner(_BoundedRunner):
         super().__init__("orin-hook-verify")
         self.agent = agent
         self._takes_cancel = agent is not None and _accepts_cancel(agent)
+        self._takes_agent = agent is not None and _accepts_kwarg(agent, "agent")
+        self._takes_source = agent is not None and _accepts_kwarg(agent, "source")
 
     def run(self, spec: HookSpec, payload: Mapping[str, Any]) -> dict[str, Any] | None:
         if self.agent is None:
             return None
+        selected_agent = (spec.agent or "explore").strip().lower()
+        if selected_agent not in {"explore", "verifier"}:
+            return None
         prompt = _with_arguments(spec.prompt, payload) + '\n\nWhen you are done, answer with {"ok": true|false, "reason": "..."}.'
         cancel = threading.Event()
+        kwargs: dict[str, Any] = {}
+        if self._takes_agent:
+            kwargs["agent"] = selected_agent
+        if self._takes_source:
+            kwargs["source"] = spec.source
         if self._takes_cancel:
-            reply = _run_bounded(self._executor, lambda: self.agent(prompt, cancel), spec.timeout, cancel)
+            reply = _run_bounded(self._executor, lambda: self.agent(prompt, cancel, **kwargs), spec.timeout, cancel)
         else:
-            reply = _run_bounded(self._executor, lambda: self.agent(prompt), spec.timeout, cancel)
+            reply = _run_bounded(self._executor, lambda: self.agent(prompt, **kwargs), spec.timeout, cancel)
         return parse_verdict(reply) if isinstance(reply, str) else None

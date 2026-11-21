@@ -90,7 +90,7 @@ export function changePermissionRule(client: ApiClient, change: RuleChange): Pro
   })
 }
 
-export type HookSpec = { event: string; matcher: string; type: string; source: string; label: string; timeout: number }
+export type HookSpec = { event: string; matcher: string; type: string; source: string; label: string; timeout: number; agent?: string }
 export type HooksReport = {
   disabled: boolean
   effective: HookSpec[]
@@ -111,7 +111,12 @@ export function parseHooksReport(value: unknown): HooksReport {
     disabled: bool(data.disabled),
     effective: list(data.effective, (item) => {
       const spec = rec(item)
-      return { event: str(spec.event), matcher: str(spec.matcher), type: str(spec.type), source: str(spec.source), label: str(spec.label), timeout: num(spec.timeout) }
+      const agent = optStr(spec.agent) ?? undefined
+      return {
+        event: str(spec.event), matcher: str(spec.matcher), type: str(spec.type), source: str(spec.source),
+        label: str(spec.label), timeout: num(spec.timeout),
+        ...(agent ? { agent } : {}),
+      }
     }),
     editable,
     errors: list(data.errors, (item) => { const error = rec(item); return { source: str(error.source), message: str(error.message) } }),

@@ -16,7 +16,7 @@ import re
 import shutil
 import sys
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
@@ -1592,10 +1592,16 @@ class TurnSession:
         learned_window_tokens: int | None = None,
         context_observation_sink: Callable[..., None] | None = None,
         context_observation_invalidator: Callable[[str, str], bool] | None = None,
+        favorites_by_provider: Mapping[str, Sequence[str]] | Callable[[], Mapping[str, Sequence[str]]] | None = None,
+        configured_providers: Collection[str] | Callable[[], Collection[str]] | None = None,
+        quota_service: object | None = None,
     ) -> None:
         self.turn = turn
         self.conversation_id = str(turn.get("conversation_id") or "")
         self.quota_gate = quota_gate
+        self._quota_service = quota_service
+        self._favorites_by_provider = favorites_by_provider
+        self._configured_providers = configured_providers
         self._quota_sink = quota_sink
         self._quota_error_sink = quota_error_sink
         self._quota_after_turn = quota_after_turn
@@ -2619,6 +2625,11 @@ class TurnSession:
         """An agent defined on disk for ``key`` (W5), or None for an Orin builtin that no file replaces."""
         catalog = getattr(self, "_agent_definitions", None)
         definition = catalog.get(key) if catalog is not None else None
+        if definition is None and catalog is None:
+            from .agent_definitions import BUILTIN_DEFINITIONS
+
+            clean = str(key or "").strip().lower()
+            definition = next((item for item in BUILTIN_DEFINITIONS if item.name.lower() == clean), None)
         if definition is None:
             return None
         if definition.origin == "builtin" and str(key or "").strip().lower() in _BUILTIN_SUBAGENT_SPECS:
@@ -2914,12 +2925,90 @@ class TurnSession:
                         return dict(item)
         return None
 
+    def _child_quota_service(self) -> object | None:
+        direct = getattr(self, "_quota_service", None)
+        if direct is not None:
+            return direct
+        gate = getattr(self, "quota_gate", None)
+        return getattr(gate, "_quota_service", None) if gate is not None else None
+
+    def _child_quota_policy_settings(self) -> tuple[bool, int]:
+        effective = getattr(self, "effective_settings", None)
+        if effective is None:
+            return False, 90
+        from agentos.settings.registry import resolve as resolve_setting
+
+        enabled = bool(resolve_setting(effective, "quota.policy.enabled").value)
+        block_percent = int(resolve_setting(effective, "quota.policy.blockBackgroundPercent").value)
+        return enabled, block_percent
+
+    def _child_routing_catalog(self) -> tuple[dict[str, tuple[str, ...]], tuple[str, ...] | None]:
+        parent_provider = str(self.turn.get("provider") or "").strip()
+        raw_favs = getattr(self, "_favorites_by_provider", None)
+        if callable(raw_favs):
+            try:
+                raw_favs = raw_favs()
+            except Exception:
+                raw_favs = None
+        if isinstance(raw_favs, Mapping):
+            favorites: dict[str, tuple[str, ...]] = {
+                str(prov).strip(): tuple(str(m).strip() for m in models if str(m).strip())
+                for prov, models in raw_favs.items()
+                if str(prov).strip()
+            }
+        elif parent_provider:
+            favorites = {parent_provider: tuple(self.child_model_ids)}
+        else:
+            favorites = {}
+
+        raw_configured = getattr(self, "_configured_providers", None)
+        if callable(raw_configured):
+            try:
+                raw_configured = raw_configured()
+            except Exception:
+                raw_configured = None
+        configured: tuple[str, ...] | None = None
+        if raw_configured is not None and not isinstance(raw_configured, (str, bytes)):
+            configured = tuple(str(p).strip() for p in raw_configured if str(p).strip())
+        return favorites, configured
+
+    def run_child(
+        self,
+        subagent_type: str,
+        task: str,
+        *,
+        provider: str | None = None,
+        model_id: str | None = None,
+        effort: str | None = None,
+        description: str = "",
+        agent_id: str | None = None,
+        run_in_background: bool = False,
+        hook_cancel: threading.Event | None = None,
+        character_name: str | None = None,
+        caller: SubagentCaller | None = None,
+    ) -> ToolOutcome:
+        """Internal entry point to run a child subagent (e.g. VerificationGate)."""
+        return self._run_subagent(
+            subagent_type,
+            task,
+            description=description,
+            provider=provider,
+            model_id=model_id,
+            effort=effort,
+            agent_id=agent_id,
+            run_in_background=run_in_background,
+            hook_cancel=hook_cancel,
+            character_name=character_name,
+            caller=caller,
+        )
+
     def _run_subagent(
         self,
         subagent_type: str,
         task: str,
         *,
         description: str = "",
+        provider: str | None = None,
         model_id: str | None = None,
         effort: str | None = None,
         agent_id: str | None = None,
@@ -2938,7 +3027,7 @@ class TurnSession:
             )
         if not teammate_name:
             return self._start_subagent(
-                subagent_type, task, description=description, model_id=model_id, effort=effort, agent_id=agent_id,
+                subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, agent_id=agent_id,
                 run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
@@ -2947,7 +3036,7 @@ class TurnSession:
         clean_name = str(teammate_name).strip().lower()
         try:
             outcome = self._start_subagent(
-                subagent_type, task, description=description, model_id=model_id, effort=effort, agent_id=agent_id,
+                subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, agent_id=agent_id,
                 run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
             )
         except BaseException:
@@ -2963,6 +3052,7 @@ class TurnSession:
         task: str,
         *,
         description: str = "",
+        provider: str | None = None,
         model_id: str | None = None,
         effort: str | None = None,
         agent_id: str | None = None,
@@ -2997,6 +3087,7 @@ class TurnSession:
         return self._ask_agent(
             clean_type,
             task,
+            requested_provider=provider,
             requested_model_id=model_id,
             requested_effort=effort,
             description=description,
@@ -3014,6 +3105,7 @@ class TurnSession:
         name: str,
         task: str,
         *,
+        requested_provider: str | None = None,
         requested_model_id: str | None = None,
         requested_effort: str | None = None,
         description: str = "",
@@ -3055,23 +3147,100 @@ class TurnSession:
             builtin_key = "general"
             clean = "general"
         builtin_spec = self._subagent_spec(builtin_key)
+        explicit_provider = str(requested_provider).strip() if requested_provider else ""
         explicit_model = str(requested_model_id).strip() if requested_model_id else ""
         resolved_explicit: str | None = None
         pinned = self._pinned_models(builtin_spec)
         pinned_choice: tuple[str, tuple[str, ...]] | None = None
-        if pinned is not None and not resumed_agent_id:
+        from .child_routing import ChildTarget, check_child_quota, resolve_child_target
+
+        ephemeral_target: ChildTarget | None = None
+        parent_provider = str(self.turn.get("provider") or "").strip()
+        quota_service = self._child_quota_service()
+        quota_policy_enabled, quota_block_percent = self._child_quota_policy_settings()
+        routing_favorites, routing_configured = self._child_routing_catalog()
+        user_id = str(self.turn.get("user_id") or "")
+
+        if explicit_provider and not resumed_agent_id:
+            if pinned is not None:
+                if pinned.provider.lower() != explicit_provider.lower():
+                    refusal = resolve_child_target(
+                        explicit_provider,
+                        explicit_model or None,
+                        parent_provider,
+                        routing_favorites,
+                        pinned,
+                        quota_service,
+                        user_id=user_id,
+                        configured_providers=routing_configured,
+                        quota_policy_enabled=quota_policy_enabled,
+                        quota_block_percent=quota_block_percent,
+                        effort=requested_effort,
+                        parent_model_id=self._current_model_id(),
+                        agent_name=clean,
+                        allowed_hint=self._allowed_child_models_hint(),
+                    )
+                    if isinstance(refusal, ToolOutcome):
+                        return refusal
+                choice = self._choose_pinned_model(pinned, explicit_model, None, clean)
+                if isinstance(choice, ToolOutcome):
+                    return choice
+                quota_refusal = check_child_quota(
+                    quota_service,
+                    user_id=user_id,
+                    provider=pinned.provider,
+                    model_id=choice[0],
+                    quota_policy_enabled=quota_policy_enabled,
+                    quota_block_percent=quota_block_percent,
+                    agent_name=clean,
+                )
+                if quota_refusal is not None:
+                    return quota_refusal
+                pinned_choice, resolved_explicit = choice, choice[0]
+            else:
+                target = resolve_child_target(
+                    explicit_provider,
+                    explicit_model or None,
+                    parent_provider,
+                    routing_favorites,
+                    None,
+                    quota_service,
+                    user_id=user_id,
+                    configured_providers=routing_configured,
+                    quota_policy_enabled=quota_policy_enabled,
+                    quota_block_percent=quota_block_percent,
+                    effort=requested_effort,
+                    parent_model_id=self._current_model_id(),
+                    agent_name=clean,
+                    allowed_hint=self._allowed_child_models_hint(),
+                )
+                if isinstance(target, ToolOutcome):
+                    return target
+                ephemeral_target = target
+                resolved_explicit = target.model_id
+        elif pinned is not None and not resumed_agent_id:
             choice = self._choose_pinned_model(pinned, explicit_model, None, clean)
             if isinstance(choice, ToolOutcome):
                 return choice
             pinned_choice, resolved_explicit = choice, choice[0]
         elif explicit_model and pinned is None:
-            resolved_explicit = self._resolve_child_model(explicit_model)
-            if not resolved_explicit or not self._child_model_allowed(resolved_explicit, allow_current=True):
-                return ToolOutcome(
-                    "failed", f"Modelo de {clean} nao permitido",
-                    "This subagent is not configured with the current model or a current favorite model for this provider." + self._allowed_child_models_hint(),
-                    {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
-                )
+            target = resolve_child_target(
+                None,
+                explicit_model,
+                parent_provider,
+                routing_favorites,
+                None,
+                None,
+                effort=requested_effort,
+                parent_model_id=self._current_model_id(),
+                agent_name=clean,
+                allowed_hint=self._allowed_child_models_hint(),
+                model_resolver=self._resolve_child_model,
+                current_model_allowed=lambda mid, allow_curr: self._child_model_allowed(mid, allow_current=allow_curr),
+            )
+            if isinstance(target, ToolOutcome):
+                return target
+            resolved_explicit = target.model_id
 
         record: dict[str, object] | None = None
         if resumed_agent_id:
@@ -3145,7 +3314,11 @@ class TurnSession:
                 model_id=resolved_explicit,
                 instance_name=instance_name,
                 parent_agent_id=caller.agent_id,
-                provider=pinned.provider if pinned is not None else None,
+                provider=(
+                    pinned.provider
+                    if pinned is not None
+                    else (ephemeral_target.provider if ephemeral_target is not None else None)
+                ),
             )
         else:
             record = self.agents_store.find(clean) if self.agents_store is not None else None
@@ -3170,23 +3343,81 @@ class TurnSession:
         # current turn model, never an arbitrary catalog model.
         if pinned is None and resumed_agent_id:
             pinned = self._pinned_models(builtin_spec)  # the definition was found through the resumed record
+        if explicit_provider and resumed_agent_id and ephemeral_target is None:
+            if pinned is not None:
+                if pinned.provider.lower() != explicit_provider.lower():
+                    refusal = resolve_child_target(
+                        explicit_provider,
+                        explicit_model or None,
+                        parent_provider,
+                        routing_favorites,
+                        pinned,
+                        quota_service,
+                        user_id=user_id,
+                        configured_providers=routing_configured,
+                        quota_policy_enabled=quota_policy_enabled,
+                        quota_block_percent=quota_block_percent,
+                        effort=requested_effort,
+                        parent_model_id=self._current_model_id(),
+                        agent_name=clean,
+                        allowed_hint=self._allowed_child_models_hint(),
+                    )
+                    if isinstance(refusal, ToolOutcome):
+                        return refusal
+            else:
+                target = resolve_child_target(
+                    explicit_provider,
+                    explicit_model or None,
+                    parent_provider,
+                    routing_favorites,
+                    None,
+                    quota_service,
+                    user_id=user_id,
+                    configured_providers=routing_configured,
+                    quota_policy_enabled=quota_policy_enabled,
+                    quota_block_percent=quota_block_percent,
+                    effort=requested_effort,
+                    parent_model_id=self._current_model_id(),
+                    agent_name=clean,
+                    allowed_hint=self._allowed_child_models_hint(),
+                )
+                if isinstance(target, ToolOutcome):
+                    return target
+                ephemeral_target = target
+                resolved_explicit = target.model_id
         if pinned is not None and pinned_choice is None:
             choice = self._choose_pinned_model(pinned, explicit_model, str(record.get("model_id") or "").strip() or None, clean)
             if isinstance(choice, ToolOutcome):
                 return choice
+            if explicit_provider:
+                quota_refusal = check_child_quota(
+                    quota_service,
+                    user_id=user_id,
+                    provider=pinned.provider,
+                    model_id=choice[0],
+                    quota_policy_enabled=quota_policy_enabled,
+                    quota_block_percent=quota_block_percent,
+                    agent_name=clean,
+                )
+                if quota_refusal is not None:
+                    return quota_refusal
             pinned_choice = choice
         child_provider = str(record.get("provider") or self.turn.get("provider") or "")
         current_model_id = self._current_model_id()
         if pinned is not None and pinned_choice is not None:
             # A pinned agent: its own provider and models only, already authorized by the choice above.
             child_provider, child_model_id = pinned.provider, pinned_choice[0]
+        elif ephemeral_target is not None:
+            child_provider = ephemeral_target.provider
+            child_model_id = ephemeral_target.model_id or current_model_id
+            record["provider"] = child_provider
         elif builtin_spec is not None:
             child_model_id = resolved_explicit or self._definition_model(builtin_spec) or current_model_id
         else:
             raw_record_model = str(record.get("model_id") or "").strip()
             child_model_id = resolved_explicit or (self._resolve_child_model(raw_record_model) if raw_record_model else current_model_id) or raw_record_model
 
-        if pinned_choice is None:
+        if pinned_choice is None and ephemeral_target is None:
             provider_mismatch = child_provider != str(self.turn.get("provider") or "") and not self._child_model_allowed(child_model_id, allow_current=False)
             if provider_mismatch or not self._child_model_allowed(child_model_id, allow_current=not explicit_model or child_model_id == current_model_id):
                 return ToolOutcome(
@@ -3194,10 +3425,16 @@ class TurnSession:
                     "This subagent is not configured with the current model or a current favorite model for this provider." + self._allowed_child_models_hint(),
                     {"agent_name": clean, "label": clean, "tool_kind": "agent"}, "CHILD_MODEL_NOT_FAVORITE",
                 )
-        routing: dict[str, object] = (
-            {"child_provider": pinned.provider, "model_chain": pinned_choice[1]}
-            if pinned is not None and pinned_choice is not None else {}
-        )
+        if pinned is not None and pinned_choice is not None:
+            routing: dict[str, object] = {"child_provider": pinned.provider, "model_chain": pinned_choice[1]}
+        elif ephemeral_target is not None:
+            routing = (
+                {"child_provider": ephemeral_target.provider, "model_chain": ephemeral_target.model_chain}
+                if ephemeral_target.pinned
+                else {"child_provider": ephemeral_target.provider}
+            )
+        else:
+            routing = {}
         if requested_effort is not None:
             routing["requested_effort"] = requested_effort
         with self._subagent_lock:
@@ -6120,18 +6357,30 @@ class TurnSession:
             dict(record),
         )
 
-    def _hook_agent(self, prompt: str, cancel: threading.Event | None = None) -> str:
-        """Runs an agent-type hook as a read-only verification subagent and returns its text.
+    def _hook_agent(
+        self,
+        prompt: str,
+        cancel: threading.Event | None = None,
+        *,
+        agent: str = "explore",
+        source: str | None = None,
+    ) -> str:
+        """Runs an agent-type hook as a read-only/verification subagent and returns its text.
 
         Re-entry is refused, atomically: the verifier's tool calls fire the same hooks, so a verifier
         that starts another verifier would recurse without bound, and two verifiers must never run at
         once. ``cancel`` is set when the hook times out; the verifier's child runtime observes it and stops.
         """
+        clean_agent = str(agent or "explore").strip().lower()
+        if clean_agent not in {"explore", "verifier"}:
+            return ""
+        if clean_agent == "verifier" and source in {"project", "local"} and not self._workspace_trusted():
+            return ""
         if not self._hook_agent_guard.acquire(blocking=False):
             return ""
         self._hook_agent_running = True
         try:
-            outcome = self._run_subagent("explore", prompt, description="Hook de verificação", hook_cancel=cancel)
+            outcome = self._run_subagent(clean_agent, prompt, description="Hook de verificação", hook_cancel=cancel)
             return str(getattr(outcome, "content", "") or "")
         except Exception:  # noqa: BLE001 - a failed verifier is a missing verdict
             return ""

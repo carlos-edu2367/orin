@@ -237,7 +237,8 @@ def hooks_report(root: Path | None, trusted: bool) -> dict[str, Any]:
     return {
         "disabled": settings.get("disableAllHooks") is True,
         "effective": [{"event": spec.event.value, "matcher": spec.matcher, "type": spec.type, "source": spec.source,
-                       "label": redact_value(spec.label()), "timeout": spec.timeout} for spec in specs],
+                       "label": redact_value(spec.label()), "timeout": spec.timeout,
+                       **({"agent": spec.agent or "explore"} if spec.type == "agent" else {})} for spec in specs],
         "editable": editable,
         "errors": [{"source": getattr(error, "source", ""), "message": str(getattr(error, "message", error))} for error in errors],
     }
