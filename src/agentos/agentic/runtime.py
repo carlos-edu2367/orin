@@ -385,6 +385,9 @@ class AgenticTurnRuntime:
         learned_window_tokens: int | None = None,
         context_observation_sink: Callable[..., None] | None = None,
         context_observation_invalidator: Callable[[str, str], bool] | None = None,
+        on_reminder_ack: Callable[[str], Any] | None = None,
+        control_watcher: Any | None = None,
+        continue_on_unread: bool = True,
     ) -> None:
         self.store, self.provider = store, provider
         if provider_timeout_seconds is not None:
@@ -405,6 +408,9 @@ class AgenticTurnRuntime:
         self.learned_window_tokens = learned_window_tokens
         self.context_observation_sink = context_observation_sink
         self.context_observation_invalidator = context_observation_invalidator
+        self.on_reminder_ack = on_reminder_ack
+        self.control_watcher = control_watcher
+        self.continue_on_unread = bool(continue_on_unread)
         self.lifecycle = lifecycle
         self.prompt_block_reason = prompt_block_reason
         self.config_block_reason = config_block_reason
@@ -545,6 +551,9 @@ class AgenticTurnRuntime:
         body = render_reminders(pending)
         if body:
             messages.append({"role": "user", "content": body, "_reminder": True})
+            from .message_ack import ack_delivered_reminders
+
+            ack_delivered_reminders(pending, getattr(self, "on_reminder_ack", None))
 
     def _label(self, internal: str) -> str:
         """A tool as the model knows it (Claude Code name when the translator is on)."""

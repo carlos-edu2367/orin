@@ -3447,13 +3447,74 @@ class PostgresChatStore:
         self._confirm_control_reachable(conversation_id, user_id, agent_id, control_id)
         return {"agent_id": agent_id, "status": "stopping", "control_id": control_id}
 
+    def _latest_turn_for_conversation(self, conversation_id: str, user_id: str) -> dict[str, object] | None:
+        with self._engine.connect() as c:
+            row = (
+                c.execute(
+                    select(conversation_turns)
+                    .where(
+                        conversation_turns.c.conversation_id == conversation_id,
+                        conversation_turns.c.user_id == user_id,
+                    )
+                    .order_by(conversation_turns.c.created_at.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row is not None else None
+
     def send_agent_message(
         self, conversation_id: str, user_id: str, agent_id: str, message: str
     ) -> dict[str, object]:
         self._validate_running_agent(conversation_id, user_id, agent_id)
-        control_id = self._agent_controls().post_message(user_id, conversation_id, agent_id, message)
+        control_id = self._agent_controls().post_message(
+            user_id, conversation_id, agent_id, message, sender_kind="user", sender_agent_id=None
+        )
         self._confirm_control_reachable(conversation_id, user_id, agent_id, control_id)
+        try:
+            turn = self._latest_turn_for_conversation(conversation_id, user_id)
+            if turn is not None:
+                preview = str(message or "").strip()[:200]
+                self._activity(
+                    turn,
+                    AgentActivityEventType.AGENT_MESSAGE_QUEUED,
+                    "Mensagem na fila para o subagente",
+                    {
+                        "control_id": control_id,
+                        "agent_id": agent_id,
+                        "sender_kind": "user",
+                        "preview": preview,
+                        "state": "queued",
+                    },
+                    agent_id=agent_id,
+                )
+        except Exception:  # noqa: BLE001 - activity emission must never fail message queueing
+            _LOGGER.debug("could not emit agent.message_queued for %s", agent_id, exc_info=True)
         return {"agent_id": agent_id, "status": "queued", "control_id": control_id}
+
+    def list_agent_messages(
+        self, conversation_id: str, user_id: str, agent_id: str
+    ) -> list[dict[str, object]]:
+        with self._engine.connect() as c:
+            owned = c.execute(
+                select(conversations.c.conversation_id).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
+                )
+            ).first()
+            if owned is None:
+                raise ApplicationNotFoundError(conversation_id)
+            agent_row = c.execute(
+                select(conversation_agents.c.agent_id).where(
+                    conversation_agents.c.agent_id == agent_id,
+                    conversation_agents.c.conversation_id == conversation_id,
+                    conversation_agents.c.user_id == user_id,
+                )
+            ).first()
+            if agent_row is None:
+                raise ApplicationNotFoundError(agent_id)
+        return self._agent_controls().list_for_agent(user_id, conversation_id, agent_id)
 
     def cancel_requested(self, turn_id: str) -> bool:
         with self._engine.connect() as c:
@@ -4035,6 +4096,11 @@ class ChatApplication:
         self, conversation_id: str, user_id: str, agent_id: str, message: str
     ) -> dict[str, object]:
         return self.store.send_agent_message(conversation_id, user_id, agent_id, message)
+
+    def list_agent_messages(
+        self, conversation_id: str, user_id: str, agent_id: str
+    ) -> list[dict[str, object]]:
+        return self.store.list_agent_messages(conversation_id, user_id, agent_id)
     def _has_live_turn(self, conversation_id: str, user_id: str) -> bool:
         with self.store._engine.connect() as connection:
             return connection.execute(select(conversation_turns.c.turn_id).where(

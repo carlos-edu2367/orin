@@ -51,6 +51,7 @@ def system_reminder(text: str, *, limit: int = MAX_REMINDER_CHARS) -> str:
 class Reminder:
     kind: str
     text: str
+    key: str = ""
 
 
 class ReminderQueue:
@@ -67,12 +68,13 @@ class ReminderQueue:
         clean = str(text or "").strip()
         if not clean:
             return False
-        dedupe = key or f"{kind}\x00{clean}"
+        explicit_key = str(key or "")
+        dedupe = explicit_key or f"{kind}\x00{clean}"
         with self._lock:
             if dedupe in self._keys or len(self._items) >= self._max or not self._fits_locked(kind, clean):
                 return False
             self._keys[dedupe] = len(self._items)
-            self._items.append(Reminder(str(kind or "note"), clean))
+            self._items.append(Reminder(str(kind or "note"), clean, explicit_key))
         return True
 
     def replace(self, key: str, kind: str, text: str) -> bool:
@@ -82,7 +84,7 @@ class ReminderQueue:
             index = self._keys.get(key)
             if index is None or not clean or not self._fits_locked(kind, clean, replacing=index):
                 return False
-            self._items[index] = Reminder(str(kind or "note"), clean)
+            self._items[index] = Reminder(str(kind or "note"), clean, str(key or ""))
         return True
 
     def drain(self) -> list[Reminder]:
