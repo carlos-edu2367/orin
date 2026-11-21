@@ -50,8 +50,15 @@ def test_ws_a2_verifier_keys_registered_with_defaults_and_scopes() -> None:
     assert REGISTRY["orchestration.verifier.maxRounds"].minimum == 1
     assert REGISTRY["orchestration.verifier.maxRounds"].maximum == 5
 
-    # WS-A5 owns orchestration.selfVerify.enabled — must NOT be created in WS-A2
-    assert "orchestration.selfVerify.enabled" not in REGISTRY
+    # WS-A5 registers orchestration.selfVerify.enabled (default False, PROJECT_OFF_ONLY)
+    assert "orchestration.selfVerify.enabled" in REGISTRY
+    sv_key = REGISTRY["orchestration.selfVerify.enabled"]
+    assert sv_key.type == "boolean"
+    assert sv_key.default is False
+    assert sv_key.scope is Scope.PROJECT_OFF_ONLY
+    assert resolve(empty, "orchestration.selfVerify.enabled") == ResolvedSetting(
+        value=False, layer="default", default=False
+    )
 
 
 def test_verifier_keys_validation() -> None:

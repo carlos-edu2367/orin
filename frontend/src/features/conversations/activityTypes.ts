@@ -20,6 +20,7 @@ export const activityStates = [
   'failed',
   'cancelled',
   'completed',
+  'completed_with_caveats',
   'unknown',
 ] as const
 
@@ -171,6 +172,9 @@ export type AgentActivityEventType =
   | 'process.exited'
   | 'quota.updated'
   | 'quota.fallback_applied'
+  | 'verifier.model_selected'
+  | 'verifier.started'
+  | 'verifier.finished'
   | 'friend.delivery_status'
   | (string & {})
 
@@ -231,7 +235,7 @@ export type ConversationActivityEvent = {
   questionsAnswerText?: string
   contextUsage?: ContextUsage
   codeStage?: string
-  verification?: 'unverified'
+  verification?: 'unverified' | 'verified' | 'completed_with_caveats'
   waitingForSlot?: boolean
   /** Set on the `context.updated` that opens an automatic or manual context compaction. */
   compacting?: boolean
@@ -420,11 +424,16 @@ export function kindFor(type: string, toolKind?: string): ActivityKind {
 }
 
 export function stateFor(type: string, status?: string, errorCode?: string | null): ActivityState {
-  if (
-    type === 'code_mode.completed' ||
-    type === 'code_mode.completed_with_caveats' ||
-    type === 'code_mode.unverified'
-  ) {
+  if (type === 'code_mode.completed' || type === 'code_mode.unverified') {
+    return 'completed'
+  }
+  if (type === 'code_mode.completed_with_caveats') {
+    return 'completed_with_caveats'
+  }
+  if (type === 'verifier.started' || type === 'verifier.model_selected') {
+    return 'working'
+  }
+  if (type === 'verifier.finished') {
     return 'completed'
   }
   if (type === 'code_mode.blocked') return 'failed'
@@ -481,6 +490,6 @@ export type TurnActivityState = {
   resyncRequired: boolean
   todos: TodoItem[]
   activePhase: string | null
-  status: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: 'idle' | 'running' | 'completed' | 'completed_with_caveats' | 'failed' | 'cancelled'
 }
 

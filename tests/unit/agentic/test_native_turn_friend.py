@@ -475,6 +475,7 @@ def test_chat_native_turn_allows_report_verification_and_blocks_write_in_verify_
         store=store,  # type: ignore[arg-type]
         provider=_VerifyProvider(),  # type: ignore[arg-type]
         actions=object(),  # type: ignore[arg-type]
+        effective_settings={"orchestration": {"selfVerify": {"enabled": True}}},
         limits=AgenticLimits(
             deadline=timedelta(minutes=5),
             max_iterations=5,

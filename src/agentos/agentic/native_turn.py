@@ -3280,11 +3280,44 @@ class NativeTurnRunner:
                         and sink.model_calls >= self.runtime.limits.max_turns
                     )
 
+                    gate_action = self.runtime._get_verification_gate().evaluate_turn_end(
+                        self.turn,
+                        self.runtime,
+                        allow_continuation=not closing_sent and not turns_used,
+                    )
+                    if gate_action.action == "continue" and gate_action.system_message:
+                        executor._maybe_refresh_live_specs()
+                        if persistent_stdin:
+                            handle.send_user(
+                                [{"type": "text", "text": gate_action.system_message}]
+                            )
+                            sink.reset_for_new_message()
+                            self.runtime._life(self.turn, "running")
+                            continue
+                        self.runtime._effect_finished(
+                            self.turn,
+                            provider_effect_id,
+                            state="APPLIED",
+                            private_result={"outcome": gate_action.reason or "verify_findings_continuation"},
+                        )
+                        if supports_session_resume and resume_session_id:
+                            user_content = [{"type": "text", "text": gate_action.system_message}]
+                        else:
+                            assistant_text = sink.settled_assistant_text()
+                            if assistant_text:
+                                self.messages.append({"role": "assistant", "content": assistant_text})
+                            self.messages.append({"role": "user", "content": gate_action.system_message})
+                            user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        break
+
                     if (
                         not closing_sent
                         and not turns_used
                         and verify_gate_attempts < 1
-                        and self.runtime._needs_verification()
+                        and gate_action.action == "self_verify"
                     ):
                         verify_gate_attempts += 1
                         if self.runtime.phases is not None:
@@ -3573,6 +3606,30 @@ class NativeTurnRunner:
                             except Exception:  # noqa: BLE001 - memory promotion hook never breaks a turn
                                 pass
                     self._invalidate_superseded_learned_window(sink)
+                    if gate_action.action == "complete_with_caveats":
+                        from .verification_gate import format_caveats_summary
+
+                        caveats_payload = tuple(
+                            item.to_dict() for item in gate_action.open_findings
+                        )
+                        caveat_summary = format_caveats_summary(gate_action.open_findings)
+                        self.runtime._life(
+                            self.turn,
+                            "completed_with_caveats",
+                            summary=caveat_summary,
+                            open_findings=list(caveats_payload),
+                        )
+                        self.runtime.store.finish(self.turn, code="COMPLETED_WITH_CAVEATS")
+                        self.runtime._settle_quality(self.turn, "completed_with_caveats")
+                        return AgenticRunResult(
+                            "completed_with_caveats",
+                            process_count,
+                            executor.action_count,
+                            budget_exhausted=closing_sent,
+                            verification="completed_with_caveats",
+                            message=caveat_summary,
+                            caveats=caveats_payload,
+                        )
                     self.runtime._life(self.turn, "completed")
                     self.runtime.store.finish(self.turn)
                     self.runtime._settle_quality(self.turn, "completed")

@@ -109,12 +109,16 @@ def _published(request: dict[str, object]) -> set[str]:
     return {str(item["function"]["name"]) for item in request["tools"]}
 
 
-def _runtime(provider, controller, **limits) -> AgenticTurnRuntime:
+def _runtime(provider, controller, *, effective_settings=None, **limits) -> AgenticTurnRuntime:
     return AgenticTurnRuntime(
         store=_Store(), provider=provider, toolset=_Toolset(), system_prompt="prompt",
         limits=AgenticLimits(max_iterations=None, max_actions=None, **limits),
         phase_controller=controller,
+        effective_settings=effective_settings,
     )
+
+
+_SELF_VERIFY_ON = {"orchestration": {"selfVerify": {"enabled": True}}}
 
 
 def test_without_a_controller_every_tool_is_published_as_before() -> None:
@@ -247,7 +251,7 @@ def test_an_unverified_change_forces_a_verification_pass_before_completing() -> 
     it first -- generalized from Code mode's own stricter gate, so an
     ordinary chat turn that edits a file is covered too."""
     provider = _ScriptedProvider([_tool_call("c1", "write_file", "{}"), _ANSWER, _ANSWER])
-    runtime = _runtime(provider, PhaseController())
+    runtime = _runtime(provider, PhaseController(), effective_settings=_SELF_VERIFY_ON)
 
     result = runtime.run("turn-1")
 
@@ -274,7 +278,7 @@ def test_a_passed_verification_moves_straight_to_responding() -> None:
         _tool_call("v1", "report_verification", _json_args({"passed": True, "findings": "tudo ok"})),
         _ANSWER,
     ])
-    runtime = _runtime(provider, PhaseController())
+    runtime = _runtime(provider, PhaseController(), effective_settings=_SELF_VERIFY_ON)
 
     result = runtime.run("turn-1")
 
@@ -291,7 +295,7 @@ def test_a_failed_verification_sends_the_agent_back_to_execute_with_the_findings
         _tool_call("v2", "report_verification", _json_args({"passed": True, "findings": "corrigido"})),
         _ANSWER,  # verification passed -> respond
     ])
-    runtime = _runtime(provider, PhaseController())
+    runtime = _runtime(provider, PhaseController(), effective_settings=_SELF_VERIFY_ON)
 
     result = runtime.run("turn-1")
 
@@ -310,7 +314,7 @@ def test_repeated_failed_verifications_eventually_give_up_and_respond() -> None:
         script += [_ANSWER, fail]
     script += [_ANSWER]
     provider = _ScriptedProvider(script)
-    runtime = _runtime(provider, PhaseController())
+    runtime = _runtime(provider, PhaseController(), effective_settings=_SELF_VERIFY_ON)
 
     result = runtime.run("turn-1")
 
@@ -323,7 +327,7 @@ def test_repeated_failed_verifications_eventually_give_up_and_respond() -> None:
 
 def test_verify_project_and_verify_frontend_are_published_during_verification() -> None:
     provider = _ScriptedProvider([_tool_call("c1", "write_file", "{}"), _ANSWER, _ANSWER])
-    runtime = _runtime(provider, PhaseController())
+    runtime = _runtime(provider, PhaseController(), effective_settings=_SELF_VERIFY_ON)
     runtime.run("turn-1")
 
     verifying = [r for r in provider.requests if "critério por critério" in str(r["messages"])]

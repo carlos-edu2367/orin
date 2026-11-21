@@ -79,6 +79,9 @@ class AgentActivityEventType(StrEnum):
     FRIEND_DELIVERY_STATUS = "friend.delivery_status"
     QUOTA_UPDATED = "quota.updated"
     QUOTA_FALLBACK_APPLIED = "quota.fallback_applied"
+    VERIFIER_MODEL_SELECTED = "verifier.model_selected"
+    VERIFIER_STARTED = "verifier.started"
+    VERIFIER_FINISHED = "verifier.finished"
 
 
 class ActivityVisibility(StrEnum):

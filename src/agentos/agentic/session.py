@@ -1307,6 +1307,9 @@ class _SubagentStore:
         self.failed = False
         self.error_code: str | None = None
         self._tool_call_lines: list[tuple[str, str]] = []
+        self._input_tokens: int = 0
+        self._output_tokens: int = 0
+        self._usage_reported: bool = False
 
     def _record_tool_call_line(
         self, inv_id: str, tool_name: str, target: str
@@ -1338,6 +1341,12 @@ class _SubagentStore:
         self.failed, self.error_code = failed, code
 
     def record_usage(self, turn: dict[str, object], *, input_tokens: int | None, output_tokens: int | None, total_tokens: int | None) -> None:
+        if isinstance(input_tokens, int) and not isinstance(input_tokens, bool):
+            self._input_tokens += input_tokens
+            self._usage_reported = True
+        if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+            self._output_tokens += output_tokens
+            self._usage_reported = True
         self._session.record_usage(
             turn,
             agent_id=self.agent_id,
@@ -1595,11 +1604,15 @@ class TurnSession:
         favorites_by_provider: Mapping[str, Sequence[str]] | Callable[[], Mapping[str, Sequence[str]]] | None = None,
         configured_providers: Collection[str] | Callable[[], Collection[str]] | None = None,
         quota_service: object | None = None,
+        review_recorder: object | None = None,
+        effort_escalator: object | None = None,
     ) -> None:
         self.turn = turn
         self.conversation_id = str(turn.get("conversation_id") or "")
         self.quota_gate = quota_gate
         self._quota_service = quota_service
+        self._review_recorder = review_recorder
+        self._effort_escalator = effort_escalator
         self._favorites_by_provider = favorites_by_provider
         self._configured_providers = configured_providers
         self._quota_sink = quota_sink
@@ -2925,6 +2938,17 @@ class TurnSession:
                         return dict(item)
         return None
 
+    def _verification_gate(self):
+        from .verification_gate import VerificationGate
+
+        return VerificationGate(
+            session=self,
+            settings=getattr(self, "effective_settings", None),
+            quota_service=self._child_quota_service(),
+            review_recorder=getattr(self, "_review_recorder", None),
+            effort_escalator=getattr(self, "_effort_escalator", None),
+        )
+
     def _child_quota_service(self) -> object | None:
         direct = getattr(self, "_quota_service", None)
         if direct is not None:
@@ -4157,7 +4181,14 @@ class TurnSession:
             note_fallback(failed, chain[index + 1], reason)
         active_model_id = chain[position]
         is_code_mode = str(self.turn.get("code_mode") or "").strip().lower() == "code"
-        subagent_turn = {**self.turn, "model_id": active_model_id, "provider": provider_name, "is_subagent": True}
+        subagent_kind = builtin_key if builtin_spec is not None else clean
+        subagent_turn = {
+            **self.turn,
+            "model_id": active_model_id,
+            "provider": provider_name,
+            "is_subagent": True,
+            "subagent_type": subagent_kind,
+        }
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
@@ -4303,6 +4334,8 @@ class TurnSession:
                 control_watcher=watcher,
                 continue_on_unread=self._continue_on_unread_enabled(),
                 on_verification=self._promote_agent_memories,
+                effective_settings=self.effective_settings,
+                verification_gate=self._verification_gate(),
                 effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
             )
@@ -4334,7 +4367,13 @@ class TurnSession:
                     break  # a pinned agent whose remaining models cannot start either
                 active_model_id = chain[position]
                 note_fallback(failed_model_id, active_model_id, reason)
-                subagent_turn = {**self.turn, "model_id": active_model_id, "provider": provider_name, "is_subagent": True}
+                subagent_turn = {
+                    **self.turn,
+                    "model_id": active_model_id,
+                    "provider": provider_name,
+                    "is_subagent": True,
+                    "subagent_type": subagent_kind,
+                }
                 sub_store = _SubagentStore(
                     self,
                     subagent_turn,
@@ -4362,6 +4401,8 @@ class TurnSession:
                     control_watcher=watcher,
                     continue_on_unread=self._continue_on_unread_enabled(),
                     on_verification=self._promote_agent_memories,
+                    effective_settings=self.effective_settings,
+                    verification_gate=self._verification_gate(),
                     effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                     **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
                 )
@@ -4462,7 +4503,9 @@ class TurnSession:
                 "usage": {
                     "iterations": result.iterations,
                     "tool_uses": result.actions,
+                    **({"input_tokens": sub_store._input_tokens, "output_tokens": sub_store._output_tokens} if sub_store._usage_reported else {}),
                 },
+                **({"verification_report": dict(runtime._last_verification_payload)} if runtime._last_verification_payload else {}),
             }
             if limit_stopped:
                 payload["budget_exhausted"] = True
@@ -7727,6 +7770,8 @@ class TurnSession:
             effort=self._effort(task),
             on_completed=self._after_completed_turn,
             on_verification=self._promote_agent_memories,
+            effective_settings=self.effective_settings,
+            verification_gate=self._verification_gate(),
             on_queued_input_claimed=self._note_queued_input_claimed,
             quota_sink=self._quota_sink,
             quota_error_sink=self._quota_error_sink,

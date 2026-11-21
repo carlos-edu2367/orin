@@ -233,6 +233,7 @@ class AgenticRunResult:
     verification: str | None = None
     end_reason: str | None = None
     message: str | None = None
+    caveats: tuple[dict[str, object], ...] = ()
 
 
 _EXIT_CODE_RE = re.compile(r"\bcode=(-?\d+)\b")
@@ -389,6 +390,8 @@ class AgenticTurnRuntime:
         control_watcher: Any | None = None,
         continue_on_unread: bool = True,
         on_verification: Callable[[bool], None] | None = None,
+        verification_gate: object | None = None,
+        effective_settings: object | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         if provider_timeout_seconds is not None:
@@ -414,6 +417,10 @@ class AgenticTurnRuntime:
         self.continue_on_unread = bool(continue_on_unread)
         self._on_verification = on_verification
         self._last_verification_passed: bool | None = None
+        self._last_verification_payload: Mapping[str, object] | None = None
+        self.verification_gate = verification_gate
+        self.effective_settings = effective_settings
+        self._verification_gate_state: object | None = None
         self.lifecycle = lifecycle
         self.prompt_block_reason = prompt_block_reason
         self.config_block_reason = config_block_reason
@@ -1642,12 +1649,23 @@ class AgenticTurnRuntime:
                     self._life(turn, "running")
                 continue
             if (finish is not None or has_text) and not (final_iteration and not has_text):
-                if self._needs_verification() and not final_iteration:
-                    # Independent of Code mode's stricter gate above: any turn
-                    # that changed the workspace owes one look at what it did
-                    # before it may answer. Skipped only when there is no
-                    # budget left for another round -- the turn still
-                    # completes, it just does so without that look.
+                gate_action = self._get_verification_gate().evaluate_turn_end(
+                    turn, self, allow_continuation=not final_iteration,
+                )
+                if gate_action.action == "continue" and gate_action.system_message:
+                    self._effect_finished(
+                        turn, provider_effect_id, state="APPLIED",
+                        result_ref=f"conversation-turn:{turn_id}:verify-gate:{iteration}",
+                        private_result={"outcome": gate_action.reason or "verification_findings"},
+                    )
+                    if has_text:
+                        messages.append({"role": "assistant", "content": "".join(text_parts)})
+                    messages.append({"role": "user", "content": gate_action.system_message})
+                    self._life(turn, "running")
+                    continue
+                if gate_action.action == "self_verify":
+                    # Legacy self-verify gate (A-RF8): active only when orchestration.selfVerify.enabled=True
+                    # and independent verification did not run for this turn.
                     self._effect_finished(
                         turn, provider_effect_id, state="APPLIED",
                         result_ref=f"conversation-turn:{turn_id}:verify-gate:{iteration}",
@@ -1742,6 +1760,24 @@ class AgenticTurnRuntime:
                             self._on_verification(True)
                         except Exception:  # noqa: BLE001 - memory promotion hook never breaks a turn
                             pass
+                if gate_action.action == "complete_with_caveats":
+                    from .verification_gate import format_caveats_summary
+
+                    caveats_payload = tuple(item.to_dict() for item in gate_action.open_findings)
+                    caveat_summary = format_caveats_summary(gate_action.open_findings)
+                    self._life(
+                        turn, "completed_with_caveats",
+                        summary=caveat_summary, open_findings=list(caveats_payload),
+                    )
+                    self.store.finish(turn, code="COMPLETED_WITH_CAVEATS")
+                    self._settle_quality(turn, "completed_with_caveats")
+                    return AgenticRunResult(
+                        "completed_with_caveats", iteration, action_count,
+                        budget_exhausted=final_iteration and (iteration > 1 or bool(calls)),
+                        verification="completed_with_caveats",
+                        message=caveat_summary,
+                        caveats=caveats_payload,
+                    )
                 self._life(turn, "completed")
                 self.store.finish(turn)
                 self._settle_quality(turn, "completed")
@@ -1792,6 +1828,8 @@ class AgenticTurnRuntime:
                         allowed.add("exit_plan_mode")
                 else:
                     allowed = set(CODE_MODE_CORE_TOOLS)
+                if getattr(self.toolset, "_open_verification_findings", None):
+                    allowed.add("resolve_findings")
                 if self.offered_tools is not None:
                     allowed &= self.offered_tools
                 allowed -= self.withheld_tools
@@ -1811,6 +1849,8 @@ class AgenticTurnRuntime:
             return schemas
         toolkits = self.contract.toolkits if self.contract is not None else None
         allowed = phases.tools_for(self.phases.current, toolkits)
+        if getattr(self.toolset, "_open_verification_findings", None):
+            allowed = allowed | frozenset({"resolve_findings"})
         if not allowed:
             return []
         try:
@@ -3663,9 +3703,19 @@ class AgenticTurnRuntime:
         getter = getattr(self.toolset, "change_events", None)
         return getter() if callable(getter) else 0
 
+    def _get_verification_gate(self):
+        if self.verification_gate is None:
+            from .verification_gate import VerificationGate
+
+            self.verification_gate = VerificationGate(settings=self.effective_settings)
+        return self.verification_gate
+
     def _code_verification(self, turn: Mapping[str, object]) -> str | None:
         if turn.get("is_subagent"):
-            return None
+            from .verification_gate import should_include_subagent_in_gate
+
+            if not should_include_subagent_in_gate(turn, self.effective_settings):
+                return None
         if not (getattr(self.toolset, "_code_mode_active", False) or turn.get("code_mode") == "code"):
             return None
         status_fn = getattr(self.toolset, "code_verification_status", None)
@@ -3702,6 +3752,7 @@ class AgenticTurnRuntime:
         payload = getattr(outcome, "payload", None)
         if isinstance(payload, Mapping):
             self._pending_verification = payload
+            self._last_verification_payload = dict(payload)
             passed = bool(payload.get("passed"))
             self._last_verification_passed = passed
             if callable(self._on_verification):
