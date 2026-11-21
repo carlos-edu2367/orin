@@ -1,0 +1,55 @@
+{
+  "oauthAccount": {
+    "accountUuid": "00000000-0000-0000-0000-000000000000",
+    "hasExtraUsageEnabled": false,
+    "accessToken": "sk-ant-fake-never-expose-me"
+  },
+  "cachedGrowthBookFeatures": {
+    "tengu_usage_overage_included_models": [
+      "Fable",
+      "Fable 5",
+      "Fable 5.1",
+      "Fable 5.2"
+    ],
+    "unrelated_flag": true
+  },
+  "cachedUsageUtilization": {
+    "fetchedAtMs": 1794775200000,
+    "accountUuid": "00000000-0000-0000-0000-000000000000",
+    "utilization": {
+      "five_hour": {
+        "utilization": 32,
+        "resets_at": "2026-11-15T23:00:00Z"
+      },
+      "seven_day": {
+        "utilization": 77,
+        "resets_at": "2026-11-20T12:00:00Z"
+      },
+      "extra_usage": {
+        "is_enabled": false
+      },
+      "limits": [
+        {
+          "kind": "weekly_all",
+          "percent": 77,
+          "severity": "warning",
+          "resets_at": "2026-11-20T12:00:00Z"
+        },
+        {
+          "kind": "weekly_scoped",
+          "percent": 0,
+          "severity": "normal",
+          "resets_at": "2026-11-20T12:00:00Z",
+          "scope": {
+            "model": {
+              "display_name": "Fable"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "secretOtherSection": {
+    "apiKey": "must-not-leak"
+  }
+}

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 import math
 from pathlib import Path
-from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from agentos.providers.models import Measurement, ProviderUsage
 
@@ -95,11 +95,34 @@ class CliResult:
     model_usage: Mapping[str, CliUsage] = field(default_factory=dict)
 
 
+def _parse_epoch_seconds(raw: Any) -> float | None:
+    if (
+        isinstance(raw, (int, float))
+        and not isinstance(raw, bool)
+        and math.isfinite(float(raw))
+        and raw > 0
+    ):
+        val = float(raw)
+        if val > 10_000_000_000:
+            val /= 1000.0
+        return val
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class RateLimitWindow:
+    kind: str
+    utilization: float | None = None
+    resets_at: float | None = None
+    status: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class RateLimitState:
     status: str
     rate_limit_type: str | None = None
     resets_at: float | None = None
+    windows: tuple[RateLimitWindow, ...] = ()
 
     @classmethod
     def from_info(cls, info: Mapping[str, Any]) -> RateLimitState:
@@ -111,25 +134,52 @@ class RateLimitState:
         resets_raw = info.get("resetsAt")
         if resets_raw is None:
             resets_raw = info.get("resets_at")
-        if resets_raw is None:
-            windows = info.get("unifiedWindows")
-            if isinstance(windows, Mapping):
-                for win in windows.values():
-                    if isinstance(win, Mapping) and win.get("resetsAt") is not None:
-                        resets_raw = win.get("resetsAt")
-                        break
-        resets_at: float | None = None
-        if (
-            isinstance(resets_raw, (int, float))
-            and not isinstance(resets_raw, bool)
-            and math.isfinite(float(resets_raw))
-            and resets_raw > 0
-        ):
-            val = float(resets_raw)
-            if val > 10_000_000_000:
-                val /= 1000.0
-            resets_at = val
-        return cls(status=status, rate_limit_type=rl_type, resets_at=resets_at)
+
+        parsed_windows: list[RateLimitWindow] = []
+        raw_windows = info.get("unifiedWindows")
+        if isinstance(raw_windows, Mapping):
+            for kind_raw, win in raw_windows.items():
+                if not isinstance(win, Mapping):
+                    continue
+                win_reset_raw = win.get("resetsAt")
+                if win_reset_raw is None:
+                    win_reset_raw = win.get("resets_at")
+                if resets_raw is None and win_reset_raw is not None:
+                    resets_raw = win_reset_raw
+                util_raw = win.get("utilization")
+                if util_raw is None:
+                    util_raw = win.get("usedPercent")
+                if util_raw is None:
+                    util_raw = win.get("used_percent")
+                util_val: float | None = None
+                if (
+                    isinstance(util_raw, (int, float))
+                    and not isinstance(util_raw, bool)
+                    and math.isfinite(float(util_raw))
+                ):
+                    util_val = float(util_raw)
+                win_status_raw = win.get("status")
+                win_status = (
+                    str(win_status_raw).strip()
+                    if isinstance(win_status_raw, str) and win_status_raw.strip()
+                    else None
+                )
+                parsed_windows.append(
+                    RateLimitWindow(
+                        kind=str(kind_raw).strip() or "unknown",
+                        utilization=util_val,
+                        resets_at=_parse_epoch_seconds(win_reset_raw),
+                        status=win_status,
+                    )
+                )
+
+        resets_at = _parse_epoch_seconds(resets_raw)
+        return cls(
+            status=status,
+            rate_limit_type=rl_type,
+            resets_at=resets_at,
+            windows=tuple(parsed_windows),
+        )
 
 
 class CliEventKind(StrEnum):
@@ -403,6 +453,36 @@ class CliAgentAdapter(Protocol):
     def context_window(self, model_id: str | None) -> int: ...
 
 
+import threading
+
+QuotaErrorReporter = Callable[[str, float | None, str, float | None], None]
+_QUOTA_ERROR_LOCK = threading.Lock()
+_QUOTA_ERROR_REPORTER: QuotaErrorReporter | None = None
+
+
+def set_quota_error_reporter(reporter: QuotaErrorReporter | None) -> None:
+    global _QUOTA_ERROR_REPORTER
+    with _QUOTA_ERROR_LOCK:
+        _QUOTA_ERROR_REPORTER = reporter
+
+
+def notify_quota_error(
+    provider: str,
+    *,
+    retry_after_seconds: float | None = None,
+    message: str = "",
+    resets_at: float | None = None,
+) -> None:
+    with _QUOTA_ERROR_LOCK:
+        reporter = _QUOTA_ERROR_REPORTER
+    if reporter is None:
+        return
+    try:
+        reporter(provider, retry_after_seconds, message, resets_at)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 __all__ = [
     "AdapterCapabilities",
     "CliAgentAdapter",
@@ -418,8 +498,12 @@ __all__ = [
     "CliStreamTranslator",
     "CliTurnRequest",
     "CliUsage",
+    "QuotaErrorReporter",
     "RateLimitState",
+    "RateLimitWindow",
     "StreamUsage",
     "ToolServerWiring",
     "clamp_cli_effort",
+    "notify_quota_error",
+    "set_quota_error_reporter",
 ]

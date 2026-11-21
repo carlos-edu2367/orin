@@ -11,6 +11,7 @@ from agentos.providers.cli_adapter import (
     CliErrorKind,
     CliResult,
     RateLimitState,
+    notify_quota_error,
 )
 
 _AUTH_CODE_RE = re.compile(r"\b401\b")
@@ -198,6 +199,12 @@ def classify_antigravity_error(
     if has_rate_limit_signal:
         retry_after = _extract_retry_after_seconds(
             raw_text, rate_limit, now=now
+        )
+        notify_quota_error(
+            "google-antigravity",
+            retry_after_seconds=retry_after,
+            message=raw_text,
+            resets_at=rate_limit.resets_at if rate_limit is not None else None,
         )
         return CliErrorInfo(
             kind=CliErrorKind.RATE_LIMITED,

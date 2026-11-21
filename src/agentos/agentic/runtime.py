@@ -376,6 +376,8 @@ class AgenticTurnRuntime:
         on_queued_input_claimed: Callable[..., None] | None = None,
         config_block_reason: str | None = None,
         provider_timeout_seconds: float | None = None,
+        quota_sink: Callable[[str, Any], None] | None = None,
+        quota_error_sink: Callable[..., None] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         if provider_timeout_seconds is not None:
@@ -387,6 +389,8 @@ class AgenticTurnRuntime:
         self._model_switched = model_switched
         self._on_completed = on_completed
         self.on_queued_input_claimed = on_queued_input_claimed
+        self.quota_sink = quota_sink
+        self.quota_error_sink = quota_error_sink
         self.lifecycle = lifecycle
         self.prompt_block_reason = prompt_block_reason
         self.config_block_reason = config_block_reason

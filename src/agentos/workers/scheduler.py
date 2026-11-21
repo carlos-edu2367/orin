@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agentos.bootstrap.production import ProductionSettings
 from agentos.conversations.chat import PostgresChatStore
+from agentos.persistence.postgres.quota import QuotaSnapshotStore
 from agentos.persistence.sqlite import create_local_engine
 from agentos.scheduler.scheduled_chats import ScheduledChatService
 
@@ -15,6 +16,7 @@ ACTIVITY_PRUNE_BATCH_SIZE = 2000
 ACTIVITY_PRUNE_MAX_BATCHES = 10
 ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS = 60.0
 ACTIVITY_PRUNE_IDLE_INTERVAL_SECONDS = 6 * 3600.0
+QUOTA_SNAPSHOT_RETENTION_DAYS = 14
 
 
 def _maybe_prune_activity_events(
@@ -24,6 +26,7 @@ def _maybe_prune_activity_events(
     next_prune_mono: float,
     batch_size: int = ACTIVITY_PRUNE_BATCH_SIZE,
     max_batches: int = ACTIVITY_PRUNE_MAX_BATCHES,
+    quota_store: QuotaSnapshotStore | None = None,
 ) -> float:
     if now_mono < next_prune_mono:
         return next_prune_mono
@@ -31,6 +34,11 @@ def _maybe_prune_activity_events(
         batch_size=batch_size,
         max_batches=max_batches,
     )
+    if quota_store is not None:
+        try:
+            quota_store.prune(datetime.now(UTC) - timedelta(days=QUOTA_SNAPSHOT_RETENTION_DAYS))
+        except Exception:
+            logging.getLogger("agentos.workers.scheduler").exception("quota snapshot prune failed")
     interval = (
         ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS
         if deleted >= batch_size * max_batches
@@ -47,6 +55,7 @@ def main() -> None:
     engine = create_local_engine(settings.DATABASE_URL)
     service = ScheduledChatService(engine)
     chat_store = PostgresChatStore(engine)
+    quota_store = QuotaSnapshotStore(engine)
     next_prune_mono = 0.0
     last_heartbeat_mono: float | None = None
     while True:
@@ -60,6 +69,7 @@ def main() -> None:
                 chat_store,
                 now_mono=time.monotonic(),
                 next_prune_mono=next_prune_mono,
+                quota_store=quota_store,
             )
         except Exception:
             logging.getLogger("agentos.workers.scheduler").exception("scheduler tick failed")

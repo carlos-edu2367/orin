@@ -2262,7 +2262,13 @@ class _RunnerSink:
             pass
 
     def on_rate_limit(self, state: RateLimitState) -> None:
-        pass
+        sink = getattr(self._runner.runtime, "quota_sink", None)
+        if callable(sink):
+            provider_name = str(self._runner.turn.get("provider") or "")
+            try:
+                sink(provider_name, state)
+            except Exception:  # noqa: BLE001 - telemetry never breaks a turn
+                pass
 
 
 class NativeTurnRunner:
@@ -2869,6 +2875,17 @@ class NativeTurnRunner:
                         sink._note_cli_event()
                         initial_user_images_pending = False
                     except ProviderTransportError as stream_exc:
+                        if stream_exc.status_code == 429:
+                            err_sink = getattr(self.runtime, "quota_error_sink", None)
+                            if callable(err_sink):
+                                try:
+                                    err_sink(
+                                        str(self.turn.get("provider") or ""),
+                                        retry_after_seconds=stream_exc.retry_after_seconds,
+                                        message=str(stream_exc),
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    pass
                         if closing_sent and self._stop_code_after_stream_error(stream_exc, executor) is None:
                             self.runtime._effect_finished(
                                 self.turn,

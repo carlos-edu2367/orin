@@ -1,0 +1,343 @@
+"""Subscription quota aggregation, passive ingestion, and query service."""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any, Protocol
+
+from agentos.providers.cli_adapter import RateLimitState
+
+from .claude_reader import ClaudeUsageCacheReader
+from .codex_reader import CodexQuotaReader
+from .models import (
+    Confidence,
+    OrinUsageSummary,
+    ProviderQuota,
+    QuotaSnapshot,
+    QuotaStatus,
+    QuotaWindow,
+)
+from .normalize import (
+    normalize_provider_name,
+    normalize_resets_at,
+    normalize_window_kind,
+    snapshots_from_rate_limit_state,
+)
+
+SUBSCRIPTION_PROVIDERS: tuple[str, ...] = (
+    "anthropic-cli",
+    "openai-codex",
+    "google-antigravity",
+)
+
+# Error-only snapshots (e.g. Antigravity 429 without resets_at) expire after a reasonable grace window
+_RECENT_ERROR_MAX_AGE = timedelta(hours=6)
+
+
+class QuotaStorePort(Protocol):
+    def add(self, user_id: str, snapshot: QuotaSnapshot) -> None: ...
+    def add_many(self, user_id: str, snapshots: Sequence[QuotaSnapshot]) -> int: ...
+    def latest(self, user_id: str, provider: str | None = None) -> list[QuotaSnapshot]: ...
+    def orin_usage(self, user_id: str, provider: str, *, now: datetime | None = None) -> OrinUsageSummary: ...
+
+
+def _snapshot_signature(snap: QuotaSnapshot) -> tuple[Any, ...]:
+    return (
+        snap.provider,
+        snap.window_kind,
+        snap.scope_model,
+        snap.used_percent,
+        snap.status,
+        snap.resets_at,
+        snap.source,
+        snap.observed_at,
+    )
+
+
+def _is_snapshot_active_rejection(snap: QuotaSnapshot, now: datetime) -> bool:
+    if snap.status != "rejected":
+        return False
+    if snap.resets_at is not None:
+        return snap.resets_at > now
+    return (now - snap.observed_at) <= _RECENT_ERROR_MAX_AGE
+
+
+def _window_sort_key(win: QuotaWindow) -> tuple[int, str, str]:
+    order = {"five_hour": 0, "seven_day": 1, "weekly": 2, "weekly_scoped": 3}
+    return (order.get(win.kind, 9), win.kind, win.scope_model or "")
+
+
+class QuotaService:
+    """Coordinates passive file readers, runtime events, storage, and status queries."""
+
+    def __init__(
+        self,
+        store: QuotaStorePort,
+        *,
+        claude_reader: ClaudeUsageCacheReader | None = None,
+        codex_reader: CodexQuotaReader | None = None,
+        clock: Callable[[], datetime] | None = None,
+        on_updated: Callable[[str, str], None] | None = None,
+    ) -> None:
+        self._store = store
+        self._claude_reader = claude_reader or ClaudeUsageCacheReader()
+        self._codex_reader = codex_reader or CodexQuotaReader()
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._lock = threading.Lock()
+        self._listeners: list[Callable[[str, str], None]] = []
+        if on_updated is not None:
+            self._listeners.append(on_updated)
+
+    def subscribe_updates(self, listener: Callable[[str, str], None]) -> Callable[[], None]:
+        with self._lock:
+            self._listeners.append(listener)
+
+        def _unsubscribe() -> None:
+            with self._lock:
+                try:
+                    self._listeners.remove(listener)
+                except ValueError:
+                    pass
+
+        return _unsubscribe
+
+    def _notify(self, user_id: str, providers: set[str]) -> None:
+        with self._lock:
+            listeners = tuple(self._listeners)
+        for provider in sorted(providers):
+            for listener in listeners:
+                try:
+                    listener(user_id, provider)
+                except Exception:  # noqa: BLE001 - notification must never break ingestion
+                    pass
+
+    def _now(self) -> datetime:
+        now = self._clock()
+        return now.astimezone(UTC) if now.tzinfo is not None else now.replace(tzinfo=UTC)
+
+    def record_snapshots(
+        self,
+        user_id: str,
+        snapshots: Sequence[QuotaSnapshot],
+        *,
+        deduplicate: bool = False,
+    ) -> list[QuotaSnapshot]:
+        items = list(snapshots)
+        if not items:
+            return []
+
+        if deduplicate:
+            existing_sigs = {
+                _snapshot_signature(s) for s in self._store.latest(user_id)
+            }
+            items = [s for s in items if _snapshot_signature(s) not in existing_sigs]
+            if not items:
+                return []
+
+        self._store.add_many(user_id, items)
+        self._notify(user_id, {normalize_provider_name(s.provider) for s in items})
+        return items
+
+    def record_rate_limit_state(
+        self,
+        user_id: str,
+        provider: str,
+        state: RateLimitState,
+        *,
+        observed_at: datetime | None = None,
+    ) -> list[QuotaSnapshot]:
+        snaps = snapshots_from_rate_limit_state(
+            provider,
+            state,
+            observed_at=observed_at or self._now(),
+        )
+        return self.record_snapshots(user_id, snaps, deduplicate=False)
+
+    def record_quota_error(
+        self,
+        user_id: str,
+        provider: str,
+        *,
+        resets_at: datetime | float | int | str | None = None,
+        retry_after_seconds: float | None = None,
+        message: str | None = None,
+        window_kind: str = "unknown",
+        observed_at: datetime | None = None,
+    ) -> QuotaSnapshot:
+        now = observed_at or self._now()
+        canon_provider = normalize_provider_name(provider)
+        resolved_reset = normalize_resets_at(resets_at)
+        if resolved_reset is None and retry_after_seconds is not None and retry_after_seconds > 0:
+            resolved_reset = now + timedelta(seconds=float(retry_after_seconds))
+
+        raw_payload: dict[str, Any] = {}
+        if message:
+            raw_payload["message"] = str(message)[:500]
+        if retry_after_seconds is not None:
+            raw_payload["retry_after_seconds"] = float(retry_after_seconds)
+
+        snap = QuotaSnapshot(
+            provider=canon_provider,
+            window_kind=normalize_window_kind(window_kind),
+            used_percent=None,
+            status="rejected",
+            resets_at=resolved_reset,
+            source="error",
+            observed_at=now,
+            scope_model=None,
+            raw=raw_payload or None,
+        )
+        self.record_snapshots(user_id, (snap,), deduplicate=False)
+        return snap
+
+    def refresh_from_files(self, user_id: str) -> list[QuotaSnapshot]:
+        """Read passive local caches (Claude `~/.claude.json` and Codex rollouts) and persist new snapshots."""
+        collected: list[QuotaSnapshot] = []
+        for reader in (self._claude_reader, self._codex_reader):
+            try:
+                collected.extend(reader.read())
+            except Exception:  # noqa: BLE001 - passive readers never fail callers
+                continue
+        return self.record_snapshots(user_id, collected, deduplicate=True)
+
+    def _build_provider_quota(
+        self,
+        user_id: str,
+        provider: str,
+        snapshots: Sequence[QuotaSnapshot],
+        now: datetime,
+    ) -> ProviderQuota:
+        canon = normalize_provider_name(provider)
+        orin_usage = self._store.orin_usage(user_id, canon, now=now)
+
+        # Filter out expired error-only snapshots so stale 429s do not linger indefinitely
+        relevant: list[QuotaSnapshot] = []
+        for snap in snapshots:
+            if snap.source == "error":
+                if snap.resets_at is not None and snap.resets_at <= now:
+                    continue
+                if snap.resets_at is None and (now - snap.observed_at) > _RECENT_ERROR_MAX_AGE:
+                    continue
+            relevant.append(snap)
+
+        windows = tuple(
+            sorted(
+                (
+                    QuotaWindow(
+                        kind=snap.window_kind,
+                        used_percent=snap.used_percent,
+                        resets_at=snap.resets_at,
+                        status=snap.status,
+                        scope_model=snap.scope_model,
+                    )
+                    for snap in relevant
+                ),
+                key=_window_sort_key,
+            )
+        )
+
+        observed_at: datetime | None = None
+        source: str | None = None
+        if relevant:
+            newest = max(relevant, key=lambda s: s.observed_at)
+            observed_at = newest.observed_at
+            source = newest.source
+
+        has_percent = any(w.used_percent is not None for w in windows)
+        if has_percent:
+            confidence = Confidence.MEASURED
+        elif windows:
+            confidence = Confidence.PARTIAL
+        elif canon == "google-antigravity":
+            # Antigravity never exposes a quota percentage; without a recent 429 error it is always unknown.
+            confidence = Confidence.UNKNOWN
+        elif orin_usage.seven_day.calls > 0 or orin_usage.five_hour.calls > 0:
+            confidence = Confidence.ESTIMATED
+            source = source or "orin_usage"
+        else:
+            confidence = Confidence.UNKNOWN
+
+        age_seconds: int | None = None
+        if observed_at is not None:
+            age_seconds = max(0, int((now - observed_at).total_seconds()))
+
+        return ProviderQuota(
+            provider=canon,
+            windows=windows,
+            confidence=confidence,
+            observed_at=observed_at,
+            source=source,
+            orin_usage=orin_usage,
+            age_seconds=age_seconds,
+        )
+
+    def get_all_quotas(self, user_id: str, *, refresh: bool = False) -> list[ProviderQuota]:
+        if refresh:
+            self.refresh_from_files(user_id)
+        now = self._now()
+        latest = self._store.latest(user_id)
+        grouped: dict[str, list[QuotaSnapshot]] = {p: [] for p in SUBSCRIPTION_PROVIDERS}
+        for snap in latest:
+            canon = normalize_provider_name(snap.provider)
+            grouped.setdefault(canon, []).append(snap)
+
+        ordered_providers = list(SUBSCRIPTION_PROVIDERS) + [
+            p for p in grouped if p not in SUBSCRIPTION_PROVIDERS
+        ]
+        return [
+            self._build_provider_quota(user_id, prov, grouped.get(prov, ()), now)
+            for prov in ordered_providers
+        ]
+
+    def status_for(
+        self,
+        user_id: str,
+        provider: str,
+        model_id: str | None = None,
+    ) -> QuotaStatus:
+        """Cross-package contract (spec 2.5): concise status for a subscription provider/model."""
+        now = self._now()
+        canon = normalize_provider_name(provider)
+        latest = self._store.latest(user_id, provider=canon)
+        pq = self._build_provider_quota(user_id, canon, latest, now)
+
+        model_lower = str(model_id or "").strip().lower()
+        matching_windows: list[QuotaWindow] = []
+        for win in pq.windows:
+            if win.scope_model is None:
+                matching_windows.append(win)
+            elif model_lower and win.scope_model.lower() in model_lower:
+                matching_windows.append(win)
+
+        percents = [w.used_percent for w in matching_windows if w.used_percent is not None]
+        max_percent = max(percents) if percents else None
+
+        rejected_windows = [
+            s for s in latest if _is_snapshot_active_rejection(s, now)
+            and (s.scope_model is None or (model_lower and s.scope_model.lower() in model_lower))
+        ]
+        rejected = bool(rejected_windows)
+
+        resets_candidates = [
+            s.resets_at for s in rejected_windows if s.resets_at is not None
+        ]
+        if not resets_candidates:
+            resets_candidates = [w.resets_at for w in matching_windows if w.resets_at is not None]
+        resets_at = min(resets_candidates) if resets_candidates else None
+
+        return QuotaStatus(
+            max_percent=max_percent,
+            rejected=rejected,
+            confidence=pq.confidence,
+            observed_at=pq.observed_at,
+            resets_at=resets_at,
+        )
+
+
+__all__ = [
+    "QuotaService",
+    "QuotaStorePort",
+    "SUBSCRIPTION_PROVIDERS",
+]

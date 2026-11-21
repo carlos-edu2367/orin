@@ -69,6 +69,8 @@ class AgentActivityEventType(StrEnum):
     SPEAK_INTERRUPTED = "speak.interrupted"
     SPEAK_FINISHED = "speak.finished"
     CODE_SESSION_PROGRESS = "code_session.progress"
+    QUOTA_UPDATED = "quota.updated"
+    QUOTA_FALLBACK_APPLIED = "quota.fallback_applied"
 
 
 class ActivityVisibility(StrEnum):
