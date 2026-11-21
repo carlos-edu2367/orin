@@ -110,7 +110,10 @@ def _validate_value(key: SettingKey, value: Any, *, allow_none_if_nullable: bool
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise ValueError(f"{key.path}: cada item deve ser um texto não vazio")
-            cleaned.append(item.strip())
+            text_item = item.strip()
+            if key.item_type == "relative_dir":
+                text_item = _validate_relative_dir(key, text_item)
+            cleaned.append(text_item)
         return cleaned
 
     if key.type == "map":
@@ -152,6 +155,20 @@ def _validate_value(key: SettingKey, value: Any, *, allow_none_if_nullable: bool
         return copy.deepcopy(dict(value))
 
     raise ValueError(f"{key.path}: tipo de configuração desconhecido '{key.type}'")
+
+
+def _validate_relative_dir(key: SettingKey, raw: str) -> str:
+    if "\x00" in raw:
+        raise ValueError(f"{key.path}: caminho contém caractere nulo inválido")
+    if raw.startswith(("/", "\\")) or ":" in raw:
+        raise ValueError(f"{key.path}: caminho deve ser relativo sem drive ou barra inicial ({raw!r})")
+    normalized = raw.replace("\\", "/").strip("/")
+    if not normalized or normalized == ".":
+        raise ValueError(f"{key.path}: diretório relativo inválido ({raw!r})")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts or any(part in {".", ".."} for part in parts):
+        raise ValueError(f"{key.path}: caminho não pode conter '.' ou '..' ({raw!r})")
+    return "/".join(parts)
 
 
 def _validate_verifier_explicit(key: SettingKey, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -459,12 +476,13 @@ def resolve(settings: EffectiveSettings, path: str) -> ResolvedSetting:
     return ResolvedSetting(effective, winning_layer, copy.deepcopy(key.default))
 
 
-# Register built-in Package E, Messages, Package D memory, and Package A verifier keys on module import.
+# Register built-in Package E, Messages, Package D memory, Package A verifier, and Package B worktree keys on import.
 from . import keys_effort_quota as _keys_effort_quota  # noqa: E402, F401
 from . import keys_memory as _keys_memory  # noqa: E402, F401
 from . import keys_messages as _keys_messages  # noqa: E402, F401
 from . import keys_verifier as _keys_verifier  # noqa: E402, F401
 from . import keys_verifier_thresholds as _keys_verifier_thresholds  # noqa: E402, F401
+from . import keys_worktree as _keys_worktree  # noqa: E402, F401
 
 __all__ = [
     "EFFORT_LEVELS",

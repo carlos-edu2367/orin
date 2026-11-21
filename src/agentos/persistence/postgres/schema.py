@@ -1025,6 +1025,7 @@ user_agents = Table(
     Column("permission_mode", String(32), nullable=True),
     Column("max_turns", Integer, nullable=True),
     Column("memory", String(16), nullable=True),
+    Column("isolation", String(16), nullable=True),
     Column("enabled", Boolean, nullable=False, server_default="true"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -1432,6 +1433,71 @@ verification_findings = Table(
     Column("resolution_reason", String(1000), nullable=True),
 )
 
+agent_runs = Table(
+    "agent_runs",
+    metadata,
+    Column("agent_id", String(64), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("conversation_id", String(255), nullable=False),
+    Column("turn_id", String(255), nullable=False),
+    Column("parent_agent_id", String(255), nullable=True),
+    Column("subagent_type", String(64), nullable=False),
+    Column("provider", String(64), nullable=True),
+    Column("model_id", String(128), nullable=True),
+    Column("effort", String(16), nullable=True),
+    Column("state", String(16), nullable=False),
+    Column("task_digest", String(64), nullable=False, server_default=""),
+    Column("history_path", String(512), nullable=True),
+    Column("worktree_path", String(512), nullable=True),
+    Column("pipeline_run_id", String(64), nullable=True),
+    Column("last_activity_at", DateTime(timezone=True), nullable=False),
+    Column("tool_calls", Integer, nullable=False, server_default="0"),
+    Column("input_tokens", Integer, nullable=False, server_default="0"),
+    Column("output_tokens", Integer, nullable=False, server_default="0"),
+    Column("cost_usd", Numeric(12, 6), nullable=True),
+    Column("result_ref", String(512), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_agent_runs_conversation_state", agent_runs.c.conversation_id, agent_runs.c.state)
+Index("ix_agent_runs_state", agent_runs.c.state)
+
+agent_worktrees = Table(
+    "agent_worktrees",
+    metadata,
+    Column("agent_id", String(64), primary_key=True),
+    Column("workspace_root", String(1024), nullable=False),
+    Column("base_commit", String(64), nullable=False),
+    Column("branch", String(255), nullable=False),
+    Column("merge_state", String(16), nullable=False, server_default="pending"),
+    Column("merge_detail", JSON, nullable=True),
+    Column("queued_at", DateTime(timezone=True), nullable=True),
+    Column("merged_at", DateTime(timezone=True), nullable=True),
+)
+Index("ix_agent_worktrees_workspace_root", agent_worktrees.c.workspace_root)
+
+task_board_items = Table(
+    "task_board_items",
+    metadata,
+    Column("item_id", String(64), primary_key=True),
+    Column("conversation_id", String(255), nullable=False),
+    Column("team_name", String(64), nullable=True),
+    Column("title", String(500), nullable=False),
+    Column("description", Text, nullable=False, server_default=""),
+    Column("status", String(16), nullable=False, server_default="pending"),
+    Column("owner_agent_id", String(64), nullable=True),
+    Column("blocked_by", JSON, nullable=False, default=list),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    Column("result_ref", String(512), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "ix_task_board_items_conversation_status",
+    task_board_items.c.conversation_id,
+    task_board_items.c.status,
+)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -1493,5 +1559,8 @@ __all__ = [
     "model_context_observations",
     "verification_reviews",
     "verification_findings",
+    "agent_runs",
+    "agent_worktrees",
+    "task_board_items",
     "create_engine_for_tests",
 ]
