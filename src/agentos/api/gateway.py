@@ -480,6 +480,7 @@ class ApiServices:
         discord_bridge: object | None = None,
         quota_service: object | None = None,
         quota_poller: object | None = None,
+        context_observations: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -521,6 +522,7 @@ class ApiServices:
         self.discord_bridge = discord_bridge
         self.quota_service = quota_service
         self.quota_poller = quota_poller
+        self.context_observations = context_observations
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
@@ -3291,6 +3293,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_scene_character_routes(app, services, principal_for)
     from .quota_routes import register_quota_routes
     register_quota_routes(app, services, principal_for)
+    from .context_window_routes import register_context_window_routes
+    register_context_window_routes(app, services, principal_for)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
 

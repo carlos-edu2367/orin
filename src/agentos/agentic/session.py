@@ -1389,6 +1389,13 @@ class TurnSession:
         quota_sink: Callable[[str, object], None] | None = None,
         quota_error_sink: Callable[..., None] | None = None,
         quota_after_turn: Callable[[], object] | None = None,
+        window_source: str | None = None,
+        window_detail: str | None = None,
+        window_rule_index: int | None = None,
+        cli_model_arg: str | None = None,
+        learned_window_tokens: int | None = None,
+        context_observation_sink: Callable[..., None] | None = None,
+        context_observation_invalidator: Callable[[str, str], bool] | None = None,
     ) -> None:
         self.turn = turn
         self.conversation_id = str(turn.get("conversation_id") or "")
@@ -1396,6 +1403,13 @@ class TurnSession:
         self._quota_sink = quota_sink
         self._quota_error_sink = quota_error_sink
         self._quota_after_turn = quota_after_turn
+        self._window_source = window_source
+        self._window_detail = window_detail
+        self._window_rule_index = window_rule_index
+        self._cli_model_arg = cli_model_arg
+        self._learned_window_tokens = learned_window_tokens
+        self._context_observation_sink = context_observation_sink
+        self._context_observation_invalidator = context_observation_invalidator
         self.friend_persona_store = friend_persona_store
         raw_conv_mode = str(
             conversation_mode
@@ -6852,6 +6866,13 @@ class TurnSession:
             on_queued_input_claimed=self._note_queued_input_claimed,
             quota_sink=self._quota_sink,
             quota_error_sink=self._quota_error_sink,
+            window_source=self._window_source,
+            window_detail=self._window_detail,
+            window_rule_index=self._window_rule_index,
+            cli_model_arg=self._cli_model_arg,
+            learned_window_tokens=self._learned_window_tokens,
+            context_observation_sink=self._context_observation_sink,
+            context_observation_invalidator=self._context_observation_invalidator,
         )
         if self.cli_options is not None:
             from .cli_turn import tool_selection

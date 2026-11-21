@@ -26,13 +26,14 @@ FAMILY_DEFAULTS: dict[str, str] = {
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
     "haiku": "claude-haiku-5-5",
-    "fable": "claude-fable-5-1",
+    "fable": "claude-fable-5-2",
 }
 
 _SUBSCRIPTION_MODELS: tuple[tuple[str, str, int], ...] = (
     ("claude-opus-5-5", "Claude Opus 5.5 (Assinatura CLI)", 1_000_000),
     ("claude-sonnet-5-5", "Claude Sonnet 5.5 (Assinatura CLI)", 200_000),
     ("claude-haiku-5-5", "Claude Haiku 5.5 (Assinatura CLI)", 200_000),
+    ("claude-fable-5-2", "Claude Fable 5.2 (Assinatura CLI)", 200_000),
     ("claude-fable-5-1", "Claude Fable 5.1 (Assinatura CLI)", 200_000),
     ("claude-opus-4-7", "Claude Opus 4.7 (Assinatura CLI)", 200_000),
     ("claude-opus-4-6", "Claude Opus 4.6 (Assinatura CLI)", 200_000),
@@ -174,6 +175,48 @@ def context_window_for(
         if "[1m]" in lower or lower.startswith("claude-opus-5"):
             return 1_000_000
     return 200_000
+
+
+def fixed_context_window_for(model: str | None) -> int | None:
+    """Return the fixed-table context window for `model`, or None when not in the static table."""
+    if not model:
+        return None
+    raw_tail = str(model).strip().rsplit("/", 1)[-1].strip()
+    try:
+        cleaned = clean_model_id(raw_tail)
+    except ValueError:
+        return None
+    if not cleaned:
+        return None
+    lower = cleaned.lower()
+    if lower.endswith("[1m]"):
+        lower = lower[:-4]
+    return _SUBSCRIPTION_WINDOWS.get(lower)
+
+
+def cached_cli_context_window_for(
+    model: str | None,
+    *,
+    org_id: str | None = None,
+    cache_dir: Path | None = None,
+) -> int | None:
+    """Return `runtime.max_input_tokens` from the local Claude CLI model-catalog cache, or None."""
+    if not model:
+        return None
+    raw_tail = str(model).strip().rsplit("/", 1)[-1].strip()
+    try:
+        cleaned = clean_model_id(raw_tail)
+    except ValueError:
+        return None
+    if not cleaned:
+        return None
+    lower = cleaned.lower()
+    if lower.endswith("[1m]"):
+        lower = lower[:-4]
+    for entry in discover_cached_models(org_id=org_id, cache_dir=cache_dir):
+        if entry.id.lower() == lower and entry.context_window > 0:
+            return entry.context_window
+    return None
 
 
 model_context_window = context_window_for

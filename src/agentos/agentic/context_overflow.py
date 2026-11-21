@@ -21,6 +21,13 @@ _OVERFLOW_TEXT_NEEDLES = (
     "input is too long",
 )
 
+_LONG_CONTEXT_CREDITS_NEEDLES = (
+    "usage credits required for 1m context",
+    "usage credits are required for long context",
+    "extra usage is required for long context",
+    "credits_clamp_200k",
+)
+
 CONTEXT_OVERFLOW_FAILURE_MESSAGE_PT_BR = (
     "O contexto desta conversa excedeu o limite do modelo mesmo após compactação automática. "
     "Use /compact para reduzir o histórico ou inicie uma nova conversa."
@@ -168,10 +175,19 @@ def strip_synthetic_error_from_messages(
     return False
 
 
+def is_long_context_credits_error(exc: BaseException | str) -> bool:
+    """Return True when the CLI refused a `[1m]` request due to missing usage credits (E-RF31)."""
+    lowered = str(exc or "").lower()
+    if not lowered:
+        return False
+    return any(needle in lowered for needle in _LONG_CONTEXT_CREDITS_NEEDLES)
+
+
 __all__ = [
     "CONTEXT_OVERFLOW_FAILURE_MESSAGE_PT_BR",
     "format_context_overflow_message",
     "is_context_overflow_error",
+    "is_long_context_credits_error",
     "is_synthetic_overflow_text",
     "is_zero_usage",
     "parse_overflow_limit",
