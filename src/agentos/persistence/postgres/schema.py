@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     Numeric,
+    SmallInteger,
     String,
     Table,
     Text,
@@ -930,14 +931,55 @@ agent_memories = Table(
     Column("last_used_at", DateTime(timezone=True), nullable=True),
     # A contradiction chains instead of deleting, so the history stays auditable.
     Column("superseded_by", String(255), nullable=True),
+    Column("status", String(16), nullable=False, server_default="active"),
+    Column("agent_key", String(64), nullable=True),
+    Column("text_hash", String(64), nullable=False, server_default=""),
+    Column("valid_from", DateTime(timezone=True), nullable=True),
+    Column("invalid_at", DateTime(timezone=True), nullable=True),
+    Column("source_kind", String(16), nullable=False, server_default="agent"),
+    Column("source_ref", String(512), nullable=True),
+    Column("trust", SmallInteger, nullable=False, server_default=text("1")),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
-    # Scope belongs in the key: 0028 added project scope but left the old
-    # (user_id, fact) constraint in place, so the same fact in two projects
-    # raised IntegrityError.
-    UniqueConstraint("user_id", "scope_type", "project_id", "fact", name="uq_agent_memories_scope_fact"),
 )
 Index("ix_agent_memories_user_updated", agent_memories.c.user_id, agent_memories.c.updated_at)
+Index(
+    "uq_agent_memories_active_hash",
+    agent_memories.c.user_id,
+    agent_memories.c.scope_type,
+    agent_memories.c.scope_id,
+    text("COALESCE(project_id, '')"),
+    text("COALESCE(agent_key, '')"),
+    agent_memories.c.text_hash,
+    unique=True,
+    sqlite_where=text("status = 'active'"),
+    postgresql_where=text("status = 'active'"),
+)
+Index(
+    "ix_agent_memories_scope_status",
+    agent_memories.c.user_id,
+    agent_memories.c.scope_type,
+    agent_memories.c.project_id,
+    agent_memories.c.agent_key,
+    agent_memories.c.status,
+)
+
+memory_events = Table(
+    "memory_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("memory_id", String(255), nullable=False),
+    Column("user_id", String(255), nullable=False),
+    Column("event", String(24), nullable=False),
+    Column("old_text", String(4000), nullable=True),
+    Column("new_text", String(4000), nullable=True),
+    Column("related_id", String(255), nullable=True),
+    Column("actor", String(80), nullable=False),
+    Column("conversation_id", String(255), nullable=True),
+    Column("turn_id", String(255), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_memory_events_memory_created", memory_events.c.memory_id, memory_events.c.created_at)
 
 user_friend_personas = Table(
     "user_friend_personas", metadata,
@@ -975,6 +1017,7 @@ user_agents = Table(
     Column("effort", String(16), nullable=True),
     Column("permission_mode", String(32), nullable=True),
     Column("max_turns", Integer, nullable=True),
+    Column("memory", String(16), nullable=True),
     Column("enabled", Boolean, nullable=False, server_default="true"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -1369,6 +1412,7 @@ __all__ = [
     "projects",
     "workspace_roots",
     "agent_memories",
+    "memory_events",
     "user_friend_personas",
     "user_agents",
     "skills",

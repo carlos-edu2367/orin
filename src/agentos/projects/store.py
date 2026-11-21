@@ -8,8 +8,10 @@ from uuid import uuid4
 from sqlalchemy import delete, insert, or_, select, update
 from sqlalchemy.engine import Engine
 
+from agentos.memory.models_write import compute_text_hash
 from agentos.memory.security import validate_memory_content
 from agentos.persistence.postgres.agent_memory import _PROMPT_INJECTION_RE
+from agentos.persistence.postgres.memory_lifecycle import MemoryLifecycle
 from agentos.persistence.postgres.schema import agent_memories, conversations, projects
 
 
@@ -165,7 +167,12 @@ class PostgresProjectStore:
             raise ValueError("unsupported memory scope")
         if actual_scope == "project" and (not project_id or self.get(project_id, user_id) is None):
             return {"items": [], "next_cursor": None} if managed else []
-        predicates = [agent_memories.c.user_id == user_id, agent_memories.c.scope_type == actual_scope]
+        predicates = [
+            agent_memories.c.user_id == user_id,
+            agent_memories.c.scope_type == actual_scope,
+            agent_memories.c.status == "active",
+            agent_memories.c.superseded_by.is_(None),
+        ]
         predicates.append(agent_memories.c.project_id == project_id if actual_scope == "project" else agent_memories.c.project_id.is_(None))
         normalized = " ".join(query.split())
         if normalized:
@@ -184,13 +191,14 @@ class PostgresProjectStore:
             raise ValueError("unsupported memory scope")
         if scope == "project" and (not project_id or self.get(project_id, user_id) is None):
             return False
-        with self._engine.begin() as connection:
-            result = connection.execute(delete(agent_memories).where(
-                agent_memories.c.memory_id == memory_id, agent_memories.c.user_id == user_id,
-                agent_memories.c.scope_type == scope,
-                agent_memories.c.project_id == project_id if scope == "project" else agent_memories.c.project_id.is_(None),
-            ))
-        return bool(result.rowcount)
+        return MemoryLifecycle(self._engine).tombstone(
+            memory_id,
+            user_id,
+            actor="user",
+            scope_type=scope,
+            project_id=project_id if scope == "project" else None,
+            check_scope=True,
+        )
 
     def update_memory(self, project_id: str | None, user_id: str, memory_id: str, fact: str, *, scope: str = "project") -> dict[str, object] | None:
         """Let the person rewrite a fact the agent got slightly wrong.
@@ -213,14 +221,34 @@ class PostgresProjectStore:
             agent_memories.c.memory_id == memory_id,
             agent_memories.c.user_id == user_id,
             agent_memories.c.scope_type == scope,
+            agent_memories.c.status == "active",
             agent_memories.c.project_id == project_id if scope == "project" else agent_memories.c.project_id.is_(None),
         ]
+        now = datetime.now(UTC)
+        lifecycle = MemoryLifecycle(self._engine)
         with self._engine.begin() as connection:
+            existing = connection.execute(select(agent_memories).where(*predicates)).mappings().first()
+            if existing is None:
+                return None
+            old_fact = str(existing.get("fact") or "")
             result = connection.execute(update(agent_memories).where(*predicates).values(
-                fact=normalized, confidence=1.0, updated_at=datetime.now(UTC),
+                fact=normalized,
+                text_hash=compute_text_hash(normalized),
+                confidence=1.0,
+                updated_at=now,
             ))
             if not result.rowcount:
                 return None
+            lifecycle.record_event(
+                connection,
+                memory_id=memory_id,
+                user_id=user_id,
+                event="updated",
+                actor="user",
+                old_text=old_fact,
+                new_text=normalized,
+                created_at=now,
+            )
             row = connection.execute(select(agent_memories).where(agent_memories.c.memory_id == memory_id)).mappings().one()
         return {
             "memory_id": row["memory_id"], "fact": row["fact"], "tags": list(row["tags"] or []),

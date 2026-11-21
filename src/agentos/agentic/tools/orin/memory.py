@@ -110,6 +110,18 @@ class MemoryTools:
                     "content": f"No stored memory matched memory_id '{clean_memory_id}'.",
                     "payload": {"count": 0, "memory_id": clean_memory_id, "label": clean_memory_id[:80]},
                 }
+            if item.get("status") == "deleted" or item.get("deleted") is True:
+                return {
+                    "summary": "Memória esquecida",
+                    "content": f"Memory '{clean_memory_id}': memória esquecida.",
+                    "payload": {
+                        "count": 0,
+                        "memory_id": clean_memory_id,
+                        "status": "deleted",
+                        "error": "memória esquecida",
+                        "label": clean_memory_id[:80],
+                    },
+                }
             if normalized_scope is not None and str(item.get("scope_type") or "user") != normalized_scope:
                 return {
                     "summary": "Nenhuma memória relevante",
