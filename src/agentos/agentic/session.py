@@ -4030,7 +4030,11 @@ class TurnSession:
                 subagent_tools.memory_tracker = self._memory_files(self._workspace_trusted())
             if definition is not None:
                 # Its tools only narrow what the parent may publish.
-                subagent_tools._policy = AgentToolPolicy(subagent_tools._policy, definition)
+                subagent_tools._policy = AgentToolPolicy(
+                    subagent_tools._policy,
+                    definition,
+                    allow_agent_memory=sub_memory_view is not None,
+                )
             sub_max_iterations = (
                 self.limits.subagent_max_iterations
                 if self.limits.subagent_max_iterations is not None
@@ -4061,6 +4065,7 @@ class TurnSession:
                 on_reminder_ack=watcher.ack_control if watcher is not None else None,
                 control_watcher=watcher,
                 continue_on_unread=self._continue_on_unread_enabled(),
+                on_verification=self._promote_agent_memories,
                 effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                 **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
             )
@@ -4119,6 +4124,7 @@ class TurnSession:
                     on_reminder_ack=watcher.ack_control if watcher is not None else None,
                     control_watcher=watcher,
                     continue_on_unread=self._continue_on_unread_enabled(),
+                    on_verification=self._promote_agent_memories,
                     effort=self._definition_effort(definition, active_model_id, provider_name, call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id),
                     **self._subagent_accounting(active_model_id, code_mode=is_code_mode, provider=provider_name),
                 )
@@ -4131,6 +4137,8 @@ class TurnSession:
                     clean, agent_id, caller, provider_name, chain, str(result.error_code or "PROVIDER_STREAM_FAILED"),
                     set_state=False,
                 )
+            from .subagent_memory import propagate_subagent_external_taint
+            propagate_subagent_external_taint(self, caller, subagent_tools)
             answer = sub_store.final_answer()
             limit_stopped = (
                 result.error_code in {"ACTION_LIMIT", "ITERATION_LIMIT", "TURN_DEADLINE_EXCEEDED"}

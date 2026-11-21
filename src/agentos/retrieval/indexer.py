@@ -18,7 +18,7 @@ import re
 from agentos.ignore import DENIED_SEGMENTS
 from agentos.pathsafety import resolve_contained
 
-from .filters import GitignoreFilter, IndexFilter
+from .filters import GitignoreFilter, IndexFilter, normalize_rel_path
 from .ports import Chunker, EmbeddingPort, EmbeddingUnavailable
 from .store import SqliteChunkStore
 from .symbols import extract_imports, language_for, resolve_import
@@ -42,16 +42,21 @@ class ProjectIndexer:
     def scan(self, only: list[str] | None = None, *, embed: bool = True) -> None:
         """Reconcile the index with the disk, optionally for a subset of paths."""
         index_filter = IndexFilter(GitignoreFilter.from_root(self.root))
+        normalized_only = [normalize_rel_path(p) for p in only] if only is not None else None
         known = self._store.known_files()
         prior_symbols = self._store.defined_symbols() if known else set()
         present: set[str] = set()
         pending_imports: dict[str, tuple[str | None, str]] = {}
-        for path in self._candidates(index_filter, only):
+        for path in self._candidates(index_filter, normalized_only):
             present.add(path)
             outcome = self._index_one(path, known)
             if outcome is not None:
                 pending_imports[path] = outcome
-        removed = (set(known) - present) if only is None else {path for path in only if path not in present and path in known}
+        removed = (
+            (set(known) - present)
+            if normalized_only is None
+            else {path for path in normalized_only if path not in present and path in known}
+        )
         for path in removed:
             self._store.forget_file(path)
         # Imports and symbol references are resolved only after every file in
@@ -89,7 +94,8 @@ class ProjectIndexer:
 
     def _candidates(self, index_filter: IndexFilter, only: list[str] | None) -> list[str]:
         if only is not None:
-            return [path for path in only if not index_filter.rejects(path) and self._resolve(path) is not None]
+            normalized = [normalize_rel_path(path) for path in only]
+            return [path for path in normalized if not index_filter.rejects(path) and self._resolve(path) is not None]
         found: list[str] = []
         gitignore = index_filter._gitignore
         has_negations = any(p.negated for p in gitignore._patterns)
@@ -153,6 +159,7 @@ class ProjectIndexer:
         the file is still valid with identical content, or ``"forgotten"`` when
         the file vanished, is excluded, or became unreadable/oversized/binary/non-UTF-8.
         """
+        relative_path = normalize_rel_path(relative_path)
         index_filter = IndexFilter(GitignoreFilter.from_root(self.root))
         if index_filter.rejects(relative_path):
             if self._store.file_state(relative_path) is not None:

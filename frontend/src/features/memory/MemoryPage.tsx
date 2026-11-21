@@ -82,6 +82,8 @@ export function MemoryPage({
   const [draftText, setDraftText] = useState<string>('')
   const [draftScope, setDraftScope] = useState<MemoryScopeLabel>('Trabalho')
   const [toastUndoSnapshot, setToastUndoSnapshot] = useState<UndoSnapshot | null>(null)
+  const [reviewRefreshTick, setReviewRefreshTick] = useState(0)
+  const [historyMemoryId, setHistoryMemoryId] = useState<string | null>(null)
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
@@ -218,6 +220,18 @@ export function MemoryPage({
         scope: nextApiScope,
         project_id: nextSemantic === 'project' ? (projectId ?? null) : null,
         tags: [nextSemantic],
+      }).then((created) => {
+        if (created && !created.memory_id.startsWith('local-mem-')) {
+          setCards((prev) =>
+            prev.map((item) =>
+              item.id === newCard.id
+                ? { ...item, id: created.memory_id, source: 'api' }
+                : item,
+            ),
+          )
+          setSelectedId((prev) => (prev === newCard.id ? created.memory_id : prev))
+        }
+        setReviewRefreshTick((tick) => tick + 1)
       })
       return
     }
@@ -237,9 +251,11 @@ export function MemoryPage({
     setIsCreating(false)
 
     if (selectedCard.source === 'api') {
-      void updateManagedMemory(client, selectedCard.id, trimmed, selectedCard.apiScope, projectId).catch(
-        () => undefined,
-      )
+      void updateManagedMemory(client, selectedCard.id, trimmed, selectedCard.apiScope, projectId)
+        .then(() => {
+          setReviewRefreshTick((tick) => tick + 1)
+        })
+        .catch(() => undefined)
     }
   }
 
@@ -276,7 +292,11 @@ export function MemoryPage({
     }
 
     if (target.source === 'api') {
-      void deleteManagedMemory(client, target.id, target.apiScope, projectId).catch(() => undefined)
+      void deleteManagedMemory(client, target.id, target.apiScope, projectId)
+        .then(() => {
+          setReviewRefreshTick((tick) => tick + 1)
+        })
+        .catch(() => undefined)
     } else if (target.source === 'local') {
       const stored = loadCustomMemories().filter((item) => item.memory_id !== target.id)
       saveCustomMemories(stored)
@@ -364,6 +384,9 @@ export function MemoryPage({
       <MemoryReviewTab
         client={client}
         projectId={projectId}
+        refreshTick={reviewRefreshTick}
+        externalHistoryMemoryId={historyMemoryId}
+        onClearExternalHistoryMemoryId={() => setHistoryMemoryId(null)}
         onMutated={() => {
           void load()
         }}
@@ -407,6 +430,20 @@ export function MemoryPage({
                           </div>
                         </div>
                         <div className="memory-card-v6__actions">
+                          {item.source === 'api' && (
+                            <button
+                              type="button"
+                              className="memory-card-v6__edit-btn"
+                              data-testid={`memory-card-history-${item.id}`}
+                              aria-label={`Histórico de ${item.title}`}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                setHistoryMemoryId(item.id)
+                              }}
+                            >
+                              Histórico
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="memory-card-v6__edit-btn"
@@ -475,6 +512,16 @@ export function MemoryPage({
                 </div>
 
                 <div className="memory-inspector__actions">
+                  {!isCreating && selectedCard?.source === 'api' && (
+                    <button
+                      type="button"
+                      className="memory-card-v6__edit-btn"
+                      data-testid="memory-inspector-history-button"
+                      onClick={() => setHistoryMemoryId(selectedCard.id)}
+                    >
+                      Histórico
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="memory-inspector__forget-btn"

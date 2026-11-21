@@ -51,6 +51,12 @@ export type MemoryReviewTabProps = {
   activeContent?: ReactNode
   /** Called whenever a review mutation changes active memories (approve, resolve, restore). */
   onMutated?: () => void
+  /** Incremented by parent mutations (create/update/forget) so tab counts stay synchronized. */
+  refreshTick?: number
+  /** Optional memory id requested externally (e.g. from the active card list) to open the history drawer. */
+  externalHistoryMemoryId?: string | null
+  /** Called when the history drawer closes so external state resets cleanly. */
+  onClearExternalHistoryMemoryId?: () => void
 }
 
 export function MemoryReviewTab({
@@ -59,6 +65,9 @@ export function MemoryReviewTab({
   initialTab = 'active',
   activeContent,
   onMutated,
+  refreshTick = 0,
+  externalHistoryMemoryId = null,
+  onClearExternalHistoryMemoryId,
 }: MemoryReviewTabProps) {
   const [tab, setTab] = useState<MemoryLifecycleTab>(initialTab)
   const [agentKey, setAgentKey] = useState<string>('')
@@ -71,8 +80,9 @@ export function MemoryReviewTab({
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [historyMemoryId, setHistoryMemoryId] = useState<string | null>(null)
 
-  const requestKey = `${projectId ?? ''}::${agentKey}::${tab}`
+  const requestKey = `${projectId ?? ''}::${agentKey}::${tab}::${refreshTick}`
   const loading = loadedKey !== requestKey
+  const activeHistoryMemoryId = historyMemoryId ?? externalHistoryMemoryId
 
   const load = useCallback(async () => {
     try {
@@ -413,8 +423,11 @@ export function MemoryReviewTab({
 
       <MemoryHistoryDrawer
         client={client}
-        memoryId={historyMemoryId}
-        onClose={() => setHistoryMemoryId(null)}
+        memoryId={activeHistoryMemoryId}
+        onClose={() => {
+          setHistoryMemoryId(null)
+          onClearExternalHistoryMemoryId?.()
+        }}
         onRestored={() => {
           void load()
           onMutated?.()

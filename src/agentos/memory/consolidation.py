@@ -762,7 +762,12 @@ class MemoryConsolidator:
                 continue
 
             seen_facts.add(fact)
-            saved += 1
+            receipt_map = receipt if isinstance(receipt, Mapping) else {}
+            receipt_status = str(receipt_map.get("status") or "active")
+            blocked_by_tombstone = bool(receipt_map.get("blocked_by_tombstone"))
+            is_active_saved = receipt_status == "active" and not blocked_by_tombstone
+            if not blocked_by_tombstone:
+                saved += 1
             effective_scope = scope or ("project" if effective_project_id else "user")
             info = {
                 "receipt": receipt or {},
@@ -773,11 +778,13 @@ class MemoryConsolidator:
                 "tags": tags_tuple,
                 "source": "consolidation",
             }
-            saved_by_index[idx] = info
+            if is_active_saved:
+                saved_by_index[idx] = info
 
             if (
                 self.on_memory_learned is not None
                 and isinstance(receipt, Mapping)
+                and is_active_saved
                 and receipt.get("created")
                 and receipt.get("memory_id")
             ):
@@ -798,7 +805,14 @@ class MemoryConsolidator:
                 target_saved = saved_by_index.get(new_idx)
                 if target_saved is None:
                     continue
-                new_id = str((target_saved.get("receipt") or {}).get("memory_id") or "").strip()
+                target_receipt = target_saved.get("receipt") or {}
+                if (
+                    not isinstance(target_receipt, Mapping)
+                    or str(target_receipt.get("status") or "active") != "active"
+                    or bool(target_receipt.get("blocked_by_tombstone"))
+                ):
+                    continue
+                new_id = str(target_receipt.get("memory_id") or "").strip()
                 if not new_id or new_id == old_id:
                     continue
                 try:

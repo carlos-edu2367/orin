@@ -936,6 +936,25 @@ class PostgresChatStore:
             for row in reversed(rows)
         ]
 
+    def user_message_for_turn(self, turn: Mapping[str, object]) -> str:
+        """Return the original human user prompt stored for ``turn['user_message_id']``."""
+        msg_id = str(turn.get("user_message_id") or "").strip()
+        if not msg_id:
+            return ""
+        try:
+            with self._engine.connect() as connection:
+                row = connection.execute(
+                    select(conversation_messages.c.role, conversation_messages.c.content).where(
+                        conversation_messages.c.message_id == msg_id
+                    )
+                ).mappings().first()
+        except Exception:  # noqa: BLE001
+            return ""
+        if row is None or str(row.get("role") or "") != "user":
+            return ""
+        content = row.get("content")
+        return content if isinstance(content, str) else ""
+
     def has_external_tool_calls(self, conversation_id: str) -> bool:
         """Return True if any tool record in the conversation invoked an external or untrusted tool."""
         cid = (

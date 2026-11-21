@@ -142,6 +142,7 @@ class SqliteChunkStore:
     # -- writes ---------------------------------------------------------
 
     def replace_file(self, path: str, *, content_hash: str, size_bytes: int, mtime_ns: int, language: str | None, chunks: list[Chunk]) -> None:
+        path = self._norm_path(path)
         now = datetime.now(UTC).isoformat()
         with self._lock:
             with self._connection:
@@ -153,9 +154,10 @@ class SqliteChunkStore:
                     (path, content_hash, size_bytes, mtime_ns, language, now),
                 )
                 for chunk in chunks:
+                    chunk_path = self._norm_path(chunk.path)
                     self._connection.execute(
                         "INSERT INTO chunks(chunk_id, path, start_line, end_line, symbol, kind, text) VALUES(?, ?, ?, ?, ?, ?, ?)",
-                        (chunk.chunk_id, chunk.path, chunk.start_line, chunk.end_line, chunk.symbol, chunk.kind, chunk.text),
+                        (chunk.chunk_id, chunk_path, chunk.start_line, chunk.end_line, chunk.symbol, chunk.kind, chunk.text),
                     )
                     self._connection.execute(
                         "INSERT INTO chunks_fts(chunk_id, symbol, text) VALUES(?, ?, ?)",
@@ -163,7 +165,15 @@ class SqliteChunkStore:
                     )
             self._matrix_cache = None
 
+    @staticmethod
+    def _norm_path(path: str) -> str:
+        norm = str(path or "").replace("\\", "/")
+        while norm.startswith("./"):
+            norm = norm[2:]
+        return norm
+
     def forget_file(self, path: str) -> None:
+        path = self._norm_path(path)
         with self._lock:
             with self._connection:
                 self._delete_chunks_of(path)
@@ -421,6 +431,7 @@ class SqliteChunkStore:
 
     def file_state(self, path: str) -> tuple[int, int] | None:
         """Return ``(mtime_ns, size_bytes)`` recorded for ``path``, or ``None``."""
+        path = self._norm_path(path)
         with self._lock:
             row = self._connection.execute(
                 "SELECT mtime_ns, size_bytes FROM files WHERE path = ?",
@@ -432,6 +443,7 @@ class SqliteChunkStore:
 
     def file_record(self, path: str) -> tuple[str, int, int] | None:
         """Return ``(content_hash, mtime_ns, size_bytes)`` recorded for ``path``, or ``None``."""
+        path = self._norm_path(path)
         with self._lock:
             row = self._connection.execute(
                 "SELECT content_hash, mtime_ns, size_bytes FROM files WHERE path = ?",
@@ -443,6 +455,7 @@ class SqliteChunkStore:
 
     def update_file_stat(self, path: str, *, mtime_ns: int, size_bytes: int) -> None:
         """Refresh ``mtime_ns`` and ``size_bytes`` when content hash is unchanged."""
+        path = self._norm_path(path)
         with self._lock, self._connection:
             self._connection.execute(
                 "UPDATE files SET mtime_ns = ?, size_bytes = ? WHERE path = ?",
@@ -451,6 +464,7 @@ class SqliteChunkStore:
 
     def chunks_of_file(self, path: str) -> list[Chunk]:
         """Return every indexed chunk of ``path``, ordered by start line."""
+        path = self._norm_path(path)
         with self._lock:
             rows = self._connection.execute(
                 "SELECT * FROM chunks WHERE path = ? ORDER BY start_line ASC, end_line ASC",

@@ -202,6 +202,18 @@ class MemoryLifecycle:
             if not result.rowcount:
                 return False
 
+            conn.execute(
+                update(memory_events)
+                .where(
+                    memory_events.c.user_id == str(user_id),
+                    or_(
+                        memory_events.c.memory_id == clean_id,
+                        memory_events.c.related_id == clean_id,
+                    ),
+                )
+                .values(old_text=None, new_text=None)
+            )
+
             self.record_event(
                 conn,
                 memory_id=clean_id,
@@ -328,15 +340,32 @@ class MemoryLifecycle:
 
     def purge_tombstones(self, older_than: datetime) -> int:
         """Physically delete tombstones whose ``invalid_at`` (or fallback ``updated_at``) is older than ``older_than``."""
+        tombstone_predicate = (
+            agent_memories.c.status == "deleted",
+            or_(
+                agent_memories.c.invalid_at < older_than,
+                (agent_memories.c.invalid_at.is_(None)) & (agent_memories.c.updated_at < older_than),
+            ),
+        )
         with self._engine.begin() as conn:
+            expired_ids = [
+                str(r[0])
+                for r in conn.execute(
+                    select(agent_memories.c.memory_id).where(*tombstone_predicate)
+                ).all()
+            ]
+            if not expired_ids:
+                return 0
+            conn.execute(
+                delete(memory_events).where(memory_events.c.memory_id.in_(expired_ids))
+            )
+            conn.execute(
+                update(memory_events)
+                .where(memory_events.c.related_id.in_(expired_ids))
+                .values(related_id=None, old_text=None, new_text=None)
+            )
             result = conn.execute(
-                delete(agent_memories).where(
-                    agent_memories.c.status == "deleted",
-                    or_(
-                        agent_memories.c.invalid_at < older_than,
-                        (agent_memories.c.invalid_at.is_(None)) & (agent_memories.c.updated_at < older_than),
-                    ),
-                )
+                delete(agent_memories).where(agent_memories.c.memory_id.in_(expired_ids))
             )
         return int(result.rowcount or 0)
 

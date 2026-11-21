@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from sqlalchemy import delete, insert, or_, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from agentos.memory.models_write import compute_text_hash
 from agentos.memory.security import validate_memory_content
@@ -225,31 +226,53 @@ class PostgresProjectStore:
             agent_memories.c.project_id == project_id if scope == "project" else agent_memories.c.project_id.is_(None),
         ]
         now = datetime.now(UTC)
+        new_hash = compute_text_hash(normalized)
         lifecycle = MemoryLifecycle(self._engine)
-        with self._engine.begin() as connection:
-            existing = connection.execute(select(agent_memories).where(*predicates)).mappings().first()
-            if existing is None:
-                return None
-            old_fact = str(existing.get("fact") or "")
-            result = connection.execute(update(agent_memories).where(*predicates).values(
-                fact=normalized,
-                text_hash=compute_text_hash(normalized),
-                confidence=1.0,
-                updated_at=now,
-            ))
-            if not result.rowcount:
-                return None
-            lifecycle.record_event(
-                connection,
-                memory_id=memory_id,
-                user_id=user_id,
-                event="updated",
-                actor="user",
-                old_text=old_fact,
-                new_text=normalized,
-                created_at=now,
-            )
-            row = connection.execute(select(agent_memories).where(agent_memories.c.memory_id == memory_id)).mappings().one()
+        try:
+            with self._engine.begin() as connection:
+                existing = connection.execute(select(agent_memories).where(*predicates)).mappings().first()
+                if existing is None:
+                    return None
+                dup_predicates = [
+                    agent_memories.c.user_id == user_id,
+                    agent_memories.c.scope_type == str(existing["scope_type"]),
+                    agent_memories.c.scope_id == str(existing.get("scope_id") or ""),
+                    agent_memories.c.status == "active",
+                    agent_memories.c.text_hash == new_hash,
+                    agent_memories.c.memory_id != memory_id,
+                ]
+                if existing.get("project_id") is None:
+                    dup_predicates.append(agent_memories.c.project_id.is_(None))
+                else:
+                    dup_predicates.append(agent_memories.c.project_id == str(existing["project_id"]))
+                if existing.get("agent_key") is None:
+                    dup_predicates.append(agent_memories.c.agent_key.is_(None))
+                else:
+                    dup_predicates.append(agent_memories.c.agent_key == str(existing["agent_key"]))
+                if connection.execute(select(agent_memories.c.memory_id).where(*dup_predicates).limit(1)).first() is not None:
+                    raise ValueError("Já existe uma memória ativa com este texto neste escopo.")
+                old_fact = str(existing.get("fact") or "")
+                result = connection.execute(update(agent_memories).where(*predicates).values(
+                    fact=normalized,
+                    text_hash=new_hash,
+                    confidence=1.0,
+                    updated_at=now,
+                ))
+                if not result.rowcount:
+                    return None
+                lifecycle.record_event(
+                    connection,
+                    memory_id=memory_id,
+                    user_id=user_id,
+                    event="updated",
+                    actor="user",
+                    old_text=old_fact,
+                    new_text=normalized,
+                    created_at=now,
+                )
+                row = connection.execute(select(agent_memories).where(agent_memories.c.memory_id == memory_id)).mappings().one()
+        except IntegrityError as exc:
+            raise ValueError("Já existe uma memória ativa com este texto neste escopo.") from exc
         return {
             "memory_id": row["memory_id"], "fact": row["fact"], "tags": list(row["tags"] or []),
             "scope": scope, "project_id": row["project_id"], "conversation_id": row["conversation_id"],

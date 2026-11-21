@@ -32,6 +32,14 @@ SECRET_SUFFIXES = (".pem", ".key", ".pfx", ".p12", ".keystore", ".jks")
 SECRET_EXEMPT_SUFFIXES = (".example", ".sample", ".template")
 
 
+def normalize_rel_path(relative_path: str) -> str:
+    """Normalize Windows backslashes and leading ``./`` without stripping leading dot filenames like ``.env``."""
+    norm = str(relative_path or "").replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    return norm
+
+
 class IndexFilter:
     """The single gate every candidate path passes through before being read."""
 
@@ -39,7 +47,8 @@ class IndexFilter:
         self._gitignore = gitignore
 
     def rejects(self, relative_path: str) -> bool:
-        segments = relative_path.split("/")
+        norm = normalize_rel_path(relative_path)
+        segments = norm.split("/")
         name = segments[-1]
         if any(segment in DENIED_SEGMENTS for segment in segments):
             return True
@@ -47,7 +56,7 @@ class IndexFilter:
             return True
         if self._is_secret(name):
             return True
-        return self._gitignore.ignores(relative_path)
+        return self._gitignore.ignores(norm)
 
     @staticmethod
     def _is_secret(name: str) -> bool:
@@ -59,4 +68,4 @@ class IndexFilter:
         return lowered.startswith(SECRET_PREFIXES) or lowered.endswith(SECRET_SUFFIXES)
 
 
-__all__ = ["DENIED_NAMES", "DENIED_SEGMENTS", "GitignoreFilter", "IndexFilter", "SECRET_NAMES"]
+__all__ = ["DENIED_NAMES", "DENIED_SEGMENTS", "GitignoreFilter", "IndexFilter", "SECRET_NAMES", "normalize_rel_path"]

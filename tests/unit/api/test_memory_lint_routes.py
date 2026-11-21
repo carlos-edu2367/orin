@@ -92,7 +92,11 @@ def test_post_memory_lint_dry_run_and_manual_run_work_even_when_setting_disabled
         )
 
         linter = InstructionLinter(engine=engine, model_caller=fake_caller)
-        app = _make_app(projects=PostgresProjectStore(engine), instruction_linter=linter)
+        app = _make_app(
+            projects=PostgresProjectStore(engine),
+            workspace_root=workspace,
+            instruction_linter=linter,
+        )
         client = TestClient(app)
 
         # 1) dry_run=True -> 0 calls, returns estimated_calls
@@ -166,7 +170,11 @@ def test_post_memory_lint_isolates_memories_by_user_id(tmp_path: Path) -> None:
             )
 
         linter = InstructionLinter(engine=engine, model_caller=fake_caller)
-        app = _make_app(projects=PostgresProjectStore(engine), instruction_linter=linter)
+        app = _make_app(
+            projects=PostgresProjectStore(engine),
+            workspace_root=workspace,
+            instruction_linter=linter,
+        )
         client = TestClient(app)
 
         resp_u2 = client.post(
@@ -200,7 +208,7 @@ def test_post_memory_lint_runs_in_threadpool_without_stalling_event_loop(tmp_pat
                 dry_run=dry_run,
             )
 
-    app = _make_app(instruction_linter=_SlowLinter())
+    app = _make_app(workspace_root=workspace, instruction_linter=_SlowLinter())
 
     async def _run() -> float:
         transport = ASGITransport(app=app)

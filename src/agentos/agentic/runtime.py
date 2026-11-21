@@ -1736,6 +1736,12 @@ class AgenticTurnRuntime:
                 verification = self._code_verification(turn)
                 if verification is not None:
                     self._life(turn, "code_verification", status=verification)
+                    if verification == "verified" and callable(self._on_verification):
+                        self._last_verification_passed = True
+                        try:
+                            self._on_verification(True)
+                        except Exception:  # noqa: BLE001 - memory promotion hook never breaks a turn
+                            pass
                 self._life(turn, "completed")
                 self.store.finish(turn)
                 self._settle_quality(turn, "completed")

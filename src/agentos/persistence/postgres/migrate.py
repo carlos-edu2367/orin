@@ -6,6 +6,7 @@ import sqlite3
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine, make_url
 
 
@@ -95,4 +96,27 @@ def downgrade(bind: Engine | Connection | str, revision: str = "base") -> None:
     command.downgrade(config, revision)
 
 
-__all__ = ["MIGRATIONS_PATH", "backup_before_migration", "downgrade", "upgrade"]
+def ensure_agent_memories_active_hash_index(connection: Connection) -> None:
+    """Recreate the expression-based partial unique index ``uq_agent_memories_active_hash``.
+
+    SQLAlchemy's SQLite reflector ignores expression-based indexes, so any future migration
+    that uses ``op.batch_alter_table("agent_memories")`` on SQLite must invoke this helper
+    after the batch block to prevent silently dropping ``uq_agent_memories_active_hash``.
+    """
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_memories_active_hash "
+            "ON agent_memories ("
+            "user_id, scope_type, scope_id, COALESCE(project_id, ''), COALESCE(agent_key, ''), text_hash"
+            ") WHERE status = 'active'"
+        )
+    )
+
+
+__all__ = [
+    "MIGRATIONS_PATH",
+    "backup_before_migration",
+    "downgrade",
+    "ensure_agent_memories_active_hash_index",
+    "upgrade",
+]

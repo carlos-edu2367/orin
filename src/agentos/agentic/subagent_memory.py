@@ -106,9 +106,44 @@ def maybe_promote_on_turn_complete(session: Any) -> None:
         promote_session_agent_memories(session, None)
 
 
+def propagate_subagent_external_taint(session: Any, caller: Any, subagent_tools: Any) -> None:
+    """Propagate untrusted external tool taint (web/tool/file) from a subagent run to the parent turn.
+
+    Purely local subagent work (reading project files, running local grep/tests) propagates nothing,
+    so parent Remember calls remain clean ``source_kind='agent'``.
+    """
+    from agentos.memory.provenance import infer_source_kind
+
+    sub_history = getattr(subagent_tools, "_turn_tool_history", None) or ()
+    if not sub_history:
+        return
+    ws = getattr(subagent_tools, "workspace", None) or getattr(session, "workspace", None)
+    root = getattr(ws, "root", None) if ws is not None else None
+    ws_root_str = str(root) if root is not None else None
+    tainted_entries: list[dict[str, Any]] = []
+    for entry in sub_history:
+        if not isinstance(entry, dict):
+            continue
+        sk, _, _ = infer_source_kind({"tool_calls": [entry], "workspace_root": ws_root_str})
+        if sk in {"web", "tool", "file"}:
+            tainted_entries.append(dict(entry))
+    if not tainted_entries:
+        return
+    caller_toolset = getattr(caller, "toolset", None) if caller is not None else None
+    caller_hist = getattr(caller_toolset, "_turn_tool_history", None)
+    if isinstance(caller_hist, list):
+        caller_hist.extend(tainted_entries)
+    existing = getattr(session, "_turn_external_tool_entries", None)
+    if not isinstance(existing, list):
+        existing = []
+        setattr(session, "_turn_external_tool_entries", existing)
+    existing.extend(tainted_entries)
+
+
 __all__ = [
     "build_subagent_memory_context",
     "maybe_promote_on_turn_complete",
     "promote_session_agent_memories",
+    "propagate_subagent_external_taint",
     "subagent_memory_turn_state",
 ]

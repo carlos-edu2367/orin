@@ -623,7 +623,7 @@ class PostgresAgentMemoryStore:
                     agent_memories.c.text_hash == text_hash,
                 )
             ).mappings().first()
-            if existing_row is not None and decision.action != "supersede":
+            if existing_row is not None:
                 existing_id = str(existing_row["memory_id"])
                 old_fact = str(existing_row.get("fact") or "")
                 merged_tags = _merge_tags(existing_row.get("tags"), tags)
@@ -656,20 +656,25 @@ class PostgresAgentMemoryStore:
                     turn_id=effective_context.turn_id,
                     created_at=now,
                 )
-                superseded = (
-                    self._supersede_by_id(
-                        connection,
-                        target_supersede,
-                        existing_id,
-                        now,
-                        actor=effective_context.actor,
-                        new_text=normalized,
-                        conversation_id=effective_context.conversation_id,
-                        turn_id=effective_context.turn_id,
+                superseded: list[str] = []
+                supersede_targets: list[str] = []
+                if decision.action == "supersede" and decision.target_id and decision.target_id != existing_id:
+                    supersede_targets.append(decision.target_id)
+                if target_supersede and target_supersede != existing_id and target_supersede not in supersede_targets:
+                    supersede_targets.append(target_supersede)
+                for old_target_id in supersede_targets:
+                    superseded.extend(
+                        self._supersede_by_id(
+                            connection,
+                            old_target_id,
+                            existing_id,
+                            now,
+                            actor=effective_context.actor,
+                            new_text=normalized,
+                            conversation_id=effective_context.conversation_id,
+                            turn_id=effective_context.turn_id,
+                        )
                     )
-                    if target_supersede and target_supersede != existing_id
-                    else []
-                )
                 return {
                     "memory_id": existing_id,
                     "fact": normalized,
@@ -1126,27 +1131,48 @@ class PostgresAgentMemoryStore:
         return [old_memory_id] if ok else []
 
     def supersede_memory(self, old_memory_id: str, new_memory_id: str, *, actor: str = "system") -> bool:
-        """Explicitly chain ``old_memory_id`` to ``new_memory_id`` if both belong to this user."""
+        """Explicitly chain ``old_memory_id`` to ``new_memory_id`` if both belong to this user.
+
+        Requires ``new_memory_id`` to be active and refuses non-user actors from superseding
+        protected ``source_kind='user'`` memories.
+        """
         old_id = str(old_memory_id or "").strip()
         new_id = str(new_memory_id or "").strip()
         if not old_id or not new_id or old_id == new_id:
             return False
         now = datetime.now(UTC)
+        clean_actor = str(actor or "system").strip()
+        is_user_actor = clean_actor == "user" or clean_actor.startswith("user:")
         with self._engine.begin() as connection:
             new_row = connection.execute(
-                select(agent_memories.c.memory_id, agent_memories.c.fact).where(
+                select(agent_memories.c.memory_id, agent_memories.c.fact, agent_memories.c.status).where(
                     agent_memories.c.memory_id == new_id,
                     agent_memories.c.user_id == self._user_id,
+                    agent_memories.c.status == "active",
                 )
             ).mappings().first()
             if new_row is None:
+                return False
+            old_row = connection.execute(
+                select(
+                    agent_memories.c.memory_id,
+                    agent_memories.c.status,
+                    agent_memories.c.source_kind,
+                ).where(
+                    agent_memories.c.memory_id == old_id,
+                    agent_memories.c.user_id == self._user_id,
+                )
+            ).mappings().first()
+            if old_row is None or str(old_row.get("status") or "") != "active":
+                return False
+            if str(old_row.get("source_kind") or "") == "user" and not is_user_actor:
                 return False
             replaced = self._supersede_by_id(
                 connection,
                 old_id,
                 new_id,
                 now,
-                actor=actor,
+                actor=clean_actor,
                 new_text=str(new_row.get("fact") or "") or None,
                 conversation_id=self._conversation_id,
             )

@@ -161,7 +161,9 @@ def test_webfetch_then_remember_becomes_active_when_quarantine_disabled(tmp_path
     assert any(m["memory_id"] == rem.payload["memory_id"] for m in found)
 
 
-def test_explicit_user_request_after_webfetch_stays_user_and_active(tmp_path: Path) -> None:
+def test_explicit_user_request_after_webfetch_is_still_quarantined_for_safety(tmp_path: Path) -> None:
+    """Red Team #1 (Vetor C1): once WebFetch runs in the turn, Remember must land in quarantine
+    even if the prompt contained memorization wording, preventing prompt-injection bypass."""
     engine, store = _memory_store(tmp_path)
     workspace = ConversationWorkspace(tmp_path, "conv-explicit")
     toolset = AgentToolset(workspace, memory=store, http_client=_mock_http_client(), public_tool_names=True)
@@ -177,15 +179,15 @@ def test_explicit_user_request_after_webfetch_stays_user_and_active(tmp_path: Pa
     assert toolset.invoke("WebFetch", {"url": "https://docs.example.com/api", "prompt": "resuma"}).status == "succeeded"
     rem = toolset.invoke("Remember", {"fact": "A API v2 usa X-Token."})
     assert rem.status == "succeeded"
-    assert "quarentena" not in rem.content.lower()
+    assert "quarentena" in rem.content.lower()
     mem_id = str(rem.payload["memory_id"])
 
     with engine.connect() as conn:
         row = conn.execute(select(agent_memories).where(agent_memories.c.memory_id == mem_id)).mappings().one()
-    assert row["source_kind"] == "user"
-    assert row["trust"] == 2
-    assert row["status"] == "active"
-    assert any(m["memory_id"] == mem_id for m in memories_for_task(store, "X-Token"))
+    assert row["source_kind"] == "web"
+    assert row["trust"] == 0
+    assert row["status"] == "quarantined"
+    assert not any(m["memory_id"] == mem_id for m in memories_for_task(store, "X-Token"))
 
 
 def test_malicious_source_kind_user_argument_from_model_is_ignored(tmp_path: Path) -> None:

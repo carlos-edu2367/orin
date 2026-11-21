@@ -248,7 +248,7 @@ VERIFIER = AgentDefinition(
         "anything and do not change files."
     ),
     origin="builtin",
-    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch"),
+    tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch", "Remember", "Recall"),
     memory="project",
 )
 BUILTIN_DEFINITIONS = (VERIFIER,)
@@ -345,11 +345,23 @@ def resolve_agent_model(requested: str | None, aliases: Mapping[str, str] | None
 class AgentToolPolicy:
     """Narrows the tools a subagent may publish to its definition's ``tools`` minus ``disallowedTools``."""
 
-    def __init__(self, base: object | None, definition: AgentDefinition) -> None:
+    def __init__(
+        self,
+        base: object | None,
+        definition: AgentDefinition,
+        *,
+        allow_agent_memory: bool = False,
+    ) -> None:
         from agentos.agentic.tools.public_names import internal_name
 
         self._base = base
-        self._allowed = None if definition.tools is None else {internal_name(item) for item in definition.tools} | set(definition.tools)
+        if definition.tools is None:
+            self._allowed = None
+        else:
+            allowed = {internal_name(item) for item in definition.tools} | set(definition.tools)
+            if allow_agent_memory:
+                allowed |= {"save_memory", "recall_memory", "remember", "recall", "Remember", "Recall"}
+            self._allowed = allowed
         self._denied = {internal_name(item) for item in definition.disallowed_tools} | set(definition.disallowed_tools)
 
     def _matches(self, name: str, names: set[str]) -> bool:

@@ -154,8 +154,8 @@ def test_explicit_supersedes_id_and_supersede_memory_enforce_user_isolation(tmp_
 
     # Direct supersede_memory helper (for auto-dream / explicit consolidation)
     third_u1 = store_u1.save("O banco de desenvolvimento usa container postgres:16-alpine.", kind="operational")
-    assert store_u2.supersede_memory(str(replacement_attempt["memory_id"]), str(third_u1["memory_id"])) is False
-    assert store_u1.supersede_memory(str(replacement_attempt["memory_id"]), str(third_u1["memory_id"])) is True
+    assert store_u2.supersede_memory(str(replacement_attempt["memory_id"]), str(third_u1["memory_id"]), actor="user") is False
+    assert store_u1.supersede_memory(str(replacement_attempt["memory_id"]), str(third_u1["memory_id"]), actor="user") is True
     with engine.connect() as conn:
         sup_val = conn.execute(
             select(agent_memories.c.superseded_by).where(

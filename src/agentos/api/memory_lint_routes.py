@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,15 +11,20 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 
-from .contracts import ApplicationNotFoundError
+from .contracts import ApplicationNotFoundError, ApplicationValidationError
+from agentos.local_workspace import FolderRejected
+from agentos.local_workspace.paths import normalize_path
 from agentos.memory.instruction_lint import (
     NO_WORKSPACE_WARNING,
     LintReport,
 )
 from agentos.persistence.postgres.instruction_lint_runtime import build_instruction_linter
+from agentos.persistence.postgres.schema import workspace_roots
+from agentos.profile_files.binding import files_root, relative_display, resolve_inside
 
-from .security import AuthenticatedPrincipal
+from .security import AuthenticatedPrincipal, AuthorizationError
 
 
 class MemoryLintRequest(BaseModel):
@@ -44,6 +50,41 @@ def _resolve_engine(services: Any) -> Any | None:
     return None
 
 
+def _norm_key(path: Path) -> str:
+    return os.path.normcase(str(path.resolve()))
+
+
+def _is_user_bound_workspace_root(services: Any, user_id: str, candidate: Path) -> bool:
+    """Return True if ``candidate`` matches a workspace root bound to ``user_id`` or instance default."""
+    target_key = _norm_key(candidate)
+    default_root = getattr(services, "workspace_root", None)
+    if default_root:
+        try:
+            if _norm_key(Path(default_root)) == target_key:
+                return True
+        except OSError:
+            pass
+
+    engine = _resolve_engine(services)
+    if engine is not None:
+        try:
+            with engine.connect() as conn:
+                bound_paths = conn.execute(
+                    select(workspace_roots.c.root_path).where(workspace_roots.c.user_id == str(user_id))
+                ).scalars().all()
+            for raw in bound_paths:
+                if not raw:
+                    continue
+                try:
+                    if _norm_key(Path(str(raw))) == target_key:
+                        return True
+                except OSError:
+                    continue
+        except Exception:  # noqa: BLE001 - fail closed if lookup fails
+            return False
+    return False
+
+
 def _resolve_workspace_root(
     services: Any,
     principal: AuthenticatedPrincipal,
@@ -51,13 +92,31 @@ def _resolve_workspace_root(
 ) -> tuple[Path | None, bool, str | None]:
     explicit_root = (body.workspace_root or body.project_root or "").strip()
     project_id = (body.project_id or "").strip() or None
+    profile_files_active = bool(getattr(services.capabilities, "profile_files", False))
 
     if explicit_root:
+        if profile_files_active:
+            try:
+                root_path = resolve_inside(files_root(principal.user_id), explicit_root)
+            except FolderRejected as exc:
+                raise AuthorizationError(str(exc)) from exc
+            from agentos.permissions.trust import WorkspaceTrustStore
+
+            trusted = WorkspaceTrustStore().is_trusted(principal.user_id, root_path)
+            return root_path, trusted, project_id
+
         services.capabilities.require("host_folders")
+        try:
+            root_path = normalize_path(explicit_root)
+        except FolderRejected as exc:
+            raise ApplicationValidationError(str(exc)) from exc
         from agentos.permissions.trust import WorkspaceTrustStore
 
-        root_path = Path(explicit_root)
         trusted = WorkspaceTrustStore().is_trusted(principal.user_id, root_path)
+        if not trusted and not _is_user_bound_workspace_root(services, principal.user_id, root_path):
+            raise AuthorizationError(
+                "workspace_root não pertence a um projeto/conversa vinculado ou diretório confiável do usuário."
+            )
         return root_path, trusted, project_id
 
     if project_id:
@@ -80,7 +139,11 @@ def _resolve_workspace_root(
             ):
                 bound_root = local_ws.root_for(str(workspace_id), principal.user_id)
                 if bound_root:
-                    services.capabilities.require("host_folders")
+                    if profile_files_active:
+                        if relative_display(files_root(principal.user_id), bound_root) is None:
+                            raise AuthorizationError("Pasta do projeto está fora da área de arquivos do perfil.")
+                    else:
+                        services.capabilities.require("host_folders")
                     from agentos.permissions.trust import WorkspaceTrustStore
 
                     root_path = Path(str(bound_root))
@@ -114,6 +177,12 @@ def register_memory_lint_routes(
 
         def _run() -> dict[str, Any]:
             principal = principal_for(request, mutable=True)
+            services.security.authorize(
+                principal,
+                action="memory.list",
+                resource_id=req.project_id,
+                purpose="memory.lint",
+            )
             services.security.check_rate_limit(
                 principal,
                 action="memory.lint",

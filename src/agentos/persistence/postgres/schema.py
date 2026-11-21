@@ -943,6 +943,13 @@ agent_memories = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 Index("ix_agent_memories_user_updated", agent_memories.c.user_id, agent_memories.c.updated_at)
+# IMPORTANT (SQLite / Alembic batch_alter_table warning — Red Team #11):
+# `uq_agent_memories_active_hash` is an expression-based partial unique index
+# (`COALESCE(project_id, '')`, `COALESCE(agent_key, '')`). SQLAlchemy's SQLite
+# dialect reflector skips expression-based indexes (emitting an SAWarning).
+# Any future Alembic migration (0065+) running `op.batch_alter_table("agent_memories")`
+# on SQLite MUST explicitly recreate this index afterwards by calling
+# `agentos.persistence.postgres.migrate.ensure_agent_memories_active_hash_index(op.get_bind())`.
 Index(
     "uq_agent_memories_active_hash",
     agent_memories.c.user_id,

@@ -19,6 +19,7 @@ import time
 
 from agentos.pathsafety import resolve_contained
 
+from .filters import normalize_rel_path
 from .indexer import ProjectIndexer
 from .models import SearchHit
 from .store import SqliteChunkStore
@@ -77,9 +78,10 @@ class FreshnessChecker:
         unique_paths: list[str] = []
         seen: set[str] = set()
         for hit in window:
-            if hit.path not in seen:
-                seen.add(hit.path)
-                unique_paths.append(hit.path)
+            norm_path = normalize_rel_path(hit.path)
+            if norm_path not in seen:
+                seen.add(norm_path)
+                unique_paths.append(norm_path)
 
         for rel_path in unique_paths:
             resolved = resolve_contained(self._root / rel_path, self._root)
@@ -128,7 +130,7 @@ class FreshnessChecker:
                 pass
 
         if not reindexed_paths:
-            return [hit for hit in window if hit.path in kept_paths]
+            return [hit for hit in window if normalize_rel_path(hit.path) in kept_paths]
 
         if reevaluate is not None:
             return reevaluate(kept_paths, reindexed_paths, discarded_paths)[:effective_limit]
@@ -162,11 +164,12 @@ class FreshnessChecker:
         fresh_hits: list[SearchHit] = []
         emitted_reindexed: set[str] = set()
         for hit in window:
-            if hit.path in kept_paths:
+            norm_path = normalize_rel_path(hit.path)
+            if norm_path in kept_paths:
                 fresh_hits.append(hit)
-            elif hit.path in reindexed_paths and hit.path not in emitted_reindexed:
-                emitted_reindexed.add(hit.path)
-                for chunk in self._store.chunks_of_file(hit.path):
+            elif norm_path in reindexed_paths and norm_path not in emitted_reindexed:
+                emitted_reindexed.add(norm_path)
+                for chunk in self._store.chunks_of_file(norm_path):
                     fresh_hits.append(
                         SearchHit(
                             path=chunk.path,

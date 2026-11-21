@@ -3566,6 +3566,12 @@ class NativeTurnRunner:
                         self.runtime._life(
                             self.turn, "code_verification", status=verification
                         )
+                        if verification == "verified" and callable(self.runtime._on_verification):
+                            self.runtime._last_verification_passed = True
+                            try:
+                                self.runtime._on_verification(True)
+                            except Exception:  # noqa: BLE001 - memory promotion hook never breaks a turn
+                                pass
                     self._invalidate_superseded_learned_window(sink)
                     self.runtime._life(self.turn, "completed")
                     self.runtime.store.finish(self.turn)

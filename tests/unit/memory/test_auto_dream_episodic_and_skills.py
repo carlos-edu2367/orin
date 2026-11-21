@@ -103,6 +103,7 @@ def test_memory_consolidator_saves_episodic_applies_supersedes_and_emits_undo_ev
         "O banco local de testes usa journal_mode=DELETE por padrão.",
         ("sqlite",),
         kind="architecture",
+        source="agent",
         scope_type="project",
     )
     old_id = str(old_receipt["memory_id"])

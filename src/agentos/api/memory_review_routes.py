@@ -319,6 +319,39 @@ def _find_active_hash_duplicate(
     return conn.execute(select(agent_memories).where(and_(*predicates))).mappings().first()
 
 
+def _memory_scope_key(row: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    return (
+        str(row.get("scope_type") or ""),
+        str(row.get("scope_id") or ""),
+        str(row.get("project_id") or ""),
+        str(row.get("agent_key") or ""),
+    )
+
+
+def _has_recorded_conflict_link(
+    conn: Connection,
+    *,
+    user_id: str,
+    memory_id: str,
+    target_id: str,
+) -> bool:
+    hit = conn.execute(
+        select(memory_events.c.id)
+        .where(
+            memory_events.c.user_id == user_id,
+            memory_events.c.event == "conflict",
+            (
+                (memory_events.c.memory_id == memory_id) & (memory_events.c.related_id == target_id)
+            )
+            | (
+                (memory_events.c.memory_id == target_id) & (memory_events.c.related_id == memory_id)
+            ),
+        )
+        .limit(1)
+    ).first()
+    return hit is not None
+
+
 def _approve_or_resolve(
     engine: Engine,
     *,
@@ -362,13 +395,20 @@ def _approve_or_resolve(
                     details={"memory_id": clean_id},
                 )
 
-            target_id = (conflicting_memory_id or "").strip() or None
+            explicit_target_id = (conflicting_memory_id or "").strip() or None
+            target_id = explicit_target_id
             if target_id is None:
                 targets = _latest_conflict_targets(conn, user_id=user_id, memory_ids=[clean_id])
                 target_id = targets.get(clean_id)
 
             target_row: Mapping[str, Any] | None = None
             if target_id:
+                if target_id == clean_id:
+                    return _conflict_response(
+                        "invalid_conflict_target",
+                        "A memória conflitante não pode ser a própria memória em revisão.",
+                        details={"memory_id": clean_id, "conflicting_memory_id": target_id},
+                    )
                 target_row = conn.execute(
                     select(agent_memories).where(
                         agent_memories.c.memory_id == target_id,
@@ -376,7 +416,27 @@ def _approve_or_resolve(
                     )
                 ).mappings().first()
                 if target_row is None:
+                    if explicit_target_id is not None:
+                        return _conflict_response(
+                            "invalid_conflict_target",
+                            "A memória conflitante informada não foi encontrada.",
+                            details={"memory_id": clean_id, "conflicting_memory_id": target_id},
+                        )
                     target_id = None
+                elif explicit_target_id is not None:
+                    same_scope = _memory_scope_key(row) == _memory_scope_key(target_row)
+                    has_conflict = _has_recorded_conflict_link(
+                        conn,
+                        user_id=user_id,
+                        memory_id=clean_id,
+                        target_id=target_id,
+                    )
+                    if not same_scope and not has_conflict:
+                        return _conflict_response(
+                            "invalid_conflict_target",
+                            "A memória conflitante informada não pertence ao mesmo escopo nem possui conflito registrado com esta proposta.",
+                            details={"memory_id": clean_id, "conflicting_memory_id": target_id},
+                        )
 
             # Case 1: keep_old ("Ficar com a antiga")
             if resolution == "keep_old":
@@ -413,6 +473,40 @@ def _approve_or_resolve(
                         "status": "invalid",
                     }
                 )
+
+            # Pre-validate keep_both BEFORE mutating either row so returning 409 commits nothing.
+            if resolution == "keep_both" and target_id is not None and target_row is not None:
+                target_status = str(target_row.get("status") or "")
+                target_fact = str(target_row.get("fact") or "").strip()
+                if target_status == "deleted" or not target_fact:
+                    return _conflict_response(
+                        "tombstone_text_erased",
+                        "A memória conflitante foi esquecida e teve o texto apagado; não pode ser mantida ativa.",
+                        details={
+                            "memory_id": clean_id,
+                            "conflicting_memory_id": target_id,
+                            "status": target_status,
+                        },
+                    )
+                row_hash = str(row.get("text_hash") or "").strip() or compute_text_hash(fact)
+                target_hash = str(target_row.get("text_hash") or "").strip() or compute_text_hash(target_fact)
+                if _memory_scope_key(row) == _memory_scope_key(target_row) and row_hash == target_hash:
+                    return _conflict_response(
+                        "duplicate_active_memory",
+                        "As duas memórias têm texto idêntico no mesmo escopo e não podem coexistir ativas.",
+                        details={"memory_id": clean_id, "existing_memory_id": target_id},
+                    )
+                if target_status != "active":
+                    target_dup = _find_active_hash_duplicate(conn, target_row, exclude_memory_id=target_id)
+                    if target_dup is not None:
+                        return _conflict_response(
+                            "duplicate_active_memory",
+                            "Já existe uma memória ativa com texto idêntico neste escopo.",
+                            details={
+                                "memory_id": target_id,
+                                "existing_memory_id": str(target_dup["memory_id"]),
+                            },
+                        )
 
             # Case 2: keep_new ("Ficar com a nova") — supersede conflicting old memory atomically
             superseded_id: str | None = None
@@ -670,16 +764,28 @@ def _memory_history_payload(engine: Engine, *, user_id: str, memory_id: str) -> 
 
     lifecycle = MemoryLifecycle(engine)
     raw_events = lifecycle.history(clean_id, user_id)
+    last_forgotten_idx = -1
+    last_restored_idx = -1
+    for idx, ev in enumerate(raw_events):
+        ev_name = str(ev.get("event") or "")
+        if ev_name == "forgotten":
+            last_forgotten_idx = idx
+        elif ev_name == "restored":
+            last_restored_idx = idx
+    scrub_all = (
+        str(row.get("status") or "") == "deleted"
+        or (last_forgotten_idx >= 0 and last_restored_idx < last_forgotten_idx)
+    )
     sanitized_events: list[dict[str, Any]] = []
-    for ev in raw_events:
-        is_forgotten = str(ev.get("event") or "") == "forgotten"
+    for idx, ev in enumerate(raw_events):
+        scrub_event = scrub_all or idx <= last_forgotten_idx or str(ev.get("event") or "") == "forgotten"
         sanitized_events.append(
             {
                 "id": int(ev["id"]),
                 "memory_id": str(ev["memory_id"]),
                 "event": str(ev["event"]),
-                "old_text": None if is_forgotten else ev.get("old_text"),
-                "new_text": None if is_forgotten else ev.get("new_text"),
+                "old_text": None if scrub_event else ev.get("old_text"),
+                "new_text": None if scrub_event else ev.get("new_text"),
                 "related_id": ev.get("related_id"),
                 "actor": str(ev.get("actor") or "system"),
                 "conversation_id": ev.get("conversation_id"),

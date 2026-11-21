@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+import json
 from pathlib import PurePosixPath, PureWindowsPath
 import re
 from typing import Any
@@ -46,13 +47,6 @@ _EXTERNAL_TOOL_NAMES: frozenset[str] = frozenset({
     "inspectplugin",
     "search_plugin",
     "searchplugin",
-    "run_subagent",
-    "runsubagent",
-    "agent",
-    "ask_agent",
-    "askagent",
-    "ask_agents",
-    "askagents",
 })
 
 _SHELL_TOOL_NAMES: frozenset[str] = frozenset({
@@ -86,22 +80,26 @@ _NETWORK_COMMAND_RE = re.compile(
     r"(?i)(?:^|[\s;|&(])(?:curl|wget|invoke-webrequest|invoke-restmethod|iwr|irm|httpie)\b"
 )
 
-# Negated memory phrases like "não consigo lembrar" / "I don't remember" must NOT trigger user intent.
+# Negated or interrogative/action phrases must NOT trigger explicit memorization intent.
 _NEGATED_MEMORY_RE = re.compile(
     r"(?iu)\b(?:"
     r"(?:n[aã]o|nunca|jamais)\s+(?:consigo\s+|consegui\s+|me\s+|te\s+|posso\s+|quero\s+)?lembr\w*"
     r"|(?:don['’]?t|do\s+not|didn['’]?t|did\s+not|can['’]?t|cannot|couldn['’]?t|never)\s+remember\b"
+    r"|(?:do|did|can|could|would|will)\s+you\s+(?:even\s+)?remember\b"
+    r"|voc[eê]\s+(?:se\s+)?lembra\w*\b"
+    r"|remember\s+to\s+(?!always\b|never\b|prefer\b|keep\b|save\b|store\b)\w+"
+    r"|lembre(?:-se)?\s+de\s+(?!sempre\b|nunca\b|preferir\b|guardar\b|salvar\b|manter\b|anotar\b)\w+"
     r")"
 )
 
 _EXPLICIT_USER_MEMORY_RE = re.compile(
     r"(?iu)(?:"
-    r"\blembre(?:-se)?\b"
+    r"\blembre(?:-se)?(?:\s*[:,-]|\s+(?:que|disso|disto|de\s+(?:sempre|nunca|preferir|guardar|salvar|manter|anotar)|na\s+mem[oó]ria|em\s+mem[oó]ria)\b)"
     r"|\bmemoriz(?:e|ar)\b"
     r"|\b(?:guarde|guarda|guardar|salve|salva|salvar|grave|grava|gravar|anote|anota|anotar|registre|registra|registrar)\b"
     r".{0,48}\b(?:mem[oó]ria|prefer[eê]ncia|prefer[eê]ncias)\b"
     r"|\b(?:na|em)\s+(?:sua\s+)?mem[oó]ria\b"
-    r"|\bremember\b"
+    r"|\bremember(?:\s*[:,-]|\s+(?:that|this|my|our|i|we|always|never|to\s+(?:always|never|prefer|keep|save|store))\b)"
     r"|\b(?:save|store|keep|add|record|note|put)\b.{0,48}\b(?:memory|preference|preferences)\b"
     r"|\b(?:to|in)\s+(?:your\s+)?memory\b"
     r")"
@@ -269,7 +267,42 @@ def _iter_tool_entries(turn_state: Any) -> list[dict[str, Any]]:
                     fn = tc.get("function") if isinstance(tc.get("function"), Mapping) else tc
                     tc_name = str(fn.get("name") or tc.get("name") or "").strip()
                     if tc_name:
-                        entries.append({"tool_name": tc_name})
+                        entry: dict[str, Any] = {"tool_name": tc_name}
+                        raw_args = fn.get("arguments")
+                        args_obj: Mapping[str, Any] | None = None
+                        if isinstance(raw_args, Mapping):
+                            args_obj = raw_args
+                        elif isinstance(raw_args, str) and raw_args.strip():
+                            try:
+                                parsed = json.loads(raw_args)
+                                if isinstance(parsed, Mapping):
+                                    args_obj = parsed
+                            except (TypeError, ValueError):
+                                args_obj = None
+                        if args_obj is not None:
+                            for k in ("url", "query", "command"):
+                                if args_obj.get(k):
+                                    entry[k] = args_obj.get(k)
+                            path_val = args_obj.get("path") or args_obj.get("file_path") or args_obj.get("notebook_path")
+                            if path_val:
+                                entry["path"] = path_val
+                        entries.append(entry)
+        content_blocks = item.get("content")
+        if isinstance(content_blocks, Sequence) and not isinstance(content_blocks, (str, bytes)):
+            for block in content_blocks:
+                if isinstance(block, Mapping) and str(block.get("type") or "") == "tool_use":
+                    b_name = str(block.get("name") or "").strip()
+                    if b_name:
+                        entry = {"tool_name": b_name}
+                        b_input = block.get("input")
+                        if isinstance(b_input, Mapping):
+                            for k in ("url", "query", "command"):
+                                if b_input.get(k):
+                                    entry[k] = b_input.get(k)
+                            path_val = b_input.get("path") or b_input.get("file_path") or b_input.get("notebook_path")
+                            if path_val:
+                                entry["path"] = path_val
+                        entries.append(entry)
     return entries
 
 
@@ -296,16 +329,12 @@ def infer_source_kind(turn_state: Any) -> tuple[SourceKind, int, str | None]:
         ref = explicit_ref or (f"consolidator:{conv_id}" if conv_id else "consolidator")
         return ("consolidator", 1, _bounded_ref(ref))
 
-    # 2. Explicit user memorization request in the current turn (takes precedence even after web/file reads)
-    user_message = str(_field(turn_state, "user_message") or "")
-    if is_explicit_user_memory_request(user_message):
-        ref = default_ref or "user_prompt"
-        return ("user", 2, _bounded_ref(ref))
-
     workspace_root = str(_field(turn_state, "workspace_root") or "").strip() or None
     entries = _iter_tool_entries(turn_state)
 
-    # 3. Web inputs (WebFetch / WebSearch / browser) -> ("web", 0, ...)
+    # 2. Untrusted web inputs (WebFetch / WebSearch / browser) -> ("web", 0, ...)
+    # Evaluated BEFORE explicit user intent so prompt injections read in the same turn
+    # can NEVER bypass quarantine, user-memory protection, or tombstones.
     for entry in entries:
         tool_name = str(entry.get("tool_name") or "").strip()
         entry_source = str(entry.get("source") or "").strip().lower()
@@ -315,7 +344,7 @@ def infer_source_kind(turn_state: Any) -> tuple[SourceKind, int, str | None]:
             ref = f"web:{label}:{url}" if url else f"web:{label}"
             return ("web", 0, _bounded_ref(ref))
 
-    # 4. External / untrusted tools (MCP, plugins, subagents, network shell, tainted tool) -> ("tool", 0, ...)
+    # 3. External / untrusted tools (MCP, plugins, network shell, tainted tool) -> ("tool", 0, ...)
     for entry in entries:
         tool_name = str(entry.get("tool_name") or "").strip()
         lowered_name = tool_name.lower()
@@ -333,7 +362,7 @@ def infer_source_kind(turn_state: Any) -> tuple[SourceKind, int, str | None]:
         ref = f"tool:external:{conv_id}" if conv_id else "tool:external"
         return ("tool", 0, _bounded_ref(ref))
 
-    # 5. Untrusted external files (uploads, PDFs/docs via view_file/transcribe_pdf, files outside workspace) -> ("file", 0, ...)
+    # 4. Untrusted external files (uploads, PDFs/docs via view_file/transcribe_pdf, files outside workspace) -> ("file", 0, ...)
     for entry in entries:
         tool_name = str(entry.get("tool_name") or "").strip()
         lowered_name = tool_name.lower()
@@ -352,6 +381,12 @@ def infer_source_kind(turn_state: Any) -> tuple[SourceKind, int, str | None]:
         path = str(raw_file or "").strip()
         if _is_untrusted_file_path(path, workspace_root):
             return ("file", 0, _bounded_ref(f"file:{path}"))
+
+    # 5. Explicit user memorization request in a clean turn (no untrusted external input consumed)
+    user_message = str(_field(turn_state, "user_message") or "")
+    if is_explicit_user_memory_request(user_message):
+        ref = default_ref or "user_prompt"
+        return ("user", 2, _bounded_ref(ref))
 
     # 6. Default clean agent write
     return ("agent", 1, _bounded_ref(default_ref))
@@ -395,30 +430,158 @@ def build_write_context_from_turn(
     )
 
 
+def _is_human_user_history_entry(entry: Any, non_user_queued_texts: frozenset[str]) -> bool:
+    """Return True only for plain human user messages, rejecting tool_result lists and non-human injections."""
+    if not isinstance(entry, Mapping):
+        return False
+    if entry.get("role") != "user":
+        return False
+    content = entry.get("content")
+    if not isinstance(content, str):
+        return False
+    stripped = content.strip()
+    if not stripped:
+        return False
+    if entry.get("is_tool_result") is True:
+        return False
+    origin = entry.get("origin")
+    if origin is not None and str(origin).strip().lower() not in {"", "user"}:
+        return False
+    source = entry.get("source")
+    if source is not None and str(source).strip().lower() in {"tool", "friend", "system", "subagent", "web", "mcp"}:
+        return False
+    if stripped.startswith("<system-reminder>") and stripped.endswith("</system-reminder>"):
+        return False
+    if stripped in non_user_queued_texts:
+        return False
+    return True
+
+
+def _extract_current_turn_step_state(
+    store: Any,
+    conv_id: str | None,
+    turn_id: str | None,
+) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """Extract tool calls and non-human queued input texts strictly for the active turn_id."""
+    entries: list[dict[str, Any]] = []
+    non_user_texts: set[str] = set()
+    if not conv_id or not turn_id:
+        return entries, frozenset()
+    reader = getattr(store, "turn_steps", None)
+    if not callable(reader):
+        return entries, frozenset()
+    try:
+        grouped = reader(conv_id, turn_ids=[turn_id])
+    except Exception:  # noqa: BLE001
+        return entries, frozenset()
+    steps = grouped.get(turn_id, []) if isinstance(grouped, Mapping) else []
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        kind = str(step.get("kind") or "")
+        payload = step.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        if kind == "queued_input":
+            origin = str(payload.get("origin") or "user").strip().lower()
+            if origin != "user" or payload.get("resume_reason"):
+                text = str(payload.get("content") or payload.get("text") or "").strip()
+                if text:
+                    non_user_texts.add(text)
+            continue
+        if kind != "assistant_tool_call":
+            continue
+        calls = payload.get("calls")
+        if not isinstance(calls, Sequence) or isinstance(calls, (str, bytes)):
+            continue
+        for call in calls:
+            if not isinstance(call, Mapping):
+                continue
+            name = str(call.get("name") or "").strip()
+            if not name:
+                continue
+            entry: dict[str, Any] = {"tool_name": name}
+            raw_args = call.get("arguments")
+            args_obj: Mapping[str, Any] | None = None
+            if isinstance(raw_args, Mapping):
+                args_obj = raw_args
+            elif isinstance(raw_args, str) and raw_args.strip():
+                try:
+                    parsed = json.loads(raw_args)
+                    if isinstance(parsed, Mapping):
+                        args_obj = parsed
+                except (TypeError, ValueError):
+                    args_obj = None
+            if args_obj is not None:
+                for key in ("url", "query", "command"):
+                    if args_obj.get(key):
+                        entry[key] = args_obj.get(key)
+                path_val = args_obj.get("path") or args_obj.get("file_path") or args_obj.get("notebook_path")
+                if path_val:
+                    entry["path"] = path_val
+            entries.append(entry)
+    return entries, frozenset(non_user_texts)
+
+
 def session_memory_turn_state(session: Any) -> dict[str, Any]:
-    """Extract runtime turn provenance state from a ``TurnSession`` instance."""
+    """Extract runtime turn provenance state strictly scoped to the current turn."""
     store = getattr(session, "store", None)
     turn = getattr(session, "turn", None) or {}
+    conv_id = str(turn.get("conversation_id") or "") or None
+    turn_id = str(turn.get("turn_id") or "") or None
+
+    turn_tool_calls, non_user_queued = _extract_current_turn_step_state(store, conv_id, turn_id)
+    session_extra_tools = getattr(session, "_turn_external_tool_entries", None)
+    if isinstance(session_extra_tools, Sequence) and not isinstance(session_extra_tools, (str, bytes)):
+        turn_tool_calls.extend(item for item in session_extra_tools if isinstance(item, Mapping))
+
     reader = getattr(store, "history_for_turn", None)
     try:
         history = list(reader(turn)) if callable(reader) else []
     except Exception:  # noqa: BLE001
         history = []
-    user_msg = next((str(m.get("content") or "") for m in reversed(history) if isinstance(m, Mapping) and m.get("role") == "user"), "")
-    conv_id = str(turn.get("conversation_id") or "") or None
-    checker = getattr(store, "has_external_tool_calls", None)
-    try:
-        has_ext = bool(checker(conv_id)) if callable(checker) and conv_id else False
-    except Exception:  # noqa: BLE001
-        has_ext = False
+
+    # Locate the last real human user message in history so we never mistake a provider
+    # tool_result list or non-user queued input for the user's own prompt, and never let
+    # earlier turns' tool calls contaminate the current turn.
+    last_user_idx = -1
+    history_user_msg = ""
+    for idx in range(len(history) - 1, -1, -1):
+        entry = history[idx]
+        if _is_human_user_history_entry(entry, non_user_queued):
+            last_user_idx = idx
+            history_user_msg = str(entry.get("content") or "")
+            break
+
+    # Prefer the exact user message stored for this turn when the store exposes it.
+    user_msg = ""
+    user_msg_reader = getattr(store, "user_message_for_turn", None)
+    if callable(user_msg_reader):
+        try:
+            direct_msg = user_msg_reader(turn)
+            if isinstance(direct_msg, str) and direct_msg.strip():
+                user_msg = direct_msg
+        except Exception:  # noqa: BLE001
+            pass
+    if not user_msg:
+        raw_turn_msg = turn.get("user_message")
+        if isinstance(raw_turn_msg, str) and raw_turn_msg.strip():
+            user_msg = raw_turn_msg
+    if not user_msg:
+        user_msg = history_user_msg
+
+    # Only messages AFTER the last real user message belong to the current (resumed) turn.
+    current_turn_history = history[last_user_idx + 1:] if last_user_idx >= 0 else []
+
     ws = getattr(session, "workspace", None)
     root = getattr(ws, "root", None) if ws is not None else None
     return {
         "user_message": user_msg,
-        "history": history,
-        "has_external_tool_calls": has_ext,
+        "tool_calls": turn_tool_calls,
+        "history": current_turn_history,
+        "has_external_tool_calls": False,
         "effective_settings": getattr(session, "effective_settings", None),
-        "turn_id": str(turn.get("turn_id") or "") or None,
+        "turn_id": turn_id,
         "conversation_id": conv_id,
         "workspace_root": str(root) if root is not None else None,
     }
