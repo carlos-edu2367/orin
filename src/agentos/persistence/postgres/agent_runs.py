@@ -169,7 +169,7 @@ class AgentRunStore:
     ) -> AgentRunRecord:
         now = self._now()
         if record is not None:
-            aid = str(record.agent_id).strip()[:64]
+            aid = str(record.agent_id).strip()[:255]
             uid = str(record.user_id)
             cid = str(record.conversation_id)
             tid = str(record.turn_id)
@@ -194,7 +194,7 @@ class AgentRunStore:
         else:
             if not agent_id or not user_id or not conversation_id or not turn_id:
                 raise ValueError("agent_id, user_id, conversation_id and turn_id are required")
-            aid = str(agent_id).strip()[:64]
+            aid = str(agent_id).strip()[:255]
             uid = str(user_id)
             cid = str(conversation_id)
             tid = str(turn_id)

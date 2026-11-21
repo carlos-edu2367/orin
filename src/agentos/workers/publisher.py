@@ -6,13 +6,16 @@ across worker threads while turns within the same conversation are serialized.
 """
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 import logging
 import os
+from pathlib import Path
 import signal
 import threading
 import time
+from typing import Any
 
 from agentos.workers.chat import ChatWorker, create_chat_worker
 
@@ -102,6 +105,154 @@ class ConcurrentTurnRunner:
 _ORPHANS_SWEPT = False
 
 
+def auto_resume_interrupted_agents(
+    engine: Any,
+    *,
+    store: Any = None,
+    runs_dir: Path | None = None,
+    settings_loader: Callable[[str], Any] | None = None,
+    quota_policy: Any = None,
+    resume_handler: Callable[[Any], Any] | None = None,
+) -> list[str]:
+    """Optionally auto-resume interrupted background runs on worker boot (WS-B4, B-RF4).
+
+    Disabled by default (``orchestration.background.autoResume = False``).
+    When enabled, resumes each interrupted agent **at most once** (guarded by the
+    persisted ``auto_resumed`` flag on disk to avoid crash loops) and honors
+    ``QuotaPolicy.check_background``.
+    """
+    from sqlalchemy import select, update
+
+    from agentos.agentic.agent_run_persistence import AgentRunRecorder
+    from agentos.persistence.postgres.schema import agent_runs, conversation_agents
+    from agentos.quota.policy import QuotaPolicy
+    from agentos.settings.registry import resolve as resolve_setting
+    from agentos.settings.loader import EffectiveSettings, SettingsLayer
+
+    def _coerce_settings(raw: Any) -> EffectiveSettings:
+        if isinstance(raw, EffectiveSettings):
+            return raw
+        if isinstance(raw, Mapping):
+            data = dict(raw)
+            return EffectiveSettings(
+                data=data,
+                provenance={},
+                layers=(SettingsLayer(name="user", path=None, data=data),),
+                errors=(),
+                trusted=True,
+            )
+        return EffectiveSettings(data={}, provenance={}, layers=(), errors=(), trusted=True)
+
+    def _load_settings(user_id: str) -> EffectiveSettings:
+        if settings_loader is not None:
+            return _coerce_settings(settings_loader(user_id))
+        try:
+            from agentos.settings.loader import load_effective_settings
+
+            return load_effective_settings(user_id=user_id)
+        except Exception:  # noqa: BLE001
+            return _coerce_settings({})
+
+    def _resolve_quota_policy() -> QuotaPolicy | None:
+        if quota_policy is not None:
+            return quota_policy
+        try:
+            from agentos.persistence.postgres.quota import QuotaStore
+            from agentos.quota.service import QuotaService
+
+            return QuotaPolicy(QuotaService(QuotaStore(engine)))
+        except Exception:  # noqa: BLE001
+            return None
+
+    recorder = AgentRunRecorder(engine, runs_dir=runs_dir)
+    with engine.connect() as conn:
+        interrupted_ids = [
+            str(row[0])
+            for row in conn.execute(
+                select(agent_runs.c.agent_id).where(agent_runs.c.state == "interrupted")
+            ).all()
+            if row and row[0]
+        ]
+    if not interrupted_ids:
+        return []
+
+    policy = _resolve_quota_policy()
+    settings_cache: dict[str, EffectiveSettings] = {}
+    resumed: list[str] = []
+
+    for agent_id in interrupted_ids:
+        run = recorder.get(agent_id)
+        if run is None or run.state != "interrupted":
+            continue
+        effective = settings_cache.get(run.user_id)
+        if effective is None:
+            effective = _load_settings(run.user_id)
+            settings_cache[run.user_id] = effective
+
+        if not bool(resolve_setting(effective, "orchestration.background.autoResume").value):
+            continue
+
+        if recorder.has_auto_resumed(agent_id):
+            continue
+
+        if policy is not None and run.provider:
+            decision = policy.check_background(
+                run.user_id,
+                run.provider,
+                model_id=run.model_id,
+                settings=effective,
+            )
+            if not decision.allowed:
+                _LOGGER.info(
+                    "auto-resume skipped for %s due to quota policy (%s)",
+                    agent_id,
+                    decision.reason,
+                )
+                continue
+
+        # Persist auto_resumed BEFORE dispatching so another crash cannot trigger a loop.
+        recorder.mark_auto_resumed(agent_id)
+        now = datetime.now(UTC)
+        recorder.store.touch(agent_id, state="queued", last_activity_at=now)
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    update(conversation_agents)
+                    .where(conversation_agents.c.agent_id == agent_id)
+                    .values(state="working", updated_at=now)
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            if resume_handler is not None:
+                resume_handler(run)
+            elif store is not None:
+                from agentos.conversations.chat import ChatApplication
+
+                restored = recorder.restore_history(agent_id, history_path=run.history_path)
+                notice = restored.resume_notice()
+                task_hint = str(restored.metadata.get("task") or "")
+                task_part = f" Original task: {task_hint}" if task_hint else ""
+                prompt = (
+                    f"Auto-resume interrupted background subagent `{run.agent_id}` "
+                    f"(subagent_type={run.subagent_type}). {notice}{task_part}"
+                )
+                ChatApplication(store).enqueue(
+                    run.user_id,
+                    run.conversation_id,
+                    prompt,
+                    f"auto-resume:{run.agent_id}",
+                )
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("auto-resume dispatch failed for %s", agent_id, exc_info=True)
+            continue
+
+        resumed.append(agent_id)
+
+    return resumed
+
+
 def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
     """Requeue turns after a worker crash and fail turns no worker can claim."""
     global _ORPHANS_SWEPT
@@ -118,6 +269,7 @@ def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
                 from agentos.agentic.background_agents import fail_orphaned_running_agents
 
                 fail_orphaned_running_agents(engine)
+                auto_resume_interrupted_agents(engine, store=store)
                 _ORPHANS_SWEPT = True
             except Exception:
                 _LOGGER.debug("could not sweep orphaned running agents", exc_info=True)

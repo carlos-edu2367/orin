@@ -290,12 +290,12 @@ def test_session_b_check_subagent_reads_completed_agent_from_session_a(tmp_path:
         assert done_from_disk.payload["status"] == "completed"
         assert "Cross-turn report ready." in done_from_disk.content
 
-        # And test startup sweep of orphaned running/working agents in DB
+        # And test startup sweep of orphaned running/working agents in DB (B-RF4: interrupted, resumable)
         session_b.agents_store.set_state(agent_id, "working")
         swept = fail_orphaned_running_agents(engine, workspace_root_resolver=lambda _cid: session_b.workspace.root)
         assert agent_id in swept
         row = session_b.agents_store.get(agent_id)
-        assert row is not None and row["state"] == "failed"
+        assert row is not None and row["state"] == "interrupted"
     finally:
         gate.set()
         session_a.close_background_subagents()

@@ -1295,6 +1295,9 @@ class _SubagentStore:
         task: str,
         *,
         initial_history: list[dict[str, Any]] | None = None,
+        on_model_step: Callable[[list[dict[str, Any]]], None] | None = None,
+        on_tool_activity: Callable[[str, str | None], None] | None = None,
+        on_usage_recorded: Callable[[int, int, float | None], None] | None = None,
     ) -> None:
         self._session = session
         self._turn = turn
@@ -1302,6 +1305,13 @@ class _SubagentStore:
         self.name = name
         self._task = task
         self._initial_history = [dict(item) for item in initial_history] if initial_history else None
+        self._on_model_step = on_model_step
+        self._on_tool_activity = on_tool_activity
+        self._on_usage_recorded = on_usage_recorded
+        self._transcript: list[dict[str, Any]] = [
+            *([dict(item) for item in initial_history] if initial_history else []),
+            {"role": "user", "content": task},
+        ]
         self.text: list[str] = []
         self.prior_text: list[str] = []
         self.failed = False
@@ -1310,6 +1320,15 @@ class _SubagentStore:
         self._input_tokens: int = 0
         self._output_tokens: int = 0
         self._usage_reported: bool = False
+
+    def snapshot_transcript(self) -> list[dict[str, Any]]:
+        snap = [dict(item) for item in self._transcript]
+        pending = "".join(self.text).strip()
+        if pending:
+            if not snap or snap[-1].get("role") != "assistant" or snap[-1].get("content") != pending:
+                snap.append({"role": "assistant", "content": pending})
+        return snap
+
 
     def _record_tool_call_line(
         self, inv_id: str, tool_name: str, target: str
@@ -1336,6 +1355,11 @@ class _SubagentStore:
 
     def delta(self, turn: dict[str, object], text: str) -> None:
         self.text.append(text)
+        if callable(self._on_tool_activity):
+            try:
+                self._on_tool_activity("activity", None)
+            except Exception:
+                pass
 
     def finish(self, turn: dict[str, object], *, failed: bool = False, code: str | None = None) -> None:
         self.failed, self.error_code = failed, code
@@ -1347,6 +1371,18 @@ class _SubagentStore:
         if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
             self._output_tokens += output_tokens
             self._usage_reported = True
+        if callable(self._on_usage_recorded):
+            try:
+                in_tok = input_tokens if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) else 0
+                out_tok = output_tokens if isinstance(output_tokens, int) and not isinstance(output_tokens, bool) else 0
+                self._on_usage_recorded(in_tok, out_tok, None)
+            except Exception:
+                pass
+        if callable(self._on_model_step):
+            try:
+                self._on_model_step(self.snapshot_transcript())
+            except Exception:
+                pass
         self._session.record_usage(
             turn,
             agent_id=self.agent_id,
@@ -1371,6 +1407,11 @@ class _SubagentStore:
                     target = val.strip()
                     break
             self._record_tool_call_line(inv_id, name, target)
+            if callable(self._on_tool_activity):
+                try:
+                    self._on_tool_activity(state, name)
+                except Exception:
+                    pass
         self._session.emit_lifecycle(turn, state, agent_id=self.agent_id, agent_name=self.name, **payload)
 
     def record_step(self, turn: dict[str, object], **values: object) -> None:
@@ -1380,9 +1421,36 @@ class _SubagentStore:
             or values.get("kind") == "assistant_tool_call"
             or (isinstance(payload, Mapping) and (payload.get("calls") or payload.get("tool_calls")))
         )
+        kind = str(values.get("kind") or "")
+        if has_tool_calls:
+            text_part = "".join(self.text).strip()
+            calls_raw = payload.get("calls") if isinstance(payload, Mapping) else None
+            call_names: list[str] = []
+            if isinstance(calls_raw, list):
+                for c in calls_raw:
+                    if isinstance(c, Mapping) and c.get("name"):
+                        call_names.append(str(c["name"]))
+            summary = text_part
+            if call_names:
+                suffix = f"[tool_calls: {', '.join(call_names)}]"
+                summary = f"{summary}\n{suffix}".strip() if summary else suffix
+            if summary:
+                self._transcript.append({"role": "assistant", "content": summary})
+        elif kind == "tool_result" and isinstance(payload, Mapping):
+            tname = str(values.get("tool_name") or payload.get("name") or "tool")
+            tstatus = str(payload.get("status") or "")
+            tcontent = str(payload.get("content") or "")[:1000]
+            self._transcript.append(
+                {"role": "user", "content": f"[tool_result {tname} ({tstatus})]: {tcontent}"}
+            )
         if has_tool_calls and self.text:
             self.prior_text.extend(self.text)
             self.text = []
+        if callable(self._on_model_step) and (has_tool_calls or kind == "tool_result"):
+            try:
+                self._on_model_step(self.snapshot_transcript())
+            except Exception:
+                pass
         recorder = getattr(self._session.store, "record_step", None)
         if callable(recorder):
             values.setdefault("agent_id", self.agent_id)
@@ -1783,6 +1851,9 @@ class TurnSession:
         self._teammate_control_meta: dict[str, dict[str, str]] = {}
         self._main_toolset_ref: Any = None
         self._bg_subagent_executor: ThreadPoolExecutor | None = None
+        self._agent_runs_dir: Path | None = None
+        self._agent_run_recorder_cache: Any = None
+        self._progress_tracker_cache: Any = None
         self._read_file_state: dict[str, object] = read_file_state if read_file_state is not None else {}
         if read_file_state:
             try:
@@ -3062,6 +3133,7 @@ class TurnSession:
         team_name: str | None = None,
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
+        pipeline_run_id: str | None = None,
     ) -> ToolOutcome:
         if teammate_name and caller is not None and not caller.is_main:
             return ToolOutcome(
@@ -3073,6 +3145,7 @@ class TurnSession:
             return self._start_subagent(
                 subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, agent_id=agent_id,
                 run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
+                pipeline_run_id=pipeline_run_id,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
         if refusal is not None:
@@ -3082,6 +3155,7 @@ class TurnSession:
             outcome = self._start_subagent(
                 subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, agent_id=agent_id,
                 run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
+                pipeline_run_id=pipeline_run_id,
             )
         except BaseException:
             self._release_teammate(clean_name)  # a start that raised never began
@@ -3106,6 +3180,7 @@ class TurnSession:
         team_name: str | None = None,
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
+        pipeline_run_id: str | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -3142,6 +3217,7 @@ class TurnSession:
             team_name=str(team_name or "").strip()[:64] or None,
             character_name=character_name,
             caller=caller,
+            pipeline_run_id=pipeline_run_id,
         )
 
     def _ask_agent(
@@ -3160,6 +3236,7 @@ class TurnSession:
         team_name: str | None = None,
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
+        pipeline_run_id: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         max_depth = self._subagent_max_depth()
@@ -3481,6 +3558,8 @@ class TurnSession:
             routing = {}
         if requested_effort is not None:
             routing["requested_effort"] = requested_effort
+        if pipeline_run_id is not None:
+            routing["pipeline_run_id"] = str(pipeline_run_id)
         with self._subagent_lock:
             if self._max_subagents_per_turn is not None and self._subagent_runs >= self._max_subagents_per_turn:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
@@ -3963,6 +4042,7 @@ class TurnSession:
         child_provider: str | None = None,
         model_chain: tuple[str, ...] = (),
         requested_effort: str | None = None,
+        pipeline_run_id: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         if hook_cancel is None:
@@ -4039,6 +4119,7 @@ class TurnSession:
                 child_provider=child_provider,
                 model_chain=model_chain,
                 requested_effort=requested_effort,
+                pipeline_run_id=pipeline_run_id,
             )
         finally:
             try:
@@ -4152,6 +4233,7 @@ class TurnSession:
         child_provider: str | None = None,
         model_chain: tuple[str, ...] = (),
         requested_effort: str | None = None,
+        pipeline_run_id: str | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         parent_agent_id = caller.agent_id
@@ -4226,6 +4308,10 @@ class TurnSession:
         final_agent_state = "failed"
         delegation_settled = False
         subagent_tools: AgentToolset | None = None
+        sub_store_ref: list[_SubagentStore | None] = [None]
+        prior_transcript_ref: list[list[dict[str, Any]] | None] = [None]
+        run_recorder = self._agent_run_recorder()
+        effective_task_text = task_text
         try:
             # A read-only caller only starts read-only subagents.
             read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only")) or caller.read_only
@@ -4243,6 +4329,18 @@ class TurnSession:
                     )
                     if reg_hist:
                         initial_history = reg_hist
+                if initial_history is None and run_recorder is not None:
+                    prior_run = run_recorder.get(str(resumed_agent_id))
+                    restored = run_recorder.restore_history(
+                        str(resumed_agent_id),
+                        history_path=prior_run.history_path if prior_run is not None else None,
+                    )
+                    if restored.messages:
+                        initial_history = restored.messages
+                    if restored.corrupted or (prior_run is not None and prior_run.state in {"interrupted", "queued"}):
+                        notice = restored.resume_notice()
+                        if notice not in effective_task_text:
+                            effective_task_text = f"{notice}\n\n{effective_task_text}"
             if initial_history is None and inherit_context and caller.history is not None:
                 # A fork inherits the conversation of whoever started it (the main agent's, or a subagent's own).
                 try:
@@ -4254,14 +4352,74 @@ class TurnSession:
                 **record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition,
                 **({"agent_memory_summary": frozen_agent_memory} if frozen_agent_memory else {}),
             }
+            resolved_effort = self._definition_effort(
+                definition, active_model_id, provider_name,
+                call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id,
+            )
+            if run_recorder is not None:
+                try:
+                    run_recorder.start(
+                        agent_id=agent_id,
+                        user_id=str(self.turn.get("user_id") or ""),
+                        conversation_id=str(self.turn.get("conversation_id") or ""),
+                        turn_id=str(self.turn.get("turn_id") or ""),
+                        parent_agent_id=parent_agent_id,
+                        subagent_type=subagent_kind,
+                        provider=provider_name or None,
+                        model_id=active_model_id or None,
+                        effort=resolved_effort,
+                        task=effective_task_text,
+                        agent_name=clean,
+                        state="running",
+                        pipeline_run_id=pipeline_run_id,
+                        result_ref=self._agent_output_file(agent_id),
+                        initial_history=initial_history,
+                    )
+                except Exception:
+                    logger.debug("agent_run_recorder.start failed for %s", agent_id, exc_info=True)
+
+            progress_tracker = self._progress_tracker()
+            progress_tracker.start(
+                agent_id,
+                conversation_id=str(self.turn.get("conversation_id") or ""),
+                parent_agent_id=parent_agent_id,
+            )
+
+            def _on_subagent_model_step(hist: list[dict[str, Any]]) -> None:
+                if run_recorder is None:
+                    return
+                st = sub_store_ref[0]
+                run_recorder.touch(
+                    agent_id,
+                    tool_calls=len(st._tool_call_lines) if st is not None else 0,
+                    input_tokens=st._input_tokens if st is not None else 0,
+                    output_tokens=st._output_tokens if st is not None else 0,
+                    history=hist,
+                )
+
+            def _on_subagent_tool_activity(kind: str, tool_name: str | None) -> None:
+                if kind == "tool_started" and tool_name:
+                    progress_tracker.on_tool_start(agent_id, tool_name)
+                elif kind == "tool_finished":
+                    progress_tracker.on_tool_finish(agent_id, tool_name)
+                else:
+                    progress_tracker.on_activity(agent_id)
+
+            def _on_subagent_usage(in_tok: int, out_tok: int, cost: float | None) -> None:
+                progress_tracker.on_usage(agent_id, input_tokens=in_tok, output_tokens=out_tok, cost_usd=cost)
+
             sub_store = _SubagentStore(
                 self,
                 subagent_turn,
                 agent_id,
                 clean,
-                self._subagent_task(enriched_record, task_text),
+                self._subagent_task(enriched_record, effective_task_text),
                 initial_history=initial_history,
+                on_model_step=_on_subagent_model_step,
+                on_tool_activity=_on_subagent_tool_activity,
+                on_usage_recorded=_on_subagent_usage,
             )
+            sub_store_ref[0] = sub_store
             from .agent_definitions import AgentToolPolicy, child_permission_mode
 
             # W5: a definition's mode applies only when it is not more permissive than the parent's; a plugin's never does.
@@ -4405,10 +4563,14 @@ class TurnSession:
                     subagent_turn,
                     agent_id,
                     clean,
-                    self._subagent_task(enriched_record, task_text),
+                    self._subagent_task(enriched_record, effective_task_text),
                     initial_history=initial_history,
+                    on_model_step=_on_subagent_model_step,
+                    on_tool_activity=_on_subagent_tool_activity,
+                    on_usage_recorded=_on_subagent_usage,
                 )
                 store_cell[0] = sub_store
+                sub_store_ref[0] = sub_store
                 runtime = AgenticTurnRuntime(
                     store=sub_store,
                     provider=fallback_provider_instance,
@@ -4450,7 +4612,7 @@ class TurnSession:
             )
             acceptable_state = result.state in {"completed", "completed_with_caveats"} or (limit_stopped and bool(answer))
             prior_transcript = [dict(item) for item in initial_history] if initial_history else []
-            prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, task_text)})
+            prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, effective_task_text)})
             recent_calls = sub_store.recent_tool_calls(15)
             progress_note = (
                 "Partial progress before interruption:\n" + "\n".join(f"- {c}" for c in recent_calls)
@@ -4463,6 +4625,7 @@ class TurnSession:
                 prior_transcript.append({"role": "assistant", "content": f"{answer}\n\n{progress_note}"})
             elif progress_note:
                 prior_transcript.append({"role": "assistant", "content": progress_note})
+            prior_transcript_ref[0] = prior_transcript
             with self._subagent_lock:
                 self._subagent_histories[agent_id] = prior_transcript
             BACKGROUND_AGENTS.save_history(
@@ -4564,6 +4727,30 @@ class TurnSession:
                     self.agents_store.set_state(agent_id, final_agent_state)
                 except Exception:
                     pass
+            try:
+                if "progress_tracker" in locals() and progress_tracker is not None:
+                    progress_tracker.finish(agent_id, state=final_agent_state)
+            except Exception:
+                logger.debug("progress_tracker.finish failed for %s", agent_id, exc_info=True)
+            if run_recorder is not None:
+                try:
+                    st = sub_store_ref[0]
+                    final_hist = (
+                        prior_transcript_ref[0]
+                        if prior_transcript_ref[0] is not None
+                        else (st.snapshot_transcript() if st is not None else None)
+                    )
+                    run_recorder.finish(
+                        agent_id,
+                        state=final_agent_state,
+                        tool_calls=len(st._tool_call_lines) if st is not None else 0,
+                        input_tokens=st._input_tokens if st is not None else 0,
+                        output_tokens=st._output_tokens if st is not None else 0,
+                        result_ref=self._agent_output_file(agent_id),
+                        history=final_hist,
+                    )
+                except Exception:
+                    logger.debug("agent_run_recorder.finish failed for %s", agent_id, exc_info=True)
             if not delegation_settled:
                 try:
                     self._record(
@@ -5063,6 +5250,169 @@ class TurnSession:
         )
         self._reminders.add("teammate", f"Teammate {name} is idle.{waiting} Its last report:\n{report}", key=f"teammate-idle:{name}:{uuid4().hex}")
 
+    def _agent_run_recorder(self):
+        engine = (
+            getattr(self.agents_store, "_engine", None)
+            or getattr(self.chat_store, "_engine", None)
+            or getattr(self.store, "_engine", None)
+        )
+        if engine is None:
+            return None
+        cached = getattr(self, "_agent_run_recorder_cache", None)
+        runs_dir = getattr(self, "_agent_runs_dir", None)
+        if cached is not None and (runs_dir is None or cached.runs_dir == Path(runs_dir)):
+            return cached
+        from .agent_run_persistence import AgentRunRecorder
+
+        recorder = AgentRunRecorder(engine, runs_dir=runs_dir)
+        self._agent_run_recorder_cache = recorder
+        return recorder
+
+    def _stall_settings(self) -> tuple[float, bool]:
+        from agentos.settings.registry import resolve as resolve_setting
+
+        effective = getattr(self, "effective_settings", None)
+        minutes = 10.0
+        auto_cancel = False
+        if effective is not None:
+            try:
+                minutes = float(resolve_setting(effective, "orchestration.stall.minutes").value)
+            except Exception:
+                minutes = 10.0
+            try:
+                auto_cancel = bool(resolve_setting(effective, "orchestration.stall.autoCancel").value)
+            except Exception:
+                auto_cancel = False
+        return max(0.01, minutes), auto_cancel
+
+    def _progress_tracker(self):
+        cached = getattr(self, "_progress_tracker_cache", None)
+        if cached is not None:
+            return cached
+        from .agent_progress import ProgressTracker
+
+        def _emit_progress(snap) -> None:
+            try:
+                self._record(
+                    AgentActivityEventType.AGENT_PROGRESS,
+                    f"Progresso de {snap.agent_id}",
+                    snap.to_payload(),
+                    agent_id=snap.agent_id,
+                    parent_agent_id=snap.parent_agent_id,
+                )
+            except Exception:
+                pass
+
+        def _emit_stalled(snap) -> None:
+            try:
+                self._record(
+                    AgentActivityEventType.AGENT_STALLED,
+                    f"Subagente {snap.agent_id} sem atividade (stalled)",
+                    snap.to_payload(),
+                    agent_id=snap.agent_id,
+                    parent_agent_id=snap.parent_agent_id,
+                )
+            except Exception:
+                pass
+
+        tracker = ProgressTracker(
+            clock=getattr(self, "_progress_clock", None),
+            wall_clock=getattr(self, "_progress_wall_clock", None),
+            on_progress=_emit_progress,
+            on_stalled=_emit_stalled,
+            recorder=self._agent_run_recorder(),
+        )
+        self._progress_tracker_cache = tracker
+        return tracker
+
+    def _progress_payload_for(
+        self,
+        agent_id: str,
+        *,
+        fallback_status: str,
+        check_stall: bool = False,
+    ) -> dict[str, object]:
+        tracker = self._progress_tracker()
+        snap = None
+        if check_stall:
+            stall_minutes, auto_cancel = self._stall_settings()
+            snap = tracker.check_stall(
+                str(agent_id),
+                stall_minutes=stall_minutes,
+                auto_cancel=auto_cancel,
+                cancel_fn=self._stop_background_subagent,
+            )
+        if snap is None:
+            snap = tracker.snapshot(str(agent_id))
+        if snap is not None:
+            return snap.to_payload()
+        recorder = self._agent_run_recorder()
+        run = recorder.get(str(agent_id)) if recorder is not None else None
+        if run is not None:
+            end_dt = run.finished_at or datetime.now(UTC)
+            elapsed = max(0.0, (end_dt - run.created_at).total_seconds())
+            return {
+                "state": run.state,
+                "elapsed_seconds": round(elapsed, 3),
+                "last_activity_at": run.last_activity_at.astimezone(UTC).isoformat(),
+                "current_tool": None,
+                "tool_calls": int(run.tool_calls),
+                "input_tokens": int(run.input_tokens),
+                "output_tokens": int(run.output_tokens),
+                "cost_usd": float(run.cost_usd) if run.cost_usd is not None else 0.0,
+                "stalled": run.state == "stalled",
+            }
+        return {
+            "state": fallback_status,
+            "elapsed_seconds": 0.0,
+            "last_activity_at": None,
+            "current_tool": None,
+            "tool_calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+            "stalled": fallback_status == "stalled",
+        }
+
+    def resume_interrupted_subagent(
+        self,
+        agent_id: str,
+        *,
+        task: str | None = None,
+        run_in_background: bool = True,
+    ) -> ToolOutcome:
+        """Resume an interrupted background subagent from its persisted run and history (WS-B4, B-RF4)."""
+        recorder = self._agent_run_recorder()
+        run = recorder.get(str(agent_id)) if recorder is not None else None
+        if run is None:
+            return ToolOutcome(
+                "failed",
+                f"Subagente {agent_id} não encontrado",
+                f"No persisted agent run found for '{agent_id}'.",
+                {"agent_id": str(agent_id), "tool_kind": "agent"},
+                "AGENT_NOT_FOUND",
+            )
+        if run.state not in {"interrupted", "queued"}:
+            return ToolOutcome(
+                "failed",
+                f"Subagente {agent_id} não pode ser retomado",
+                f"Agent run '{agent_id}' is in state '{run.state}' and cannot be resumed.",
+                {"agent_id": str(agent_id), "state": run.state, "tool_kind": "agent"},
+                "AGENT_NOT_RESUMABLE",
+            )
+        restored = recorder.restore_history(str(agent_id), history_path=run.history_path)
+        base_task = str(task or restored.metadata.get("task") or "Continue your interrupted task.")
+        resume_task = f"{restored.resume_notice()}\n\n{base_task}"
+        subagent_type = run.subagent_type or "general"
+        return self._ask_agent(
+            subagent_type,
+            resume_task,
+            resumed_agent_id=str(agent_id),
+            run_in_background=bool(run_in_background),
+            requested_effort=run.effort,
+            pipeline_run_id=run.pipeline_run_id,
+        )
+
     def _stop_background_subagent(self, agent_id: str, *, caller: SubagentCaller | None = None) -> ToolOutcome:
         """TaskStop for a background agent: it stops at its next step, and so does everything it started (W5)."""
         refusal = self._ownership_refusal(str(agent_id), caller)
@@ -5131,8 +5481,14 @@ class TurnSession:
                     report_text = ""
             if db_state in {"running", "working"}:
                 status = "running"
+            elif db_state == "stalled":
+                status = "stalled"
+            elif db_state == "interrupted":
+                status = "interrupted"
             elif db_state in {"idle", "completed", "succeeded"}:
                 status = "completed"
+            elif db_state in {"cancelled", "stopped"}:
+                status = "cancelled"
             else:
                 status = "failed"
             return {
@@ -5166,11 +5522,13 @@ class TurnSession:
             output_file = str(entry.get("output_file") or self._agent_output_file(str(agent_id)))
             report_text = str(entry.get("report_text") or "")
             outcome_status = "succeeded" if status != "failed" else "failed"
+            progress = self._progress_payload_for(str(agent_id), fallback_status=status, check_stall=(status == "running"))
             return ToolOutcome(
                 outcome_status,
                 f"Relatório de {agent_name}",
                 report_text or f"Subagent '{agent_name}' (agent_id=\"{agent_id}\") status: {status}.",
                 {
+                    **progress,
                     "agent_id": agent_id,
                     "agent_name": agent_name,
                     "status": status,
@@ -5184,14 +5542,17 @@ class TurnSession:
         if not future.done() and wait_seconds > 0:
             self._wait_subagent_futures([future], float(wait_seconds), caller)
         if not future.done():
+            progress = self._progress_payload_for(str(agent_id), fallback_status="running", check_stall=True)
+            live_status = "cancelled" if progress.get("state") == "cancelled" else "running"
             return ToolOutcome(
                 "succeeded",
                 f"{agent_name} ainda em execução",
                 f"Subagent '{agent_name}' (agent_id=\"{agent_id}\") is still running in the background.",
                 {
+                    **progress,
                     "agent_id": agent_id,
                     "agent_name": agent_name,
-                    "status": "running",
+                    "status": live_status,
                     "background": True,
                     "label": agent_name,
                     "tool_kind": "agent",
@@ -5200,11 +5561,13 @@ class TurnSession:
         try:
             outcome = future.result(timeout=0)
         except Exception as error:
+            progress = self._progress_payload_for(str(agent_id), fallback_status="failed", check_stall=False)
             return ToolOutcome(
                 "failed",
                 f"{agent_name} falhou",
                 f"Background subagent '{agent_name}' raised {type(error).__name__}: {error}",
                 {
+                    **progress,
                     "agent_id": agent_id,
                     "agent_name": agent_name,
                     "status": "failed",
@@ -5215,11 +5578,14 @@ class TurnSession:
                 "SUBAGENT_EXCEPTION",
             )
         BACKGROUND_AGENTS.mark_notified(conv_id, str(agent_id))
+        final_status = "completed" if outcome.status == "succeeded" else "failed"
+        progress = self._progress_payload_for(str(agent_id), fallback_status=final_status, check_stall=False)
         merged_payload = {
             **dict(outcome.payload),
+            **progress,
             "agent_id": agent_id,
             "agent_name": agent_name,
-            "status": "completed" if outcome.status == "succeeded" else "failed",
+            "status": final_status,
             "background": True,
         }
         return ToolOutcome(
