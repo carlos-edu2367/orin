@@ -2261,6 +2261,7 @@ def test_f05_verify_continuation_works_when_resume_session_id_is_empty(
         provider=prov,
         toolset=toolset,
         phase_controller=PhaseController(resumed_contract=True),
+        effective_settings={"orchestration": {"selfVerify": {"enabled": True}}},
         limits=AgenticLimits(
             max_iterations=10, max_actions=10, context_window_tokens=1_000_000
         ),

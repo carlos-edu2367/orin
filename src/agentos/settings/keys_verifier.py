@@ -10,6 +10,15 @@ VERIFIER_MODEL_POLICY_CHOICES: tuple[str, ...] = ("cross_family", "same_model", 
 
 VERIFIER_KEYS: tuple[SettingKey, ...] = (
     SettingKey(
+        path="orchestration.selfVerify.enabled",
+        type="boolean",
+        default=False,
+        scope=Scope.PROJECT_OFF_ONLY,
+        group="verifier",
+        label="Auto-verificação antes de responder",
+        description="Pede ao próprio agente uma rodada extra de conferência antes de encerrar turnos que alteraram arquivos. Antes da 0.13 esta rodada era automática.",
+    ),
+    SettingKey(
         path="orchestration.verifier.enabled",
         type="boolean",
         default=False,
