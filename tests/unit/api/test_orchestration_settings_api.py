@@ -83,6 +83,13 @@ def test_get_returns_registered_keys_with_defaults_layers_and_filters(tmp_path: 
     assert "effort.subagentPolicy" in items
     assert "quota.policy.warnPercent" in items
     assert "context.windowOverrides" in items
+    assert items["orchestration.agentMessages.parentTool"]["default"] is True
+    assert items["orchestration.agentMessages.parentTool"]["value"] is True
+    assert items["orchestration.agentMessages.continueOnUnread"]["default"] is True
+    assert items["orchestration.agentMessages.continueOnUnread"]["value"] is True
+    assert items["friend.sessionDelivery"]["default"] == "now"
+    assert items["friend.sessionDelivery"]["value"] == "now"
+    assert items["friend.sessionDelivery"]["choices"] == ["now", "queue"]
 
     policy = items["effort.subagentPolicy"]
     assert policy["value"] == "model_default"

@@ -721,6 +721,8 @@ conversation_input_queue = Table(
     Column("conversation_id", String(255), nullable=False), Column("user_id", String(255), nullable=False),
     Column("content", String(16000), nullable=False), Column("state", String(16), nullable=False),
     Column("turn_id", String(255), nullable=True), Column("idempotency_key", String(255), nullable=True),
+    Column("origin", String(16), nullable=False, server_default="user"),
+    Column("origin_conversation_id", String(255), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False), Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 Index("ix_conversation_input_queue_pending", conversation_input_queue.c.conversation_id, conversation_input_queue.c.state, conversation_input_queue.c.id)
@@ -1086,6 +1088,9 @@ conversation_agent_controls = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("consumed_at", DateTime(timezone=True), nullable=True),
     Column("outcome", String(16), nullable=True),
+    Column("sender_kind", String(16), nullable=False, server_default="user"),
+    Column("sender_agent_id", String(64), nullable=True),
+    Column("delivered_at", DateTime(timezone=True), nullable=True),
 )
 Index(
     "ix_conversation_agent_controls_pending",

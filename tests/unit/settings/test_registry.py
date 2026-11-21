@@ -336,3 +336,95 @@ def test_loader_still_drops_scalar_effort_and_empty_effort_dict_from_project(tmp
     _write(repo_dict / ".orin" / "settings.json", {"effort": {"boostKeyword": True, "maxForSubagents": "bogus"}})
     settings_dict = load_effective_settings(repo_dict, trusted=True)
     assert settings_dict.get("effort") is None
+
+
+def test_messages_keys_registered_with_defaults_scopes_and_choices() -> None:
+    expected = {
+        "orchestration.agentMessages.parentTool": (True, Scope.PROJECT_OFF_ONLY, "boolean", None),
+        "orchestration.agentMessages.continueOnUnread": (True, Scope.USER_ONLY, "boolean", None),
+        "friend.sessionDelivery": ("now", Scope.USER_ONLY, "choice", ("now", "queue")),
+    }
+    empty = empty_settings()
+    for path, (default_value, scope, key_type, choices) in expected.items():
+        assert path in REGISTRY, f"missing key {path}"
+        key = REGISTRY[path]
+        assert key.scope is scope
+        assert key.type == key_type
+        assert key.choices == choices
+        assert key.label.strip()
+        assert key.description.strip()
+        assert resolve(empty, path) == ResolvedSetting(value=default_value, layer="default", default=default_value)
+
+
+def test_messages_keys_validation_and_scope_resolution(tmp_path: Path) -> None:
+    # validate_change accepts valid values and rejects values outside now|queue
+    assert validate_change("orchestration.agentMessages.parentTool", False) is False
+    assert validate_change("orchestration.agentMessages.continueOnUnread", False) is False
+    assert validate_change("friend.sessionDelivery", "now") == "now"
+    assert validate_change("friend.sessionDelivery", "queue") == "queue"
+
+    with pytest.raises(ValueError):
+        validate_change("friend.sessionDelivery", "later")
+    with pytest.raises(ValueError):
+        validate_change("friend.sessionDelivery", None)
+    with pytest.raises(ValueError):
+        validate_change("friend.sessionDelivery", 123)
+    with pytest.raises(ValueError):
+        validate_change("orchestration.agentMessages.parentTool", "false")
+
+    # PROJECT_OFF_ONLY on parentTool: project True is ignored, project False turns it off
+    user_off_project_on = _synthetic(
+        ("user", {"orchestration": {"agentMessages": {"parentTool": False}}}),
+        ("project", {"orchestration": {"agentMessages": {"parentTool": True}}}),
+    )
+    assert resolve(user_off_project_on, "orchestration.agentMessages.parentTool") == ResolvedSetting(
+        False, "user", True
+    )
+
+    default_on_project_off = _synthetic(
+        ("project", {"orchestration": {"agentMessages": {"parentTool": False}}}),
+    )
+    assert resolve(default_on_project_off, "orchestration.agentMessages.parentTool") == ResolvedSetting(
+        False, "project", True
+    )
+
+    # USER_ONLY on continueOnUnread and friend.sessionDelivery: project layer ignored
+    project_overrides = _synthetic(
+        ("project", {"orchestration": {"agentMessages": {"continueOnUnread": False}}, "friend": {"sessionDelivery": "queue"}}),
+    )
+    assert resolve(project_overrides, "orchestration.agentMessages.continueOnUnread") == ResolvedSetting(
+        True, "default", True
+    )
+    assert resolve(project_overrides, "friend.sessionDelivery") == ResolvedSetting("now", "default", "now")
+
+    # End-to-end via load_effective_settings on real files
+    project = tmp_path / "repo-messages"
+    _write(
+        orin_user_dir() / "settings.json",
+        {
+            "orchestration": {"agentMessages": {"parentTool": False, "continueOnUnread": True}},
+            "friend": {"sessionDelivery": "now"},
+        },
+    )
+    _write(
+        project / ".orin" / "settings.json",
+        {
+            "orchestration": {"agentMessages": {"parentTool": True, "continueOnUnread": False}},
+            "friend": {"sessionDelivery": "queue"},
+        },
+    )
+    _write(orin_managed_dir() / "managed-settings.json", {})
+    loaded = load_effective_settings(project, trusted=True)
+    assert resolve(loaded, "orchestration.agentMessages.parentTool") == ResolvedSetting(False, "user", True)
+    assert resolve(loaded, "orchestration.agentMessages.continueOnUnread") == ResolvedSetting(True, "user", True)
+    assert resolve(loaded, "friend.sessionDelivery") == ResolvedSetting("now", "user", "now")
+
+    # Now project explicitly disables parentTool while user leaves it at default (True)
+    _write(orin_user_dir() / "settings.json", {})
+    _write(
+        project / ".orin" / "settings.json",
+        {"orchestration": {"agentMessages": {"parentTool": False}}},
+    )
+    loaded_off = load_effective_settings(project, trusted=True)
+    assert resolve(loaded_off, "orchestration.agentMessages.parentTool") == ResolvedSetting(False, "project", True)
+

@@ -646,6 +646,11 @@ def _ensure_conversation_mode_columns(engine: Engine) -> None:
         ("conversation_turns", "effort", "VARCHAR(16)"),
         ("conversation_dispatches", "lease_renewed_at", timestamp),
         ("conversation_input_queue", "idempotency_key", "VARCHAR(255)"),
+        ("conversation_input_queue", "origin", "VARCHAR(16) NOT NULL DEFAULT 'user'"),
+        ("conversation_input_queue", "origin_conversation_id", "VARCHAR(255)"),
+        ("conversation_agent_controls", "sender_kind", "VARCHAR(16) NOT NULL DEFAULT 'user'"),
+        ("conversation_agent_controls", "sender_agent_id", "VARCHAR(64)"),
+        ("conversation_agent_controls", "delivered_at", timestamp),
     ):
         try:
             inspector = sa_inspect(engine)

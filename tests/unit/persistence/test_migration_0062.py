@@ -29,9 +29,9 @@ def test_migration_0062_upgrade_downgrade_and_idempotence(tmp_path: Path) -> Non
         turn_cols_before = {col["name"] for col in inspector.get_columns("conversation_turns")}
         assert "effort" not in turn_cols_before
 
-        upgrade(engine, "head")
+        upgrade(engine, TARGET_REVISION)
         # Running head upgrade a second time must be a harmless no-op.
-        upgrade(engine, "head")
+        upgrade(engine, TARGET_REVISION)
 
         with engine.connect() as conn:
             assert conn.execute(text("select version_num from alembic_version")).scalar() == TARGET_REVISION
@@ -89,7 +89,7 @@ def test_migration_0062_upgrade_downgrade_and_idempotence(tmp_path: Path) -> Non
         assert "effort" not in turn_cols_down
 
         # Re-upgrade cleanly after downgrade.
-        upgrade(engine, "head")
+        upgrade(engine, TARGET_REVISION)
         inspector = inspect(engine)
         assert "subscription_quota_snapshots" in set(inspector.get_table_names())
         assert "model_context_observations" in set(inspector.get_table_names())
@@ -106,7 +106,7 @@ def test_store_patches_effort_column_and_migration_0062_stays_idempotent(tmp_pat
         PostgresChatStore(engine)
         assert "effort" in {col["name"] for col in inspect(engine).get_columns("conversation_turns")}
 
-        upgrade(engine, "head")
+        upgrade(engine, TARGET_REVISION)
         with engine.connect() as conn:
             assert conn.execute(text("select version_num from alembic_version")).scalar() == TARGET_REVISION
         assert "subscription_quota_snapshots" in set(inspect(engine).get_table_names())
