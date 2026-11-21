@@ -3285,6 +3285,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_conversation_routes(app, services, principal_for, conversation_root)
     from .friend_routes import register_friend_routes
     register_friend_routes(app, services, principal_for)
+    from .friend_delivery_routes import register_friend_delivery_routes
+    register_friend_delivery_routes(app, services, principal_for)
     from .discord_routes import register_discord_routes
     register_discord_routes(app, services, principal_for)
     from .custom_agent_routes import register_custom_agent_routes

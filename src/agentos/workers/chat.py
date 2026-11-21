@@ -272,15 +272,24 @@ class _RuntimeStore:
     def latest_contract(self, conversation_id: str):
         return self._store.latest_contract(conversation_id)
 
-    def claim_queued_inputs(self, turn: dict[str, object]):
+    def claim_queued_inputs(self, turn: dict[str, object], **kwargs):
+        if kwargs:
+            return self._store.claim_queued_inputs(turn, **kwargs)
         return self._store.claim_queued_inputs(turn)
+
+    def confirm_queued_input_injected(self, turn: dict[str, object], item: dict[str, object]) -> None:
+        fn = getattr(self._store, "confirm_queued_input_injected", None)
+        if callable(fn):
+            fn(turn, item)
 
     def has_queued_inputs(self, turn: dict[str, object]) -> bool:
         return self._store.has_queued_inputs(turn)
-        return self._store.claim_queued_inputs(turn)
 
-    def mark_queued_input_blocked(self, queue_id: str) -> None:
-        self._store.mark_queued_input_blocked(queue_id)
+    def mark_queued_input_blocked(self, queue_id: str, **kwargs) -> None:
+        if kwargs:
+            self._store.mark_queued_input_blocked(queue_id, **kwargs)
+        else:
+            self._store.mark_queued_input_blocked(queue_id)
 
     def prompt_snapshot(self, conversation_id: str):
         return self._store.prompt_snapshot(conversation_id)

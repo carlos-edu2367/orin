@@ -2097,10 +2097,24 @@ class TurnSession:
                 self._record(AgentActivityEventType.TURN_STARTED, "Tentando novamente", {**base, "attempt": payload.get("attempt")}, agent_id=actor)
             return
         if state == "queued_input":
+            queued_payload: dict[str, object] = {
+                **base,
+                "queued_text": str(payload.get("queued_text") or "")[:2000],
+                "queue_id": payload.get("queue_id"),
+            }
+            if payload.get("origin"):
+                queued_payload["origin"] = str(payload["origin"])
+            if payload.get("origin_conversation_id"):
+                queued_payload["origin_conversation_id"] = str(payload["origin_conversation_id"])
+            summary = (
+                "Mensagem via Friend entregue ao agente"
+                if queued_payload.get("origin") == "friend"
+                else "Mensagem da fila entregue ao agente"
+            )
             self._record(
                 AgentActivityEventType.TURN_STARTED,
-                "Mensagem da fila entregue ao agente",
-                {**base, "queued_text": str(payload.get("queued_text") or "")[:2000], "queue_id": payload.get("queue_id")},
+                summary,
+                queued_payload,
                 agent_id=actor,
             )
             return
@@ -3178,22 +3192,35 @@ class TurnSession:
                 continue
             if not items:
                 continue
+            from agentos.agentic.tools.orin.session_delivery import format_friend_injected_text
+
             for item in items:
                 text = str((item or {}).get("content") or "").strip()
                 queue_id = str((item or {}).get("queue_id") or "")
+                origin = str((item or {}).get("origin") or "user").strip().lower() or "user"
+                origin_cid = (item or {}).get("origin_conversation_id") or None
                 if not text:
                     continue
-                texts.append(text)
+                injected_text = format_friend_injected_text(text) if origin == "friend" else text
+                texts.append(injected_text)
+                step_payload: dict[str, object] = {"content": injected_text}
+                life_kwargs: dict[str, object] = {"queued_text": text[:2000], "queue_id": queue_id}
+                if origin == "friend":
+                    step_payload["origin"] = "friend"
+                    if origin_cid:
+                        step_payload["origin_conversation_id"] = origin_cid
+                    life_kwargs["origin"] = "friend"
+                    life_kwargs["origin_conversation_id"] = origin_cid
                 recorder = getattr(candidate, "record_step", None)
                 if callable(recorder):
                     try:
-                        recorder(self.turn, kind=transcript.STEP_QUEUED_INPUT, payload={"content": text})
+                        recorder(self.turn, kind=transcript.STEP_QUEUED_INPUT, payload=step_payload)
                     except Exception:  # noqa: BLE001
                         pass
                 life = getattr(candidate, "lifecycle", None)
                 if callable(life):
                     try:
-                        life(self.turn, "queued_input", queued_text=text[:2000], queue_id=queue_id)
+                        life(self.turn, "queued_input", **life_kwargs)
                     except Exception:  # noqa: BLE001
                         pass
             if texts:
@@ -5216,6 +5243,7 @@ class TurnSession:
         )
         # W5: skills and commands read from disk, for the Skill tool of this toolset (subagents' too).
         toolset._disk_skills = getattr(self, "_disk_skills", None)
+        toolset._effective_settings = self.effective_settings
         toolset._skill_hooks_sink = self._skill_hooks  # W5: a skill's own hooks
         # W5 deviation 4: a forked skill's `model`, resolved as an agent file's is.
         toolset._skill_model_for = lambda requested: self._allowed_requested_model(requested, "a skill")

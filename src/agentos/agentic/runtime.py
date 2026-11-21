@@ -572,36 +572,64 @@ class AgenticTurnRuntime:
 
     def _inject_queued_inputs(self, turn: dict[str, object], messages: list[dict[str, object]]) -> None:
         """Text the person queued while tools ran joins the conversation now, through UserPromptSubmit."""
+        from agentos.agentic.tools.orin.session_delivery import format_friend_injected_text
+
         claim = getattr(self.store, "claim_queued_inputs", None)
         if not callable(claim):
             return
+        deferred_friend_ack = False
         try:
-            items = list(claim(turn) or ())
+            try:
+                items = list(claim(turn, notify_friend=False) or ())
+                deferred_friend_ack = True
+            except TypeError:
+                items = list(claim(turn) or ())
         except Exception:  # noqa: BLE001 - the queue never breaks a turn
             return
         claimed_texts: list[str] = []
         for item in items:
             text = str((item or {}).get("content") or "").strip()
             queue_id = str((item or {}).get("queue_id") or "")
+            origin = str((item or {}).get("origin") or "user").strip().lower() or "user"
+            origin_cid = (item or {}).get("origin_conversation_id") or None
             if not text:
                 continue
             decision = self._emit(HookEvent.USER_PROMPT_SUBMIT, prompt=text)
             if decision is not None and (decision.blocked or decision.stop):
+                reason = decision.reason or decision.stop_reason or "blocked by hook"
                 marker = getattr(self.store, "mark_queued_input_blocked", None)
                 if callable(marker):
                     try:
-                        marker(queue_id)
+                        try:
+                            marker(queue_id, reason=reason)
+                        except TypeError:
+                            marker(queue_id)
                     except Exception:  # noqa: BLE001
                         pass
-                reason = decision.reason or decision.stop_reason or "blocked by hook"
                 self.store.delta(turn, f"\n\n⚠️ Mensagem da fila bloqueada por um hook: {reason}\n\n")
                 continue
             extra = [entry for entry in (decision.additional_context if decision is not None else []) if entry]
-            content = f"{text}\n\n{system_reminder(chr(10).join(extra))}" if extra else text
+            injected_text = format_friend_injected_text(text) if origin == "friend" else text
+            content = f"{injected_text}\n\n{system_reminder(chr(10).join(extra))}" if extra else injected_text
             messages.append({"role": "user", "content": content})
             self._queued_turn_count += 1
-            self._record_step(turn, kind=transcript.STEP_QUEUED_INPUT, payload={"content": text})
-            self._life(turn, "queued_input", queued_text=text[:2000], queue_id=queue_id)
+            step_payload: dict[str, object] = {"content": injected_text}
+            life_kwargs: dict[str, object] = {"queued_text": text[:2000], "queue_id": queue_id}
+            if origin == "friend":
+                step_payload["origin"] = "friend"
+                if origin_cid:
+                    step_payload["origin_conversation_id"] = origin_cid
+                life_kwargs["origin"] = "friend"
+                life_kwargs["origin_conversation_id"] = origin_cid
+            self._record_step(turn, kind=transcript.STEP_QUEUED_INPUT, payload=step_payload)
+            self._life(turn, "queued_input", **life_kwargs)
+            if deferred_friend_ack and origin == "friend":
+                confirm = getattr(self.store, "confirm_queued_input_injected", None)
+                if callable(confirm):
+                    try:
+                        confirm(turn, item)
+                    except Exception:  # noqa: BLE001
+                        pass
             claimed_texts.append(content)
         if claimed_texts:
             self._notify_queued_input_claimed(claimed_texts)
