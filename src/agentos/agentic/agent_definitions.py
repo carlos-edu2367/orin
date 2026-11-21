@@ -353,6 +353,7 @@ class AgentToolPolicy:
         definition: AgentDefinition,
         *,
         allow_agent_memory: bool = False,
+        allow_task_board: bool = False,
     ) -> None:
         from agentos.agentic.tools.public_names import internal_name
 
@@ -363,6 +364,10 @@ class AgentToolPolicy:
             allowed = {internal_name(item) for item in definition.tools} | set(definition.tools)
             if allow_agent_memory:
                 allowed |= {"save_memory", "recall_memory", "remember", "recall", "Remember", "Recall"}
+            if allow_task_board and (
+                allowed & {"task_create", "task_update", "task_get", "task_list", "TaskCreate", "TaskUpdate", "TaskGet", "TaskList"}
+            ):
+                allowed |= {"task_claim", "TaskClaim"}
             self._allowed = allowed
         self._denied = {internal_name(item) for item in definition.disallowed_tools} | set(definition.disallowed_tools)
 

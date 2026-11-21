@@ -1790,6 +1790,7 @@ class TurnSession:
             except Exception:
                 pass
         self._todos_state: list[dict[str, str]] = []
+        self._task_board: Any = None
         self._fg_promotion_seq: int = 0
         self.on_queued_input_claimed = self._note_queued_input_claimed
         raw_perm = str(turn.get("permission_mode") or "").strip()
@@ -4326,6 +4327,7 @@ class TurnSession:
                     subagent_tools._policy,
                     definition,
                     allow_agent_memory=sub_memory_view is not None,
+                    allow_task_board=self._task_board_enabled(),
                 )
             sub_max_iterations = (
                 self.limits.subagent_max_iterations
@@ -4897,6 +4899,21 @@ class TurnSession:
             return bool(resolve_setting(self.effective_settings, "orchestration.agentMessages.continueOnUnread").value)
         except Exception:  # noqa: BLE001
             return True
+
+    def _task_board_enabled(self) -> bool:
+        from agentos.settings.registry import resolve as resolve_setting
+        try:
+            return bool(resolve_setting(self.effective_settings, "orchestration.taskBoard.enabled").value)
+        except Exception:  # noqa: BLE001
+            return False
+    def _shared_task_board(self) -> Any | None:
+        if not self._task_board_enabled():
+            return None
+        if self._task_board is None:
+            from .task_board import TaskBoard
+            engine = getattr(self.chat_store, "_engine", None) or getattr(self.agents_store, "_engine", None) or getattr(self.store, "_engine", None)
+            self._task_board = TaskBoard(conversation_id=str(self.turn.get("conversation_id") or "default"), engine=engine)
+        return self._task_board
 
     def _sender_display_name(self, sender_agent_id: str) -> str:
         clean_id = str(sender_agent_id or "").strip()
@@ -5950,6 +5967,7 @@ class TurnSession:
             return partial(method, caller=caller) if caller is not None else method
 
         is_main_toolset = subagents and caller is None
+        task_board = self._shared_task_board()
         toolset = AgentToolset(
             self.workspace,
             memory=(memory_override if memory_override is not None else self.memory),
@@ -6024,6 +6042,7 @@ class TurnSession:
                 else (copy_read_state(self._read_file_state) if inherit_context else {})
             ),
             todos_state=self._todos_state if todos_state is None else todos_state,
+            task_board=task_board, task_board_enabled=task_board is not None, task_board_agent_id=actor_id,
             read_only_mode=read_only_mode,
             default_provider=str(self.turn.get("provider") or "").strip() or None,
             default_model_id=str(self.turn.get("model_id") or "").strip() or None,

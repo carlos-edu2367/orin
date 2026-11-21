@@ -53,6 +53,7 @@ FAMILIES = [
     ("orin.models_catalog", "ModelCatalogTools", ("list_models",)),
     ("planning.todo", "TodoTools", ("todo_write",)),
     ("planning.tasks", "TaskTools", ("task_create", "task_update", "task_get", "task_list")),
+    ("planning.task_claim", "TaskClaimTools", ("task_claim",)),
     ("planning.plan_mode", "PlanModeTools", ("enter_plan_mode", "exit_plan_mode", "write_contract")),
     ("interaction.ask_user", "AskUserTools", ("ask_user",)),
     ("agents.agent", "AgentTools", ("run_subagent", "check_subagent", "ask_agents")),

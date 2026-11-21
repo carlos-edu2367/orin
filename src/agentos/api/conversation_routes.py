@@ -223,6 +223,37 @@ def fork_conversation(services, user_id: str, conversation_id: str, *, before_me
     return result
 
 
+def _conversation_board_items(services: Any, conversation_id: str) -> list[dict[str, Any]]:
+    from agentos.agentic.task_board import TaskBoard, record_to_task_dict
+
+    board_store = getattr(services, "task_board_store", None)
+    engine = None
+    if board_store is None:
+        conv_app = getattr(services, "conversation_application", None)
+        conv_store = getattr(conv_app, "_store", None) if conv_app is not None else None
+        for candidate in (
+            conv_store,
+            conv_app,
+            getattr(services, "projects", None),
+            getattr(services, "local_workspaces", None),
+            getattr(services, "context_observations", None),
+        ):
+            engine = getattr(candidate, "_engine", None) if candidate is not None else None
+            if engine is not None:
+                break
+        if engine is None:
+            quota_service = getattr(services, "quota_service", None)
+            qstore = getattr(quota_service, "_store", None) if quota_service is not None else None
+            engine = getattr(qstore, "_engine", None)
+    if board_store is None and engine is None:
+        return []
+    try:
+        board = TaskBoard(conversation_id=conversation_id, engine=engine, store=board_store)
+        return [record_to_task_dict(item) for item in board.list_items()]
+    except Exception:  # noqa: BLE001 - missing table in minimal test stubs degrades cleanly
+        return []
+
+
 def register_conversation_routes(
     app: FastAPI,
     services,
@@ -235,7 +266,12 @@ def register_conversation_routes(
             principal = principal_for(request)
             services.security.authorize(principal, action="conversation.read", resource_id=conversation_id, purpose="conversation.tasks")
             root = conversation_root(conversation_id, principal)
-            return {"tasks": shell_tasks(root)}
+            board_items = _conversation_board_items(services, conversation_id)
+            return {
+                "tasks": shell_tasks(root),
+                "board_items": board_items,
+                "task_board": {"items": board_items},
+            }
 
         return JSONResponse(await run_in_threadpool(_list_tasks))
 

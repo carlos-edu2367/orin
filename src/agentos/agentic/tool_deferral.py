@@ -9,7 +9,7 @@ CODE_MODE_CORE_TOOLS: frozenset[str] = frozenset({
     "run_command", "powershell", "read_process_output", "stop_process", "verify_project",
     "enter_worktree", "exit_worktree", "preview_start", "preview_open", "preview_stop", "preview_logs",
     "enter_plan_mode", "exit_plan_mode",
-    "todo_write", "task_create", "task_update", "task_get", "task_list",
+    "todo_write", "task_create", "task_update", "task_get", "task_list", "task_claim",
     "ask_user", "run_subagent", "check_subagent", "fetch_url", "web_search",
     "remember", "recall",
     "search_skills", "list_skills", "read_skill_resource", "use_skill", "create_skill", "edit_skill",

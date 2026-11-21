@@ -34,6 +34,7 @@ PUBLIC_NAMES: dict[str, str] = {
     "task_update": "TaskUpdate",
     "task_get": "TaskGet",
     "task_list": "TaskList",
+    "task_claim": "TaskClaim",
     "ask_user": "AskUserQuestion",
     "enter_plan_mode": "EnterPlanMode",
     "exit_plan_mode": "ExitPlanMode",

@@ -14,6 +14,7 @@ from agentos.agentic.tools.orin.verify import SPECS as _orin_verify
 from agentos.agentic.tools.orin.resolve_findings import SPECS as _orin_resolve_findings
 from agentos.agentic.tools.planning.todo import SPECS as _planning_todo
 from agentos.agentic.tools.planning.tasks import SPECS as _planning_tasks
+from agentos.agentic.tools.planning.task_claim import SPECS as _planning_task_claim
 from agentos.agentic.tools.web.fetch import SPECS as _web_fetch
 from agentos.agentic.tools.interaction.ask_user import SPECS as _interaction_ask_user
 from agentos.agentic.tools.web.search import SPECS as _web_search
@@ -54,6 +55,7 @@ def default_registry() -> ToolRegistry:
         *_orin_resolve_findings,
         *_planning_todo,
         *_planning_tasks,
+        *_planning_task_claim,
         *_web_fetch,
         *_interaction_ask_user,
         *_web_search,

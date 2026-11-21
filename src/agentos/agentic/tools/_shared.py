@@ -333,6 +333,7 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
     "task_create": {
         "activeForm": "active_form",
         "title": "subject",
+        "blockedBy": "blocked_by",
     },
     "task_update": {
         "taskId": "task_id",
@@ -342,6 +343,10 @@ _PARAM_ALIASES: Mapping[str, Mapping[str, str]] = {
         "addBlockedBy": "add_blocked_by",
     },
     "task_get": {
+        "taskId": "task_id",
+        "id": "task_id",
+    },
+    "task_claim": {
         "taskId": "task_id",
         "id": "task_id",
     },
