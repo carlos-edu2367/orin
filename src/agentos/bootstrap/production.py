@@ -391,10 +391,12 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     )
     from agentos.persistence.postgres.context_observations import ContextObservationStore
     from agentos.persistence.postgres.quota import QuotaSnapshotStore
+    from agentos.persistence.postgres.verification_reviews import VerificationReviewStore
     from agentos.quota.poller import QuotaPoller
     from agentos.quota.service import QuotaService
 
     context_observations = ContextObservationStore(engine)
+    verification_reviews = VerificationReviewStore(engine)
     quota_store = QuotaSnapshotStore(engine)
     quota_service = QuotaService(quota_store)
     quota_poller = QuotaPoller(quota_service)
@@ -429,6 +431,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         quota_service=quota_service,
         quota_poller=quota_poller,
         context_observations=context_observations,
+        verification_reviews=verification_reviews,
     )
 
 
