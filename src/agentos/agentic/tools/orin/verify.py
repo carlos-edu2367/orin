@@ -9,6 +9,13 @@ import time
 from typing import Any, Mapping
 
 from agentos.agentic.diagnostics import STEP_ORDER, detect_recipe
+from agentos.agentic.verification_findings import (
+    VALID_CATEGORIES,
+    VALID_EVIDENCE_KINDS,
+    VALID_SEVERITIES,
+    VALID_VERDICTS,
+    validate_report,
+)
 from agentos.agentic.tools._shared import (
     AgentToolError,
     CANCEL_CHECK_SECONDS,
@@ -185,31 +192,141 @@ class VerifyTools:
             "payload": {"recipe": recipe.kind, "steps": step_results, "all_passed": all_passed},
         }
 
-    def report_verification(self, passed: bool, findings: str = "") -> dict[str, Any]:
-        passed = bool(passed)
-        findings = str(findings or "").strip()[:2000]
-        return {
-            "summary": "Verificação: critérios atendidos" if passed else "Verificação: critérios não atendidos",
-            "content": findings or (
-                "Todos os critérios de aceite foram conferidos com ferramentas e se sustentam."
-                if passed else "Um ou mais critérios de aceite não se sustentam."
-            ),
-            "payload": {"passed": passed, "findings": findings},
+    def report_verification(
+        self,
+        passed: bool | None = None,
+        findings: str | list[dict[str, Any]] = "",
+        verdict: str | None = None,
+        checked: list[dict[str, Any]] | None = None,
+        unverified: list[str] | None = None,
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        raw: dict[str, Any] = {
+            "findings": findings,
+            "checked": checked,
+            "unverified": unverified,
+            "summary": summary,
         }
+        if verdict is not None:
+            raw["verdict"] = verdict
+        if passed is not None:
+            raw["passed"] = passed
+        try:
+            report = validate_report(raw)
+        except ValueError as error:
+            raise AgentToolError(str(error), error_code="INVALID_VERIFICATION_REPORT") from error
+
+        if report.verdict == "pass":
+            status_summary = "Verificação: critérios atendidos"
+            default_content = "Todos os critérios de aceite foram conferidos com ferramentas e se sustentam."
+        elif report.verdict == "inconclusive":
+            status_summary = "Verificação: resultado inconclusivo"
+            default_content = "Não foi possível concluir a verificação de todos os critérios."
+        else:
+            status_summary = "Verificação: critérios não atendidos"
+            default_content = "Um ou mais critérios de aceite não se sustentam."
+
+        return {
+            "summary": status_summary,
+            "content": report.summary_text or default_content,
+            "payload": {
+                "passed": report.passed,
+                "verdict": report.verdict,
+                "findings": report.summary_text,
+                "structured_findings": [item.to_dict() for item in report.findings],
+                "blocking_findings": [item.to_dict() for item in report.blocking_findings],
+                "checked": [item.to_dict() for item in report.checked],
+                "unverified": list(report.unverified),
+                "report": report.to_dict(),
+            },
+        }
+
+
+_CHECKED_ITEM_SCHEMA = _schema(
+    {
+        "command": {**_TEXT, "description": "Command executed during verification."},
+        "exit_code": {"type": "integer", "description": "Process exit code."},
+        "summary": {**_TEXT, "description": "Short summary of the command output."},
+    },
+    ("command", "exit_code"),
+)
+
+_EVIDENCE_SCHEMA = _schema(
+    {
+        "kind": {
+            "type": "string",
+            "enum": sorted(VALID_EVIDENCE_KINDS),
+            "description": "failing_test/command require command+exit_code; code_ref requires file+line+reason.",
+        },
+        "command": {**_TEXT, "description": "Command run (required for failing_test/command)."},
+        "exit_code": {"type": "integer", "description": "Exit code (required for failing_test/command)."},
+        "output_excerpt": {**_TEXT, "description": "Short excerpt of the failing output."},
+        "file": {**_TEXT, "description": "Relative file path (required for code_ref)."},
+        "line": {"type": "integer", "minimum": 1, "description": "1-based line number (required for code_ref)."},
+        "reason": {**_TEXT, "description": "Why this line is wrong (required for code_ref)."},
+    },
+    ("kind",),
+)
+
+_FINDING_ITEM_SCHEMA = _schema(
+    {
+        "id": {**_TEXT, "description": "Short finding id such as F1."},
+        "severity": {
+            "type": "string",
+            "enum": sorted(VALID_SEVERITIES),
+            "description": "blocker, major, minor, nit, or unproven (findings without valid evidence downgrade to unproven).",
+        },
+        "category": {
+            "type": "string",
+            "enum": sorted(VALID_CATEGORIES),
+            "description": "Problem category.",
+        },
+        "claim": {**_TEXT, "description": "Concrete statement of the issue."},
+        "evidence": _EVIDENCE_SCHEMA,
+        "suggested_fix": {**_TEXT, "description": "Optional short suggestion to fix the issue."},
+    },
+    ("claim",),
+)
 
 
 # Tool specs, moved from AgentToolset._build_definitions (W4).
 SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         key="report_verification",
-        description="Conclude verification: state whether every acceptance criterion actually holds, based on what you just "
-        "checked with tools — not a guess. If something does not hold, describe concretely what is broken (the "
-        "actual error, not a hypothesis); you will be sent back to fix it, up to a few rounds. Calling this tool, "
-        "not a plain text reply, is how you leave the verification stage.",
+        description="Conclude verification with a verdict ('pass', 'fail', or 'inconclusive'), executed commands in "
+        "'checked', concrete 'findings' backed by evidence (failing_test/command: command+exit_code; code_ref: "
+        "file+line+reason — unproven findings downgrade to 'unproven'), and 'unverified' items. Verdict 'pass' "
+        "is rejected when any proven blocker finding exists.",
         legacy_schema=_schema({
-            "passed": {"type": "boolean", "description": "True only if every acceptance criterion was checked with a tool and holds."},
-            "findings": {**_TEXT, "description": "What you checked and, when passed=false, exactly what is broken and where."},
-        }, ("passed",)),
+            "verdict": {
+                "type": "string",
+                "enum": sorted(VALID_VERDICTS),
+                "description": "Overall verdict: pass, fail, or inconclusive.",
+            },
+            "passed": {
+                "type": "boolean",
+                "description": "Legacy boolean verdict (optional when verdict is provided).",
+            },
+            "checked": {
+                "type": "array",
+                "items": _CHECKED_ITEM_SCHEMA,
+                "description": "Commands actually run to verify the change.",
+            },
+            "findings": {
+                "type": "array",
+                "items": _FINDING_ITEM_SCHEMA,
+                "description": "Structured findings with mandatory evidence.",
+            },
+            "unverified": {
+                "type": "array",
+                "items": _TEXT,
+                "description": "Checks that could not be executed and why.",
+            },
+            "summary": {
+                **_TEXT,
+                "description": "Optional short summary of what was verified.",
+            },
+        }),
         handler="report_verification",
         kind="planning",
         order=110,

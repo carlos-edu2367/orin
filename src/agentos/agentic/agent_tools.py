@@ -82,6 +82,7 @@ from agentos.agentic.tools.shell.powershell import PowerShellTools
 from agentos.agentic.tools.shell.tasks import ShellTaskTools
 from agentos.agentic.tools.orin.working_state import WorkingStateTools
 from agentos.agentic.tools.orin.verify import VerifyTools
+from agentos.agentic.tools.orin.resolve_findings import ResolveFindingsTools
 from agentos.agentic.tools.web.fetch import FetchTools
 from agentos.agentic.tools.web.search import WebSearchTools
 from agentos.agentic.tools.orin.memory import MemoryTools
@@ -153,7 +154,7 @@ def _tool_response(outcome: ToolOutcome) -> dict[str, Any]:
 
 class AgentToolset(
     ActiveInvocation, ReadTools, WriteTools, EditTools, NotebookTools, GlobTools, GrepTools, CodeSearchTools,
-    BashTools, PowerShellTools, ShellTaskTools, WorkingStateTools, VerifyTools, FetchTools, WebSearchTools,
+    BashTools, PowerShellTools, ShellTaskTools, WorkingStateTools, VerifyTools, ResolveFindingsTools, FetchTools, WebSearchTools,
     MemoryTools, SkillTools, DiskSkillTools, McpTools, PluginTools, ProjectTools, ModelCatalogTools, TodoTools,
     TaskTools, PlanModeTools, AskUserTools, AgentTools, TeamTools, WorktreeTools, PreviewTools, MediaTools,
     CronTools, WakeupTools, MonitorTools, NotifyTools,

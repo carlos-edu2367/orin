@@ -42,6 +42,7 @@ FAMILIES = [
     ("shell.bash", "BashTools", ("run_command", "_resolve_cwd_after_command")),
     ("shell.tasks", "ShellTaskTools", ("read_process_output", "stop_process")),
     ("orin.verify", "VerifyTools", ("verify_project", "report_verification")),
+    ("orin.resolve_findings", "ResolveFindingsTools", ("resolve_findings",)),
     ("web.fetch", "FetchTools", ("fetch_url",)),
     ("web.search", "WebSearchTools", ("web_search",)),
     ("orin.memory", "MemoryTools", ("remember", "recall")),
