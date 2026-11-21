@@ -8,5 +8,5 @@ def test_default_aliases_are_the_5x_family() -> None:
     assert resolve_agent_model("opus", {}) == "claude-opus-5-5"
     assert resolve_agent_model("sonnet", {}) == "claude-sonnet-5-5"
     assert resolve_agent_model("haiku", {}) == "claude-haiku-5-5"
-    assert resolve_agent_model("fable", None) == "claude-fable-5-1"
+    assert resolve_agent_model("fable", None) == "claude-fable-5-2"
     assert dict(DEFAULT_MODEL_ALIASES) == dict(FAMILY_DEFAULTS)

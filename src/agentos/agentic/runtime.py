@@ -825,7 +825,7 @@ class AgenticTurnRuntime:
                     pass
             turn["model_id"] = candidate
             if self.effort:
-                from .effort_levels import clamp as _clamp_effort
+                from .effort_levels import clamp as _clamp_effort, levels_for as _effort_levels_for
 
                 provider_name = str(turn.get("provider") or "")
                 if self._effort_supported is not None and not self._model_accepts_effort(candidate):
@@ -839,16 +839,27 @@ class AgenticTurnRuntime:
                         model=candidate,
                     )
                 else:
-                    clamped, adj = _clamp_effort(provider_name, candidate, self.effort)
-                    self.effort = clamped
-                    if adj is not None:
-                        self._emit_effort_adjusted(
-                            turn,
-                            requested=adj.requested,
-                            applied=adj.applied,
-                            reason=adj.reason,
-                            model=candidate,
+                    model_effort_info = _effort_levels_for(provider_name, candidate)
+                    if (
+                        self._effort_supported is not None
+                        and not model_effort_info.levels
+                        and model_effort_info.source == "unknown"
+                    ):
+                        # Caller explicitly confirmed effort support for a model outside static tables.
+                        pass
+                    else:
+                        clamped, adj = _clamp_effort(
+                            provider_name, candidate, self.effort, info=model_effort_info
                         )
+                        self.effort = clamped
+                        if adj is not None:
+                            self._emit_effort_adjusted(
+                                turn,
+                                requested=adj.requested,
+                                applied=adj.applied,
+                                reason=adj.reason,
+                                model=candidate,
+                            )
             if self._model_switched is not None:
                 try:
                     self._model_switched(candidate)

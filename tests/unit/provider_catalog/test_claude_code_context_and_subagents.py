@@ -170,7 +170,7 @@ def test_resolve_agent_model_supports_claude_aliases_without_manual_settings() -
     assert resolve_agent_model("haiku", {}) == "claude-haiku-5-5"
     assert resolve_agent_model("sonnet", {}) == "claude-sonnet-5-5"
     assert resolve_agent_model("opus", {}) == "claude-opus-5-5"
-    assert resolve_agent_model("fable", None) == "claude-fable-5-1"
+    assert resolve_agent_model("fable", None) == "claude-fable-5-2"
 
 
 def test_http_provider_stream_transport_forwards_cancel_check_to_claude_bridge(monkeypatch) -> None:

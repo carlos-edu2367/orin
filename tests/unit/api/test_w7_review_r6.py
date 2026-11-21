@@ -16,7 +16,7 @@ def test_editing_an_agent_keeps_the_frontmatter_the_form_does_not_show(tmp_path)
     folder = orin_user_dir() / "agents"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "helper.md").write_text(
-        "---\nname: helper\ndescription: d\nskills: pdf\ncolor: blue\nmemory: user\nhooks:\n  Stop:\n    - command: echo\n---\n\nprompt\n",
+        "---\nname: helper\ndescription: d\nskills: pdf\ncolor: blue\nbackground: true\nhooks:\n  Stop:\n    - command: echo\n---\n\nprompt\n",
         encoding="utf-8",
     )
     client = _client(tmp_path)
@@ -26,7 +26,7 @@ def test_editing_an_agent_keeps_the_frontmatter_the_form_does_not_show(tmp_path)
     text = (folder / "helper.md").read_text(encoding="utf-8")
     assert response.status_code == 200
     assert 'description: "d2"' in text
-    assert "skills: pdf" in text and "color: blue" in text and "memory: user" in text
+    assert "skills: pdf" in text and "color: blue" in text and "background: true" in text
     assert "hooks:\n  Stop:\n    - command: echo" in text
 
 
