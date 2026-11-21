@@ -6,7 +6,9 @@ import { ActivityCard } from './ActivityCard'
 import { AgentBirth } from './AgentBirth'
 import { AgentExchange } from './AgentExchange'
 import type { AgentMessagesState } from './agentMessages'
+import type { AgentProgressMap } from './agentTree'
 import { CodeModeCard } from './CodeModeCard'
+import { MergeConflictCard, type MergeResolveDetails } from './MergeConflictCard'
 import { VerificationCard } from './VerificationCard'
 import { CodeSessionProposalCard, type CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import {
@@ -18,7 +20,7 @@ import { McpApprovalCard } from './McpApprovalCard'
 import { MemoryLearnedCard } from './MemoryLearnedCard'
 import { PluginApprovalCard } from './PluginApprovalCard'
 import { ToolPermissionCard } from './ToolPermissionCard'
-import { isFriendQueuedInputEvent, summarizeActivities } from './activitySummary'
+import { isFriendQueuedInputEvent, isMergeEvent, summarizeActivities } from './activitySummary'
 import type { ActivityGroup, ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import { UserQuestionCard, type UserQuestionAnswer } from './UserQuestionCard'
 import { WorkspaceTrustCard } from './WorkspaceTrustCard'
@@ -31,6 +33,9 @@ export type CodeSessionProposalContext = {
   models?: Partial<Record<ProviderName, ProviderModel[]>>
   agentMessages?: AgentMessagesState
   onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  agentProgress?: AgentProgressMap
+  onOpenWorktree?: (worktreePath: string, agentId: string) => void
+  onAskAgentToResolveMerge?: (prompt: string, details: MergeResolveDetails) => void | Promise<void>
   friendDeliveries?: Record<string, FriendDeliveryItem>
   onOpenTargetConversation?: (conversationId: string) => void
 }
@@ -56,6 +61,9 @@ type ActivityStreamProps = {
   models?: Partial<Record<ProviderName, ProviderModel[]>>
   agentMessages?: AgentMessagesState
   onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  agentProgress?: AgentProgressMap
+  onOpenWorktree?: (worktreePath: string, agentId: string) => void
+  onAskAgentToResolveMerge?: (prompt: string, details: MergeResolveDetails) => void | Promise<void>
   friendDeliveries?: Record<string, FriendDeliveryItem>
   onOpenTargetConversation?: (conversationId: string) => void
 }
@@ -89,6 +97,9 @@ export function ActivityStream({
   models,
   agentMessages,
   onAgentMessageSent,
+  agentProgress,
+  onOpenWorktree,
+  onAskAgentToResolveMerge,
   friendDeliveries,
   onOpenTargetConversation,
 }: ActivityStreamProps) {
@@ -124,6 +135,9 @@ export function ActivityStream({
                 models,
                 agentMessages,
                 onAgentMessageSent,
+                agentProgress,
+                onOpenWorktree,
+                onAskAgentToResolveMerge,
                 friendDeliveries,
                 onOpenTargetConversation,
               },
@@ -203,6 +217,17 @@ export function renderActivityGroup(
     )
   }
   if (first.type.startsWith('verifier.')) return <VerificationCard group={group} />
+  if (group.id.startsWith('merge:') || isMergeEvent(first)) {
+    return (
+      <MergeConflictCard
+        group={group}
+        conversationId={conversationId}
+        client={codeSessionContext?.client}
+        onOpenWorktree={codeSessionContext?.onOpenWorktree}
+        onAskAgentToResolve={codeSessionContext?.onAskAgentToResolveMerge}
+      />
+    )
+  }
   if (first.type.startsWith('code_mode.')) return <CodeModeCard group={group} />
   if (first.type === 'workspace.trust_required' && conversationId) {
     return <>{group.events.map((event) => <WorkspaceTrustCard key={event.eventId} event={event} conversationId={conversationId} />)}</>
@@ -246,6 +271,7 @@ export function renderActivityGroup(
       client={codeSessionContext?.client}
       agentMessages={codeSessionContext?.agentMessages}
       onAgentMessageSent={codeSessionContext?.onAgentMessageSent}
+      agentProgress={codeSessionContext?.agentProgress?.[group.agentId]}
     />
   )
 }

@@ -1002,6 +1002,14 @@ export function isVerifierEvent(event: ConversationActivityEvent): boolean {
   )
 }
 
+export function isMergeEvent(event: ConversationActivityEvent): boolean {
+  return (
+    event.type === 'merge.applied' ||
+    event.type === 'merge.conflict' ||
+    event.type === 'merge.check_failed'
+  )
+}
+
 export function isCodeModeEvent(event: ConversationActivityEvent): boolean {
   return event.type.startsWith('code_mode.') && !event.toolPermission
 }
@@ -1051,6 +1059,8 @@ export function isFriendQueuedInputEvent(event: ConversationActivityEvent): bool
 export function isRenderable(event: ConversationActivityEvent, settled: Set<string>): boolean {
   if (event.type === 'agent.thought_delta' || event.type === 'AGENT_THOUGHT_DELTA') return true
   if (event.type === 'friend.delivery_status') return false
+  if (event.type === 'agent.progress') return false
+  if (isMergeEvent(event)) return true
   if (isFriendQueuedInputEvent(event)) return true
   if (event.type.startsWith('context.')) return false
   if (event.kind === 'message') return false
@@ -1085,6 +1095,12 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
 export function groupingKey(event: ConversationActivityEvent): string {
   if (isVerifierEvent(event)) {
     return `verifier:${event.agentId}:${event.turnId ?? ''}`
+  }
+  if (isMergeEvent(event)) {
+    const targetAgent =
+      (typeof event.payload?.agent_id === 'string' && event.payload.agent_id.trim()) ||
+      event.agentId
+    return `merge:${targetAgent}:${event.turnId ?? ''}`
   }
   if (isFriendQueuedInputEvent(event)) {
     const queueId = typeof event.payload?.queue_id === 'string' ? event.payload.queue_id : event.eventId
@@ -1176,6 +1192,7 @@ export function processExitedLabel(event: ConversationActivityEvent): string {
 export function groupLabel(group: ActivityGroup): string {
   const first = group.events[0]
   if (first && isVerifierEvent(first)) return 'Verificação independente'
+  if (first && isMergeEvent(first)) return 'Integração da worktree'
   if (group.kind === 'tool') return toolGroupLabel(group)
   if (group.kind === 'agent') return agentLabel(first)
   if (group.kind === 'artifact') return first.label ? `Criou ${first.label}` : 'Criou um artefato'

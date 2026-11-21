@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
+import type { ApiClient } from '../../api/client'
 import { EFFORT_LEVELS, listProviderModels, PROVIDER_NAMES, type EffortLevel, type ProviderModel } from '../../api/providers'
-import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft, type AgentMemoryMode } from '../../api/settings'
+import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft, type AgentIsolationMode, type AgentMemoryMode } from '../../api/settings'
 import { SettingsSection } from '../settings/SettingsSection'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation, useLoaded, useSettingsClient } from './shared'
 
@@ -12,6 +13,10 @@ const MEMORY_MODES: ReadonlyArray<{ id: AgentMemoryMode; label: string }> = [
   { id: 'user', label: 'Usuário (user)' },
   { id: 'local', label: 'Local (local)' },
   { id: 'none', label: 'Nenhuma (none)' },
+]
+const ISOLATION_MODES: ReadonlyArray<{ id: AgentIsolationMode; label: string }> = [
+  { id: 'none', label: 'Nenhum (none)' },
+  { id: 'worktree', label: 'Worktree isolada (worktree)' },
 ]
 const ORIGIN: Record<string, string> = { user: 'usuário', project: 'projeto', plugin: 'plugin', builtin: 'do Orin', cli: 'linha de comando', orin: 'Biblioteca' }
 
@@ -39,9 +44,9 @@ export function acceptedEffortsForModelInput(modelInput: string, catalogModels: 
   return allDeclared ? [] : EFFORT_LEVELS
 }
 
-type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string; memory?: AgentMemoryMode }
+type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string; memory?: AgentMemoryMode; isolation?: AgentIsolationMode }
 
-const EMPTY: Form = { name: '', scope: 'user', description: '', prompt: '', tools: '', disallowed: '', model: '', permissionMode: '', maxTurns: '', effort: '', memory: 'project' }
+const EMPTY: Form = { name: '', scope: 'user', description: '', prompt: '', tools: '', disallowed: '', model: '', permissionMode: '', maxTurns: '', effort: '', memory: 'project', isolation: 'none' }
 
 function names(text: string): string[] {
   return text.split(/[,\n]/).map((item) => item.trim()).filter(Boolean)
@@ -66,6 +71,7 @@ export function draftOf(form: Form): AgentDraft {
     disallowedTools: names(form.disallowed), model: form.model.trim() || null, permissionMode: form.permissionMode || null,
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null, effort: form.effort || null,
     ...(form.memory ? { memory: form.memory } : {}),
+    ...(form.isolation ? { isolation: form.isolation } : {}),
   }
 }
 
@@ -75,6 +81,7 @@ function formOf(agent: AgentDefinition): Form {
     tools: (agent.tools ?? []).join(', '), disallowed: agent.disallowedTools.join(', '), model: agent.model ?? '',
     permissionMode: agent.permissionMode ?? '', maxTurns: agent.maxTurns ? String(agent.maxTurns) : '', effort: agent.effort ?? '',
     memory: agent.memory ?? 'project',
+    isolation: agent.isolation ?? 'none',
   }
 }
 
@@ -82,8 +89,9 @@ function formOf(agent: AgentDefinition): Form {
  * `/agents` (W7): the agents defined in files (the person's, the project's, plugins'), and a form to create, edit or
  * delete the person's and the project's. Files keep Claude Code's format (`.orin/agents/<name>.md`).
  */
-export function AgentsSection() {
-  const client = useSettingsClient()
+export function AgentsSection({ client: clientProp }: { client?: ApiClient } = {}) {
+  const defaultClient = useSettingsClient()
+  const client = clientProp ?? defaultClient
   const conversationId = useFolderConversation()
   const load = useCallback(() => getAgents(client, conversationId), [client, conversationId])
   const agents = useLoaded(load, 'ler os agentes')
@@ -259,6 +267,19 @@ export function AgentsSection() {
               </select>
               <span className="code-settings__muted">
                 Sem efeito enquanto a memória por agente estiver desligada
+              </span>
+            </label>
+            <label>Isolamento
+              <select
+                value={form.isolation ?? 'none'}
+                aria-label="Isolamento"
+                onChange={(event) => set({ isolation: event.target.value as AgentIsolationMode })}
+              >
+                {ISOLATION_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+              </select>
+              <span className="code-settings__muted">
+                Tem efeito só com a chave global &ldquo;Worktree por subagente&rdquo; ligada em{' '}
+                <Link to="/settings/orchestration">Configurações › Orquestração</Link>.
               </span>
             </label>
             {tried && problems.length > 0 && (

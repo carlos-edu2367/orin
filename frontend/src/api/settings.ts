@@ -136,6 +136,7 @@ export function saveHooks(client: ApiClient, layer: WritableLayer, hooks: Record
 }
 
 export type AgentMemoryMode = 'project' | 'user' | 'local' | 'none'
+export type AgentIsolationMode = 'none' | 'worktree'
 
 export type AgentDefinition = {
   name: string
@@ -151,6 +152,7 @@ export type AgentDefinition = {
   maxTurns: number | null
   effort: string | null
   memory?: AgentMemoryMode | null
+  isolation?: AgentIsolationMode | null
 }
 export type AgentsReport = {
   agents: AgentDefinition[]
@@ -174,6 +176,10 @@ export function parseAgentsReport(value: unknown): AgentsReport {
           agent.memory === 'project' || agent.memory === 'user' || agent.memory === 'local' || agent.memory === 'none'
             ? agent.memory
             : null,
+        isolation:
+          agent.isolation === 'worktree' || agent.isolation === 'none'
+            ? agent.isolation
+            : null,
       }
     }, 200),
     errors: list(data.errors, (item) => { const error = rec(item); return { file: str(error.file), message: str(error.message) } }),
@@ -196,6 +202,7 @@ export type AgentDraft = {
   maxTurns: number | null
   effort: string | null
   memory?: AgentMemoryMode | null
+  isolation?: AgentIsolationMode | null
 }
 
 export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, conversationId?: string | null, create = false): Promise<AgentsReport> {
@@ -208,6 +215,7 @@ export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, co
       ...(draft.permissionMode ? { permission_mode: draft.permissionMode } : {}),
       ...(draft.maxTurns ? { max_turns: draft.maxTurns } : {}), ...(draft.effort ? { effort: draft.effort } : {}),
       ...(draft.memory ? { memory: draft.memory } : {}),
+      ...(draft.isolation ? { isolation: draft.isolation } : {}),
       ...(create ? { create: true } : {}),
       ...(conversationId ? { conversation_id: conversationId } : {}),
     },

@@ -20,6 +20,9 @@ const DEFAULT_GROUP_LABELS: Record<string, string> = {
   context: 'Janela de contexto',
   messages: 'Mensagens a subagentes',
   friend: 'Orin Friend',
+  worktree: 'Worktree por subagente',
+  task_board: 'Quadro de tarefas compartilhado',
+  background: 'Agentes em segundo plano e travamento',
 }
 
 const CHOICE_LABELS: Record<string, string> = {
@@ -343,6 +346,7 @@ function SettingRow({
                 ? 'code-settings__layer code-settings__layer--managed'
                 : 'code-settings__layer'
             }
+            data-testid={`layer-${item.path}`}
           >
             {LAYER_LABELS[item.layer]}
           </span>

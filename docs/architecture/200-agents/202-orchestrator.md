@@ -147,6 +147,15 @@ ScheduleConstraint {
 
 Agendamento não altera a máquina de estados. Antes de `not_before`, existe somente intenção planejada. Depois de `expires_at`, a intenção não é materializada; o fato é registrado e o plano segue sua política de falha. Trabalho recorrente futuro cria nova Execution por ocorrência.
 
+### Entidades de persistência do runtime 0.13 (`agent_runs`, `agent_worktrees`, `task_board_items`, `verification_reviews`)
+
+No runtime real da 0.13 (SQLite/PostgreSQL), o plano de controle de subagentes e verificação persiste as seguintes entidades operacionais isoladas por `user_id` e `conversation_id`:
+
+- **`agent_runs`:** registro durável de cada execução de subagente (`agent_id`, `parent_agent_id`, `subagent_type`, `provider`, `model_id`, `effort`, `state` em `queued | running | stalled | interrupted | completed | failed | cancelled`, `task_digest`, `history_path`, `worktree_path`, `last_activity_at`, `tool_calls`, `input_tokens`, `output_tokens`, `cost_usd`, `result_ref`). Permite listar execuções (`GET /v1/conversations/{id}/agent-runs`) e retomar subagentes interrompidos (`POST /v1/conversations/{id}/agents/{agent_id}/resume`).
+- **`agent_worktrees`:** metadados da worktree Git isolada vinculada a um subagente (`agent_id`, `workspace_root`, `worktree_path`, `branch` no padrão `orin/agent-<slug>`, `base_commit`, `merge_state` em `pending | applied | conflict | check_failed | discarded | empty`, `conflict_detail`).
+- **`task_board_items`:** quadro de tarefas compartilhado por conversa (`task_id`, `conversation_id`, `title`, `description`, `status`, `depends_on`, `claimed_by_agent_id`, `lease_expires_at`, `result_ref`), substituindo o Blackboard conceitual por reivindicação atômica com lease.
+- **`verification_reviews` / `verification_findings`:** registro persistente das rodadas do verificador independente (`verdict`, par autor → revisor, achados provados/sem prova e métricas por par).
+
 ## Contratos públicos
 
 O pseudocódigo é tipado, contratual e não executável.
@@ -244,6 +253,12 @@ SupervisionSnapshot {
 
 Supervisão observa; não altera storage. Recuperação e cancelamento passam por comandos do Kernel com versão esperada.
 
+### Contratos de ferramentas de orquestração no runtime 0.13
+
+- **`Agent(provider, model_id, effort, isolation)`:** delega trabalho a um subagente podendo escolher provedor, modelo, nível de esforço e modo de isolamento (`none` ou `worktree`; `worktree` só produz efeito quando `orchestration.worktree.enabled = true`, emitindo `isolation.unavailable` e executando no workspace principal quando o repositório não suporta worktree).
+- **`CheckSubagent` (com progresso e detecção de travamento):** retorna estado atual, progresso incremental (`elapsed_seconds`, `last_activity_at`, `current_tool`, `tool_calls`, `input_tokens`, `output_tokens`, `cost_usd`), estado da integração de worktree (`merge_state`) e sinalização explícita de travamento (`stalled: true`).
+- **`TaskClaim`:** reivindica atomicamente uma tarefa pronta (com todas as dependências satisfeitas) em `task_board_items` sob lease renovável; em concorrência entre dois subagentes para o mesmo item, exatamente um obtém a posse.
+
 ## Criação de Agent
 
 Uma criação de Agent é trabalho e DEVE ser uma Execution administrativa:
@@ -307,6 +322,12 @@ Deadline de orquestração, timeout de Execution e expiração operacional são 
 - **expiração de lease ou ausência de progresso:** indica necessidade de reconciliação; não prova falha da Task.
 
 Na recuperação, o Orchestrator observa versão e checkpoint, confirma perda do direito de processamento e solicita ao Kernel redispatch seguro. Ele não repete efeito externo nem muda estado diretamente. Se reconciliação não puder provar consistência, o Kernel termina a tentativa em `FAILED`. Retry posterior cria nova Execution com mesmo `correlation_id` e causalidade explícita.
+
+### Retomada de subagentes em segundo plano e detecção de travamento (Pacote B)
+
+- **Persistência e recuperação por `agent_runs` + snapshot JSON atômico:** durante a execução em segundo plano, cada subagente atualiza `agent_runs` e persiste seu histórico recente em arquivo JSON atômico (`history_path` via gravação temporária + `os.replace`). Quando o worker reinicia com execuções ainda abertas (`running`), a reconciliação de inicialização marca essas linhas como `interrupted` e emite `agent.interrupted`.
+- **Retomada manual e automática:** o usuário pode retomar qualquer subagente `interrupted` pela interface ("Retomar" -> `POST /v1/conversations/{id}/agents/{agent_id}/resume`), que restaura o último snapshot válido, move a linha para `queued` e despacha a continuação. A retomada automática no reinício só ocorre quando `orchestration.background.autoResume = true` (desligada por padrão) e respeita as políticas de cota.
+- **Detecção de travamento (`stalled`):** um subagente em execução cuja `last_activity_at` ultrapassa `orchestration.stall.minutes` (padrão `10` minutos) é marcado como `stalled`, emite `agent.stalled` e aparece com selo `travado` na árvore de agentes e em `CheckSubagent`. O cancelamento automático só ocorre quando `orchestration.stall.autoCancel = true` (desligado por padrão).
 
 ## Cancelamento e propagação
 
@@ -418,6 +439,15 @@ Na 0.13, a delegação de subagentes e o gate de verificação de entrega passam
 | `verifier.model_selected` | política de seleção escolheu o par provedor/modelo/esforço (ou registrou `fallback_step = 4` sem modelo disponível) para o verificador independente |
 | `verifier.started` | rodada do verificador independente foi iniciada com aviso visível de provedor, modelo, esforço, motivo do disparo (`trigger_reason`) e contagem de arquivos/linhas (`lines_known`) |
 | `verifier.finished` | rodada do verificador independente terminou com `verdict` (`pass`, `fail`, `inconclusive` ou `skipped`), comandos verificados (`checked`), achados estruturados (`findings`) e contadores de bloqueio/sem prova |
+| `agent.progress` | snapshot periódico de progresso de um subagente em execução (`agent_id`, `state`, `current_tool`, `tool_calls`, `elapsed_seconds`, `last_activity_at`, `input_tokens`, `output_tokens`, `cost_usd`) |
+| `agent.stalled` | subagente em execução ultrapassou `orchestration.stall.minutes` sem atividade de ferramenta ou resposta |
+| `agent.interrupted` | subagente em segundo plano foi encontrado aberto após reinício do worker e marcado como `interrupted` em `agent_runs`, pronto para retomada |
+| `isolation.unavailable` | subagente solicitou `isolation: worktree`, mas o workspace não suporta worktree (ex.: fora de repositório Git, submódulos ou LFS), seguindo no workspace principal |
+| `worktree.created` | worktree Git isolada (`orin/agent-<slug>`) foi criada para um subagente com diretórios de `orchestration.worktree.linkDirs` ligados |
+| `worktree.removed` | worktree isolada foi limpa após integração, descarte ou conclusão sem alterações (removendo junções antes de `git worktree remove`) |
+| `merge.applied` | fila serializada (`MergeQueue`) aplicou o patch da worktree no workspace do pai via `git apply --3way` sem criar commit automático |
+| `merge.conflict` | integração da worktree encontrou conflito; nada foi aplicado ao workspace do pai e a worktree permanece disponível para inspeção, descarte ou resolução assistida |
+| `merge.check_failed` | `orchestration.worktree.mergeCheckCommand` falhou após a aplicação; alterações foram revertidas na árvore do pai e a worktree foi preservada |
 
 Events pertencentes à máquina de estados, como `ExecutionStarted`, `ExecutionFinished`, `ExecutionFailed` e `ExecutionCancelled`, continuam sob ownership do Kernel. Os Events desta RFC carregam `execution_id` quando vinculados a uma tentativa e sempre preservam owner, Workspace, correlação, causalidade e classificação.
 

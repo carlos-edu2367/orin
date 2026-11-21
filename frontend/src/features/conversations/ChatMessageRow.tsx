@@ -7,8 +7,10 @@ import type { ProviderModel, ProviderName } from '../../api/providers'
 import { OrinMascot } from '../../components/OrinMascot'
 import type { ConversationActivityEvent, ToolPermissionDecision } from './activityTypes'
 import type { AgentMessagesState } from './agentMessages'
+import type { AgentProgressMap } from './agentTree'
 import type { CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import type { FriendDeliveryItem } from './FriendDeliveryCard'
+import type { MergeResolveDetails } from './MergeConflictCard'
 import { MarkdownMessage } from './MarkdownMessage'
 import { MessageAttachments } from './MessageAttachments'
 import { MessageCommandChip } from './MessageCommandChip'
@@ -73,6 +75,9 @@ export type ChatMessageRowProps = {
   onRequestPlanChanges?: (feedback: string, event: ConversationActivityEvent) => void | Promise<void>
   agentMessages?: AgentMessagesState
   onAgentMessageSent?: (item: { controlId: string; agentId: string; message: string }) => void
+  agentProgress?: AgentProgressMap
+  onOpenWorktree?: (worktreePath: string, agentId: string) => void
+  onAskAgentToResolveMerge?: (prompt: string, details: MergeResolveDetails) => void | Promise<void>
   friendDeliveries?: Record<string, FriendDeliveryItem>
   onOpenTargetConversation?: (conversationId: string) => void
 }
@@ -117,6 +122,9 @@ export const ChatMessageRow = memo(function ChatMessageRow({
   onRequestPlanChanges,
   agentMessages,
   onAgentMessageSent,
+  agentProgress,
+  onOpenWorktree,
+  onAskAgentToResolveMerge,
   friendDeliveries,
   onOpenTargetConversation,
 }: ChatMessageRowProps) {
@@ -170,6 +178,9 @@ export const ChatMessageRow = memo(function ChatMessageRow({
           onRequestPlanChanges={isTurnFinished ? undefined : onRequestPlanChanges}
           agentMessages={agentMessages}
           onAgentMessageSent={onAgentMessageSent}
+          agentProgress={agentProgress}
+          onOpenWorktree={onOpenWorktree}
+          onAskAgentToResolveMerge={onAskAgentToResolveMerge}
           friendDeliveries={friendDeliveries}
           onOpenTargetConversation={onOpenTargetConversation}
         />

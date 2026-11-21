@@ -80,6 +80,14 @@ Participar de `Collaboration` permite somente as operações declaradas pela pol
 
 Criar uma Collaboration ou alterar participantes, quando produzir trabalho, ocorre por Execution administrativa. Remover participante impede novas mensagens e delegações, mas não remove o Agent persistente nem apaga Executions e Events anteriores.
 
+### Propriedade pai-filho, worktree isolada e fila de integração (Orin 0.13, Pacote B)
+
+No runtime interativo da 0.13:
+
+- **Pai é dono dos filhos:** cada subagente nasce vinculado ao agente pai (`parent_agent_id`) dentro do mesmo `user_id` e `conversation_id`, sem transferência implícita de privilégios nem acesso a outros workspaces.
+- **Worktree isolada opcional por filho (`orin/agent-<slug>`):** quando `orchestration.worktree.enabled = true` (desligado por padrão) e o subagente declara ou recebe `isolation: worktree`, o Orin cria uma worktree Git dedicada em branch `orin/agent-<slug>`, ligando diretórios de dependências declarados em `orchestration.worktree.linkDirs` (padrão `["node_modules", ".venv"]`) via junção/symlink sem duplicar arquivos. Filhos sem alterações removem worktree e branch automaticamente.
+- **Fila de integração única serializada por workspace (`MergeQueue`):** ao concluir com alterações, a integração entra em uma fila única por `workspace_root` que gera o diff e aplica na árvore de trabalho do pai com `git apply --3way` — **sem criar commit automático**. Em caso de conflito (`merge.conflict`) ou falha de `mergeCheckCommand` (`merge.check_failed`), nada permanece aplicado no workspace do pai e a worktree fica preservada para o usuário abrir, descartar (`POST /v1/conversations/{id}/worktrees/{agent_id}/discard`) ou pedir ao agente para resolver.
+
 ## Entidades e dados conceituais
 
 O pseudocódigo é tipado, contratual e não executável.
@@ -289,6 +297,8 @@ No runtime interativo real (`AgentSession` + `AgenticTurnRuntime`/`NativeTurnRun
    - `manage_session(action="send_message")` e `control_code_session(action="send_message")` aceitam `delivery: "now" | "queue"`, com padrão vindo de `friend.sessionDelivery` (`now` na 0.13; `queue` preserva o comportamento de criar um novo turno na fila).
    - Com `delivery = "now"` e turno alvo vivo (`queued`, `starting` ou `running`), a mensagem entra em `conversation_input_queue` com `origin = "friend"` e `origin_conversation_id`, chave de idempotência derivada da chamada (`friend:<tool_call_id>`), prefixo explícito no transcript da sessão alvo e selo `via Friend` na timeline. Troca de provedor/modelo/permissão (`model_change`), fila cheia (`queue_full`) ou turno em cancelamento (`turn_cancelling`) caem automaticamente para `queue` com `delivery_fallback` preenchido.
    - Enquanto aguarda o próximo ponto seguro (`pending_in_turn`), o usuário pode adiar para depois do turno por `POST /v1/conversations/{id}/queue/{queue_id}/defer`. A mensagem passa pelo mesmo hook `USER_PROMPT_SUBMIT` das mensagens do usuário; o observador de entrega (`friend_delivery_watch.py`) publica `friend.delivery_status` (`injected`, `promoted` ou `blocked`) de volta ao Friend para confirmação honesta por texto e voz.
+4. **Quadro de tarefas compartilhado (`task_board_items` + `TaskClaim`, no lugar do Blackboard):**
+   - Quando `orchestration.taskBoard.enabled = true` (desligado por padrão), subagentes de uma mesma conversa coordenam trabalho paralelo por um quadro persistido em `task_board_items` com grafo explícito de dependências (`depends_on`) e reivindicação atômica via `TaskClaim` sob lease. A posse é mutuamente exclusiva (exatamente um subagente obtém cada tarefa em concorrência) e a expiração de lease devolve a tarefa para reatribuição auditável, substituindo a noção futura de Blackboard compartilhado sem controle transacional.
 
 ## Delegação e contexto
 
@@ -429,6 +439,9 @@ Events usam passado, envelope da RFC 103, `execution_id` aplicável, `correlatio
   - **revisor somente leitura:** o subagente `verifier` NÃO recebe ferramentas de escrita/edição de arquivos nem permissão para criar outros subagentes; sua superfície fica restrita à leitura do repositório, execução de comandos de inspeção/testes e envio de relatório estruturado via `report_verification`;
   - **prova objetiva obrigatória para bloquear turno:** um achado só bloqueia o encerramento do turno e exige `resolve_findings` quando possui severidade `blocker` ou `major` acompanhada de evidência verificável (`failing_test`, `command` com `exit_code`, ou `code_ref` com `file`, `line >= 1` e `reason`); achados sem prova são rebaixados automaticamente para `unproven` ("sem prova") e nunca bloqueiam a entrega nem forçam retrabalho;
   - **isolamento de escopo e contexto:** o verificador executa em contexto limpo contendo apenas o objetivo do turno e o escopo de arquivos/diff alterados (sem herdar histórico bruto, memória privada do autor ou credenciais); a persistência de revisões e métricas por par permanece isolada por `user_id`;
+- **segurança de worktrees e integração (Pacote B):**
+  - **`mergeCheckCommand` sob permissões e Workspace Trust:** `orchestration.worktree.mergeCheckCommand` passa obrigatoriamente pelo motor de permissões de shell do usuário (`PermissionEngine`) antes de executar e é ignorado automaticamente em repositórios não confiáveis (`trusted = false`);
+  - **limpeza segura de junções no Windows/POSIX:** todas as junções e links simbólicos criados a partir de `orchestration.worktree.linkDirs` são desvinculados (removendo apenas a entrada da junção, nunca o conteúdo do diretório alvo) antes de invocar `git worktree remove`, impedindo remoção acidental de `node_modules` ou `.venv` do workspace principal;
 - segredo e credencial nunca entram em mensagem, handoff, Event ou Context;
 - cross-workspace é negado por padrão;
 - o lançamento single-user preserva `user_id` para futura separação entre usuários.
@@ -454,7 +467,9 @@ Conteúdo privado não é label. Auditoria registra ator, finalidade, destinatá
 - somente `COMPLETED` retorna sucesso;
 - falha e cancelamento permanecem explícitos e auditáveis;
 - cancelamento não apaga Agent, Execution, Event ou resultado confirmado;
-- nenhum coordenador multi-agent chama LLM ou conhece adapter concreto.
+- nenhum coordenador multi-agent chama LLM ou conhece adapter concreto;
+- nenhuma funcionalidade que gasta tokens liga sozinha;
+- nenhum nível de esforço muda sem evento.
 
 ## Extensibilidade
 
