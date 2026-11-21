@@ -59,9 +59,9 @@ def test_migration_0063_upgrade_preserves_rows_is_idempotent_and_downgrades_clea
 
         _seed_pre_0063_rows(engine)
 
-        # Upgrade to head and verify idempotence on a second call.
-        upgrade(engine, "head")
-        upgrade(engine, "head")
+        # Upgrade to target revision and verify idempotence on a second call.
+        upgrade(engine, TARGET_REVISION)
+        upgrade(engine, TARGET_REVISION)
 
         with engine.connect() as conn:
             assert conn.execute(text("select version_num from alembic_version")).scalar() == TARGET_REVISION
@@ -150,7 +150,7 @@ def test_migration_0063_upgrade_preserves_rows_is_idempotent_and_downgrades_clea
                 mig.downgrade()
 
         # Re-upgrade cleanly after downgrade.
-        upgrade(engine, "head")
+        upgrade(engine, TARGET_REVISION)
         inspector = inspect(engine)
         assert NEW_CONTROL_COLS <= {col["name"] for col in inspector.get_columns("conversation_agent_controls")}
         assert NEW_QUEUE_COLS <= {col["name"] for col in inspector.get_columns("conversation_input_queue")}
@@ -177,7 +177,7 @@ def test_store_patches_message_columns_and_migration_0063_stays_idempotent(tmp_p
                 text("SELECT origin FROM conversation_input_queue WHERE queue_id = 'q_existing'")
             ).scalar() == "user"
 
-        upgrade(engine, "head")
+        upgrade(engine, TARGET_REVISION)
         with engine.connect() as conn:
             assert conn.execute(text("select version_num from alembic_version")).scalar() == TARGET_REVISION
     finally:

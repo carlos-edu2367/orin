@@ -428,3 +428,62 @@ def test_messages_keys_validation_and_scope_resolution(tmp_path: Path) -> None:
     loaded_off = load_effective_settings(project, trusted=True)
     assert resolve(loaded_off, "orchestration.agentMessages.parentTool") == ResolvedSetting(False, "project", True)
 
+
+def test_memory_keys_registered_with_defaults_user_only_scope_and_bounds() -> None:
+    expected = {
+        "memory.quarantine.enabled": (True, "boolean", None, None),
+        "memory.conflicts.llmAdjudication": (False, "boolean", None, None),
+        "memory.agent.enabled": (False, "boolean", None, None),
+        "memory.agent.maxPromptChars": (4000, "number", 200, 20000),
+        "memory.agent.learnFromVerifiedOnly": (True, "boolean", None, None),
+        "memory.instructionLint.enabled": (False, "boolean", None, None),
+        "memory.tombstoneRetentionDays": (90, "number", 1, 3650),
+    }
+    empty = empty_settings()
+    for path, (default_value, key_type, minimum, maximum) in expected.items():
+        assert path in REGISTRY, f"missing key {path}"
+        key = REGISTRY[path]
+        assert key.scope is Scope.USER_ONLY
+        assert key.type == key_type
+        assert key.minimum == minimum
+        assert key.maximum == maximum
+        assert key.label.strip()
+        assert key.description.strip()
+        assert resolve(empty, path) == ResolvedSetting(value=default_value, layer="default", default=default_value)
+
+    # Validation bounds
+    assert validate_change("memory.agent.maxPromptChars", 200) == 200
+    assert validate_change("memory.agent.maxPromptChars", 20000) == 20000
+    assert validate_change("memory.tombstoneRetentionDays", 1) == 1
+    assert validate_change("memory.tombstoneRetentionDays", 3650) == 3650
+
+    with pytest.raises(ValueError):
+        validate_change("memory.agent.maxPromptChars", 199)
+    with pytest.raises(ValueError):
+        validate_change("memory.agent.maxPromptChars", 20001)
+    with pytest.raises(ValueError):
+        validate_change("memory.tombstoneRetentionDays", 0)
+    with pytest.raises(ValueError):
+        validate_change("memory.tombstoneRetentionDays", 3651)
+    with pytest.raises(ValueError):
+        validate_change("memory.quarantine.enabled", "true")
+
+    # Project/local layers MUST be ignored for all memory.* keys (V21 USER_ONLY)
+    project_override = _synthetic(
+        (
+            "project",
+            {
+                "memory": {
+                    "quarantine": {"enabled": False},
+                    "conflicts": {"llmAdjudication": True},
+                    "agent": {"enabled": True, "maxPromptChars": 500, "learnFromVerifiedOnly": False},
+                    "instructionLint": {"enabled": True},
+                    "tombstoneRetentionDays": 7,
+                }
+            },
+        ),
+    )
+    for path, (default_value, _, _, _) in expected.items():
+        assert resolve(project_override, path) == ResolvedSetting(default_value, "default", default_value)
+
+

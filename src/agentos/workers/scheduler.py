@@ -6,9 +6,12 @@ from datetime import UTC, datetime, timedelta
 
 from agentos.bootstrap.production import ProductionSettings
 from agentos.conversations.chat import PostgresChatStore
+from agentos.persistence.postgres.memory_lifecycle import MemoryLifecycle
 from agentos.persistence.postgres.quota import QuotaSnapshotStore
 from agentos.persistence.sqlite import create_local_engine
 from agentos.scheduler.scheduled_chats import ScheduledChatService
+from agentos.settings.loader import load_effective_settings
+from agentos.settings.registry import resolve as resolve_setting
 
 POLL_SECONDS = 1.0
 HEARTBEAT_REFRESH_SECONDS = 10.0
@@ -17,6 +20,18 @@ ACTIVITY_PRUNE_MAX_BATCHES = 10
 ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS = 60.0
 ACTIVITY_PRUNE_IDLE_INTERVAL_SECONDS = 6 * 3600.0
 QUOTA_SNAPSHOT_RETENTION_DAYS = 14
+DEFAULT_TOMBSTONE_RETENTION_DAYS = 90
+
+
+def _resolve_tombstone_retention_days(override: int | None = None) -> int:
+    if override is not None:
+        return max(1, int(override))
+    try:
+        effective = load_effective_settings()
+        resolved = resolve_setting(effective, "memory.tombstoneRetentionDays")
+        return max(1, int(resolved.value))
+    except Exception:
+        return DEFAULT_TOMBSTONE_RETENTION_DAYS
 
 
 def _maybe_prune_activity_events(
@@ -27,6 +42,8 @@ def _maybe_prune_activity_events(
     batch_size: int = ACTIVITY_PRUNE_BATCH_SIZE,
     max_batches: int = ACTIVITY_PRUNE_MAX_BATCHES,
     quota_store: QuotaSnapshotStore | None = None,
+    memory_lifecycle: MemoryLifecycle | None = None,
+    tombstone_retention_days: int | None = None,
 ) -> float:
     if now_mono < next_prune_mono:
         return next_prune_mono
@@ -39,6 +56,12 @@ def _maybe_prune_activity_events(
             quota_store.prune(datetime.now(UTC) - timedelta(days=QUOTA_SNAPSHOT_RETENTION_DAYS))
         except Exception:
             logging.getLogger("agentos.workers.scheduler").exception("quota snapshot prune failed")
+    if memory_lifecycle is not None:
+        try:
+            retention_days = _resolve_tombstone_retention_days(tombstone_retention_days)
+            memory_lifecycle.purge_tombstones(datetime.now(UTC) - timedelta(days=retention_days))
+        except Exception:
+            logging.getLogger("agentos.workers.scheduler").exception("memory tombstone purge failed")
     interval = (
         ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS
         if deleted >= batch_size * max_batches
@@ -56,6 +79,7 @@ def main() -> None:
     service = ScheduledChatService(engine)
     chat_store = PostgresChatStore(engine)
     quota_store = QuotaSnapshotStore(engine)
+    memory_lifecycle = MemoryLifecycle(engine)
     next_prune_mono = 0.0
     last_heartbeat_mono: float | None = None
     while True:
@@ -70,6 +94,7 @@ def main() -> None:
                 now_mono=time.monotonic(),
                 next_prune_mono=next_prune_mono,
                 quota_store=quota_store,
+                memory_lifecycle=memory_lifecycle,
             )
         except Exception:
             logging.getLogger("agentos.workers.scheduler").exception("scheduler tick failed")

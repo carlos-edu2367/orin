@@ -96,12 +96,16 @@ def test_near_duplicate_merges_in_place_unless_polarity_is_inverted(tmp_path: Pa
     first = store.save(base_fact, ("pytest", "windows"), kind="operational", confidence=0.7)
     merged = store.save(near_dup_fact, ("windows", "ci"), kind="operational", confidence=0.95)
 
-    assert merged["created"] is False
-    assert merged["memory_id"] == first["memory_id"]
-    assert merged["superseded"] == []
+    # D-RF3: near-duplicate supersedes the old memory instead of overwriting it in-place.
+    assert merged["created"] is True
+    assert merged["memory_id"] != first["memory_id"]
+    assert merged["superseded"] == [first["memory_id"]]
 
+    # D-RF5: get_memory(old_id) follows the supersession chain to the active successor.
     loaded = store.get_memory(str(first["memory_id"]))
     assert loaded is not None
+    assert loaded["memory_id"] == merged["memory_id"]
+    assert loaded["superseded_from"] == first["memory_id"]
     assert loaded["fact"] == near_dup_fact
     assert loaded["confidence"] == pytest.approx(0.95)
     assert loaded["tags"] == ["ci", "pytest", "windows"]

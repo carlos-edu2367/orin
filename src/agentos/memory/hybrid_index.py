@@ -6,7 +6,7 @@ any time from active memory rows.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import hashlib
@@ -238,15 +238,26 @@ class MemoryHybridIndex:
 
     def sync(
         self,
-        rows: Sequence[Mapping[str, object]],
+        rows: Iterable[Mapping[str, object]],
         *,
         prune_missing: bool = True,
-    ) -> None:
-        """Incrementally synchronize the index with active rows from agent_memories."""
+        batch_size: int = 500,
+    ) -> int:
+        """Incrementally synchronize the index with active rows from agent_memories.
+
+        Accepts any iterable (including paginated streams) and filters out any row whose
+        ``status`` is explicitly non-active, pruning inactive/superseded/deleted ids.
+        Returns the total count of active rows synced.
+        """
         with self._lock:
             incoming_sigs: dict[str, tuple[str, str]] = {}
             parsed_rows: dict[str, tuple[str, str, str, str, str, str, str]] = {}
             for row in rows:
+                status = row.get("status")
+                if status is not None and str(status) != "active":
+                    continue
+                if row.get("superseded_by") is not None:
+                    continue
                 mid = str(row.get("memory_id") or "")
                 if not mid:
                     continue
@@ -274,43 +285,53 @@ class MemoryHybridIndex:
                     if prune_missing
                     else set()
                 )
-                changed_or_new_ids = {
+                changed_or_new_ids = [
                     mid
                     for mid, sig_pair in incoming_sigs.items()
                     if existing_meta.get(mid) != sig_pair
-                }
+                ]
 
                 if not removed_ids and not changed_or_new_ids and not self._missing_vectors:
                     need_check = [mid for mid in incoming_sigs if mid not in existing_vectors]
                     if not need_check or self._embedder.identity.embedder_id == "lexical":
                         self._synced_signatures = dict(existing_meta) if not prune_missing else incoming_sigs
-                        return
+                        return len(incoming_sigs)
 
-                if removed_ids or changed_or_new_ids:
-                    with conn:
-                        for mid in removed_ids:
-                            conn.execute("DELETE FROM memories_meta WHERE memory_id = ?", (mid,))
-                            conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (mid,))
-                            conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (mid,))
-                            existing_vectors.discard(mid)
-                        for mid in changed_or_new_ids:
-                            fact, tags_text, scope_type, project_id, kind, updated_at_iso, content_hash = parsed_rows[mid]
-                            conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (mid,))
-                            conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (mid,))
-                            existing_vectors.discard(mid)
-                            conn.execute(
-                                "INSERT INTO memories_meta(memory_id, scope_type, project_id, kind, updated_at_iso, content_hash) "
-                                "VALUES(?, ?, ?, ?, ?, ?) "
-                                "ON CONFLICT(memory_id) DO UPDATE SET "
-                                "scope_type=excluded.scope_type, project_id=excluded.project_id, "
-                                "kind=excluded.kind, updated_at_iso=excluded.updated_at_iso, "
-                                "content_hash=excluded.content_hash",
-                                (mid, scope_type, project_id, kind, updated_at_iso, content_hash),
-                            )
-                            conn.execute(
-                                "INSERT INTO memories_fts(memory_id, fact, tags) VALUES(?, ?, ?)",
-                                (mid, fact, tags_text),
-                            )
+                step = max(1, int(batch_size))
+                if removed_ids:
+                    removed_list = list(removed_ids)
+                    for start in range(0, len(removed_list), step):
+                        chunk = removed_list[start : start + step]
+                        with conn:
+                            for mid in chunk:
+                                conn.execute("DELETE FROM memories_meta WHERE memory_id = ?", (mid,))
+                                conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (mid,))
+                                conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (mid,))
+                                existing_vectors.discard(mid)
+                    self._matrix_cache = None
+
+                if changed_or_new_ids:
+                    for start in range(0, len(changed_or_new_ids), step):
+                        chunk = changed_or_new_ids[start : start + step]
+                        with conn:
+                            for mid in chunk:
+                                fact, tags_text, scope_type, project_id, kind, updated_at_iso, content_hash = parsed_rows[mid]
+                                conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (mid,))
+                                conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?", (mid,))
+                                existing_vectors.discard(mid)
+                                conn.execute(
+                                    "INSERT INTO memories_meta(memory_id, scope_type, project_id, kind, updated_at_iso, content_hash) "
+                                    "VALUES(?, ?, ?, ?, ?, ?) "
+                                    "ON CONFLICT(memory_id) DO UPDATE SET "
+                                    "scope_type=excluded.scope_type, project_id=excluded.project_id, "
+                                    "kind=excluded.kind, updated_at_iso=excluded.updated_at_iso, "
+                                    "content_hash=excluded.content_hash",
+                                    (mid, scope_type, project_id, kind, updated_at_iso, content_hash),
+                                )
+                                conn.execute(
+                                    "INSERT INTO memories_fts(memory_id, fact, tags) VALUES(?, ?, ?)",
+                                    (mid, fact, tags_text),
+                                )
                     self._matrix_cache = None
 
                 need_vectors = [
@@ -352,6 +373,7 @@ class MemoryHybridIndex:
                 self._synced_signatures = (
                     incoming_sigs if prune_missing else {**existing_meta, **incoming_sigs}
                 )
+            return len(incoming_sigs)
 
     def search_lexical(self, query: str, *, limit: int = 50) -> list[tuple[str, float]]:
         expression = fts_memory_query(query)
@@ -418,7 +440,7 @@ class MemoryHybridIndex:
         query: str,
         rows: Sequence[Mapping[str, object]],
         *,
-        all_user_rows: Sequence[Mapping[str, object]] | None = None,
+        all_user_rows: Iterable[Mapping[str, object]] | None = None,
         prune_missing: bool | None = None,
         active_project_id: str | None = None,
         now: datetime | None = None,
@@ -430,10 +452,10 @@ class MemoryHybridIndex:
         moment = now or datetime.now(UTC)
         sync_rows = all_user_rows if all_user_rows is not None else rows
         effective_prune = True if prune_missing is None else bool(prune_missing)
-        self.sync(sync_rows, prune_missing=effective_prune)
+        synced_count = self.sync(sync_rows, prune_missing=effective_prune)
 
         candidate_ids = {str(r["memory_id"]) for r in rows if r.get("memory_id")}
-        search_limit = max(50, len(sync_rows), len(rows))
+        search_limit = max(50, synced_count, len(rows))
         wanted = _terms(query)
         fts_hits = dict(self.search_lexical(query, limit=search_limit))
 

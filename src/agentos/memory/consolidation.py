@@ -549,6 +549,9 @@ class MemoryConsolidator:
         lines: list[str] = []
         ids: set[str] = set()
         for row in rows[:30]:
+            status = row.get("status")
+            if status is not None and str(status) != "active":
+                continue
             if row.get("superseded_by") is not None:
                 continue
             mid = str(row.get("memory_id") or "").strip()

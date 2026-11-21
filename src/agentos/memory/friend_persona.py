@@ -369,6 +369,7 @@ class FriendPersonaStore:
                     .where(
                         agent_memories.c.user_id == user_id,
                         agent_memories.c.scope_type.in_(("user", "project")),
+                        agent_memories.c.status == "active",
                         agent_memories.c.superseded_by.is_(None),
                     )
                 ).scalar_one()

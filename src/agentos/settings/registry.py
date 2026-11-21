@@ -375,8 +375,9 @@ def resolve(settings: EffectiveSettings, path: str) -> ResolvedSetting:
     return ResolvedSetting(effective, winning_layer, copy.deepcopy(key.default))
 
 
-# Register built-in Package E and Messages keys on module import.
+# Register built-in Package E, Messages and Package D memory keys on module import.
 from . import keys_effort_quota as _keys_effort_quota  # noqa: E402, F401
+from . import keys_memory as _keys_memory  # noqa: E402, F401
 from . import keys_messages as _keys_messages  # noqa: E402, F401
 
 __all__ = [
