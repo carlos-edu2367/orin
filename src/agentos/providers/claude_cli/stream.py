@@ -45,6 +45,30 @@ class StreamJsonParser:
         self._latest_usage_raw: dict[str, Any] = {}
         self._saw_stream_text_msgs: set[str] = set()
         self._saw_stream_thinking_msgs: set[str] = set()
+        self.synthetic_error_text: str | None = None
+        self._synthetic_error_msg_ids: set[str] = set()
+
+    @staticmethod
+    def _is_synthetic_error_packet(
+        packet: Mapping[str, Any],
+        msg: Mapping[str, Any] | None = None,
+    ) -> bool:
+        if packet.get("isApiErrorMessage") is True:
+            return True
+        if isinstance(msg, Mapping):
+            if str(msg.get("model") or "") == "<synthetic>":
+                return True
+            if msg.get("isApiErrorMessage") is True:
+                return True
+        return False
+
+    def _record_synthetic_error_text(self, text: str) -> None:
+        if not text:
+            return
+        if self.synthetic_error_text is None:
+            self.synthetic_error_text = text
+        else:
+            self.synthetic_error_text += text
 
     def latest_usage(self) -> CliUsage:
         if self.result is not None:
@@ -68,13 +92,23 @@ class StreamJsonParser:
             raw=raw,
         )
 
-    def _drain_deferred_usage(self, raw: Mapping[str, Any] | None = None) -> list[CliEvent]:
+    def _drain_deferred_usage(
+        self,
+        raw: Mapping[str, Any] | None = None,
+        *,
+        skip_zero: bool = False,
+    ) -> list[CliEvent]:
         """Usage of streamed messages that never got a message_delta (the stream ended early): bill what is known."""
-        return [
-            self._usage_event(msg_id, raw or {})
-            for msg_id in sorted(self._deferred_usage_msgs)
-            if msg_id not in self._seen_usage_message_ids
-        ]
+        drained: list[CliEvent] = []
+        for msg_id in sorted(self._deferred_usage_msgs):
+            if msg_id in self._seen_usage_message_ids or msg_id in self._synthetic_error_msg_ids:
+                continue
+            usage = CliUsage.from_raw(self._msg_usage_raw.get(msg_id, {}))
+            if skip_zero and usage.context_tokens == 0 and usage.output_tokens == 0:
+                self._deferred_usage_msgs.discard(msg_id)
+                continue
+            drained.append(self._usage_event(msg_id, raw or {}))
+        return drained
 
     def _flush_pending_tool(self, index: int, raw: Mapping[str, Any]) -> list[CliEvent]:
         entry = self._pending_tools.pop(index, None)
@@ -213,6 +247,9 @@ class StreamJsonParser:
                     # An invented id is replaced by the first real one an assistant packet carries.
                     self._invented_start_id = None if real_id else msg_id
                     self._current_message_id = msg_id
+                    if self._is_synthetic_error_packet(packet, msg_obj):
+                        self._synthetic_error_msg_ids.add(msg_id)
+                        return events
                     if isinstance(msg_obj.get("usage"), Mapping):
                         bucket = self._msg_usage_raw.setdefault(msg_id, {})
                         bucket.update(msg_obj["usage"])
@@ -323,6 +360,12 @@ class StreamJsonParser:
                 elif d_type == "text_delta":
                     text_piece = str(delta.get("text") or "")
                     if text_piece:
+                        if (
+                            self._current_message_id in self._synthetic_error_msg_ids
+                            or self._is_synthetic_error_packet(packet)
+                        ):
+                            self._record_synthetic_error_text(text_piece)
+                            return events
                         if self._current_message_id:
                             self._saw_stream_text_msgs.add(self._current_message_id)
                         events.append(
@@ -383,6 +426,13 @@ class StreamJsonParser:
                     if msg_id not in self._seen_usage_message_ids:
                         self._deferred_usage_msgs.add(msg_id)
             self._current_message_id = msg_id
+            is_synthetic_error = (
+                self._is_synthetic_error_packet(packet, msg)
+                or msg_id in self._synthetic_error_msg_ids
+            )
+            if is_synthetic_error:
+                self._synthetic_error_msg_ids.add(msg_id)
+                self._deferred_usage_msgs.discard(msg_id)
             bucket = self._msg_usage_raw.setdefault(msg_id, {})
             if isinstance(msg.get("usage"), Mapping):
                 bucket.update(msg["usage"])
@@ -397,6 +447,27 @@ class StreamJsonParser:
             tool_seq = 0
 
             content_list = msg.get("content")
+            if is_synthetic_error:
+                if self.synthetic_error_text is None and isinstance(content_list, list):
+                    syn_parts = [
+                        str(block.get("text") or "")
+                        for block in content_list
+                        if isinstance(block, Mapping)
+                        and str(block.get("type") or "") == "text"
+                        and str(block.get("text") or "")
+                    ]
+                    if syn_parts:
+                        self._record_synthetic_error_text("".join(syn_parts))
+                events.append(
+                    CliEvent(
+                        kind=CliEventKind.ASSISTANT_MESSAGE,
+                        message_id=msg_id,
+                        usage=cli_usage,
+                        raw=packet,
+                    )
+                )
+                return events
+
             if isinstance(content_list, list):
                 for block in content_list:
                     if not isinstance(block, Mapping):
@@ -519,9 +590,9 @@ class StreamJsonParser:
         if pkt_type == "result":
             for pending_idx in list(self._pending_tools.keys()):
                 events.extend(self._flush_pending_tool(pending_idx, packet))
-            events.extend(self._drain_deferred_usage(packet))
             subtype = str(packet.get("subtype") or "")
             is_error = packet.get("is_error") is True or subtype.startswith("error")
+            events.extend(self._drain_deferred_usage(packet, skip_zero=is_error))
             result_text = str(
                 packet.get("result")
                 or packet.get("error")

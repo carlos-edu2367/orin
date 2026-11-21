@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 from pathlib import Path
 import os
 import queue
@@ -50,10 +51,14 @@ from agentos.providers.claude_cli.stream import (
 )
 from agentos.providers.cli_adapter import (
     CliAgentAdapter,
+    CliErrorKind,
     CliStreamTranslator,
     CliTurnRequest,
     ToolServerWiring,
 )
+
+_LOGGER = logging.getLogger(__name__)
+_OVERFLOW_DIAGNOSTIC_MAX_RESULT_BYTES = 2048
 from agentos.providers.cli_queue import CliSlotTicket, acquire_cli_slot
 from agentos.providers.cli_tools_mcp import (
     BackgroundTurnToolServer,
@@ -475,11 +480,13 @@ class NativeTurnHandle:
         allowed_media_root: Path | None = None,
         media_policy: Any | None = None,
         win_job: Any | None = None,
+        first_message_bytes: int = 0,
     ) -> None:
         self._process_cwd = process_cwd
         self._allowed_media_root = allowed_media_root
         self._media_policy = media_policy
         self._win_job = win_job
+        self._first_message_bytes = max(0, int(first_message_bytes))
         self._adapter: CliAgentAdapter = (
             adapter if adapter is not None else ClaudeCliAdapter()
         )
@@ -534,6 +541,54 @@ class NativeTurnHandle:
     def process_cwd(self) -> Path | None:
         """The folder this process alone runs in (None when the CLI shares the request's folder)."""
         return self._process_cwd
+
+    @property
+    def synthetic_error_text(self) -> str | None:
+        raw = getattr(self._parser, "synthetic_error_text", None)
+        return str(raw) if isinstance(raw, str) and raw else None
+
+    def _log_context_overflow_diagnostic(
+        self,
+        res: CliResult,
+        raw_packet: Mapping[str, Any] | None,
+    ) -> None:
+        """E-RF14: log sanitized overflow result metadata and first_message_bytes without user content."""
+        raw = raw_packet if isinstance(raw_packet, Mapping) else {}
+        raw_result = str(
+            raw.get("result") if raw.get("result") is not None else (res.result_text or "")
+        )
+        encoded = raw_result.encode("utf-8")
+        if len(encoded) > _OVERFLOW_DIAGNOSTIC_MAX_RESULT_BYTES:
+            raw_result = encoded[:_OVERFLOW_DIAGNOSTIC_MAX_RESULT_BYTES].decode(
+                "utf-8", errors="ignore"
+            )
+        usage_dict = {
+            "input_tokens": res.usage.input_tokens,
+            "output_tokens": res.usage.output_tokens,
+            "cache_read_input_tokens": res.usage.cache_read_input_tokens,
+            "cache_creation_input_tokens": res.usage.cache_creation_input_tokens,
+        }
+        model_usage_dict = {
+            str(m_id): {
+                "input_tokens": m_usage.input_tokens,
+                "output_tokens": m_usage.output_tokens,
+                "cache_read_input_tokens": m_usage.cache_read_input_tokens,
+                "cache_creation_input_tokens": m_usage.cache_creation_input_tokens,
+            }
+            for m_id, m_usage in (res.model_usage or {}).items()
+        }
+        diagnostic = {
+            "result": raw_result,
+            "subtype": res.subtype,
+            "api_error_status": res.api_error_status,
+            "usage": usage_dict,
+            "modelUsage": model_usage_dict,
+            "first_message_bytes": self._first_message_bytes,
+        }
+        _LOGGER.warning(
+            "CLI context overflow diagnostic: %s",
+            json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")),
+        )
 
     @property
     def in_flight(self) -> int:
@@ -760,6 +815,15 @@ class NativeTurnHandle:
                     res_before_init, self._parser.rate_limit
                 )
                 err = error_info_to_transport_error(err_info)
+                if (
+                    err_info.kind == CliErrorKind.CONTEXT_OVERFLOW
+                    or getattr(err, "error_kind", None) == CliErrorKind.CONTEXT_OVERFLOW
+                ):
+                    self._log_context_overflow_diagnostic(
+                        res_before_init, ev.raw if isinstance(ev.raw, Mapping) else None
+                    )
+                if self.synthetic_error_text:
+                    setattr(err, "synthetic_error_text", self.synthetic_error_text)
                 self.close()
                 tail = self._build_output_tail()
                 err.end_reason = "error_result"
@@ -850,6 +914,15 @@ class NativeTurnHandle:
                         res, self._parser.rate_limit
                     )
                     err = error_info_to_transport_error(err_info)
+                    if (
+                        err_info.kind == CliErrorKind.CONTEXT_OVERFLOW
+                        or getattr(err, "error_kind", None) == CliErrorKind.CONTEXT_OVERFLOW
+                    ):
+                        self._log_context_overflow_diagnostic(
+                            res, ev.raw if isinstance(ev.raw, Mapping) else None
+                        )
+                    if self.synthetic_error_text:
+                        setattr(err, "synthetic_error_text", self.synthetic_error_text)
                     self.close()
                     tail = self._build_output_tail()
                     err.end_reason = "error_result"
@@ -1704,6 +1777,7 @@ def start_native_turn_for_provider(
             allowed_media_root=allowed_media_root,
             media_policy=media_policy,
             win_job=win_job,
+            first_message_bytes=len(initial_payload.encode("utf-8")),
         )
         wrapped_executor.handle = handle
         return handle

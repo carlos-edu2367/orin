@@ -176,7 +176,7 @@ def classify_codex_error(
             retryable=False,
             retry_after_seconds=None,
             exception=ProviderTransportError(
-                user_msg, status_code=401, exhausted=True
+                user_msg, status_code=401, exhausted=True, error_kind=CliErrorKind.AUTH
             ),
         )
 
@@ -195,6 +195,7 @@ def classify_codex_error(
                 status_code=429,
                 exhausted=False,
                 retry_after_seconds=retry_after,
+                error_kind=CliErrorKind.RATE_LIMITED,
             ),
         )
 
@@ -212,7 +213,7 @@ def classify_codex_error(
             retryable=False,
             retry_after_seconds=None,
             exception=ProviderTransportError(
-                raw_text, status_code=404, exhausted=False
+                raw_text, status_code=404, exhausted=False, error_kind=CliErrorKind.MODEL_NOT_FOUND
             ),
         )
 
@@ -227,7 +228,7 @@ def classify_codex_error(
             retryable=False,
             retry_after_seconds=None,
             exception=ProviderTransportError(
-                raw_text, status_code=400, exhausted=False
+                raw_text, status_code=400, exhausted=False, error_kind=CliErrorKind.CONTEXT_OVERFLOW
             ),
         )
 
@@ -248,7 +249,7 @@ def classify_codex_error(
             retryable=True,
             retry_after_seconds=None,
             exception=ProviderTransportError(
-                raw_text, status_code=status_code, exhausted=False
+                raw_text, status_code=status_code, exhausted=False, error_kind=CliErrorKind.TRANSIENT
             ),
         )
 
@@ -259,7 +260,7 @@ def classify_codex_error(
         retryable=False,
         retry_after_seconds=None,
         exception=ProviderTransportError(
-            raw_text, status_code=502, exhausted=False
+            raw_text, status_code=502, exhausted=False, error_kind=CliErrorKind.FATAL
         ),
     )
 

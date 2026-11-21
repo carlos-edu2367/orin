@@ -3415,5 +3415,42 @@ def test_codex_native_turn_preserves_user_image_paths_across_transient_retry_bef
     assert provider.requests[1].user_image_paths == (img_rel,)
 
 
+def test_zero_usage_on_error_does_not_emit_context_updated(tmp_path: Path) -> None:
+    store = FakeStore()
+
+    def _round(req: NativeTurnRequest, sink: NativeTurnSink, _h: ScriptedHandle) -> NativeTurnOutcome:
+        init = _make_init(req.model)
+        sink.on_init(init)
+        sink.on_assistant_usage("msg_real", CliUsage(input_tokens=12_000, output_tokens=300))
+        # Simulated error packet with all-zero usage must NOT zero the context meter.
+        sink.on_assistant_usage(
+            "msg_err_zero",
+            CliUsage(
+                input_tokens=0,
+                output_tokens=0,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+        )
+        sink.on_text("ok")
+        return NativeTurnOutcome(result=_make_result(text="ok"), init=init, final_text="ok", exit_code=0)
+
+    provider = FakeNativeProvider(handle_factory=lambda req: ScriptedHandle(req, [_round]))
+    workspace = ConversationWorkspace(tmp_path, "c1")
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=_make_toolset(workspace),
+        sleep=lambda _s: None,
+        limits=AgenticLimits(context_window_tokens=200_000),
+    )
+    res = runtime.run("t1")
+    assert res.state == "completed"
+    ctx_updates = [payload for state, payload in store.states if state == "context_updated"]
+    assert any(p.get("used_tokens") == 12_000 for p in ctx_updates)
+    assert not any(p.get("used_tokens") == 0 for p in ctx_updates)
+
+
+
 
 
