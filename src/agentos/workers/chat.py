@@ -80,6 +80,7 @@ from agentos.memory.friend_persona import FriendPersonaStore
 from agentos.persistence.postgres.agent_memory import PostgresAgentMemoryStore
 from agentos.persistence.postgres.agentic_activity import PostgresAgenticActivityStore
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
+from agentos.persistence.postgres.verification_reviews import VerificationReviewStore
 from agentos.persistence.postgres.execution_adapters import ExecutionApplicationAdapter, ExecutionQueryAdapter
 from agentos.persistence.postgres.execution_journal import PostgresExecutionJournal
 from agentos.execution.journal import (
@@ -2095,6 +2096,7 @@ class ChatWorker:
             favorites_by_provider=lambda: self._child_routing_catalog(turn)[0],
             configured_providers=lambda: self._child_routing_catalog(turn)[1],
             quota_service=getattr(self, "_quota_service", None),
+            review_recorder=VerificationReviewStore(engine),
             subagent_context_limits=lambda model_id, provider: self._context_limits_for(
                 {**turn, "model_id": model_id, "provider": provider or turn["provider"]}
             ),
