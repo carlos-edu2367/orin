@@ -388,6 +388,7 @@ class AgenticTurnRuntime:
         on_reminder_ack: Callable[[str], Any] | None = None,
         control_watcher: Any | None = None,
         continue_on_unread: bool = True,
+        on_verification: Callable[[bool], None] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         if provider_timeout_seconds is not None:
@@ -411,6 +412,8 @@ class AgenticTurnRuntime:
         self.on_reminder_ack = on_reminder_ack
         self.control_watcher = control_watcher
         self.continue_on_unread = bool(continue_on_unread)
+        self._on_verification = on_verification
+        self._last_verification_passed: bool | None = None
         self.lifecycle = lifecycle
         self.prompt_block_reason = prompt_block_reason
         self.config_block_reason = config_block_reason
@@ -3693,6 +3696,13 @@ class AgenticTurnRuntime:
         payload = getattr(outcome, "payload", None)
         if isinstance(payload, Mapping):
             self._pending_verification = payload
+            passed = bool(payload.get("passed"))
+            self._last_verification_passed = passed
+            if callable(self._on_verification):
+                try:
+                    self._on_verification(passed)
+                except Exception:  # noqa: BLE001 - memory promotion hook never breaks a turn
+                    pass
 
     def _absorb_contract(self, outcome: object) -> None:
         """Adopt a contract the planning tool just produced, or count a refusal.

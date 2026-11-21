@@ -20,7 +20,9 @@ from sqlalchemy import inspect, insert, select, text, update
 from sqlalchemy.engine import Engine
 
 from agentos.agentic.learning import is_ephemeral_mechanical_fact
+from agentos.memory.agent_scope import AgentMemoryScope, is_learn_from_verified_only
 from agentos.memory.conflict import (
+    ConflictResolver,
     ExistingMemoryCandidate,
     MAX_CONFLICT_CANDIDATES,
     _has_polarity_inversion,
@@ -144,6 +146,8 @@ class PostgresAgentMemoryStore:
         execution_id: str | None = None,
         scope_type: str | None = None,
         agent_key: str | None = None,
+        agent_scope: AgentMemoryScope | None = None,
+        scope_id: str | None = None,
         write_policy: WritePolicy | None = None,
         settings_provider: Callable[[], Any] | None = None,
         data_dir: Path | str | None = None,
@@ -157,7 +161,13 @@ class PostgresAgentMemoryStore:
         self._project_id = project_id
         self._execution_id = execution_id
         self._explicit_scope_type = scope_type
-        self._agent_key = str(agent_key).strip() if agent_key and str(agent_key).strip() else None
+        self._agent_scope = agent_scope
+        self._explicit_scope_id = str(scope_id).strip() if scope_id and str(scope_id).strip() else None
+        self._agent_key = (
+            agent_scope.agent_key
+            if agent_scope is not None
+            else (str(agent_key).strip() if agent_key and str(agent_key).strip() else None)
+        )
         self._settings_provider: Callable[[], Any] | None = settings_provider
         self._write_policy: WritePolicy = (
             write_policy
@@ -230,7 +240,11 @@ class PostgresAgentMemoryStore:
         supersedes_id: str | None = None,
         context: MemoryWriteContext | None = None,
         agent_key: str | None = None,
+        agent_scope: AgentMemoryScope | None = None,
+        scope_id: str | None = None,
         quarantine_enabled: bool | None = None,
+        learn_from_verified_only: bool | None = None,
+        propose_only: bool = False,
     ) -> dict[str, object]:
         now = datetime.now(UTC)
         normalized = " ".join(str(fact or "").split())[:MAX_FACT_CHARS]
@@ -252,13 +266,35 @@ class PostgresAgentMemoryStore:
 
         valence = _clamp(emotional_valence, -1.0, 1.0)
         salience_val = _clamp(salience, 0.0, 1.0)
-        effective_project_id = self._project_id if effective_scope in {"project", "agent"} else None
-        effective_scope_id = effective_project_id or self._user_id
+        active_agent_scope = agent_scope or (self._agent_scope if effective_scope == "agent" else None)
         resolved_agent_key = (
-            (context.agent_key.strip() if context and context.agent_key and context.agent_key.strip() else None)
+            (active_agent_scope.agent_key if active_agent_scope is not None else None)
+            or (context.agent_key.strip() if context and context.agent_key and context.agent_key.strip() else None)
             or (agent_key.strip() if agent_key and agent_key.strip() else None)
             or (self._agent_key if effective_scope == "agent" else None)
         )
+        if effective_scope == "agent":
+            if not resolved_agent_key:
+                raise ValueError("agent_key is required when scope_type='agent'")
+            resolved_agent_key = resolved_agent_key.lower()
+            if active_agent_scope is not None:
+                effective_project_id = active_agent_scope.effective_project_id
+                effective_scope_id = active_agent_scope.scope_id
+            else:
+                effective_project_id = self._project_id
+                explicit_sid = (
+                    str(scope_id).strip()
+                    if scope_id and str(scope_id).strip()
+                    else self._explicit_scope_id
+                )
+                effective_scope_id = explicit_sid or (
+                    f"project:{self._project_id}:{resolved_agent_key}"
+                    if self._project_id
+                    else f"user:{resolved_agent_key}"
+                )
+        else:
+            effective_project_id = self._project_id if effective_scope == "project" else None
+            effective_scope_id = effective_project_id or self._user_id
         if context is not None:
             effective_context = MemoryWriteContext(
                 source_kind=context.source_kind,
@@ -304,6 +340,7 @@ class PostgresAgentMemoryStore:
                 scope_type=effective_scope,
                 project_id=effective_project_id,
                 agent_key=resolved_agent_key,
+                scope_id=effective_scope_id if effective_scope == "agent" else None,
                 text_hash=text_hash,
                 limit=MAX_CONFLICT_CANDIDATES,
             )
@@ -501,6 +538,78 @@ class PostgresAgentMemoryStore:
                 if decision.action == "conflict" and decision.target_id:
                     receipt["conflict_with"] = decision.target_id
                 return receipt
+
+            # D-RF10: Subagent writes in scope_type='agent' enter as 'proposed' waiting for MemoryPromotionGate
+            # unless learnFromVerifiedOnly is explicitly disabled (and propose_only is False).
+            if effective_scope == "agent":
+                require_proposal = (
+                    True
+                    if propose_only
+                    else (
+                        bool(learn_from_verified_only)
+                        if learn_from_verified_only is not None
+                        else is_learn_from_verified_only(self._resolve_settings(), default=True)
+                    )
+                )
+                if require_proposal:
+                    memory_id = f"mem_{uuid4().hex}"
+                    connection.execute(
+                        insert(agent_memories).values(
+                            memory_id=memory_id,
+                            user_id=self._user_id,
+                            conversation_id=effective_context.conversation_id,
+                            scope_type=effective_scope,
+                            scope_id=effective_scope_id,
+                            project_id=effective_project_id,
+                            source_message_id=None,
+                            source_execution_id=self._execution_id,
+                            fact=normalized,
+                            tags=list(tags),
+                            kind=kind,
+                            confidence=confidence,
+                            emotional_valence=valence,
+                            salience=salience_val,
+                            source=source,
+                            hit_count=0,
+                            last_used_at=None,
+                            superseded_by=None,
+                            status="proposed",
+                            agent_key=resolved_agent_key,
+                            text_hash=text_hash,
+                            valid_from=now,
+                            invalid_at=None,
+                            source_kind=effective_context.source_kind,
+                            source_ref=effective_context.source_ref,
+                            trust=effective_context.trust,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    self._lifecycle.record_event(
+                        connection,
+                        memory_id=memory_id,
+                        user_id=self._user_id,
+                        event="proposed",
+                        actor=effective_context.actor,
+                        new_text=normalized,
+                        related_id=target_supersede,
+                        conversation_id=effective_context.conversation_id,
+                        turn_id=effective_context.turn_id,
+                        created_at=now,
+                    )
+                    return {
+                        "memory_id": memory_id,
+                        "fact": normalized,
+                        "created": True,
+                        "superseded": [],
+                        "status": "proposed",
+                        "scope_type": "agent",
+                        "scope_id": effective_scope_id,
+                        "agent_key": resolved_agent_key,
+                        "source_kind": effective_context.source_kind,
+                        "source_ref": effective_context.source_ref,
+                        "trust": effective_context.trust,
+                    }
 
             # Exact active match by text_hash in the same scope -> update in-place & audit event
             existing_row = connection.execute(
@@ -851,6 +960,7 @@ class PostgresAgentMemoryStore:
         scope_type: str,
         project_id: str | None,
         agent_key: str | None = None,
+        scope_id: str | None = None,
         text_hash: str,
         limit: int = MAX_CONFLICT_CANDIDATES,
     ) -> tuple[ExistingMemoryCandidate, ...]:
@@ -865,19 +975,22 @@ class PostgresAgentMemoryStore:
             if agent_key
             else agent_memories.c.agent_key.is_(None)
         )
+        predicates = [
+            agent_memories.c.user_id == self._user_id,
+            agent_memories.c.scope_type == scope_type,
+            agent_memories.c.kind == kind,
+            agent_memories.c.status == "active",
+            agent_memories.c.superseded_by.is_(None),
+            scope_predicate,
+            agent_key_predicate,
+        ]
+        if scope_id is not None:
+            predicates.append(agent_memories.c.scope_id == scope_id)
         with self._engine.connect() as connection:
             rows = [
                 dict(row)
                 for row in connection.execute(
-                    select(agent_memories).where(
-                        agent_memories.c.user_id == self._user_id,
-                        agent_memories.c.scope_type == scope_type,
-                        agent_memories.c.kind == kind,
-                        agent_memories.c.status == "active",
-                        agent_memories.c.superseded_by.is_(None),
-                        scope_predicate,
-                        agent_key_predicate,
-                    )
+                    select(agent_memories).where(*predicates)
                 )
                 .mappings()
                 .all()
@@ -1133,12 +1246,37 @@ class PostgresAgentMemoryStore:
             row["hit_count"] = int(row.get("hit_count") or 0) + 1
             row["last_used_at"] = now
 
+    def active_for_agent_scope(self, scope: AgentMemoryScope) -> list[dict[str, object]]:
+        """Return all active, non-superseded memories strictly matching ``scope``."""
+        proj_pred = (
+            agent_memories.c.project_id == scope.effective_project_id
+            if scope.effective_project_id is not None
+            else agent_memories.c.project_id.is_(None)
+        )
+        stmt = (
+            select(agent_memories)
+            .where(
+                agent_memories.c.user_id == scope.user_id,
+                agent_memories.c.scope_type == "agent",
+                agent_memories.c.scope_id == scope.scope_id,
+                agent_memories.c.agent_key == scope.agent_key,
+                proj_pred,
+                agent_memories.c.status == "active",
+                agent_memories.c.superseded_by.is_(None),
+            )
+            .order_by(agent_memories.c.updated_at.desc())
+        )
+        with self._engine.connect() as connection:
+            return [self._public(dict(row)) for row in connection.execute(stmt).mappings().all()]
+
     def relevant(
         self,
         task: str,
         *,
         limit: int = 12,
         conversation_id: str | None = None,
+        agent_key: str | None = None,
+        agent_scope: AgentMemoryScope | None = None,
     ) -> list[dict[str, object]]:
         """Memories worth spending prompt space on for *this* task.
 
@@ -1152,7 +1290,7 @@ class PostgresAgentMemoryStore:
         preference_slots = min(4, limit)
         rows = [
             row
-            for row in self._all()
+            for row in self._all(agent_key=agent_key, agent_scope=agent_scope)
             if str(row.get("status") or "active") == "active"
             and row["superseded_by"] is None
             and not (row.get("source") == "mechanical" and is_ephemeral_mechanical_fact(str(row.get("fact") or "")))
@@ -1316,6 +1454,15 @@ class PostgresAgentMemoryStore:
         combined = list(layer1_selected) + [self._public(row) for row in chosen_layer2]
         return combined[:limit]
 
+    @staticmethod
+    def _recall_scope_bonus(row: dict[str, object]) -> float:
+        st = str(row.get("scope_type") or "user")
+        if st == "agent":
+            return 0.35
+        if st == "project":
+            return 0.15
+        return 0.0
+
     def search(
         self,
         query: str,
@@ -1323,20 +1470,25 @@ class PostgresAgentMemoryStore:
         limit: int = 8,
         scope: str | None = None,
         conversation_id: str | None = None,
+        agent_key: str | None = None,
+        agent_scope: AgentMemoryScope | None = None,
     ) -> list[dict[str, object]]:
         if limit <= 0:
             return []
         norm_scope = (
             str(scope).strip().lower()
-            if scope is not None and str(scope).strip().lower() in {"user", "project"}
+            if scope is not None and str(scope).strip().lower() in {"user", "project", "agent"}
             else None
         )
-        rows = self._all(scope=norm_scope)
+        rows = self._all(scope=norm_scope, agent_key=agent_key, agent_scope=agent_scope)
         if not rows:
             return []
 
+        has_agent_ctx = agent_scope is not None or bool(agent_key)
         now = datetime.now(UTC)
         if not str(query or "").strip():
+            if has_agent_ctx and norm_scope is None:
+                rows.sort(key=lambda r: (self._recall_scope_bonus(r), r["updated_at"]), reverse=True)
             selected = rows[:limit]
             self._record_usage(selected, conversation_id=conversation_id)
             return [self._public(row) for row in selected]
@@ -1354,10 +1506,20 @@ class PostgresAgentMemoryStore:
         ]
         if not matched_rows:
             return []
-        matched_rows.sort(
-            key=lambda row: (final_scores.get(str(row["memory_id"]), 0.0), row["updated_at"]),
-            reverse=True,
-        )
+        if has_agent_ctx and norm_scope is None:
+            matched_rows.sort(
+                key=lambda row: (
+                    final_scores.get(str(row["memory_id"]), 0.0) + self._recall_scope_bonus(row),
+                    self._recall_scope_bonus(row),
+                    row["updated_at"],
+                ),
+                reverse=True,
+            )
+        else:
+            matched_rows.sort(
+                key=lambda row: (final_scores.get(str(row["memory_id"]), 0.0), row["updated_at"]),
+                reverse=True,
+            )
         selected = matched_rows[:limit]
         self._record_usage(selected, conversation_id=conversation_id)
         return [self._public(row) for row in selected]
@@ -1445,13 +1607,57 @@ class PostgresAgentMemoryStore:
                 .all()
             ]
 
-    def _all(self, *, scope: str | None = None, limit: int | None = None) -> list[dict[str, object]]:
+    def _agent_scope_clause(
+        self,
+        *,
+        agent_key: str | None = None,
+        agent_scope: AgentMemoryScope | None = None,
+    ):
+        if agent_scope is not None:
+            proj_pred = (
+                agent_memories.c.project_id == agent_scope.effective_project_id
+                if agent_scope.effective_project_id is not None
+                else agent_memories.c.project_id.is_(None)
+            )
+            return (
+                (agent_memories.c.scope_type == "agent")
+                & (agent_memories.c.scope_id == agent_scope.scope_id)
+                & (agent_memories.c.agent_key == agent_scope.agent_key)
+                & proj_pred
+            )
+        clean_key = str(agent_key or "").strip().lower()
+        if not clean_key:
+            return None
+        proj_pred = (
+            agent_memories.c.project_id == self._project_id
+            if self._project_id
+            else agent_memories.c.project_id.is_(None)
+        )
+        return (
+            (agent_memories.c.scope_type == "agent")
+            & (agent_memories.c.agent_key == clean_key)
+            & proj_pred
+        )
+
+    def _all(
+        self,
+        *,
+        scope: str | None = None,
+        limit: int | None = None,
+        agent_key: str | None = None,
+        agent_scope: AgentMemoryScope | None = None,
+    ) -> list[dict[str, object]]:
         predicate = [
             agent_memories.c.user_id == self._user_id,
             agent_memories.c.status == "active",
             agent_memories.c.superseded_by.is_(None),
         ]
-        if scope == "user":
+        agent_clause = self._agent_scope_clause(agent_key=agent_key, agent_scope=agent_scope)
+        if scope == "agent":
+            if agent_clause is None:
+                return []
+            predicate.append(agent_clause)
+        elif scope == "user":
             predicate.extend((agent_memories.c.scope_type == "user", agent_memories.c.project_id.is_(None)))
         elif scope == "project":
             if self._project_id:
@@ -1460,13 +1666,14 @@ class PostgresAgentMemoryStore:
                 )
             else:
                 return []
-        elif self._project_id:
-            predicate.append(
+        else:
+            base_clause = (
                 (agent_memories.c.scope_type == "user")
                 | ((agent_memories.c.scope_type == "project") & (agent_memories.c.project_id == self._project_id))
+                if self._project_id
+                else ((agent_memories.c.scope_type == "user") & agent_memories.c.project_id.is_(None))
             )
-        else:
-            predicate.extend((agent_memories.c.scope_type == "user", agent_memories.c.project_id.is_(None)))
+            predicate.append((agent_clause | base_clause) if agent_clause is not None else base_clause)
         stmt = select(agent_memories).where(*predicate).order_by(agent_memories.c.updated_at.desc())
         if limit is not None:
             stmt = stmt.limit(max(0, int(limit)))
@@ -1497,6 +1704,7 @@ class PostgresAgentMemoryStore:
             "tags": list(row["tags"] or []),
             "kind": row["kind"],
             "scope_type": row.get("scope_type", "user"),
+            "scope_id": row.get("scope_id"),
             "project_id": row.get("project_id"),
             "agent_key": row.get("agent_key"),
             "status": row.get("status", "active"),

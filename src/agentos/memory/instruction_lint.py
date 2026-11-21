@@ -13,6 +13,7 @@ are discarded. The linter never modifies memories or instruction files.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -24,17 +25,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.engine import Engine
-
 from agentos.file_lock import file_lock as _file_lock
 from agentos.memory_files.loader import DIRECTORY_FILES, MAX_FILE_BYTES, MemoryFile, MemoryFiles
-from agentos.persistence.postgres.schema import (
-    agent_memories,
-    provider_configurations,
-    provider_model_catalog,
-    provider_model_favorites,
-)
 from agentos.settings.loader import load_effective_settings
 from agentos.settings.paths import orin_user_dir
 from agentos.settings.registry import resolve as resolve_setting
@@ -163,6 +155,11 @@ class _LoadedInstructionFile:
 
 ModelCaller = Callable[[str, str], str]
 ProviderResolver = Callable[[str], ModelCaller | None]
+MemoryLoader = Callable[[str, str | None], Sequence[Mapping[str, Any]]]
+
+
+def _runtime_adapter() -> Any:
+    return importlib.import_module("agentos.persistence.postgres.instruction_lint_runtime")
 
 
 class InstructionLintState:
@@ -359,155 +356,11 @@ def _choose_lightweight_model(candidates: Sequence[tuple[str, str]]) -> tuple[st
     return candidates[0]
 
 
-def resolve_lightweight_model_caller(engine: Engine | None, user_id: str) -> ModelCaller | None:
-    """Resolve a lightweight configured provider/model caller for ``user_id``, or ``None`` if unavailable."""
+def resolve_lightweight_model_caller(engine: Any | None, user_id: str) -> ModelCaller | None:
+    """Delegate lightweight model resolution to the persistence runtime adapter."""
     if engine is None or not str(user_id or "").strip():
         return None
-    try:
-        with engine.connect() as connection:
-            configs = connection.execute(
-                select(
-                    provider_configurations.c.provider,
-                    provider_configurations.c.base_url,
-                    provider_configurations.c.enabled,
-                    provider_configurations.c.key_cooldown_seconds,
-                    provider_configurations.c.risk_acknowledged_at,
-                ).where(
-                    provider_configurations.c.user_id == user_id,
-                    provider_configurations.c.enabled.is_(True),
-                )
-            ).mappings().all()
-            if not configs:
-                return None
-
-            config_by_provider: dict[str, Mapping[str, Any]] = {}
-            for cfg in configs:
-                prov = str(cfg.get("provider") or "").strip()
-                if not prov:
-                    continue
-                if prov == "google-antigravity" and not cfg.get("risk_acknowledged_at"):
-                    continue
-                config_by_provider[prov] = cfg
-            if not config_by_provider:
-                return None
-
-            enabled_providers = sorted(config_by_provider.keys())
-            fav_rows = connection.execute(
-                select(
-                    provider_model_favorites.c.provider,
-                    provider_model_favorites.c.model_id,
-                ).where(
-                    provider_model_favorites.c.user_id == user_id,
-                    provider_model_favorites.c.provider.in_(enabled_providers),
-                )
-            ).all()
-            candidates: list[tuple[str, str]] = [
-                (str(r.provider), str(r.model_id))
-                for r in fav_rows
-                if r.provider and r.model_id and not str(r.model_id).lower().endswith(":batch")
-            ]
-            if not candidates:
-                cat_rows = connection.execute(
-                    select(
-                        provider_model_catalog.c.provider,
-                        provider_model_catalog.c.model_id,
-                    )
-                    .where(
-                        provider_model_catalog.c.user_id == user_id,
-                        provider_model_catalog.c.provider.in_(enabled_providers),
-                    )
-                    .limit(50)
-                ).all()
-                candidates = [
-                    (str(r.provider), str(r.model_id))
-                    for r in cat_rows
-                    if r.provider and r.model_id and not str(r.model_id).lower().endswith(":batch")
-                ]
-    except Exception:  # noqa: BLE001
-        return None
-
-    chosen = _choose_lightweight_model(candidates)
-    if chosen is None:
-        return None
-    provider_name, model_id = chosen
-    cfg = config_by_provider[provider_name]
-
-    try:
-        from agentos.agentic.provider_stream import (
-            DEFAULT_CLAUDE_CLI_BRIDGE_URL,
-            HTTPProviderStreamTransport,
-            MultiKeyProviderStreamTransport,
-            PROVIDERS_WITH_BASE_URL,
-            is_claude_cli_bridge_url,
-        )
-        from agentos.persistence.postgres.provider_api_keys import PostgresProviderApiKeyAdapter
-        from agentos.provider_credentials.crypto import ProviderSecretCipher
-
-        if provider_name in {"openai-codex", "google-antigravity"}:
-            from agentos.providers.claude_cli.provider import ClaudeCliProvider
-            from agentos.providers.cli_registry import cli_adapter_for
-
-            cli_adapter = cli_adapter_for(
-                provider_name,
-                str(cfg.get("base_url") or "") or None,
-                risk_acknowledged_at=cfg.get("risk_acknowledged_at")
-                if provider_name == "google-antigravity"
-                else None,
-            )
-            if cli_adapter is None:
-                return None
-            transport = ClaudeCliProvider(
-                base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
-                model=model_id,
-                adapter=cli_adapter,
-            )
-            return _wrap_provider_as_caller(transport, provider_name, model_id)
-
-        base_url = str(cfg.get("base_url") or "").strip()
-        if provider_name == "anthropic" and is_claude_cli_bridge_url(base_url):
-            from agentos.providers.claude_cli.provider import ClaudeCliProvider
-
-            transport = ClaudeCliProvider(base_url=base_url, model=model_id)
-            return _wrap_provider_as_caller(transport, provider_name, model_id)
-
-        keys = PostgresProviderApiKeyAdapter(
-            engine,
-            cipher=ProviderSecretCipher.from_environment(required=False),
-        )
-        first_key = keys.next_available_key(user_id, provider_name)
-        if first_key is None:
-            if provider_name not in PROVIDERS_WITH_BASE_URL or (
-                provider_name == "anthropic" and not is_claude_cli_bridge_url(base_url)
-            ):
-                return None
-            transport = HTTPProviderStreamTransport(
-                provider=provider_name,
-                base_url=base_url,
-                api_key="",
-                model=model_id,
-            )
-            return _wrap_provider_as_caller(transport, provider_name, model_id)
-
-        def _build(api_key: str) -> HTTPProviderStreamTransport:
-            return HTTPProviderStreamTransport(
-                provider=provider_name,
-                base_url=base_url,
-                api_key=api_key,
-                model=model_id,
-            )
-
-        transport = MultiKeyProviderStreamTransport(
-            key_pool=keys,
-            user_id=user_id,
-            provider=provider_name,
-            cooldown_seconds=int(cfg.get("key_cooldown_seconds") or 60),
-            transport_factory=_build,
-            model=model_id,
-            base_url=base_url,
-        )
-        return _wrap_provider_as_caller(transport, provider_name, model_id)
-    except Exception:  # noqa: BLE001
-        return None
+    return _runtime_adapter().resolve_lightweight_model_caller(engine, user_id)
 
 
 def _parse_raw_contradictions(raw_text: str) -> list[dict[str, Any]]:
@@ -555,7 +408,8 @@ class InstructionLinter:
     def __init__(
         self,
         *,
-        engine: Engine | None = None,
+        engine: Any | None = None,
+        memory_loader: MemoryLoader | None = None,
         memory_store: Any | None = None,
         model_caller: ModelCaller | None = None,
         provider: Any | None = None,
@@ -565,6 +419,7 @@ class InstructionLinter:
         walk_up: bool = True,
     ) -> None:
         self._engine = engine
+        self._memory_loader = memory_loader
         self._memory_store = memory_store
         self._model_caller = model_caller
         self._provider = provider
@@ -614,35 +469,17 @@ class InstructionLinter:
         *,
         project_id: str | None = None,
     ) -> list[dict[str, Any]]:
+        if self._memory_loader is not None:
+            return [dict(row) for row in self._memory_loader(user_id, project_id)]
+
         if self._engine is not None:
-            predicate = [
-                agent_memories.c.user_id == user_id,
-                agent_memories.c.status == "active",
-                agent_memories.c.superseded_by.is_(None),
-                agent_memories.c.scope_type != "friend",
-            ]
-            if project_id:
-                predicate.append(
-                    (agent_memories.c.scope_type == "user")
-                    | (agent_memories.c.project_id == project_id)
+            return list(
+                _runtime_adapter().load_active_memories_for_lint(
+                    self._engine,
+                    user_id,
+                    project_id=project_id,
                 )
-            else:
-                predicate.append(agent_memories.c.scope_type == "user")
-            stmt = (
-                select(
-                    agent_memories.c.memory_id,
-                    agent_memories.c.fact,
-                    agent_memories.c.kind,
-                    agent_memories.c.scope_type,
-                    agent_memories.c.project_id,
-                    agent_memories.c.status,
-                    agent_memories.c.superseded_by,
-                )
-                .where(*predicate)
-                .order_by(agent_memories.c.updated_at.desc())
             )
-            with self._engine.connect() as connection:
-                return [dict(row) for row in connection.execute(stmt).mappings().all()]
 
         if self._memory_store is not None:
             raw_rows: Sequence[Mapping[str, Any]] = ()

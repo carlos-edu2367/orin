@@ -3957,7 +3957,11 @@ class TurnSession:
                     initial_history = [dict(item) for item in caller.history()]
                 except Exception:
                     initial_history = None
-            enriched_record = {**record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition}
+            sub_memory_view, frozen_agent_memory = self._subagent_memory_context(clean, builtin_key, definition)
+            enriched_record = {
+                **record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition,
+                **({"agent_memory_summary": frozen_agent_memory} if frozen_agent_memory else {}),
+            }
             sub_store = _SubagentStore(
                 self,
                 subagent_turn,
@@ -4009,6 +4013,7 @@ class TurnSession:
                 # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
                 reminders=sub_reminders,
                 todos_state=[],
+                memory_override=sub_memory_view,
             )
             subagent_tools.set_allow_deferral(self._tool_deferral_allowed(provider_name))
             child_caller.toolset = subagent_tools
@@ -5375,6 +5380,8 @@ class TurnSession:
             prompt += f"\n\n## Workspace instructions\n{workspace_guidance}"
         if definition is not None and definition.skills:
             prompt += self._preloaded_skills(definition, toolset)
+        if record.get("agent_memory_summary"):
+            prompt += f"\n\n{record['agent_memory_summary']}"
         catalog = self._skill_catalog(task, toolset)
         if catalog:
             prompt += "\n\nRelevant procedural Skills are available as metadata only. Load one with use_skill only if it helps:"
@@ -5616,6 +5623,7 @@ class TurnSession:
         model_sees_images: bool | None = None,
         cli_native_media: bool | None = None,
         native_media_hears: bool | None = None,
+        memory_override: object | None = None,
     ) -> AgentToolset:
         browser = None if read_only_mode else self.browser
         actor_id = browser_agent_key or self.main_agent_id
@@ -5630,7 +5638,7 @@ class TurnSession:
         is_main_toolset = subagents and caller is None
         toolset = AgentToolset(
             self.workspace,
-            memory=self.memory,
+            memory=(memory_override if memory_override is not None else self.memory),
             create_agent=bound(self._create_agent),
             delegate=bound(self._ask_agent),
             delegate_batch=bound(self._ask_agents),
@@ -5754,7 +5762,12 @@ class TurnSession:
         # Production confirmations may come from the person's message that started this turn (confirmation.py).
         toolset._approval_dialogue = self._approval_dialogue_pairs
         from agentos.memory.provenance import session_memory_turn_state
-        toolset._memory_turn_state_provider = lambda: session_memory_turn_state(self)
+        if memory_override is not None and getattr(memory_override, "agent_scope", None) is not None:
+            from .subagent_memory import subagent_memory_turn_state
+            _sub_scope = memory_override.agent_scope
+            toolset._memory_turn_state_provider = lambda: subagent_memory_turn_state(self, _sub_scope)
+        else:
+            toolset._memory_turn_state_provider = lambda: session_memory_turn_state(self)
         toolset._on_memory_quarantined = lambda payload: self._record(
             AgentActivityEventType.MEMORY_QUARANTINED, f"Memória em quarentena: {str(payload.get('fact') or '')[:120]}", dict(payload)
         )
@@ -6896,8 +6909,18 @@ class TurnSession:
                 self._learned_window_tokens = None
         return decision
 
+    def _subagent_memory_context(self, clean: str, builtin_key: str, definition: Any) -> tuple[object | None, str]:
+        from .subagent_memory import build_subagent_memory_context
+        return build_subagent_memory_context(self, clean, builtin_key, definition)
+
+    def _promote_agent_memories(self, verdict: bool | str | None) -> None:
+        from .subagent_memory import promote_session_agent_memories
+        promote_session_agent_memories(self, verdict)
+
     def _after_completed_turn(self) -> None:
         """Opt-in consolidation (``autoDreamEnabled``), at most once a day per user, in the background."""
+        from .subagent_memory import maybe_promote_on_turn_complete
+        maybe_promote_on_turn_complete(self)
         after_quota = getattr(self, "_quota_after_turn", None)
         if callable(after_quota):
             try:
@@ -7446,6 +7469,7 @@ class TurnSession:
             shell_command=self._shell_request(task),
             effort=self._effort(task),
             on_completed=self._after_completed_turn,
+            on_verification=self._promote_agent_memories,
             on_queued_input_claimed=self._note_queued_input_claimed,
             quota_sink=self._quota_sink,
             quota_error_sink=self._quota_error_sink,

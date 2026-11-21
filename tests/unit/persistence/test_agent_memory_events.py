@@ -102,10 +102,11 @@ def test_save_with_explicit_context_records_provenance_and_event(tmp_path: Path)
 
     assert row["scope_type"] == "agent"
     assert row["agent_key"] == "revisor-sql"
+    assert row["status"] == "proposed"
     assert row["source_kind"] == "agent"
     assert row["source_ref"] == "conv-99/msg-4"
     assert row["trust"] == 1
-    assert ev["event"] == "created"
+    assert ev["event"] == "proposed"
     assert ev["actor"] == "agent:revisor-sql"
     assert ev["conversation_id"] == "conv-99"
     assert ev["turn_id"] == "turn-7"

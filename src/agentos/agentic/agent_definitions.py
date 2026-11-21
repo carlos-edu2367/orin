@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from agentos.memory.agent_scope import VALID_AGENT_MEMORY_MODES, resolve_agent_memory_mode
 from agentos.skills.disk import split_frontmatter
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,15 @@ def _text(value: object, maximum: int = 200) -> str | None:
     return None
 
 
+def _memory_mode(raw: object, *, agent_name: str, is_builtin: bool = False) -> str:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return resolve_agent_memory_mode(agent_name, None, is_builtin=is_builtin)
+    if not isinstance(raw, str):
+        allowed = ", ".join(VALID_AGENT_MEMORY_MODES)
+        raise ValueError(f"memory must be one of: {allowed}")
+    return resolve_agent_memory_mode(agent_name, raw, is_builtin=is_builtin)
+
+
 def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
     data = path.read_bytes() if path.stat().st_size <= MAX_AGENT_FILE_BYTES else None
     if data is None:
@@ -165,6 +175,7 @@ def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
     turns = meta.get("maxTurns")
     max_turns = int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None
     provider, models = _provider_and_models(meta)
+    memory = _memory_mode(meta.get("memory"), agent_name=name, is_builtin=(origin == "builtin"))
     return AgentDefinition(
         name=name, description=description, prompt=body.strip()[:MAX_AGENT_PROMPT_CHARS], origin=origin, path=path,
         tools=tools, disallowed_tools=_list(meta.get("disallowedTools")),
@@ -173,7 +184,7 @@ def parse_agent_file(path: Path, *, origin: str) -> AgentDefinition:
         omit_claude_md=_flag(meta.get("omitClaudeMd")), isolation=_text(meta.get("isolation"), 20),
         effort=_text(meta.get("effort"), 20), color=_text(meta.get("color"), 20),
         hooks=meta.get("hooks") if isinstance(meta.get("hooks"), dict) else None,
-        mcp_servers=meta.get("mcpServers"), memory=_text(meta.get("memory"), 20),
+        mcp_servers=meta.get("mcpServers"), memory=memory,
         digest=hashlib.sha256(data).hexdigest(),
     )
 
@@ -205,6 +216,7 @@ def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[Agent
         turns = value.get("maxTurns")
         try:
             provider, models = _provider_and_models(value)
+            memory = _memory_mode(value.get("memory"), agent_name=name, is_builtin=(origin == "builtin"))
         except ValueError as error:
             errors.append((name, str(error)[:200]))
             continue
@@ -215,6 +227,7 @@ def agents_from_mapping(raw: object, *, origin: str = "cli") -> tuple[list[Agent
             permission_mode=_text(value.get("permissionMode"), 40),
             max_turns=int(turns) if isinstance(turns, int) and not isinstance(turns, bool) and 0 < turns <= 500 else None,
             skills=_list(value.get("skills")),
+            memory=memory,
             digest=hashlib.sha256(repr(sorted(value.items(), key=str)).encode("utf-8")).hexdigest(),
         ))
     if len(raw) > MAX_CLI_AGENTS:
@@ -236,6 +249,7 @@ VERIFIER = AgentDefinition(
     ),
     origin="builtin",
     tools=("Read", "Glob", "Grep", "Bash", "PowerShell", "TaskOutput", "WebFetch"),
+    memory="project",
 )
 BUILTIN_DEFINITIONS = (VERIFIER,)
 

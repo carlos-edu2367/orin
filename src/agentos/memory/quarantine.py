@@ -42,7 +42,7 @@ class QuarantinePolicy:
     """Redirects memory writes from ``tool|web|file`` sources to ``status="quarantined"``.
 
     Active whenever ``memory.quarantine.enabled`` is True (default). Consolidation
-    (``source_kind="consolidator"``), explicit user requests (``"user"``), and clean
+    (``source_kind="consolidator"``), explicit user instructions (``"user"``), and clean
     agent writes (``"agent"``) remain ``status="active"``.
     """
 

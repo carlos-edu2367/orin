@@ -10,7 +10,7 @@ from agentos.memory.provenance import build_write_context_from_turn
 from agentos.memory.quarantine import is_quarantine_enabled
 
 
-_VALID_MEMORY_SCOPES = frozenset({"user", "project"})
+_VALID_MEMORY_SCOPES = frozenset({"user", "project", "agent"})
 _VALID_MEMORY_KINDS = frozenset({"fact", "preference", "architecture", "operational", "episodic"})
 _USER_SCOPE_TAGS = frozenset({"user", "global", "perfil", "pessoal", "preferencia", "preferência", "meta", "metas"})
 _MAX_MEMORY_FACT_CHARS = 4_000
@@ -18,6 +18,9 @@ _MAX_MEMORY_FACT_CHARS = 4_000
 
 class MemoryTools:
     """Mixed into ``AgentToolset``; ``self`` is the toolset."""
+
+    def _active_agent_memory_scope(self) -> Any | None:
+        return getattr(self.memory, "agent_scope", None) or getattr(self, "_agent_memory_scope", None)
 
     def _build_memory_write_state(self) -> tuple[dict[str, Any], Any]:
         """Collect runtime-verified turn provenance state; never trusts model arguments."""
@@ -78,12 +81,30 @@ class MemoryTools:
             raise AgentToolError("Memory is not available.")
         if not isinstance(fact, str) or not fact.strip():
             raise AgentToolError("fact must be a non-blank string")
+        agent_scope = self._active_agent_memory_scope()
         normalized_scope: str | None = None
         if scope is not None and str(scope).strip():
             candidate_scope = str(scope).strip().lower()
+            if candidate_scope == "agent" and agent_scope is None:
+                raise AgentToolError(
+                    "scope='agent' is only available inside a subagent with agent memory enabled "
+                    "(memory.agent.enabled=true and agent memory != 'none'). Use scope='user' or scope='project'."
+                )
             if candidate_scope not in _VALID_MEMORY_SCOPES:
-                raise AgentToolError("scope must be 'user' or 'project'")
+                allowed_msg = (
+                    "scope must be 'user', 'project' or 'agent'"
+                    if agent_scope is not None
+                    else "scope must be 'user' or 'project'"
+                )
+                raise AgentToolError(allowed_msg)
             normalized_scope = candidate_scope
+        if agent_scope is not None:
+            if normalized_scope is None:
+                normalized_scope = "agent"
+            elif normalized_scope != "agent":
+                raise AgentToolError(
+                    "Parent 'user' and 'project' memory scopes are read-only inside this subagent; use scope='agent'."
+                )
         normalized_kind: str | None = None
         if kind is not None and str(kind).strip():
             candidate_kind = str(kind).strip().lower()
@@ -94,14 +115,17 @@ class MemoryTools:
             normalized_kind = candidate_kind
         clean_fact = fact.strip()[:_MAX_MEMORY_FACT_CHARS]
         clean_tags = tuple(str(tag)[:40] for tag in (tags or []))[:8]
-        if normalized_scope is None and (
+        if agent_scope is None and normalized_scope is None and (
             normalized_kind == "preference"
             or any(tag.strip().lower() in _USER_SCOPE_TAGS for tag in clean_tags)
         ):
             normalized_scope = "user"
 
         turn_state, effective_settings = self._build_memory_write_state()
-        write_context = build_write_context_from_turn(turn_state)
+        write_context = build_write_context_from_turn(
+            turn_state,
+            agent_key=(agent_scope.agent_key if agent_scope is not None else None),
+        )
         quarantine_enabled = is_quarantine_enabled(effective_settings, default=True)
 
         save_kwargs: dict[str, Any] = {
@@ -115,18 +139,21 @@ class MemoryTools:
         if replaces_memory_id is not None and str(replaces_memory_id).strip():
             save_kwargs["supersedes_id"] = str(replaces_memory_id).strip()
         try:
-            record = self.memory.save(clean_fact, clean_tags, **save_kwargs)
-        except TypeError:
-            save_kwargs.pop("quarantine_enabled", None)
-            save_kwargs.pop("context", None)
             try:
                 record = self.memory.save(clean_fact, clean_tags, **save_kwargs)
             except TypeError:
-                save_kwargs.pop("supersedes_id", None)
+                save_kwargs.pop("quarantine_enabled", None)
+                save_kwargs.pop("context", None)
                 try:
                     record = self.memory.save(clean_fact, clean_tags, **save_kwargs)
                 except TypeError:
-                    record = self.memory.save(clean_fact, clean_tags)
+                    save_kwargs.pop("supersedes_id", None)
+                    try:
+                        record = self.memory.save(clean_fact, clean_tags, **save_kwargs)
+                    except TypeError:
+                        record = self.memory.save(clean_fact, clean_tags)
+        except PermissionError as exc:
+            raise AgentToolError(str(exc)) from exc
 
         status = str(record.get("status") or "active")
         payload: dict[str, Any] = {
@@ -165,6 +192,22 @@ class MemoryTools:
                 ),
                 "payload": payload,
             }
+        if status == "proposed" and record.get("decision") != "conflict":
+            agent_key_str = str(
+                record.get("agent_key")
+                or (agent_scope.agent_key if agent_scope is not None else "")
+            )
+            payload["scope_type"] = str(record.get("scope_type") or "agent")
+            if agent_key_str:
+                payload["agent_key"] = agent_key_str
+            return {
+                "summary": f"Proposta salva ({agent_key_str or 'agente'}): {clean_fact[:60]}",
+                "content": (
+                    f"Memória {record['memory_id']} salva como proposta (status=proposed) no escopo do agente "
+                    f"'{agent_key_str or 'agent'}'; será promovida após verificação aprovada ou aprovação do usuário."
+                ),
+                "payload": payload,
+            }
         return {
             "summary": f"Guardou: {clean_fact[:60]}",
             "content": f"Saved memory {record['memory_id']}.",
@@ -184,11 +227,22 @@ class MemoryTools:
         if not clean_query and not clean_memory_id:
             raise AgentToolError("Provide 'query' or 'memory_id' to recall memories.")
 
+        agent_scope = self._active_agent_memory_scope()
         normalized_scope: str | None = None
         if scope is not None and str(scope).strip():
             candidate_scope = str(scope).strip().lower()
+            if candidate_scope == "agent" and agent_scope is None:
+                raise AgentToolError(
+                    "scope='agent' is only available inside a subagent with agent memory enabled "
+                    "(memory.agent.enabled=true and agent memory != 'none'). Use scope='user' or scope='project'."
+                )
             if candidate_scope not in _VALID_MEMORY_SCOPES:
-                raise AgentToolError("scope must be 'user' or 'project'")
+                allowed_msg = (
+                    "scope must be 'user', 'project' or 'agent'"
+                    if agent_scope is not None
+                    else "scope must be 'user' or 'project'"
+                )
+                raise AgentToolError(allowed_msg)
             normalized_scope = candidate_scope
 
         conv_id = getattr(self, "conversation_id", None) or getattr(self, "_conversation_id", None)

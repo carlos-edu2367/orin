@@ -14,9 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from .contracts import ApplicationNotFoundError
 from agentos.memory.instruction_lint import (
     NO_WORKSPACE_WARNING,
-    InstructionLinter,
     LintReport,
 )
+from agentos.persistence.postgres.instruction_lint_runtime import build_instruction_linter
 
 from .security import AuthenticatedPrincipal
 
@@ -132,7 +132,7 @@ def register_memory_lint_routes(
 
             linter = getattr(services, "instruction_linter", None)
             if linter is None:
-                linter = InstructionLinter(engine=_resolve_engine(services))
+                linter = build_instruction_linter(_resolve_engine(services))
 
             report = linter.run(
                 principal.user_id,

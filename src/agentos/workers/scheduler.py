@@ -18,6 +18,8 @@ from agentos.memory.instruction_lint import (
     LintReport,
     is_instruction_lint_enabled,
 )
+from agentos.memory.promotion import PROPOSAL_EXPIRATION_DAYS, MemoryPromotionGate
+from agentos.persistence.postgres.instruction_lint_runtime import build_instruction_linter
 from agentos.persistence.postgres.memory_lifecycle import MemoryLifecycle
 from agentos.persistence.postgres.quota import QuotaSnapshotStore
 from agentos.persistence.postgres.schema import projects, workspace_roots
@@ -57,6 +59,7 @@ def _maybe_prune_activity_events(
     quota_store: QuotaSnapshotStore | None = None,
     memory_lifecycle: MemoryLifecycle | None = None,
     tombstone_retention_days: int | None = None,
+    promotion_gate: MemoryPromotionGate | None = None,
 ) -> float:
     if now_mono < next_prune_mono:
         return next_prune_mono
@@ -75,6 +78,11 @@ def _maybe_prune_activity_events(
             memory_lifecycle.purge_tombstones(datetime.now(UTC) - timedelta(days=retention_days))
         except Exception:
             logging.getLogger("agentos.workers.scheduler").exception("memory tombstone purge failed")
+    if promotion_gate is not None:
+        try:
+            promotion_gate.expire_proposals(datetime.now(UTC) - timedelta(days=PROPOSAL_EXPIRATION_DAYS))
+        except Exception:
+            logging.getLogger("agentos.workers.scheduler").exception("memory proposal expiration failed")
     interval = (
         ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS
         if deleted >= batch_size * max_batches
@@ -146,7 +154,7 @@ def _maybe_run_instruction_lint(
     if not resolved_targets:
         return []
 
-    runner = linter or InstructionLinter(engine=engine)
+    runner = linter or build_instruction_linter(engine)
     reports: list[LintReport] = []
     logger = logging.getLogger("agentos.workers.scheduler")
     for user_id, workspace_root, project_id in resolved_targets:
@@ -187,6 +195,7 @@ def main() -> None:
     chat_store = PostgresChatStore(engine)
     quota_store = QuotaSnapshotStore(engine)
     memory_lifecycle = MemoryLifecycle(engine)
+    promotion_gate = MemoryPromotionGate(engine)
     lint_state = InstructionLintState()
     next_prune_mono = 0.0
     last_heartbeat_mono: float | None = None
@@ -203,6 +212,7 @@ def main() -> None:
                 next_prune_mono=next_prune_mono,
                 quota_store=quota_store,
                 memory_lifecycle=memory_lifecycle,
+                promotion_gate=promotion_gate,
             )
             _maybe_run_instruction_lint(engine, state=lint_state)
         except Exception:
