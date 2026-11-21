@@ -2,12 +2,25 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
 
 from agentos.bootstrap.production import ProductionSettings
 from agentos.conversations.chat import PostgresChatStore
+from agentos.memory.instruction_lint import (
+    INSTRUCTION_LINT_INTERVAL,
+    InstructionLinter,
+    InstructionLintState,
+    LintReport,
+    is_instruction_lint_enabled,
+)
 from agentos.persistence.postgres.memory_lifecycle import MemoryLifecycle
 from agentos.persistence.postgres.quota import QuotaSnapshotStore
+from agentos.persistence.postgres.schema import projects, workspace_roots
 from agentos.persistence.sqlite import create_local_engine
 from agentos.scheduler.scheduled_chats import ScheduledChatService
 from agentos.settings.loader import load_effective_settings
@@ -70,6 +83,100 @@ def _maybe_prune_activity_events(
     return now_mono + interval
 
 
+def _discover_lint_targets(engine: Engine) -> list[tuple[str, Path, str | None]]:
+    """Return active `(user_id, workspace_root, project_id)` pairs from bound project workspaces."""
+    targets: list[tuple[str, Path, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    projects.c.user_id,
+                    projects.c.project_id,
+                    workspace_roots.c.root_path,
+                )
+                .join(
+                    workspace_roots,
+                    (workspace_roots.c.workspace_id == projects.c.workspace_id)
+                    & (workspace_roots.c.user_id == projects.c.user_id),
+                )
+                .where(projects.c.archived_at.is_(None))
+            ).mappings().all()
+    except Exception:  # noqa: BLE001
+        return targets
+
+    for row in rows:
+        uid = str(row.get("user_id") or "").strip()
+        pid = str(row.get("project_id") or "").strip() or None
+        raw_root = str(row.get("root_path") or "").strip()
+        if not uid or not raw_root:
+            continue
+        root_path = Path(raw_root)
+        if not root_path.is_dir():
+            continue
+        key = (uid, str(root_path))
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append((uid, root_path, pid))
+    return targets
+
+
+def _maybe_run_instruction_lint(
+    engine: Engine,
+    *,
+    targets: Sequence[tuple[str, Path, str | None]] | None = None,
+    now: datetime | None = None,
+    enabled_override: bool | None = None,
+    state: InstructionLintState | None = None,
+    linter: InstructionLinter | None = None,
+) -> list[LintReport]:
+    """Optional periodic instruction lint: runs only when `memory.instructionLint.enabled` is True and at most 1x/24h."""
+    enabled = (
+        bool(enabled_override)
+        if enabled_override is not None
+        else is_instruction_lint_enabled()
+    )
+    if not enabled:
+        return []
+
+    current = now or datetime.now(UTC)
+    lint_state = state or InstructionLintState()
+    resolved_targets = list(targets) if targets is not None else _discover_lint_targets(engine)
+    if not resolved_targets:
+        return []
+
+    runner = linter or InstructionLinter(engine=engine)
+    reports: list[LintReport] = []
+    logger = logging.getLogger("agentos.workers.scheduler")
+    for user_id, workspace_root, project_id in resolved_targets:
+        scope_key = f"{user_id}:{Path(workspace_root).as_posix()}"
+        if not lint_state.claim_run(scope_key, current, interval=INSTRUCTION_LINT_INTERVAL):
+            continue
+        try:
+            report = runner.run(
+                user_id,
+                workspace_root,
+                project_id=project_id,
+                dry_run=False,
+            )
+            reports.append(report)
+            if report.contradictions:
+                logger.info(
+                    "instruction lint found %d contradiction(s) for user=%s workspace=%s",
+                    len(report.contradictions),
+                    user_id,
+                    workspace_root,
+                )
+        except Exception:
+            logger.exception(
+                "periodic instruction lint failed for user=%s workspace=%s",
+                user_id,
+                workspace_root,
+            )
+    return reports
+
+
 def main() -> None:
     import time
 
@@ -80,6 +187,7 @@ def main() -> None:
     chat_store = PostgresChatStore(engine)
     quota_store = QuotaSnapshotStore(engine)
     memory_lifecycle = MemoryLifecycle(engine)
+    lint_state = InstructionLintState()
     next_prune_mono = 0.0
     last_heartbeat_mono: float | None = None
     while True:
@@ -96,6 +204,7 @@ def main() -> None:
                 quota_store=quota_store,
                 memory_lifecycle=memory_lifecycle,
             )
+            _maybe_run_instruction_lint(engine, state=lint_state)
         except Exception:
             logging.getLogger("agentos.workers.scheduler").exception("scheduler tick failed")
         time.sleep(POLL_SECONDS)
