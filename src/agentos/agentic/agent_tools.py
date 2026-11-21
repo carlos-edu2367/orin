@@ -374,6 +374,7 @@ class AgentToolset(
         # not only Code mode.
         self._changed_paths: set[str] = set()
         self._recent_actions: list[str] = []  # for the compaction summary's working state
+        self._turn_tool_history: list[dict[str, Any]] = []  # WS-D4: runtime provenance tracking for Remember
         self._change_events = 0
         self._tool_calls_count = 0
         # A Code-mode completion is evidence-led. A command string containing
@@ -1265,6 +1266,13 @@ class AgentToolset(
         if outcome.status != "succeeded":
             return
         self._tool_calls_count += 1
+        self._turn_tool_history.append({
+            "tool_name": name,
+            "url": arguments.get("url"),
+            "query": arguments.get("query"),
+            "path": arguments.get("path") or arguments.get("file_path") or arguments.get("notebook_path"),
+            "command": arguments.get("command"),
+        })
         payload = outcome.payload or {}
         if name in {"write_file", "edit_file", "notebook_edit"}:
             path = self._normalize_tracked_path(str(payload.get("path") or arguments.get("path") or arguments.get("notebook_path") or ""))

@@ -440,11 +440,14 @@ def memories_for_task(
         if callable(ranker):
             if conversation_id is not None:
                 try:
-                    return list(ranker(task, limit=12, conversation_id=conversation_id))
+                    items = list(ranker(task, limit=12, conversation_id=conversation_id))
                 except TypeError:
-                    return list(ranker(task, limit=12))
-            return list(ranker(task, limit=12))
-        return list(memory_store.recent(limit=12))
+                    items = list(ranker(task, limit=12))
+            else:
+                items = list(ranker(task, limit=12))
+        else:
+            items = list(memory_store.recent(limit=12))
+        return [m for m in items if str(m.get("status") or "active") == "active"]
     except Exception:  # noqa: BLE001 - a prompt enrichment never breaks a turn
         return []
 
@@ -5750,6 +5753,13 @@ class TurnSession:
             toolset._plan_mode_active = True
         # Production confirmations may come from the person's message that started this turn (confirmation.py).
         toolset._approval_dialogue = self._approval_dialogue_pairs
+        from agentos.memory.provenance import session_memory_turn_state
+        toolset._memory_turn_state_provider = lambda: session_memory_turn_state(self)
+        toolset._on_memory_quarantined = lambda payload: self._record(
+            AgentActivityEventType.MEMORY_QUARANTINED, f"Memória em quarentena: {str(payload.get('fact') or '')[:120]}", dict(payload)
+        )
+        if hasattr(self.memory, "set_settings_provider"):
+            self.memory.set_settings_provider(lambda: self.effective_settings)
         return toolset
 
     def _approval_dialogue_pairs(self) -> list[tuple[str, str]]:
