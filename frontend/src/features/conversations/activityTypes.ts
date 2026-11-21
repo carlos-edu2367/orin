@@ -176,6 +176,12 @@ export type AgentActivityEventType =
   | 'verifier.started'
   | 'verifier.finished'
   | 'friend.delivery_status'
+  | 'isolation.unavailable'
+  | 'worktree.created'
+  | 'worktree.removed'
+  | 'merge.applied'
+  | 'merge.conflict'
+  | 'merge.check_failed'
   | (string & {})
 
 export type ConversationActivityEvent = {
@@ -411,6 +417,12 @@ const AGENT_TYPES = new Set([
   'delegation.waiting',
   'delegation.completed',
   'delegation.failed',
+  'isolation.unavailable',
+  'worktree.created',
+  'worktree.removed',
+  'merge.applied',
+  'merge.conflict',
+  'merge.check_failed',
 ])
 
 export function kindFor(type: string, toolKind?: string): ActivityKind {
@@ -460,6 +472,10 @@ export function stateFor(type: string, status?: string, errorCode?: string | nul
   if (type === 'agent.message_delivered' || type === 'agent.message_forwarded') return 'completed'
   if (type === 'agent.message_sent' || type === 'delegation.waiting') return 'waiting_agent'
   if (type === 'agent.created' || type === 'agent.message_received' || type === 'delegation.completed') return 'completed'
+  if (type === 'worktree.created' || type === 'worktree.removed' || type === 'merge.applied') return 'completed'
+  if (type === 'isolation.unavailable') return 'completed_with_caveats'
+  if (type === 'merge.conflict') return 'waiting_user'
+  if (type === 'merge.check_failed') return 'failed'
   // Only ever emitted after its tool call already succeeded (see the backend
   // ARTIFACT_CREATED emission), so there is no "in progress" state for it to
   // pass through.

@@ -74,6 +74,7 @@ class AgentFile(BaseModel):
     max_turns: int | None = Field(default=None, ge=1, le=500)
     effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = None
     memory: Literal["project", "user", "local", "none"] | None = None
+    isolation: Literal["none", "worktree"] | None = None
     create: bool = False  # W7-R6: a new agent; refuses (409) to replace an existing file
 
 
@@ -293,7 +294,7 @@ def agents_report(root: Path | None, trusted: bool) -> dict[str, Any]:
             "tools": list(definition.tools) if definition.tools is not None else None,
             "disallowed_tools": list(definition.disallowed_tools), "model": definition.model,
             "permission_mode": definition.permission_mode, "max_turns": definition.max_turns, "effort": definition.effort,
-            "memory": definition.memory,
+            "memory": definition.memory, "isolation": definition.isolation,
         })
     return {
         "agents": sorted(agents, key=lambda item: (item["origin"] == "builtin", item["name"])),
@@ -306,7 +307,7 @@ def _scalar(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-_FORM_FRONTMATTER_KEYS = frozenset({"name", "description", "tools", "disallowedTools", "model", "permissionMode", "effort", "maxTurns", "memory"})
+_FORM_FRONTMATTER_KEYS = frozenset({"name", "description", "tools", "disallowedTools", "model", "permissionMode", "effort", "maxTurns", "memory", "isolation"})
 _FRONTMATTER_KEY = re.compile(r"^([A-Za-z_][\w-]*):")
 
 
@@ -344,7 +345,7 @@ def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
         lines.append(f"tools: {', '.join(tool.strip() for tool in body.tools) or _scalar('')}")
     if body.disallowed_tools:
         lines.append(f"disallowedTools: {', '.join(tool.strip() for tool in body.disallowed_tools)}")
-    for key, value in (("model", body.model), ("permissionMode", body.permission_mode), ("effort", body.effort), ("memory", body.memory)):
+    for key, value in (("model", body.model), ("permissionMode", body.permission_mode), ("effort", body.effort), ("memory", body.memory), ("isolation", body.isolation)):
         if value:
             lines.append(f"{key}: {_scalar(value.strip())}")
     if body.max_turns is not None:

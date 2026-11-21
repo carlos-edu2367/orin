@@ -82,6 +82,12 @@ class AgentActivityEventType(StrEnum):
     VERIFIER_MODEL_SELECTED = "verifier.model_selected"
     VERIFIER_STARTED = "verifier.started"
     VERIFIER_FINISHED = "verifier.finished"
+    ISOLATION_UNAVAILABLE = "isolation.unavailable"
+    WORKTREE_CREATED = "worktree.created"
+    WORKTREE_REMOVED = "worktree.removed"
+    MERGE_APPLIED = "merge.applied"
+    MERGE_CONFLICT = "merge.conflict"
+    MERGE_CHECK_FAILED = "merge.check_failed"
 
 
 class ActivityVisibility(StrEnum):

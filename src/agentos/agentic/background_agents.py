@@ -102,6 +102,7 @@ class BackgroundAgentEntry:
     notified: bool = False
     callback_fired: bool = field(default=False, repr=False)
     run_id: str = field(default_factory=lambda: uuid4().hex[:12], repr=False)
+    worktree_path: str | None = None
 
 
 class BackgroundAgentRegistry:
