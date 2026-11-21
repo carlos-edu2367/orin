@@ -160,6 +160,8 @@ export type AgentActivityEventType =
   | 'code_mode.decision_required'
   | 'notification.pushed'
   | 'process.exited'
+  | 'quota.updated'
+  | 'quota.fallback_applied'
   | (string & {})
 
 export type ConversationActivityEvent = {

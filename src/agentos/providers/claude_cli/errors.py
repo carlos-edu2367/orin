@@ -10,6 +10,7 @@ from agentos.providers.cli_adapter import (
     CliErrorKind,
     CliResult,
     RateLimitState,
+    notify_quota_error,
 )
 
 _API_ERROR_STATUS_RE = re.compile(r"\bAPI Error:\s*(\d{3})\b")
@@ -245,6 +246,14 @@ def classify_result_error_info(
         if raw_status is not None
         else (429 if is_rate_limited else transport_err.status_code)
     )
+
+    if kind == CliErrorKind.RATE_LIMITED:
+        notify_quota_error(
+            "anthropic-cli",
+            retry_after_seconds=retry_after_seconds,
+            message=str(transport_err),
+            resets_at=rate_limit.resets_at if rate_limit is not None else None,
+        )
 
     return CliErrorInfo(
         kind=kind,

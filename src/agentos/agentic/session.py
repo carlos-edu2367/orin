@@ -1385,9 +1385,17 @@ class TurnSession:
         friend_persona_store=None,
         conversation_mode: str | None = None,
         read_file_state: dict[str, object] | None = None,
+        quota_gate: object | None = None,
+        quota_sink: Callable[[str, object], None] | None = None,
+        quota_error_sink: Callable[..., None] | None = None,
+        quota_after_turn: Callable[[], object] | None = None,
     ) -> None:
         self.turn = turn
         self.conversation_id = str(turn.get("conversation_id") or "")
+        self.quota_gate = quota_gate
+        self._quota_sink = quota_sink
+        self._quota_error_sink = quota_error_sink
+        self._quota_after_turn = quota_after_turn
         self.friend_persona_store = friend_persona_store
         raw_conv_mode = str(
             conversation_mode
@@ -6257,8 +6265,49 @@ class TurnSession:
 
         return not any(value is False for _name, value in layer_values(self.effective_settings, "autoMemoryEnabled"))
 
+    def apply_quota_fallback_before_turn(self, *, has_pending_tool_effects: bool = False):
+        """Optional between-turn subscription fallback via `quota_gate` (never mid-turn)."""
+        gate = getattr(self, "quota_gate", None)
+        if gate is None:
+            return None
+        select_fn = getattr(gate, "select_fallback", None)
+        if not callable(select_fn):
+            return None
+        user_id = str(self.turn.get("user_id") or "")
+        provider = str(self.turn.get("provider") or "")
+        model_id = str(self.turn.get("model_id") or "")
+        if not user_id or not provider or not model_id:
+            return None
+
+        def _emit(event_type: str, payload: dict[str, object]) -> None:
+            if event_type == AgentActivityEventType.QUOTA_FALLBACK_APPLIED.value:
+                self._record(
+                    AgentActivityEventType.QUOTA_FALLBACK_APPLIED,
+                    f"Assinatura esgotada em {payload.get('from_provider')}; iniciando turno em {payload.get('to_provider')}/{payload.get('to_model')}",
+                    payload,
+                )
+
+        decision = select_fn(
+            user_id,
+            provider,
+            model_id,
+            settings=self.effective_settings,
+            has_pending_tool_effects=has_pending_tool_effects,
+            emit_event=_emit,
+        )
+        if decision is not None:
+            self.turn["provider"] = decision.to_provider
+            self.turn["model_id"] = decision.to_model
+        return decision
+
     def _after_completed_turn(self) -> None:
         """Opt-in consolidation (``autoDreamEnabled``), at most once a day per user, in the background."""
+        after_quota = getattr(self, "_quota_after_turn", None)
+        if callable(after_quota):
+            try:
+                self._background_runner(after_quota)
+            except Exception:  # noqa: BLE001
+                pass
         from agentos.memory.consolidation import (
             ConsolidationState,
             MemoryConsolidator,
@@ -6415,6 +6464,10 @@ class TurnSession:
                 self.effective_settings = load_effective_settings(None, cli=cli_layer, sources=())
             except Exception:  # noqa: BLE001
                 self.effective_settings = empty_settings()
+        try:
+            self.apply_quota_fallback_before_turn(has_pending_tool_effects=False)
+        except Exception:  # noqa: BLE001 - quota gate never breaks turn startup
+            logger.debug("quota fallback check failed", exc_info=True)
         if not self.effective_settings.trusted and self.effective_settings.untrusted_ignored:
             try:
                 self._record(
@@ -6778,6 +6831,8 @@ class TurnSession:
             effort=self._effort(),
             on_completed=self._after_completed_turn,
             on_queued_input_claimed=self._note_queued_input_claimed,
+            quota_sink=self._quota_sink,
+            quota_error_sink=self._quota_error_sink,
         )
         if self.cli_options is not None:
             from .cli_turn import tool_selection

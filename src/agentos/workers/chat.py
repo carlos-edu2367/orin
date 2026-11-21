@@ -1897,8 +1897,47 @@ class ChatWorker:
             model_capabilities=self._catalog_capabilities_for(turn),
             fallback_provider_factory=lambda model_id: self._provider_transport({**turn, "model_id": model_id}),
             read_file_state=self._read_states.state_for(str(turn["user_id"]), str(turn["conversation_id"])),
+            **self._quota_session_kwargs(engine, turn),
         )
         return session.build_runtime()
+
+    def _quota_session_kwargs(self, engine, turn: dict[str, object]) -> dict[str, object]:
+        try:
+            from agentos.persistence.postgres.quota import QuotaSnapshotStore
+            from agentos.quota.policy import QuotaPolicy
+            from agentos.quota.service import QuotaService
+
+            qstore = QuotaSnapshotStore(engine)
+            qservice = QuotaService(qstore)
+            user_id = str(turn.get("user_id") or "")
+
+            def _quota_sink(provider_name: str, state) -> None:
+                qservice.record_rate_limit_state(user_id, provider_name, state)
+
+            def _quota_error_sink(
+                provider_name: str,
+                *,
+                retry_after_seconds: float | None = None,
+                message: str | None = None,
+                resets_at=None,
+            ) -> None:
+                qservice.record_quota_error(
+                    user_id,
+                    provider_name,
+                    retry_after_seconds=retry_after_seconds,
+                    message=message,
+                    resets_at=resets_at,
+                )
+
+            return {
+                "quota_gate": QuotaPolicy(qservice),
+                "quota_sink": _quota_sink,
+                "quota_error_sink": _quota_error_sink,
+                "quota_after_turn": lambda: qservice.refresh_from_files(user_id),
+            }
+        except Exception:
+            _LOGGER.debug("quota wiring unavailable for turn %s", turn.get("turn_id"), exc_info=True)
+            return {}
 
     def _record_session_watch(
         self,

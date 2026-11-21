@@ -389,6 +389,13 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         project_store=project_store,
         provider_catalog=provider_catalog_service,
     )
+    from agentos.persistence.postgres.quota import QuotaSnapshotStore
+    from agentos.quota.poller import QuotaPoller
+    from agentos.quota.service import QuotaService
+
+    quota_store = QuotaSnapshotStore(engine)
+    quota_service = QuotaService(quota_store)
+    quota_poller = QuotaPoller(quota_service)
     return ApiServices(
         security=security,
         accounts=accounts,
@@ -417,6 +424,8 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
         conversation_directories=ConversationDirectoryStore(engine),
         discord_store=discord_store,
         discord_bridge=discord_bridge,
+        quota_service=quota_service,
+        quota_poller=quota_poller,
     )
 
 

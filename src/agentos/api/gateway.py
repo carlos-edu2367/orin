@@ -474,6 +474,8 @@ class ApiServices:
         skill_proposals: SkillProposalStore | None = None,
         discord_store: object | None = None,
         discord_bridge: object | None = None,
+        quota_service: object | None = None,
+        quota_poller: object | None = None,
     ) -> None:
         self.security = security or InMemorySecurityService()
         self.accounts = accounts
@@ -513,6 +515,8 @@ class ApiServices:
         self.friend_memory_factory = friend_memory_factory
         self.discord_store = discord_store
         self.discord_bridge = discord_bridge
+        self.quota_service = quota_service
+        self.quota_poller = quota_poller
 
     def managed_root_for(self, user_id: str) -> Path:
         """Where a profile's managed workspaces live; an explicit root (tests) wins."""
@@ -2111,37 +2115,44 @@ def create_app(services: ApiServices) -> FastAPI:
             # receives activity as the worker produces it. Polling the durable
             # log here (rather than in the browser) keeps the client free of a
             # reconnect storm while the turn is running.
-            cursor = after
-            deadline = monotonic() + _SSE_MAX_SECONDS
-            idle_heartbeat = 0.0
-            while monotonic() < deadline:
-                if await request.is_disconnected():
-                    return
-                try:
-                    events, cursor = await run_in_threadpool(app_service.events, conversation_id, principal.user_id, cursor)  # type: ignore[union-attr]
-                except CursorError:
-                    yield f"event: resync\ndata: {json_dumps({'code': 'cursor_invalid'})}\n\n"
-                    return
-                except Exception:
-                    import logging
+            poller = getattr(services, "quota_poller", None)
+            if poller is not None and hasattr(poller, "client_connected"):
+                poller.client_connected(principal.user_id)
+            try:
+                cursor = after
+                deadline = monotonic() + _SSE_MAX_SECONDS
+                idle_heartbeat = 0.0
+                while monotonic() < deadline:
+                    if await request.is_disconnected():
+                        return
+                    try:
+                        events, cursor = await run_in_threadpool(app_service.events, conversation_id, principal.user_id, cursor)  # type: ignore[union-attr]
+                    except CursorError:
+                        yield f"event: resync\ndata: {json_dumps({'code': 'cursor_invalid'})}\n\n"
+                        return
+                    except Exception:
+                        import logging
 
-                    logging.getLogger("agentos.api.gateway").warning(
-                        "SSE events poll error for conversation %s", conversation_id, exc_info=True
-                    )
+                        logging.getLogger("agentos.api.gateway").warning(
+                            "SSE events poll error for conversation %s", conversation_id, exc_info=True
+                        )
+                        await asyncio.sleep(_SSE_IDLE_POLL_SECONDS)
+                        continue
+                    for event in events:
+                        yield f"id: {event['event_id']}\nevent: {event['event_type']}\ndata: {json_dumps(event)}\n\n"
+                    if events:
+                        idle_heartbeat = 0.0
+                        await asyncio.sleep(_SSE_ACTIVE_POLL_SECONDS)
+                        continue
+                    idle_heartbeat += _SSE_IDLE_POLL_SECONDS
+                    if idle_heartbeat >= _SSE_HEARTBEAT_SECONDS:
+                        idle_heartbeat = 0.0
+                        yield f"event: heartbeat\ndata: {json_dumps({'cursor': cursor})}\n\n"
                     await asyncio.sleep(_SSE_IDLE_POLL_SECONDS)
-                    continue
-                for event in events:
-                    yield f"id: {event['event_id']}\nevent: {event['event_type']}\ndata: {json_dumps(event)}\n\n"
-                if events:
-                    idle_heartbeat = 0.0
-                    await asyncio.sleep(_SSE_ACTIVE_POLL_SECONDS)
-                    continue
-                idle_heartbeat += _SSE_IDLE_POLL_SECONDS
-                if idle_heartbeat >= _SSE_HEARTBEAT_SECONDS:
-                    idle_heartbeat = 0.0
-                    yield f"event: heartbeat\ndata: {json_dumps({'cursor': cursor})}\n\n"
-                await asyncio.sleep(_SSE_IDLE_POLL_SECONDS)
-            yield f"event: heartbeat\ndata: {json_dumps({'cursor': cursor})}\n\n"
+                yield f"event: heartbeat\ndata: {json_dumps({'cursor': cursor})}\n\n"
+            finally:
+                if poller is not None and hasattr(poller, "client_disconnected"):
+                    poller.client_disconnected(principal.user_id)
 
         return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
@@ -3266,8 +3277,28 @@ def create_app(services: ApiServices) -> FastAPI:
     register_custom_agent_routes(app, services, principal_for)
     from .scene_character_routes import register_scene_character_routes
     register_scene_character_routes(app, services, principal_for)
+    from .quota_routes import register_quota_routes
+    register_quota_routes(app, services, principal_for)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
+
+    @app.on_event("startup")
+    async def _start_quota_poller() -> None:
+        poller = getattr(services, "quota_poller", None)
+        if poller is not None and hasattr(poller, "start"):
+            try:
+                poller.start()
+            except Exception:
+                return
+
+    @app.on_event("shutdown")
+    async def _stop_quota_poller() -> None:
+        poller = getattr(services, "quota_poller", None)
+        if poller is not None and hasattr(poller, "stop"):
+            try:
+                poller.stop()
+            except Exception:
+                return
 
     @app.on_event("startup")
     async def _start_discord_bridge() -> None:
