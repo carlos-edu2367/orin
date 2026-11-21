@@ -378,6 +378,13 @@ class AgenticTurnRuntime:
         provider_timeout_seconds: float | None = None,
         quota_sink: Callable[[str, Any], None] | None = None,
         quota_error_sink: Callable[..., None] | None = None,
+        window_source: str | None = None,
+        window_detail: str | None = None,
+        window_rule_index: int | None = None,
+        cli_model_arg: str | None = None,
+        learned_window_tokens: int | None = None,
+        context_observation_sink: Callable[..., None] | None = None,
+        context_observation_invalidator: Callable[[str, str], bool] | None = None,
     ) -> None:
         self.store, self.provider = store, provider
         if provider_timeout_seconds is not None:
@@ -391,6 +398,13 @@ class AgenticTurnRuntime:
         self.on_queued_input_claimed = on_queued_input_claimed
         self.quota_sink = quota_sink
         self.quota_error_sink = quota_error_sink
+        self.window_source = window_source
+        self.window_detail = window_detail
+        self.window_rule_index = window_rule_index
+        self.cli_model_arg = cli_model_arg
+        self.learned_window_tokens = learned_window_tokens
+        self.context_observation_sink = context_observation_sink
+        self.context_observation_invalidator = context_observation_invalidator
         self.lifecycle = lifecycle
         self.prompt_block_reason = prompt_block_reason
         self.config_block_reason = config_block_reason
@@ -1811,7 +1825,7 @@ class AgenticTurnRuntime:
         omitted = getattr(self, "_last_omitted_messages", None)
         if not isinstance(omitted, int):
             omitted = max(0, len(messages) - sum(1 for item in messages if id(item) in kept_message_ids))
-        return {
+        usage_payload: dict[str, object] = {
             "used_tokens": used,
             "limit_tokens": limit,
             "percentage": min(100, round(used / limit * 100)) if limit else 0,
@@ -1827,6 +1841,11 @@ class AgenticTurnRuntime:
             "compaction_count": self._compaction_count,
             "compaction_enabled": True,
         }
+        if self.window_source:
+            usage_payload["window_source"] = self.window_source
+        if self.window_detail:
+            usage_payload["window_detail"] = self.window_detail
+        return usage_payload
 
     def _prefix_caching(self, turn: Mapping[str, object]) -> bool:
         """Whether this turn's provider has a prompt cache worth protecting.

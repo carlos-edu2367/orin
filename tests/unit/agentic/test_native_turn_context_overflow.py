@@ -626,3 +626,306 @@ def test_native_loop_logs_sanitized_overflow_diagnostic_without_user_content(cap
     assert secret_user_text not in diag_msg
     # The raw result text inside the diagnostic must be truncated to <= 2 KB.
     assert len(diag_msg) < 2800
+
+
+def _rehydrated_190k_history() -> list[dict[str, object]]:
+    """Rehydrated history of ~190k estimated tokens (~760k chars across multiple turns + tool results)."""
+    msgs: list[dict[str, object]] = []
+    # 10 turns * ~76k chars (~19k tokens each) = ~190k tokens
+    chunk_user = "Contexto detalhado do projeto " + ("codigo_modulo_alpha " * 1400)  # ~28k chars
+    chunk_assistant = "Analise tecnica extensa " + ("implementacao_beta " * 2500)  # ~47.5k chars
+    seq = 1
+    for i in range(10):
+        msgs.append({"role": "user", "content": f"Turno {i}: {chunk_user}", "_sequence": seq})
+        seq += 1
+        msgs.append({"role": "assistant", "content": f"Resposta {i}: {chunk_assistant}", "_sequence": seq})
+        seq += 1
+    msgs.append({"role": "user", "content": "Prossiga com o ultimo ajuste.", "_sequence": seq})
+    return msgs
+
+
+def test_fable_52_rehydrated_190k_history_with_effective_200k_compacts_before_spawn_and_sets_autocompact_200000(
+    tmp_path: Path,
+) -> None:
+    from agentos.providers.claude_cli.command import build_claude_command
+    from agentos.providers.claude_cli.effective_window import effective_window_for
+    from agentos.quota.claude_account import ClaudeAccountReader
+
+    account_state = ClaudeAccountReader(FIXTURES / "claude-json-no-credits.json").read()
+    ew = effective_window_for(
+        "anthropic",
+        "claude-fable-5-2",
+        account_state=account_state,
+        cli_catalog_window=1_000_000,
+        fixed_catalog_window=200_000,
+    )
+    assert ew.tokens == 200_000
+    assert ew.source == "account_credits"
+    assert ew.rule_index == 3
+
+    store = _OverflowStore(_rehydrated_190k_history(), model_id="claude-fable-5-2")
+    provider = _FakeCliProvider([_normal_reply_handler("Compactado antes de abrir o CLI.")])
+    workspace = ConversationWorkspace(tmp_path, "c_fable_pre")
+    toolset = AgentToolset(workspace)
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=toolset,
+        sleep=lambda _s: None,
+        autocompact=True,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=1,
+            max_context_tokens=180_000,
+            context_window_tokens=ew.tokens,
+        ),
+        window_source=ew.source,
+        window_detail=ew.detail,
+        window_rule_index=ew.rule_index,
+        cli_model_arg=ew.cli_model_arg,
+    )
+    res = runtime.run("t_ovf")
+
+    assert res.state == "completed"
+    assert len(provider.requests) == 1
+    assert runtime._compaction_count >= 1
+    first_msg_tokens = _user_content_chars(provider.requests[0]) // 4
+    assert first_msg_tokens < 170_000
+    assert provider.requests[0].autocompact == 200_000
+
+    prompt_file = tmp_path / "sys.txt"
+    prompt_file.write_text("sys", encoding="utf-8")
+    cmd = build_claude_command(
+        binary="claude",
+        system_prompt_file=prompt_file,
+        model=provider.requests[0].model,
+        autocompact=provider.requests[0].autocompact,
+    )
+    idx = cmd.index("--autocompact")
+    assert cmd[idx + 1] == "200000"
+
+    ctx_events = [p for s, p in store.states if s == "context_updated"]
+    assert ctx_events
+    assert ctx_events[0].get("window_source") == "account_credits"
+    assert "200 mil" in str(ctx_events[0].get("window_detail") or "")
+
+
+def test_fable_52_without_fixture_learns_200k_from_raw_overflow_and_next_turn_compacts_before_spawn(
+    tmp_path: Path,
+) -> None:
+    from sqlalchemy import create_engine
+
+    from agentos.persistence.postgres.context_observations import ContextObservationStore
+    from agentos.persistence.postgres.migrate import upgrade
+    from agentos.providers.claude_cli.effective_window import effective_window_for
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'fable_learn.db').as_posix()}")
+    upgrade(engine, "head")
+    try:
+        obs_store = ContextObservationStore(engine)
+
+        # Turn 1: no ~/.claude.json fixture -> CLI catalog says 1M
+        ew1 = effective_window_for(
+            "anthropic",
+            "claude-fable-5-2",
+            account_state=None,
+            cli_catalog_window=1_000_000,
+            fixed_catalog_window=200_000,
+        )
+        assert ew1.tokens == 1_000_000
+
+        def _raw_overflow_handler(_req: NativeTurnRequest, _sink: NativeTurnSink, _handle: _ScriptedHandle) -> NativeTurnOutcome:
+            raise ProviderTransportError(
+                "Prompt is too long: 205123 tokens > 200000 maximum",
+                status_code=400,
+                end_reason="error_result",
+                error_kind=CliErrorKind.CONTEXT_OVERFLOW,
+            )
+
+        store1 = _OverflowStore(_large_history(), model_id="claude-fable-5-2")
+        provider1 = _FakeCliProvider([_raw_overflow_handler, _normal_reply_handler("Recuperado apos aprender.")])
+        workspace1 = ConversationWorkspace(tmp_path, "c_fable_t1")
+        runtime1 = AgenticTurnRuntime(
+            store=store1,
+            provider=provider1,
+            toolset=AgentToolset(workspace1),
+            sleep=lambda _s: None,
+            autocompact=True,
+            limits=AgenticLimits(
+                max_iterations=10,
+                max_actions=10,
+                max_provider_retries=1,
+                max_context_tokens=900_000,
+                context_window_tokens=ew1.tokens,
+            ),
+            window_source=ew1.source,
+            window_detail=ew1.detail,
+            window_rule_index=ew1.rule_index,
+            context_observation_sink=lambda prov, mdl, lim, src, first_message_tokens=None: obs_store.learn(
+                "u1",
+                prov,
+                mdl,
+                lim,
+                src,
+                first_message_tokens=first_message_tokens,
+            ),
+        )
+        res1 = runtime1.run("t_ovf")
+        assert res1.state == "completed"
+        assert len(provider1.requests) == 2
+
+        learned = obs_store.get("u1", "anthropic", "claude-fable-5-2")
+        assert learned is not None
+        assert learned.observed_limit_tokens == 200_000
+        assert learned.source == "error_raw"
+
+        learned_events = [
+            p for s, p in store1.states if s == AgentActivityEventType.CONTEXT_WINDOW_LEARNED.value
+        ]
+        assert len(learned_events) == 1
+        assert learned_events[0]["model"] == "claude-fable-5-2"
+        assert learned_events[0]["tokens"] == 200_000
+        assert learned_events[0]["source"] == "error_raw"
+
+        # Turn 2: learned observation wins -> effective window is 200k -> compacts before spawning CLI!
+        ew2 = effective_window_for(
+            "anthropic",
+            "claude-fable-5-2",
+            learned_limit=learned.observed_limit_tokens,
+            learned_source=learned.source,
+            account_state=None,
+            cli_catalog_window=1_000_000,
+            fixed_catalog_window=200_000,
+        )
+        assert ew2.tokens == 200_000
+        assert ew2.source == "learned"
+        assert ew2.rule_index == 2
+
+        store2 = _OverflowStore(_rehydrated_190k_history(), model_id="claude-fable-5-2")
+        provider2 = _FakeCliProvider([_normal_reply_handler("Turno 2 sem estouro.")])
+        workspace2 = ConversationWorkspace(tmp_path, "c_fable_t2")
+        runtime2 = AgenticTurnRuntime(
+            store=store2,
+            provider=provider2,
+            toolset=AgentToolset(workspace2),
+            sleep=lambda _s: None,
+            autocompact=True,
+            limits=AgenticLimits(
+                max_iterations=10,
+                max_actions=10,
+                max_provider_retries=1,
+                max_context_tokens=180_000,
+                context_window_tokens=ew2.tokens,
+            ),
+            window_source=ew2.source,
+            window_detail=ew2.detail,
+            window_rule_index=ew2.rule_index,
+            learned_window_tokens=learned.observed_limit_tokens,
+        )
+        res2 = runtime2.run("t_ovf")
+        assert res2.state == "completed"
+        assert len(provider2.requests) == 1
+        assert runtime2._compaction_count >= 1
+        assert _user_content_chars(provider2.requests[0]) // 4 < 170_000
+        assert provider2.requests[0].autocompact == 200_000
+    finally:
+        engine.dispose()
+
+
+def test_successful_turn_exceeding_learned_window_invalidates_observation(tmp_path: Path) -> None:
+    from sqlalchemy import create_engine
+
+    from agentos.persistence.postgres.context_observations import ContextObservationStore
+    from agentos.persistence.postgres.migrate import upgrade
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'inv_ok.db').as_posix()}")
+    upgrade(engine, "head")
+    try:
+        obs_store = ContextObservationStore(engine)
+        obs_store.learn("u1", "anthropic", "claude-fable-5-2", 150_000, "estimate")
+        assert obs_store.get("u1", "anthropic", "claude-fable-5-2") is not None
+
+        def _high_usage_handler(req: NativeTurnRequest, sink: NativeTurnSink, _handle: _ScriptedHandle) -> NativeTurnOutcome:
+            init = _make_init(req.model or "claude-fable-5-2")
+            sink.on_init(init)
+            sink.on_text("Resposta com uso maior que o limite aprendido.")
+            u = CliUsage(input_tokens=180_000, output_tokens=100, context_window_used_tokens=180_000)
+            sink.on_assistant_usage("msg_big", u)
+            res = CliResult(
+                subtype="success",
+                is_error=False,
+                result_text="Resposta com uso maior que o limite aprendido.",
+                stop_reason="end_turn",
+                num_turns=1,
+                duration_ms=80,
+                session_id="sess_ok",
+                api_error_status=None,
+                usage=u,
+                model_usage={"claude-fable-5-2": u},
+            )
+            return NativeTurnOutcome(result=res, init=init, final_text=res.result_text, exit_code=0)
+
+        store = _OverflowStore([{"role": "user", "content": "Ola", "_sequence": 1}], model_id="claude-fable-5-2")
+        provider = _FakeCliProvider([_high_usage_handler])
+        runtime = AgenticTurnRuntime(
+            store=store,
+            provider=provider,
+            toolset=AgentToolset(ConversationWorkspace(tmp_path, "c_inv")),
+            sleep=lambda _s: None,
+            limits=AgenticLimits(
+                max_iterations=5,
+                max_actions=5,
+                max_context_tokens=150_000,
+                context_window_tokens=150_000,
+            ),
+            learned_window_tokens=150_000,
+            context_observation_invalidator=lambda prov, mdl: obs_store.invalidate("u1", prov, mdl),
+        )
+        res = runtime.run("t_ovf")
+        assert res.state == "completed"
+        assert obs_store.get("u1", "anthropic", "claude-fable-5-2") is None
+    finally:
+        engine.dispose()
+
+
+def test_long_context_1m_credits_error_falls_back_to_200k_without_1m_suffix(tmp_path: Path) -> None:
+    def _credits_required_handler(_req: NativeTurnRequest, _sink: NativeTurnSink, _handle: _ScriptedHandle) -> NativeTurnOutcome:
+        raise ProviderTransportError(
+            "Usage credits required for 1M context",
+            status_code=400,
+            end_reason="error_result",
+            error_kind=CliErrorKind.FATAL,
+        )
+
+    store = _OverflowStore(_large_history(), model_id="claude-fable-5-2")
+    provider = _FakeCliProvider([_credits_required_handler, _normal_reply_handler("Fallback 200k concluido.")])
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=AgentToolset(ConversationWorkspace(tmp_path, "c_1m_fb")),
+        sleep=lambda _s: None,
+        autocompact=True,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=1,
+            max_context_tokens=900_000,
+            context_window_tokens=1_000_000,
+        ),
+        window_source="credits_1m",
+        window_detail="1 M, créditos de uso ativos (1M)",
+        window_rule_index=3,
+        cli_model_arg="claude-fable-5-2[1m]",
+    )
+    res = runtime.run("t_ovf")
+    assert res.state == "completed"
+    assert len(provider.requests) == 2
+    assert provider.requests[0].model == "claude-fable-5-2[1m]"
+    assert provider.requests[1].model == "claude-fable-5-2"
+    assert provider.requests[1].autocompact == 200_000
+    assert runtime.limits.context_window_tokens == 200_000
+    assert runtime.window_source == "account_credits"
+    ctx_updates = [p for s, p in store.states if s == "context_updated"]
+    assert any(p.get("limit_tokens") == 200_000 and p.get("window_source") == "account_credits" for p in ctx_updates)
+

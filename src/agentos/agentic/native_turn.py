@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import contextvars
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import threading
@@ -58,7 +59,9 @@ from . import phases, transcript
 from .context_overflow import (
     format_context_overflow_message,
     is_context_overflow_error,
+    is_long_context_credits_error,
     is_zero_usage,
+    parse_overflow_limit,
     strip_synthetic_error_from_messages,
     strip_synthetic_error_from_parts,
 )
@@ -1710,9 +1713,21 @@ class RuntimeToolExecutor(ToolExecutor):
         return out_results
 
 
-def _resolve_cli_autocompact(setting: object) -> str | int | None:
+def _resolve_cli_autocompact(
+    setting: object,
+    *,
+    effective_window_tokens: int | None = None,
+    window_rule_index: int | None = None,
+) -> str | int | None:
     if setting is False:
         return None
+    if (
+        window_rule_index in {1, 2, 3}
+        and isinstance(effective_window_tokens, int)
+        and not isinstance(effective_window_tokens, bool)
+        and effective_window_tokens > 0
+    ):
+        return max(100_000, min(1_000_000, int(effective_window_tokens)))
     if (
         isinstance(setting, int)
         and not isinstance(setting, bool)
@@ -1745,6 +1760,7 @@ class _RunnerSink:
         self._round_thinking_parts: list[str] = []
         self.total_tokens: int = 0
         self.total_cost: Decimal = Decimal("0")
+        self.max_context_used_tokens: int = 0
         # Model calls of the whole turn (one per assistant message id), across every follow-up message:
         # --max-turns only caps one message of the live process.
         self.model_calls: int = 0
@@ -2226,6 +2242,8 @@ class _RunnerSink:
             if usage.context_window_used_tokens is not None
             else used_in
         )
+        if isinstance(ctx_used, int) and ctx_used > self.max_context_used_tokens:
+            self.max_context_used_tokens = ctx_used
         updated_ctx = {
             **self._runner.last_context,
             "used_tokens": ctx_used,
@@ -2234,6 +2252,10 @@ class _RunnerSink:
             "percentage": min(100, round(ctx_used / limit * 100)) if limit else 0,
             "compaction_count": self._runner.runtime._compaction_count,
         }
+        if self._runner.runtime.window_source:
+            updated_ctx["window_source"] = self._runner.runtime.window_source
+        if self._runner.runtime.window_detail:
+            updated_ctx["window_detail"] = self._runner.runtime.window_detail
         self._runner.last_context = updated_ctx
         self._runner.runtime._life(
             self._runner.turn, "context_updated", **updated_ctx
@@ -2294,6 +2316,8 @@ class NativeTurnRunner:
         self.last_context: dict[str, object] = {}
         self.clock: Callable[[], Any] = runtime.clock
         self._reactive_compacted: bool = False
+        self._last_first_message_tokens: int = 0
+        self._fell_back_from_1m: bool = False
 
     def _effective_permission_mode(self) -> str | None:
         """The mode the turn's tools enforce now (plan mode included), for the CLI's system prompt."""
@@ -2357,10 +2381,23 @@ class NativeTurnRunner:
             return "TURN_DEADLINE_EXCEEDED"
         return None
 
+    @staticmethod
+    def _estimate_user_content_tokens(blocks: Sequence[Mapping[str, Any]]) -> int:
+        total = 0
+        for block in blocks:
+            btype = str(block.get("type") or "text").strip().lower()
+            if btype in {"image", "image_url", "input_image"}:
+                total += 1200
+            else:
+                total += len(str(block.get("text") or "")) // 4
+        return total
+
     def _build_initial_user_content(
         self,
         tool_schemas: list[dict[str, object]],
         window: list[dict[str, object]] | None = None,
+        *,
+        _allow_pre_compact: bool = True,
     ) -> list[dict[str, Any]]:
         self.runtime._check_external_changes(self.turn)
         self.runtime._add_periodic_reminders()
@@ -2461,6 +2498,40 @@ class NativeTurnRunner:
             total_prior_chars = sum(
                 len(str(b.get("text") or "")) for b in prior_blocks
             )
+            eff_window = self.runtime.limits.context_window_tokens
+            if (
+                _allow_pre_compact
+                and eff_window is not None
+                and eff_window > 0
+                and self.runtime._compaction_count < 8
+            ):
+                threshold_85 = int(eff_window * 0.85)
+                est_blocks_tokens = (
+                    (total_prior_chars + reserved_tail_chars) // 4
+                    + len(cur_images) * 1200
+                    + self.runtime._prompt_overhead_tokens()
+                )
+                est_msgs_tokens = (
+                    self.runtime._estimated_tokens({"messages": source_msgs, "tools": tool_schemas})
+                    + self.runtime._prompt_overhead_tokens()
+                )
+                if max(est_blocks_tokens, est_msgs_tokens) > threshold_85:
+                    self.runtime._age_tool_results(self.messages, keep_recent=0)
+                    self.runtime._release_read_stubs(self.messages)
+                    try:
+                        self.runtime._compact_keeping_recent(self.messages, self.turn)
+                    except Exception:  # noqa: BLE001 - safety truncation below still bounds the prompt
+                        _LOGGER.warning("native turn: pre-spawn 85%% compaction failed", exc_info=True)
+                    refreshed_window: list[dict[str, object]] | None = None
+                    if window is not None:
+                        refreshed_window = self.runtime._request_messages(self.messages)
+                        if self.runtime._names is not None:
+                            refreshed_window = self.runtime._names.messages_out(refreshed_window)
+                    return self._build_initial_user_content(
+                        tool_schemas,
+                        window=refreshed_window,
+                        _allow_pre_compact=False,
+                    )
             if total_prior_chars > prior_char_budget:
                 tool_use_span_re = re.compile(
                     r"\n?(?:\[|&#91;)\s*Tool Use(?::|\b)[^\]]*\]\n.*?\n(?:\[|&#91;)\s*/Tool Use\s*\]",
@@ -2572,6 +2643,10 @@ class NativeTurnRunner:
             )
             blocks.append({"type": "text", "text": rendered_cur_text})
         blocks.extend(cur_images)
+        self._last_first_message_tokens = (
+            self._estimate_user_content_tokens(blocks)
+            + self.runtime._prompt_overhead_tokens()
+        )
         return blocks
 
     def _prior_history_char_cap(self) -> int | None:
@@ -2773,7 +2848,12 @@ class NativeTurnRunner:
             and (limits.max_iterations is None or limits.max_turns < limits.max_iterations)
             else "ITERATION_LIMIT"
         )
-        autocompact = _resolve_cli_autocompact(self.runtime.autocompact)
+        autocompact = _resolve_cli_autocompact(
+            self.runtime.autocompact,
+            effective_window_tokens=self.runtime.limits.context_window_tokens,
+            window_rule_index=self.runtime.window_rule_index,
+        )
+        active_cli_model_arg: str | None = self.runtime.cli_model_arg
         effort = (
             self.runtime.effort
             if (self.runtime.effort and not bool(self.turn.get("live_mode")))
@@ -2833,7 +2913,7 @@ class NativeTurnRunner:
                 )
 
             req = NativeTurnRequest(
-                model=str(self.turn.get("model_id") or ""),
+                model=active_cli_model_arg or str(self.turn.get("model_id") or ""),
                 system_prompt=str(self.runtime.system_prompt or ""),
                 user_content=user_content,
                 executor=executor,
@@ -3250,6 +3330,7 @@ class NativeTurnRunner:
                         self.runtime._life(
                             self.turn, "code_verification", status=verification
                         )
+                    self._invalidate_superseded_learned_window(sink)
                     self.runtime._life(self.turn, "completed")
                     self.runtime.store.finish(self.turn)
                     self.runtime._settle_quality(self.turn, "completed")
@@ -3283,13 +3364,43 @@ class NativeTurnRunner:
                     return self.runtime._cancel(
                         self.turn, process_count, executor.action_count
                     )
+                if (
+                    active_cli_model_arg
+                    and "[1m]" in active_cli_model_arg.lower()
+                    and not self._fell_back_from_1m
+                    and is_long_context_credits_error(exc)
+                ):
+                    self._recover_long_context_credits_error(
+                        exc, executor, sink, provider_effect_id
+                    )
+                    active_cli_model_arg = None
+                    autocompact = _resolve_cli_autocompact(
+                        self.runtime.autocompact,
+                        effective_window_tokens=self.runtime.limits.context_window_tokens,
+                        window_rule_index=self.runtime.window_rule_index,
+                    )
+                    initial_user_images_pending = False
+                    resume_session_id = None
+                    user_content = self._build_initial_user_content(tool_schemas)
+                    sink.reset_for_new_message()
+                    self.runtime._life(self.turn, "running")
+                    next_process = True
+                    continue
                 if is_context_overflow_error(exc, self.runtime):
                     if self._recover_context_overflow(
                         exc, executor, sink, provider_effect_id, tool_schemas
                     ):
+                        active_cli_model_arg = self.runtime.cli_model_arg
+                        autocompact = _resolve_cli_autocompact(
+                            self.runtime.autocompact,
+                            effective_window_tokens=self.runtime.limits.context_window_tokens,
+                            window_rule_index=self.runtime.window_rule_index,
+                        )
                         initial_user_images_pending = False
                         resume_session_id = None
-                        user_content = self._build_initial_user_content(tool_schemas)
+                        user_content = self._build_initial_user_content(
+                            tool_schemas, _allow_pre_compact=False
+                        )
                         sink.reset_for_new_message()
                         self.runtime._life(self.turn, "running")
                         next_process = True
@@ -3357,13 +3468,43 @@ class NativeTurnRunner:
                     self.runtime._life(self.turn, "running")
                     next_process = True
                     continue
+                if (
+                    active_cli_model_arg
+                    and "[1m]" in active_cli_model_arg.lower()
+                    and not self._fell_back_from_1m
+                    and is_long_context_credits_error(exc)
+                ):
+                    self._recover_long_context_credits_error(
+                        exc, executor, sink, provider_effect_id
+                    )
+                    active_cli_model_arg = None
+                    autocompact = _resolve_cli_autocompact(
+                        self.runtime.autocompact,
+                        effective_window_tokens=self.runtime.limits.context_window_tokens,
+                        window_rule_index=self.runtime.window_rule_index,
+                    )
+                    initial_user_images_pending = False
+                    resume_session_id = None
+                    user_content = self._build_initial_user_content(tool_schemas)
+                    sink.reset_for_new_message()
+                    self.runtime._life(self.turn, "running")
+                    next_process = True
+                    continue
                 if is_context_overflow_error(exc, self.runtime):
                     if self._recover_context_overflow(
                         exc, executor, sink, provider_effect_id, tool_schemas
                     ):
+                        active_cli_model_arg = self.runtime.cli_model_arg
+                        autocompact = _resolve_cli_autocompact(
+                            self.runtime.autocompact,
+                            effective_window_tokens=self.runtime.limits.context_window_tokens,
+                            window_rule_index=self.runtime.window_rule_index,
+                        )
                         initial_user_images_pending = False
                         resume_session_id = None
-                        user_content = self._build_initial_user_content(tool_schemas)
+                        user_content = self._build_initial_user_content(
+                            tool_schemas, _allow_pre_compact=False
+                        )
                         sink.reset_for_new_message()
                         self.runtime._life(self.turn, "running")
                         next_process = True
@@ -3527,6 +3668,136 @@ class NativeTurnRunner:
             self.messages, synthetic_error_text=syn_text, error_message=err_msg
         )
 
+    def _record_learned_window_from_overflow(
+        self,
+        exc: BaseException,
+        tool_schemas: list[dict[str, object]],
+    ) -> None:
+        raw_error = str(exc or "")
+        tail = str(getattr(exc, "output_tail", "") or "")
+        parsed = parse_overflow_limit(raw_error) or (parse_overflow_limit(tail) if tail else None)
+        first_n = self._last_first_message_tokens or (
+            self.runtime._estimated_tokens({"messages": self.messages, "tools": tool_schemas})
+            + self.runtime._prompt_overhead_tokens()
+        )
+        if parsed is not None:
+            learned_tokens = parsed
+            learned_source = "error_raw"
+        else:
+            learned_tokens = max(1_000, math.floor(0.9 * max(1_000, int(first_n))))
+            learned_source = "estimate"
+
+        provider = str(self.turn.get("provider") or "")
+        model_id = str(self.turn.get("model_id") or "")
+        obs_sink = self.runtime.context_observation_sink
+        if callable(obs_sink) and provider and model_id:
+            try:
+                obs_sink(
+                    provider,
+                    model_id,
+                    learned_tokens,
+                    learned_source,
+                    first_message_tokens=int(first_n) if first_n > 0 else None,
+                )
+            except Exception:  # noqa: BLE001 - learning persistence never breaks overflow recovery
+                _LOGGER.debug("context observation learn failed for %s/%s", provider, model_id, exc_info=True)
+
+        cur_limits = self.runtime.limits
+        self.runtime.limits = replace(
+            cur_limits,
+            context_window_tokens=learned_tokens,
+            max_context_tokens=max(1_000, min(cur_limits.max_context_tokens, learned_tokens)),
+        )
+        self.runtime.learned_window_tokens = learned_tokens
+        self.runtime.window_source = "learned"
+        self.runtime.window_detail = (
+            f"{learned_tokens // 1_000} mil, aprendido após erro do modelo"
+            if learned_tokens >= 1_000 and learned_tokens % 1_000 == 0
+            else f"{learned_tokens:,} tokens, aprendido após erro do modelo"
+        )
+        self.runtime.window_rule_index = 2
+
+        learned_payload = {
+            "model": model_id,
+            "tokens": learned_tokens,
+            "source": learned_source,
+        }
+        recorder = getattr(self.runtime.store, "record", None)
+        if callable(recorder):
+            try:
+                recorder(
+                    self.turn,
+                    AgentActivityEventType.CONTEXT_WINDOW_LEARNED,
+                    f"Janela efetiva aprendida para {model_id}: {learned_tokens:,} tokens",
+                    learned_payload,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        self.runtime._life(
+            self.turn,
+            AgentActivityEventType.CONTEXT_WINDOW_LEARNED.value,
+            **learned_payload,
+        )
+
+    def _invalidate_superseded_learned_window(self, sink: _RunnerSink) -> None:
+        learned_limit = self.runtime.learned_window_tokens
+        if learned_limit is None or learned_limit <= 0:
+            return
+        observed_used = max(
+            int(getattr(sink, "max_context_used_tokens", 0) or 0),
+            int(self.last_context.get("used_tokens") or 0),
+        )
+        if observed_used <= learned_limit:
+            return
+        invalidator = self.runtime.context_observation_invalidator
+        provider = str(self.turn.get("provider") or "")
+        model_id = str(self.turn.get("model_id") or "")
+        if callable(invalidator) and provider and model_id:
+            try:
+                invalidator(provider, model_id)
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug("context observation invalidate failed for %s/%s", provider, model_id, exc_info=True)
+        self.runtime.learned_window_tokens = None
+
+    def _recover_long_context_credits_error(
+        self,
+        exc: BaseException,
+        executor: RuntimeToolExecutor,
+        sink: _RunnerSink,
+        provider_effect_id: str | None,
+    ) -> None:
+        self._fell_back_from_1m = True
+        self._drain_in_flight_tools(executor)
+        self._discard_overflow_error_text(exc, executor, sink)
+        cur_limits = self.runtime.limits
+        self.runtime.limits = replace(
+            cur_limits,
+            context_window_tokens=200_000,
+            max_context_tokens=max(1_000, min(cur_limits.max_context_tokens, 200_000)),
+        )
+        self.runtime.window_source = "account_credits"
+        self.runtime.window_detail = "200 mil, limite da conta sem créditos"
+        self.runtime.window_rule_index = 3
+        self.runtime.cli_model_arg = None
+
+        self.runtime._effect_finished(
+            self.turn,
+            provider_effect_id,
+            state="NOT_APPLIED",
+            error_code="LONG_CONTEXT_CREDITS_REQUIRED",
+        )
+        used = int(self.last_context.get("used_tokens") or 0)
+        updated_ctx = {
+            **self.last_context,
+            "limit_tokens": 200_000,
+            "free_tokens": max(0, 200_000 - used),
+            "percentage": min(100, round(used / 200_000 * 100)),
+            "window_source": "account_credits",
+            "window_detail": "200 mil, limite da conta sem créditos",
+        }
+        self.last_context = updated_ctx
+        self.runtime._life(self.turn, "context_updated", **updated_ctx)
+
     def _recover_context_overflow(
         self,
         exc: BaseException,
@@ -3538,6 +3809,7 @@ class NativeTurnRunner:
         if not is_context_overflow_error(exc, self.runtime) or self._reactive_compacted:
             return False
         self._reactive_compacted = True
+        self._record_learned_window_from_overflow(exc, tool_schemas)
         self._drain_in_flight_tools(executor)
         self._discard_overflow_error_text(exc, executor, sink)
         before_tokens = (

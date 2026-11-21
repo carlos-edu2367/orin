@@ -56,7 +56,7 @@ def test_resolve_family_alias_prefers_newest_catalog_member_then_default() -> No
         CatalogModel("claude-opus-5-6", "Opus 5.6", 1_000_000),
     ]
     assert resolve_family_alias("opus", models) == "claude-opus-5-6"
-    assert resolve_family_alias("fable", []) == "claude-fable-5-1"
+    assert resolve_family_alias("fable", []) == "claude-fable-5-2"
     assert resolve_family_alias("gpt", []) is None
 
 

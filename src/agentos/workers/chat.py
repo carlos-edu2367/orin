@@ -1040,31 +1040,168 @@ class ChatWorker:
             capabilities = [item.strip() for item in capabilities.split(",")]
         return tuple(str(item) for item in capabilities if str(item).strip())
 
-    def _context_window_for(self, turn: dict[str, object]) -> int | None:
-        """The turn model's real context window, or None if it is unknown."""
+    def _context_window_settings(self, turn: dict[str, object]) -> tuple[dict[str, int], bool]:
+        try:
+            from agentos.settings.loader import load_effective_settings
+            from agentos.settings.registry import resolve
+
+            root = getattr(self, "_workspace_root", None)
+            settings = load_effective_settings(Path(root) if root else None, trusted=root is not None)
+            raw_overrides = resolve(settings, "context.windowOverrides").value
+            overrides: dict[str, int] = {}
+            if isinstance(raw_overrides, Mapping):
+                for key, value in raw_overrides.items():
+                    if isinstance(key, str) and key.strip() and isinstance(value, int) and not isinstance(value, bool):
+                        overrides[key.strip()] = int(value)
+            long_ctx = bool(resolve(settings, "claudeCli.longContextWithCredits").value)
+            return overrides, long_ctx
+        except Exception:
+            return {}, False
+
+    def _claude_account_state(self):
+        try:
+            reader = getattr(self, "_claude_account_reader", None)
+            if reader is None:
+                from agentos.quota.claude_account import ClaudeAccountReader
+
+                reader = ClaudeAccountReader()
+                self._claude_account_reader = reader
+            return reader.read()
+        except Exception:
+            return None
+
+    def _context_observation_store(self):
+        injected = getattr(self, "_context_observations", None)
+        if injected is not None:
+            return injected
+        store = getattr(self, "store", None)
+        engine = getattr(store, "_engine", None)
+        if engine is None:
+            return None
+        try:
+            from agentos.persistence.postgres.context_observations import ContextObservationStore
+
+            return ContextObservationStore(engine)
+        except Exception:
+            return None
+
+    def _effective_window_for(self, turn: dict[str, object]):
+        """Resolve the effective context window for ``turn`` using E-RF28 rules (never ``max``)."""
+        from dataclasses import replace as _dc_replace
+        from agentos.providers.claude_cli.effective_window import (
+            EffectiveWindow,
+            account_credits_enabled,
+            effective_window_for,
+        )
+
         row = self._catalog_row_for(turn) or {}
         context_window = row.get("context_window")
-        window = int(context_window) if context_window else None
-        if str(turn.get("provider") or "") == "anthropic":
-            base_url = str(row.get("base_url") or "") or self._provider_base_url("anthropic", user_id=str(turn.get("user_id") or ""))
-            if is_claude_cli_bridge_url(base_url):
-                from agentos.providers.claude_cli.catalog import context_window_for as _cli_context_window_for
-                from agentos.providers.claude_cli.command import claude_cli_version as _claude_cli_version
-                import agentos.providers.claude_cli.provider as _cli_provider_mod
+        row_window = int(context_window) if context_window else None
+        provider = str(turn.get("provider") or "").strip()
+        model_id = str(turn.get("model_id") or "").strip()
+        user_id = str(turn.get("user_id") or "").strip()
+        overrides, long_ctx_with_credits = self._context_window_settings(turn)
 
-                cli_window = _cli_context_window_for(str(turn.get("model_id") or ""))
-                if window is None or (cli_window is not None and cli_window > window):
-                    window = cli_window
-                budget = _cli_provider_mod.text_context_budget()
-                if budget is not None:
-                    is_native = _cli_provider_mod.native_tools_enabled(
-                        conversation_mode=str(turn.get("conversation_mode") or ""),
-                        code_mode=_cli_provider_mod.is_code_mode_value(turn.get("code_mode")),
-                        version=_claude_cli_version(),
+        is_claude_cli = False
+        if provider == "anthropic":
+            base_url = str(row.get("base_url") or "") or self._provider_base_url("anthropic", user_id=user_id)
+            is_claude_cli = is_claude_cli_bridge_url(base_url)
+        elif provider == "anthropic-cli":
+            is_claude_cli = True
+
+        account_state = self._claude_account_state() if is_claude_cli else None
+        credits_on = account_credits_enabled(account_state) if is_claude_cli else None
+
+        learned_limit: int | None = None
+        learned_source: str | None = None
+        obs_store = self._context_observation_store()
+        if obs_store is not None and user_id and provider and model_id:
+            try:
+                obs = obs_store.get(user_id, provider, model_id)
+                if obs is not None:
+                    cli_version_str: str | None = None
+                    if is_claude_cli and obs.cli_version:
+                        try:
+                            from agentos.providers.claude_cli.command import claude_cli_version as _claude_cli_version
+
+                            ver = _claude_cli_version()
+                            if ver is not None:
+                                cli_version_str = (
+                                    ".".join(str(part) for part in ver)
+                                    if isinstance(ver, tuple)
+                                    else str(ver)
+                                )
+                        except Exception:
+                            cli_version_str = None
+                    invalidated = obs_store.invalidate_if_environment_changed(
+                        user_id,
+                        provider,
+                        model_id,
+                        cli_version=cli_version_str,
+                        account_credits_on=credits_on,
                     )
-                    if not is_native:
-                        window = min(window, budget) if window else budget
-        return window
+                    if not invalidated:
+                        learned_limit = obs.observed_limit_tokens
+                        learned_source = obs.source
+            except Exception:
+                pass
+
+        if is_claude_cli:
+            from agentos.providers.claude_cli.catalog import (
+                cached_cli_context_window_for,
+                fixed_context_window_for,
+            )
+            from agentos.providers.claude_cli.command import claude_cli_version as _claude_cli_version
+            import agentos.providers.claude_cli.provider as _cli_provider_mod
+
+            cli_catalog_window = cached_cli_context_window_for(model_id)
+            if cli_catalog_window is None and row_window is not None:
+                cli_catalog_window = row_window
+            fixed_catalog_window = fixed_context_window_for(model_id)
+
+            ew = effective_window_for(
+                provider,
+                model_id,
+                window_overrides=overrides,
+                learned_limit=learned_limit,
+                learned_source=learned_source,
+                account_state=account_state,
+                long_context_with_credits=long_ctx_with_credits,
+                cli_catalog_window=cli_catalog_window,
+                fixed_catalog_window=fixed_catalog_window,
+            )
+            budget = _cli_provider_mod.text_context_budget()
+            if budget is not None:
+                is_native = _cli_provider_mod.native_tools_enabled(
+                    conversation_mode=str(turn.get("conversation_mode") or ""),
+                    code_mode=_cli_provider_mod.is_code_mode_value(turn.get("code_mode")),
+                    version=_claude_cli_version(),
+                )
+                if not is_native and ew.tokens > budget:
+                    ew = _dc_replace(ew, tokens=budget)
+            return ew
+
+        if overrides or learned_limit is not None or row_window is not None:
+            ew = effective_window_for(
+                provider,
+                model_id,
+                window_overrides=overrides,
+                learned_limit=learned_limit,
+                learned_source=learned_source,
+                account_state=None,
+                long_context_with_credits=False,
+                cli_catalog_window=None,
+                fixed_catalog_window=row_window,
+            )
+            if ew.rule_index == 6 and row_window is None:
+                return None
+            return ew
+        return None
+
+    def _context_window_for(self, turn: dict[str, object]) -> int | None:
+        """The turn model's effective context window, or None if it is unknown."""
+        ew = self._effective_window_for(turn)
+        return ew.tokens if ew is not None else None
 
     def _model_sees_images(self, turn: dict[str, object]) -> bool:
         row = self._catalog_row_for(turn) or {}
@@ -1820,6 +1957,8 @@ class ChatWorker:
         except Exception:
             _LOGGER.exception("could not build memory embedder for %s", turn.get("user_id"))
             memory_embedder = None
+        effective_window = self._effective_window_for(turn)
+        effective_window_tokens = effective_window.tokens if effective_window is not None else None
         session = TurnSession(
             turn=turn,
             store=_RuntimeStore(self, turn),
@@ -1844,7 +1983,7 @@ class ChatWorker:
                 max_iterations=configured_limits["max_iterations"],
                 max_actions=None if configured_limits["max_iterations"] is None else max(24, configured_limits["max_iterations"] * 2),
                 max_context_tokens=self._max_context_tokens_for(turn),
-                context_window_tokens=self._context_window_for(turn),
+                context_window_tokens=effective_window_tokens,
                 subagent_max_iterations=configured_limits.get("subagent_max_iterations", configured_limits["max_iterations"]),
                 subagent_max_actions=(
                     None
@@ -1898,8 +2037,64 @@ class ChatWorker:
             fallback_provider_factory=lambda model_id: self._provider_transport({**turn, "model_id": model_id}),
             read_file_state=self._read_states.state_for(str(turn["user_id"]), str(turn["conversation_id"])),
             **self._quota_session_kwargs(engine, turn),
+            **self._context_window_session_kwargs(engine, turn, effective_window),
         )
         return session.build_runtime()
+
+    def _context_window_session_kwargs(self, engine, turn: dict[str, object], effective_window) -> dict[str, object]:
+        kwargs: dict[str, object] = {}
+        if effective_window is not None:
+            kwargs["window_source"] = effective_window.source
+            kwargs["window_detail"] = effective_window.detail
+            kwargs["window_rule_index"] = effective_window.rule_index
+            kwargs["cli_model_arg"] = effective_window.cli_model_arg
+            if effective_window.source == "learned":
+                kwargs["learned_window_tokens"] = effective_window.tokens
+        try:
+            from agentos.persistence.postgres.context_observations import ContextObservationStore
+            from agentos.providers.claude_cli.command import claude_cli_version as _claude_cli_version
+            from agentos.providers.claude_cli.effective_window import account_credits_enabled
+
+            obs_store = ContextObservationStore(engine)
+            user_id = str(turn.get("user_id") or "")
+            if user_id:
+                def _sink(
+                    provider_name: str,
+                    model_id: str,
+                    observed_limit_tokens: int,
+                    source: str,
+                    *,
+                    first_message_tokens: int | None = None,
+                ) -> None:
+                    cli_ver_str: str | None = None
+                    credits_on: bool | None = None
+                    if str(provider_name or "").strip().lower() in {"anthropic", "anthropic-cli"}:
+                        try:
+                            ver = _claude_cli_version()
+                            if ver is not None:
+                                cli_ver_str = ".".join(str(p) for p in ver) if isinstance(ver, tuple) else str(ver)
+                        except Exception:
+                            cli_ver_str = None
+                        credits_on = account_credits_enabled(self._claude_account_state())
+                    obs_store.learn(
+                        user_id,
+                        provider_name,
+                        model_id,
+                        observed_limit_tokens,
+                        source,
+                        first_message_tokens=first_message_tokens,
+                        cli_version=cli_ver_str,
+                        account_credits_on=credits_on,
+                    )
+
+                def _invalidate(provider_name: str, model_id: str) -> bool:
+                    return obs_store.invalidate(user_id, provider_name, model_id)
+
+                kwargs["context_observation_sink"] = _sink
+                kwargs["context_observation_invalidator"] = _invalidate
+        except Exception:
+            _LOGGER.debug("context observation wiring unavailable for turn %s", turn.get("turn_id"), exc_info=True)
+        return kwargs
 
     def _quota_session_kwargs(self, engine, turn: dict[str, object]) -> dict[str, object]:
         try:

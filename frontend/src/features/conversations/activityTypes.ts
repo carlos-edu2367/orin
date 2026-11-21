@@ -146,6 +146,7 @@ export type AgentActivityEventType =
   | 'artifact.created'
   | 'context.updated'
   | 'context.overflow_compacted'
+  | 'context.window_learned'
   | 'memory.learned'
   | 'workspace.trust_required'
   | 'todo.updated'
@@ -304,6 +305,8 @@ export type ContextUsage = {
   skills_tokens: number
   mcps_tokens: number
   omitted_messages: number
+  window_source?: string
+  window_detail?: string
   compaction_count: number
   compaction_enabled: boolean
 }
