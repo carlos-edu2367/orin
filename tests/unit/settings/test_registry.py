@@ -487,3 +487,134 @@ def test_memory_keys_registered_with_defaults_user_only_scope_and_bounds() -> No
         assert resolve(project_override, path) == ResolvedSetting(default_value, "default", default_value)
 
 
+def test_worktree_and_package_b_keys_registered_with_spec_defaults_scopes_and_validation(
+    tmp_path: Path,
+) -> None:
+    expected = {
+        "orchestration.worktree.enabled": (False, "boolean", Scope.PROJECT_OFF_ONLY),
+        "orchestration.worktree.linkDirs": (["node_modules", ".venv"], "string_list", Scope.ANY),
+        "orchestration.worktree.mergeCheckCommand": (None, "string", Scope.ANY),
+        "orchestration.taskBoard.enabled": (False, "boolean", Scope.USER_ONLY),
+        "orchestration.background.autoResume": (False, "boolean", Scope.USER_ONLY),
+        "orchestration.stall.minutes": (10, "number", Scope.ANY),
+        "orchestration.stall.autoCancel": (False, "boolean", Scope.USER_ONLY),
+    }
+    empty = empty_settings()
+    for path, (default_value, key_type, scope) in expected.items():
+        assert path in REGISTRY, f"missing key {path}"
+        key = REGISTRY[path]
+        assert key.type == key_type
+        assert key.scope is scope
+        assert key.label.strip()
+        assert key.description.strip()
+        resolved = resolve(empty, path)
+        assert resolved == ResolvedSetting(value=default_value, layer="default", default=default_value)
+
+    # Mutable default list must return a fresh copy.
+    first_dirs = resolve(empty, "orchestration.worktree.linkDirs")
+    first_dirs.value.append(".cache")
+    assert resolve(empty, "orchestration.worktree.linkDirs").value == ["node_modules", ".venv"]
+
+    # Validation for linkDirs: relative safe paths accepted, absolute or traversal rejected.
+    assert validate_change("orchestration.worktree.linkDirs", ["node_modules", "frontend/node_modules", ".venv"]) == [
+        "node_modules",
+        "frontend/node_modules",
+        ".venv",
+    ]
+    for bad_dirs in (
+        ["../outside"],
+        ["a/../b"],
+        ["/etc/passwd"],
+        ["\\windows\\system32"],
+        ["C:\\repo\\node_modules"],
+        ["C:foo"],
+        ["."],
+        [""],
+    ):
+        with pytest.raises(ValueError):
+            validate_change("orchestration.worktree.linkDirs", bad_dirs)
+
+    # Validation for mergeCheckCommand & stall.minutes.
+    assert validate_change("orchestration.worktree.mergeCheckCommand", None) is None
+    assert validate_change("orchestration.worktree.mergeCheckCommand", "pytest -q") == "pytest -q"
+    assert validate_change("orchestration.stall.minutes", 1) == 1
+    assert validate_change("orchestration.stall.minutes", 30) == 30
+    with pytest.raises(ValueError):
+        validate_change("orchestration.stall.minutes", 0)
+    with pytest.raises(ValueError):
+        validate_change("orchestration.stall.minutes", True)
+
+    # Scope enforcement: PROJECT_OFF_ONLY for worktree.enabled (project=true ignored; project=false disables).
+    project_tries_on = _synthetic(
+        ("project", {"orchestration": {"worktree": {"enabled": True}}}),
+    )
+    assert resolve(project_tries_on, "orchestration.worktree.enabled") == ResolvedSetting(False, "default", False)
+
+    user_on_project_off = _synthetic(
+        ("user", {"orchestration": {"worktree": {"enabled": True}}}),
+        ("project", {"orchestration": {"worktree": {"enabled": False}}}),
+    )
+    assert resolve(user_on_project_off, "orchestration.worktree.enabled") == ResolvedSetting(False, "project", False)
+
+    # Scope enforcement: USER_ONLY keys ignore project layer.
+    project_user_only = _synthetic(
+        (
+            "project",
+            {
+                "orchestration": {
+                    "taskBoard": {"enabled": True},
+                    "background": {"autoResume": True},
+                    "stall": {"autoCancel": True},
+                }
+            },
+        )
+    )
+    assert resolve(project_user_only, "orchestration.taskBoard.enabled") == ResolvedSetting(False, "default", False)
+    assert resolve(project_user_only, "orchestration.background.autoResume") == ResolvedSetting(False, "default", False)
+    assert resolve(project_user_only, "orchestration.stall.autoCancel") == ResolvedSetting(False, "default", False)
+
+    # End-to-end security via load_effective_settings: mergeCheckCommand is ignored on untrusted repos,
+    # honoured on trusted repos; worktree.enabled=true from project is always ignored.
+    project = tmp_path / "repo-worktree"
+    _write(orin_user_dir() / "settings.json", {})
+    _write(orin_managed_dir() / "managed-settings.json", {})
+    _write(
+        project / ".orin" / "settings.json",
+        {
+            "orchestration": {
+                "worktree": {
+                    "enabled": True,
+                    "linkDirs": ["node_modules", ".venv", "packages/web/node_modules"],
+                    "mergeCheckCommand": "pytest -q",
+                },
+                "taskBoard": {"enabled": True},
+                "background": {"autoResume": True},
+                "stall": {"minutes": 15, "autoCancel": True},
+            }
+        },
+    )
+
+    untrusted = load_effective_settings(project, trusted=False)
+    assert resolve(untrusted, "orchestration.worktree.enabled") == ResolvedSetting(False, "default", False)
+    assert resolve(untrusted, "orchestration.worktree.mergeCheckCommand") == ResolvedSetting(None, "default", None)
+    assert resolve(untrusted, "orchestration.taskBoard.enabled") == ResolvedSetting(False, "default", False)
+    assert resolve(untrusted, "orchestration.background.autoResume") == ResolvedSetting(False, "default", False)
+    assert resolve(untrusted, "orchestration.stall.autoCancel") == ResolvedSetting(False, "default", False)
+    assert resolve(untrusted, "orchestration.stall.minutes") == ResolvedSetting(15, "project", 10)
+
+    trusted = load_effective_settings(project, trusted=True)
+    assert resolve(trusted, "orchestration.worktree.enabled") == ResolvedSetting(False, "default", False)
+    assert resolve(trusted, "orchestration.worktree.mergeCheckCommand") == ResolvedSetting(
+        "pytest -q", "project", None
+    )
+    assert resolve(trusted, "orchestration.worktree.linkDirs") == ResolvedSetting(
+        ["node_modules", ".venv", "packages/web/node_modules"],
+        "project",
+        ["node_modules", ".venv"],
+    )
+    assert resolve(trusted, "orchestration.taskBoard.enabled") == ResolvedSetting(False, "default", False)
+    assert resolve(trusted, "orchestration.background.autoResume") == ResolvedSetting(False, "default", False)
+    assert resolve(trusted, "orchestration.stall.autoCancel") == ResolvedSetting(False, "default", False)
+
+
+

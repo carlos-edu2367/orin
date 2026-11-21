@@ -247,11 +247,13 @@ def test_migration_0064_backfills_1200_rows_creates_backup_is_idempotent_and_dow
         with engine.connect() as conn:
             assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == TARGET_REVISION
 
-        # Schema sync check
+        # Schema sync check (user_agents.isolation is added later in 0066)
         inspector = inspect(engine)
         assert {c["name"] for c in inspector.get_columns("agent_memories")} == {c.name for c in agent_memories.columns}
         assert {c["name"] for c in inspector.get_columns("memory_events")} == {c.name for c in memory_events.columns}
-        assert {c["name"] for c in inspector.get_columns("user_agents")} == {c.name for c in user_agents.columns}
+        assert {c["name"] for c in inspector.get_columns("user_agents")} == (
+            {c.name for c in user_agents.columns} - {"isolation"}
+        )
 
         with engine.connect() as conn:
             sqlite_indexes = {

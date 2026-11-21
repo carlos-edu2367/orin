@@ -72,6 +72,8 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "disableAllHooks",
     # Verifier thresholds/ignore/sensitivePaths cannot be weakened or weaponized by an untrusted repo.
     "orchestration.verifier.threshold",
+    # Worktree merge check executes a shell command: never honour from an untrusted repository.
+    "orchestration.worktree.mergeCheckCommand",
 )
 # A repository can never turn these on: it may only switch them off (a restriction).
 PROJECT_TRUE_IGNORED = (

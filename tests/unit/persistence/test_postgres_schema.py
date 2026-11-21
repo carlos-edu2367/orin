@@ -83,6 +83,11 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "discord_bot_configs",
             "discord_interaction_bindings",
             "friend_session_watches",
+            "verification_reviews",
+            "verification_findings",
+            "agent_runs",
+            "agent_worktrees",
+            "task_board_items",
         }
 
 
