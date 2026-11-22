@@ -239,3 +239,31 @@ def test_cross_host_redirect_is_refused(monkeypatch):
         transport.send({"jsonrpc": "2.0", "id": 1, "method": "ping"})
     assert "evil.example.org" in str(exc_info.value)
 
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1:8000/mcp", "http://localhost:8000/mcp", "https://LOCALHOST/mcp",
+    "http://[::1]:8000/mcp", "http://127.5.6.7/mcp",
+])
+def test_an_approved_server_may_reach_a_literal_loopback_address(url):
+    transport = HttpTransport(url=url, headers={}, allow_loopback=True)
+    assert transport._checked(url) == url
+
+
+@pytest.mark.parametrize("url", [
+    "http://192.168.0.10:8000/mcp", "http://10.0.0.5/mcp", "http://169.254.169.254/latest",
+    "http://mcp.example.com/v1", "ftp://127.0.0.1/mcp",
+])
+def test_allow_loopback_still_refuses_private_network_plain_http_and_other_schemes(url):
+    with pytest.raises(HttpTransportRefused):
+        HttpTransport(url=url, headers={}, allow_loopback=True)
+
+
+def test_allow_loopback_does_not_trust_a_public_name_that_resolves_to_loopback(monkeypatch):
+    import socket
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443)),
+    ])
+    with pytest.raises(HttpTransportRefused):
+        HttpTransport(url="https://rebind.example.com/mcp", headers={}, allow_loopback=True)

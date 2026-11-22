@@ -14,7 +14,7 @@ import agentos.mcp.file_servers as file_servers
 from agentos.agentic.reminders import ReminderQueue
 from agentos.mcp.file_config import parse_server
 from agentos.mcp.file_servers import clear_discovery_cache, connect_file_servers, file_bundle
-from agentos.mcp.models import McpToolDescriptor
+from agentos.mcp.models import McpServerState, McpToolDescriptor
 from agentos.mcp.toolset import McpToolProvider, build_client
 from agentos.settings.loader import EffectiveSettings
 from agentos.settings.paths import orin_user_dir
@@ -98,7 +98,11 @@ def test_a_file_server_may_use_any_launcher_and_a_local_url() -> None:
     config, _, secrets = file_bundle(remote, user_id="u1")
     assert build_client(config, secrets)._transport._headers == {"X-Key": "abc"}
     with pytest.raises(Exception):
-        build_client(replace(config, origin="orin"), secrets)  # a model-proposed server stays public-HTTPS only
+        # A server in Orin's own list that still awaits approval stays public-HTTPS only...
+        build_client(replace(config, origin="orin", state=McpServerState.PENDING_APPROVAL), secrets)
+    with pytest.raises(Exception):
+        # ...and once approved it may reach loopback, never another private address.
+        build_client(replace(config, origin="orin", url="http://192.168.0.10:3000/mcp"), secrets)
 
 
 def test_the_provider_takes_file_servers_and_drops_refused_ones() -> None:

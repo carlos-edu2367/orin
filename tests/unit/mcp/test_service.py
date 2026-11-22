@@ -310,3 +310,29 @@ def test_approve_redacts_secret_values_when_connection_raises_generic_error(serv
     assert "leaked_value_12345" not in str(exc_info.value)
 
 
+
+
+def test_approve_connects_as_approved_so_a_loopback_endpoint_is_allowed(service):
+    record = service.propose({"user_id": "u1", "display_name": "Unreal", "transport": "http",
+                              "url": "http://127.0.0.1:8000/mcp"})
+    seen = []
+
+    def connect(config, secrets):
+        seen.append(config.state)
+        return "2025-06-18", ()
+
+    service.approve(user_id="u1", server_id=record["server_id"], secrets={}, connect=connect)
+    assert seen == [McpServerState.ACTIVE]
+
+
+def test_testing_a_pending_server_keeps_it_unapproved(service):
+    record = service.propose({"user_id": "u1", "display_name": "Unreal", "transport": "http",
+                              "url": "http://127.0.0.1:8000/mcp"})
+    seen = []
+
+    def connect(config, secrets):
+        seen.append(config.state)
+        return "2025-06-18", ()
+
+    service.test("u1", record["slug"], connect)
+    assert seen == [McpServerState.PENDING_APPROVAL]
