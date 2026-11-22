@@ -1189,9 +1189,9 @@ class ChatWorker:
             import agentos.providers.claude_cli.provider as _cli_provider_mod
 
             cli_catalog_window = cached_cli_context_window_for(model_id)
-            if cli_catalog_window is None and row_window is not None:
-                cli_catalog_window = row_window
             fixed_catalog_window = fixed_context_window_for(model_id)
+            if fixed_catalog_window is None and row_window is not None:
+                fixed_catalog_window = row_window
 
             ew = effective_window_for(
                 provider,

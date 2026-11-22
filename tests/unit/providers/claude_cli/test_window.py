@@ -266,6 +266,10 @@ def test_window_overrides_stale_200k_db_row_for_1m_models(
             "context_window": 200_000,
         },
     )
+    monkeypatch.setattr(
+        "agentos.providers.claude_cli.catalog.cached_cli_context_window_for",
+        lambda *_a, **_kw: None,
+    )
     monkeypatch.setattr(provider_mod, "TEXT_CACHE_OK", True)
     turn = {
         "user_id": "u1",
@@ -274,4 +278,20 @@ def test_window_overrides_stale_200k_db_row_for_1m_models(
         "code_mode": "off",
     }
     assert worker._context_window_for(turn) == 1_000_000
+
+    custom_turn = {
+        "user_id": "u1",
+        "provider": "anthropic",
+        "model_id": "claude-custom-enterprise-1",
+        "code_mode": "off",
+    }
+    monkeypatch.setattr(
+        worker,
+        "_catalog_row_for",
+        lambda _turn: {
+            "base_url": DEFAULT_CLAUDE_CLI_BRIDGE_URL,
+            "context_window": 500_000,
+        },
+    )
+    assert worker._context_window_for(custom_turn) == 500_000
 
