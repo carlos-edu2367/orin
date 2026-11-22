@@ -1,8 +1,12 @@
 import AxeBuilder from '@axe-core/playwright'
-import { expect, test, type Page } from '@playwright/test'
+import { env as processEnv } from 'node:process'
+import { expect, test, type Page, type TestInfo } from '@playwright/test'
 import { mockSettings } from '../support/w7Settings'
 
-const ARTIFACT_DIR = 'C:/Users/User/.gemini/antigravity/brain/3b3d2ee8-ba1f-4504-9638-a5bb14471222'
+function screenshotPath(testInfo: TestInfo, filename: string): string {
+  const customDir = processEnv.ORIN_VISUAL_ARTIFACT_DIR
+  return customDir ? `${customDir}/${filename}` : testInfo.outputPath(filename)
+}
 
 async function assertZeroCriticalOrSeriousViolations(page: Page, label: string) {
   const results = await new AxeBuilder({ page }).analyze()
@@ -28,7 +32,7 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     await mockSettings(page)
   })
 
-  test('1. Modelos e provedores (ref-14.png) renders 2-column layout, 6-category SettingsNav, and passes Axe in dark & light mode', async ({ page }) => {
+  test('1. Modelos e provedores (ref-14.png) renders 2-column layout, 6-category SettingsNav, and passes Axe in dark & light mode', async ({ page }, testInfo) => {
     await page.route('**/v1/providers/**', async (route) => {
       const url = route.request().url()
       if (url.endsWith('/models')) {
@@ -67,14 +71,14 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     await expect(page.getByTestId('providers-cost-card')).toBeVisible()
     await expect(page.getByTestId('providers-save-btn')).toBeVisible()
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/fase7-ref14-providers.png`, fullPage: false })
+    await page.screenshot({ path: screenshotPath(testInfo, 'fase7-ref14-providers.png'), fullPage: false })
     await assertZeroCriticalOrSeriousViolations(page, '/settings/providers (dark)')
 
     await applyTheme(page, 'light')
     await assertZeroCriticalOrSeriousViolations(page, '/settings/providers (light)')
   })
 
-  test('2. Segurança e controle (ref-15.png) renders default permissions, honest empty folders state, neutral approval simulation card, and passes Axe in dark & light mode', async ({ page }) => {
+  test('2. Segurança e controle (ref-15.png) renders default permissions, honest empty folders state, neutral approval simulation card, and passes Axe in dark & light mode', async ({ page }, testInfo) => {
     await page.goto('/settings/permissions')
     await applyTheme(page, 'dark')
 
@@ -88,14 +92,14 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     await expect(page.getByTestId('security-approval-preview-card')).toBeVisible()
     await expect(page.getByTestId('security-approval-preview-card')).toContainText('Simulação do pedido de permissão')
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/fase7-ref15-security.png`, fullPage: false })
+    await page.screenshot({ path: screenshotPath(testInfo, 'fase7-ref15-security.png'), fullPage: false })
     await assertZeroCriticalOrSeriousViolations(page, '/settings/permissions (dark)')
 
     await applyTheme(page, 'light')
     await assertZeroCriticalOrSeriousViolations(page, '/settings/permissions (light)')
   })
 
-  test('3. Voz (/settings/voice) renders embedded voice settings and passes Axe in dark & light mode', async ({ page }) => {
+  test('3. Voz (/settings/voice) renders embedded voice settings and passes Axe in dark & light mode', async ({ page }, testInfo) => {
     await page.goto('/settings/voice')
     await applyTheme(page, 'dark')
 
@@ -103,14 +107,14 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     await expect(primaryNav.getByRole('link', { name: 'Voz' })).toHaveAttribute('aria-current', 'page')
     await expect(page.getByTestId('settings-voice-section')).toBeVisible()
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/fase7-voice-settings.png`, fullPage: false })
+    await page.screenshot({ path: screenshotPath(testInfo, 'fase7-voice-settings.png'), fullPage: false })
     await assertZeroCriticalOrSeriousViolations(page, '/settings/voice (dark)')
 
     await applyTheme(page, 'light')
     await assertZeroCriticalOrSeriousViolations(page, '/settings/voice (light)')
   })
 
-  test('4. Interactive Home (orin-home-interativa.html) triggers mascot celebration & 9 radial particles and passes Axe in dark & light mode', async ({ page }) => {
+  test('4. Interactive Home (orin-home-interativa.html) triggers mascot celebration & 9 radial particles and passes Axe in dark & light mode', async ({ page }, testInfo) => {
     await page.goto('/')
     await applyTheme(page, 'dark')
 
@@ -133,7 +137,7 @@ test.describe('Phase 7 — Settings (ref-14, ref-15, Voice) & Interactive Motion
     })
     expect(desktopRightPad).toBeGreaterThanOrEqual(148)
 
-    await page.screenshot({ path: `${ARTIFACT_DIR}/fase7-home-interactive.png`, fullPage: false })
+    await page.screenshot({ path: screenshotPath(testInfo, 'fase7-home-interactive.png'), fullPage: false })
     await assertZeroCriticalOrSeriousViolations(page, '/ (dark)')
 
     await applyTheme(page, 'light')

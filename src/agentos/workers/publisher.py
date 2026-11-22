@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta
+import inspect
 import logging
 import os
 from pathlib import Path
@@ -349,7 +350,13 @@ def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: f
         next_sweep = now_mono + SWEEP_EVERY_SECONDS
         if isinstance(worker_or_runner, ConcurrentTurnRunner):
             renew_leases(worker_or_runner)
-        recover_once(worker.store, has_in_flight=has_in_flight, worker=worker)
+        _rec_params = inspect.signature(recover_once).parameters
+        if "worker" in _rec_params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in _rec_params.values()
+        ):
+            recover_once(worker.store, has_in_flight=has_in_flight, worker=worker)
+        else:
+            recover_once(worker.store, has_in_flight=has_in_flight)
         try:
             resume_queued = getattr(worker, "resume_queued_subagents", None)
             if callable(resume_queued):

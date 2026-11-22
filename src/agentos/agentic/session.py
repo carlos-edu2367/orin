@@ -5340,9 +5340,9 @@ class TurnSession:
 
     def _agent_run_recorder(self):
         engine = (
-            getattr(self.agents_store, "_engine", None)
-            or getattr(self.chat_store, "_engine", None)
-            or getattr(self.store, "_engine", None)
+            getattr(getattr(self, "agents_store", None), "_engine", None)
+            or getattr(getattr(self, "chat_store", None), "_engine", None)
+            or getattr(getattr(self, "store", None), "_engine", None)
         )
         if engine is None:
             return None
