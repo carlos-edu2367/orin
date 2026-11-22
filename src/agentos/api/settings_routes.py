@@ -345,9 +345,12 @@ def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
         lines.append(f"tools: {', '.join(tool.strip() for tool in body.tools) or _scalar('')}")
     if body.disallowed_tools:
         lines.append(f"disallowedTools: {', '.join(tool.strip() for tool in body.disallowed_tools)}")
-    for key, value in (("model", body.model), ("permissionMode", body.permission_mode), ("effort", body.effort), ("memory", body.memory), ("isolation", body.isolation)):
+    for key, value in (("model", body.model), ("permissionMode", body.permission_mode), ("effort", body.effort), ("memory", body.memory)):
         if value:
             lines.append(f"{key}: {_scalar(value.strip())}")
+    # RT-B-14: omit default isolation ('none') from frontmatter (spec: absent == none).
+    if body.isolation and body.isolation.strip().lower() not in {"", "none"}:
+        lines.append(f"isolation: {_scalar(body.isolation.strip())}")
     if body.max_turns is not None:
         lines.append(f"maxTurns: {body.max_turns}")
     folder = _agent_dir(body.scope, root)

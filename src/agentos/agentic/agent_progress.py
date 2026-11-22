@@ -8,7 +8,7 @@ aggregation (child + grandchildren), throttled ``agent.progress`` emission
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import threading
 import time
@@ -71,6 +71,93 @@ class _AgentProgressEntry:
     last_progress_emit_mono: float | None = None
 
 
+@dataclass
+class _SharedProgressBucket:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    entries: dict[str, _AgentProgressEntry] = field(default_factory=dict)
+    children: dict[str, set[str]] = field(default_factory=dict)
+
+
+_BUCKETS_GUARD = threading.Lock()
+_BUCKETS_BY_ENGINE_ID: dict[int, _SharedProgressBucket] = {}
+
+
+def _engine_id_for_recorder(recorder: Any) -> int | None:
+    if recorder is None:
+        return None
+    engine = getattr(recorder, "_engine", None)
+    if engine is None:
+        store = getattr(recorder, "store", None)
+        engine = getattr(store, "_engine", None)
+    return id(engine) if engine is not None else None
+
+
+def _shared_bucket_for_engine_id(engine_id: int) -> _SharedProgressBucket:
+    with _BUCKETS_GUARD:
+        bucket = _BUCKETS_BY_ENGINE_ID.get(engine_id)
+        if bucket is None:
+            bucket = _SharedProgressBucket()
+            _BUCKETS_BY_ENGINE_ID[engine_id] = bucket
+        return bucket
+
+
+def clear_shared_progress_for_tests() -> None:
+    with _BUCKETS_GUARD:
+        _BUCKETS_BY_ENGINE_ID.clear()
+
+
+def shared_progress_snapshot(engine: Any, agent_id: str) -> AgentProgressSnapshot | None:
+    """Read live subtree metrics/state for ``agent_id`` from the engine's shared ProgressTracker bucket."""
+    if engine is None:
+        return None
+    aid = str(agent_id or "").strip()
+    if not aid:
+        return None
+    with _BUCKETS_GUARD:
+        bucket = _BUCKETS_BY_ENGINE_ID.get(id(engine))
+    if bucket is None:
+        return None
+    now_m = time.monotonic()
+    with bucket.lock:
+        entry = bucket.entries.get(aid)
+        if entry is None:
+            return None
+        visited: set[str] = set()
+        stack = [aid]
+        in_tok = 0
+        out_tok = 0
+        cost = 0.0
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            cur_entry = bucket.entries.get(cur)
+            if cur_entry is not None:
+                in_tok += cur_entry.input_tokens
+                out_tok += cur_entry.output_tokens
+                cost += cur_entry.cost_usd
+            for child_id in bucket.children.get(cur, ()):
+                if child_id not in visited:
+                    stack.append(child_id)
+        end_m = entry.finished_mono if entry.finished_mono is not None else now_m
+        elapsed = max(0.0, end_m - entry.started_mono)
+        return AgentProgressSnapshot(
+            agent_id=entry.agent_id,
+            state=entry.state,
+            elapsed_seconds=elapsed,
+            last_activity_at=entry.last_activity_at,
+            current_tool=entry.current_tool,
+            tool_calls=entry.tool_calls,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            cost_usd=cost,
+            stalled=entry.stalled,
+            parent_agent_id=entry.parent_agent_id,
+            conversation_id=entry.conversation_id,
+        )
+
+
 class ProgressTracker:
     """Thread-safe progress tracker with injectable clocks for deterministic testing."""
 
@@ -90,9 +177,19 @@ class ProgressTracker:
         self._on_stalled = on_stalled
         self._recorder = recorder
         self._progress_interval = max(0.0, float(progress_interval_seconds))
-        self._lock = threading.Lock()
-        self._entries: dict[str, _AgentProgressEntry] = {}
-        self._children: dict[str, set[str]] = {}
+        engine_id = _engine_id_for_recorder(recorder)
+        if engine_id is not None:
+            # RT-B-06: share live progress state across TurnSessions backed by the same DB engine
+            # so background subagents crossing turn boundaries retain current_tool, subtree tokens,
+            # stall detection, and stall.autoCancel.
+            bucket = _shared_bucket_for_engine_id(engine_id)
+            self._lock = bucket.lock
+            self._entries = bucket.entries
+            self._children = bucket.children
+        else:
+            self._lock = threading.Lock()
+            self._entries = {}
+            self._children = {}
 
     def _now_mono(self) -> float:
         return float(self._clock())
@@ -321,13 +418,20 @@ class ProgressTracker:
             entry = self._entries.get(aid)
             if entry is None:
                 return None
-            entry.state = str(state or "completed")
-            entry.current_tool = None
-            entry.finished_mono = now_m
-            entry.last_activity_mono = now_m
-            entry.last_activity_at = now_w
-            if entry.state in {"completed", "failed"}:
-                entry.stalled = False
+            # RT-B-13: preserve 'cancelled' (and stalled=True) set by stall.autoCancel
+            # so thread unwind / finally calling finish(..., state='failed') never overwrites it.
+            if entry.state == "cancelled":
+                entry.current_tool = None
+                if entry.finished_mono is None:
+                    entry.finished_mono = now_m
+            else:
+                entry.state = str(state or "completed")
+                entry.current_tool = None
+                entry.finished_mono = now_m
+                entry.last_activity_mono = now_m
+                entry.last_activity_at = now_w
+                if entry.state in {"completed", "failed"}:
+                    entry.stalled = False
             snap = self._build_snapshot_locked(entry, now_m)
 
         if self._recorder is not None:
@@ -364,17 +468,47 @@ class ProgressTracker:
         with self._lock:
             entry = self._entries.get(aid)
             if entry is None:
-                return None
-            if entry.state in {"running", "stalled"} and entry.finished_mono is None:
-                idle_seconds = max(0.0, now_m - entry.last_activity_mono)
-                if idle_seconds >= threshold_seconds:
-                    if not entry.stalled:
-                        newly_stalled = True
-                    entry.stalled = True
-                    entry.state = "stalled"
-                    if auto_cancel:
-                        should_cancel = True
-            snap = self._build_snapshot_locked(entry, now_m)
+                # RT-B-06 fallback: if no in-memory entry exists (e.g., tracker created after start),
+                # evaluate stall directly against the persisted agent_runs row.
+                run = self._recorder.get(aid) if self._recorder is not None else None
+                if run is None:
+                    return None
+                if run.state not in {"running", "stalled"} or run.last_activity_at is None:
+                    return None
+                now_w = self._now_wall()
+                idle_seconds = max(0.0, (now_w - run.last_activity_at).total_seconds())
+                if idle_seconds < threshold_seconds:
+                    return None
+                elapsed = max(0.0, (now_w - run.created_at).total_seconds())
+                was_stalled = run.state == "stalled"
+                effective_state = "cancelled" if auto_cancel else "stalled"
+                snap = AgentProgressSnapshot(
+                    agent_id=aid,
+                    state=effective_state,
+                    elapsed_seconds=elapsed,
+                    last_activity_at=run.last_activity_at,
+                    current_tool=None,
+                    tool_calls=int(run.tool_calls),
+                    input_tokens=int(run.input_tokens),
+                    output_tokens=int(run.output_tokens),
+                    cost_usd=float(run.cost_usd) if run.cost_usd is not None else 0.0,
+                    stalled=True,
+                    parent_agent_id=run.parent_agent_id,
+                    conversation_id=run.conversation_id,
+                )
+                newly_stalled = not was_stalled
+                should_cancel = bool(auto_cancel)
+            else:
+                if entry.state in {"running", "stalled"} and entry.finished_mono is None:
+                    idle_seconds = max(0.0, now_m - entry.last_activity_mono)
+                    if idle_seconds >= threshold_seconds:
+                        if not entry.stalled:
+                            newly_stalled = True
+                        entry.stalled = True
+                        entry.state = "stalled"
+                        if auto_cancel:
+                            should_cancel = True
+                snap = self._build_snapshot_locked(entry, now_m)
 
         if newly_stalled:
             callback = on_stalled or self._on_stalled
@@ -425,6 +559,28 @@ class ProgressTracker:
                     pass
         return snap
 
+    def rebind(
+        self,
+        *,
+        clock: Callable[[], float] | None = None,
+        wall_clock: Callable[[], datetime] | None = None,
+        on_progress: Callable[[AgentProgressSnapshot], None] | None = None,
+        on_stalled: Callable[[AgentProgressSnapshot], None] | None = None,
+        recorder: Any | None = None,
+    ) -> None:
+        """Rebind session-scoped callbacks/recorder/clocks on a conversation-shared tracker (RT-B-06)."""
+        with self._lock:
+            if clock is not None:
+                self._clock = clock
+            if wall_clock is not None:
+                self._wall_clock = wall_clock
+            if on_progress is not None:
+                self._on_progress = on_progress
+            if on_stalled is not None:
+                self._on_stalled = on_stalled
+            if recorder is not None:
+                self._recorder = recorder
+
     def snapshot(self, agent_id: str) -> AgentProgressSnapshot | None:
         aid = str(agent_id or "").strip()
         if not aid:
@@ -442,4 +598,6 @@ __all__ = [
     "DEFAULT_PROGRESS_INTERVAL_SECONDS",
     "DEFAULT_STALL_MINUTES",
     "ProgressTracker",
+    "clear_shared_progress_for_tests",
+    "shared_progress_snapshot",
 ]

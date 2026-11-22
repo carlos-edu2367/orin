@@ -179,6 +179,103 @@ export function mergeAgentProgress(
   }
 }
 
+const AUTHORITATIVE_NON_RUNNING_STATES: ReadonlySet<AgentRunState> = new Set([
+  'interrupted',
+  'completed',
+  'failed',
+  'cancelled',
+])
+
+function timestampMs(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const parsed = Date.parse(iso)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * Reconcile authoritative polled ``agent_runs`` state with historical/live activity events (RT-B-08).
+ * Historical ``running`` or ``worktree.created`` events must never downgrade an authoritative
+ * ``interrupted`` / ``stalled`` / terminal state returned by ``listAgentRuns``.
+ */
+export function reconcileAgentProgress(
+  authoritativeRun: AgentProgressData | undefined,
+  liveEventProgress: AgentProgressData | undefined,
+): AgentProgressData | undefined {
+  if (!authoritativeRun) return liveEventProgress
+  if (!liveEventProgress) return authoritativeRun
+
+  const runTs = timestampMs(authoritativeRun.lastActivityAt)
+  const liveTs = timestampMs(liveEventProgress.lastActivityAt)
+  const liveIsStrictlyNewer = liveTs !== null && (runTs === null || liveTs > runTs)
+
+  let state: AgentRunState = authoritativeRun.state
+  let stalled = authoritativeRun.stalled
+  let interrupted = authoritativeRun.interrupted
+  let currentTool: string | null = null
+
+  if (AUTHORITATIVE_NON_RUNNING_STATES.has(authoritativeRun.state)) {
+    // Authoritative terminal or interrupted state from agent_runs always wins over historical events.
+    state = authoritativeRun.state
+    stalled = authoritativeRun.stalled
+    interrupted = authoritativeRun.interrupted
+  } else if (authoritativeRun.state === 'stalled' || authoritativeRun.stalled) {
+    if (liveIsStrictlyNewer && liveEventProgress.state === 'running' && !liveEventProgress.stalled) {
+      state = 'running'
+      stalled = false
+      interrupted = false
+      currentTool = liveEventProgress.currentTool
+    } else if (liveIsStrictlyNewer && AUTHORITATIVE_NON_RUNNING_STATES.has(liveEventProgress.state)) {
+      state = liveEventProgress.state
+      stalled = liveEventProgress.stalled
+      interrupted = liveEventProgress.interrupted
+    } else {
+      state = 'stalled'
+      stalled = true
+      interrupted = false
+      currentTool = liveEventProgress.currentTool ?? authoritativeRun.currentTool
+    }
+  } else if (authoritativeRun.state === 'queued') {
+    if (liveIsStrictlyNewer && liveEventProgress.state !== 'running') {
+      state = liveEventProgress.state
+      stalled = liveEventProgress.stalled
+      interrupted = liveEventProgress.interrupted
+    }
+  } else {
+    // authoritativeRun.state === 'running'
+    if (liveEventProgress.state === 'stalled' || liveEventProgress.stalled) {
+      state = 'stalled'
+      stalled = true
+    } else if (liveIsStrictlyNewer && AUTHORITATIVE_NON_RUNNING_STATES.has(liveEventProgress.state)) {
+      state = liveEventProgress.state
+      stalled = liveEventProgress.stalled
+      interrupted = liveEventProgress.interrupted
+    }
+    currentTool = liveEventProgress.currentTool ?? authoritativeRun.currentTool
+  }
+
+  const costUsd =
+    authoritativeRun.costUsd !== null && liveEventProgress.costUsd !== null
+      ? Math.max(authoritativeRun.costUsd, liveEventProgress.costUsd)
+      : authoritativeRun.costUsd ?? liveEventProgress.costUsd
+
+  return {
+    agentId: authoritativeRun.agentId,
+    state,
+    stalled,
+    interrupted,
+    elapsedSeconds: Math.max(authoritativeRun.elapsedSeconds, liveEventProgress.elapsedSeconds),
+    lastActivityAt: liveIsStrictlyNewer ? liveEventProgress.lastActivityAt : authoritativeRun.lastActivityAt ?? liveEventProgress.lastActivityAt,
+    currentTool,
+    toolCalls: Math.max(authoritativeRun.toolCalls, liveEventProgress.toolCalls),
+    inputTokens: Math.max(authoritativeRun.inputTokens, liveEventProgress.inputTokens),
+    outputTokens: Math.max(authoritativeRun.outputTokens, liveEventProgress.outputTokens),
+    costUsd,
+    mergeState: liveEventProgress.mergeState ?? authoritativeRun.mergeState,
+    parentAgentId: authoritativeRun.parentAgentId ?? liveEventProgress.parentAgentId,
+    resultRef: authoritativeRun.resultRef ?? liveEventProgress.resultRef,
+  }
+}
+
 export function hydrateAgentRuns(
   runs: readonly AgentRunSummary[],
   current: AgentProgressMap = {},

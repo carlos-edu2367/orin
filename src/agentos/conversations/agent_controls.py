@@ -44,7 +44,7 @@ def _clean_sender_agent_id(sender_agent_id: object) -> str | None:
     if sender_agent_id is None:
         return None
     cleaned = str(sender_agent_id).strip()
-    return cleaned[:64] if cleaned else None
+    return cleaned[:255] if cleaned else None
 
 
 def _ensure_utc(value: datetime | None) -> datetime | None:

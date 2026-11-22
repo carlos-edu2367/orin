@@ -109,6 +109,7 @@ def auto_resume_interrupted_agents(
     engine: Any,
     *,
     store: Any = None,
+    worker: Any = None,
     runs_dir: Path | None = None,
     settings_loader: Callable[[str], Any] | None = None,
     quota_policy: Any = None,
@@ -210,10 +211,18 @@ def auto_resume_interrupted_agents(
                 )
                 continue
 
-        # Persist auto_resumed BEFORE dispatching so another crash cannot trigger a loop.
-        recorder.mark_auto_resumed(agent_id)
         now = datetime.now(UTC)
-        recorder.store.touch(agent_id, state="queued", last_activity_at=now)
+        transitioned = recorder.store.transition_state(
+            agent_id,
+            from_state="interrupted",
+            to_state="queued",
+            last_activity_at=now,
+        )
+        if transitioned is None:
+            continue
+        # Persist auto_resumed BEFORE dispatching so a sudden crash cannot loop,
+        # and roll back both state and flag if dispatch raises synchronously (RT-B-05).
+        recorder.mark_auto_resumed(agent_id)
         try:
             with engine.begin() as conn:
                 conn.execute(
@@ -226,26 +235,30 @@ def auto_resume_interrupted_agents(
 
         try:
             if resume_handler is not None:
-                resume_handler(run)
+                resume_handler(transitioned)
+            elif worker is not None and callable(getattr(worker, "resume_subagent", None)):
+                if not worker.resume_subagent(agent_id, runs_dir=runs_dir):
+                    raise RuntimeError(f"worker.resume_subagent returned False for {agent_id}")
             elif store is not None:
-                from agentos.conversations.chat import ChatApplication
-
-                restored = recorder.restore_history(agent_id, history_path=run.history_path)
-                notice = restored.resume_notice()
-                task_hint = str(restored.metadata.get("task") or "")
-                task_part = f" Original task: {task_hint}" if task_hint else ""
-                prompt = (
-                    f"Auto-resume interrupted background subagent `{run.agent_id}` "
-                    f"(subagent_type={run.subagent_type}). {notice}{task_part}"
-                )
-                ChatApplication(store).enqueue(
-                    run.user_id,
-                    run.conversation_id,
-                    prompt,
-                    f"auto-resume:{run.agent_id}",
-                )
+                # Leave durably in 'queued' for ChatWorker.resume_queued_subagents without creating fake user messages.
+                pass
         except Exception:  # noqa: BLE001
-            _LOGGER.warning("auto-resume dispatch failed for %s", agent_id, exc_info=True)
+            _LOGGER.warning("auto-resume dispatch failed for %s; reverting to interrupted", agent_id, exc_info=True)
+            rollback_ts = datetime.now(UTC)
+            recorder.store.touch(agent_id, state="interrupted", last_activity_at=rollback_ts)
+            try:
+                recorder.clear_auto_resumed(agent_id)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        update(conversation_agents)
+                        .where(conversation_agents.c.agent_id == agent_id)
+                        .values(state="interrupted", updated_at=rollback_ts)
+                    )
+            except Exception:  # noqa: BLE001
+                pass
             continue
 
         resumed.append(agent_id)
@@ -253,7 +266,7 @@ def auto_resume_interrupted_agents(
     return resumed
 
 
-def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
+def recover_once(store, *, has_in_flight: bool = False, worker: Any = None) -> tuple[str, ...]:
     """Requeue turns after a worker crash and fail turns no worker can claim."""
     global _ORPHANS_SWEPT
     if not has_in_flight and not _ORPHANS_SWEPT:
@@ -269,7 +282,7 @@ def recover_once(store, *, has_in_flight: bool = False) -> tuple[str, ...]:
                 from agentos.agentic.background_agents import fail_orphaned_running_agents
 
                 fail_orphaned_running_agents(engine)
-                auto_resume_interrupted_agents(engine, store=store)
+                auto_resume_interrupted_agents(engine, store=store, worker=worker)
                 _ORPHANS_SWEPT = True
             except Exception:
                 _LOGGER.debug("could not sweep orphaned running agents", exc_info=True)
@@ -336,7 +349,13 @@ def poll_once(worker_or_runner: ChatWorker | ConcurrentTurnRunner, next_sweep: f
         next_sweep = now_mono + SWEEP_EVERY_SECONDS
         if isinstance(worker_or_runner, ConcurrentTurnRunner):
             renew_leases(worker_or_runner)
-        recover_once(worker.store, has_in_flight=has_in_flight)
+        recover_once(worker.store, has_in_flight=has_in_flight, worker=worker)
+        try:
+            resume_queued = getattr(worker, "resume_queued_subagents", None)
+            if callable(resume_queued):
+                resume_queued()
+        except Exception:
+            _LOGGER.exception("could not drain queued subagent resumptions")
         try:
             worker.sweep_exited_processes()
         except Exception:

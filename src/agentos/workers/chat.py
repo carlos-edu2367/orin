@@ -1992,9 +1992,7 @@ class ChatWorker:
 
         return build
 
-    def _runtime_for(self, turn: dict[str, object]) -> AgenticTurnRuntime:
-        if self._runtime_factory is not None:
-            return self._runtime_factory(turn)
+    def _build_session_for(self, turn: dict[str, object]) -> TurnSession:
         engine = self.store._engine
         skill_library = PostgresSkillLibraryService(engine)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
@@ -2036,7 +2034,7 @@ class ChatWorker:
         turn = self._apply_quota_fallback_before_runtime(engine, turn, quota_kwargs)
         effective_window = self._effective_window_for(turn)
         effective_window_tokens = effective_window.tokens if effective_window is not None else None
-        session = TurnSession(
+        return TurnSession(
             turn=turn,
             store=_RuntimeStore(self, turn),
             agents_store=ConversationAgentStore(engine, conversation_id=str(turn["conversation_id"]), user_id=str(turn["user_id"])),
@@ -2120,7 +2118,105 @@ class ChatWorker:
             **quota_kwargs,
             **self._context_window_session_kwargs(engine, turn, effective_window),
         )
-        return session.build_runtime()
+
+    def _runtime_for(self, turn: dict[str, object]) -> AgenticTurnRuntime:
+        if self._runtime_factory is not None:
+            return self._runtime_factory(turn)
+        return self._build_session_for(turn).build_runtime()
+
+    def resume_subagent(self, agent_id: str, *, runs_dir: Path | None = None) -> bool:
+        """Directly resume a queued/interrupted background subagent via ``TurnSession.resume_interrupted_subagent`` (RT-B-05)."""
+        from agentos.agentic.agent_run_persistence import AgentRunRecorder
+        from agentos.agentic.background_agents import BACKGROUND_AGENTS
+        from agentos.persistence.postgres.schema import conversation_agents, conversations
+
+        engine = getattr(self.store, "_engine", None)
+        if engine is None:
+            return False
+        recorder = AgentRunRecorder(engine, runs_dir=runs_dir)
+        run = recorder.get(agent_id)
+        if run is None or run.state not in {"queued", "interrupted"}:
+            return False
+        live = BACKGROUND_AGENTS.get(run.conversation_id, run.agent_id)
+        if live is not None and live.status in {"running", "stalled"}:
+            return True
+
+        turn: dict[str, object] | None = None
+        if hasattr(self.store, "load"):
+            try:
+                loaded = self.store.load(run.turn_id)
+                if isinstance(loaded, dict):
+                    turn = dict(loaded)
+            except Exception:
+                turn = None
+        if turn is None:
+            with engine.connect() as conn:
+                conv_row = conn.execute(
+                    select(conversations).where(conversations.c.conversation_id == run.conversation_id)
+                ).mappings().first()
+            turn = {
+                "turn_id": run.turn_id,
+                "execution_id": f"resume_{uuid4().hex}",
+                "conversation_id": run.conversation_id,
+                "user_id": run.user_id,
+                "provider": run.provider or (str(conv_row["provider"]) if conv_row and conv_row.get("provider") else ""),
+                "model_id": run.model_id or (str(conv_row["model_id"]) if conv_row and conv_row.get("model_id") else ""),
+                "conversation_mode": str(conv_row["mode"]) if conv_row and conv_row.get("mode") else "chat",
+                "project_id": str(conv_row["project_id"]) if conv_row and conv_row.get("project_id") else None,
+                "user_message": "",
+                "message_id": f"resume_msg_{uuid4().hex[:12]}",
+                "assistant_message_id": f"resume_asst_{uuid4().hex[:12]}",
+            }
+        try:
+            session = self._build_session_for(turn)
+            if runs_dir is not None:
+                session._agent_runs_dir = runs_dir
+            outcome = session.resume_interrupted_subagent(run.agent_id, run_in_background=True)
+            if outcome.status != "succeeded":
+                raise RuntimeError(outcome.content or outcome.summary)
+            return True
+        except Exception:
+            _LOGGER.warning("direct subagent resume failed for %s; reverting to interrupted", agent_id, exc_info=True)
+            now = datetime.now(UTC)
+            recorder.store.touch(agent_id, state="interrupted", last_activity_at=now)
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        update(conversation_agents)
+                        .where(conversation_agents.c.agent_id == agent_id)
+                        .values(state="interrupted", updated_at=now)
+                    )
+            except Exception:
+                pass
+            return False
+
+    def resume_queued_subagents(self, *, runs_dir: Path | None = None) -> list[str]:
+        """Drain ``agent_runs`` in ``queued`` state and resume them directly without fake user messages (RT-B-05)."""
+        from agentos.agentic.background_agents import BACKGROUND_AGENTS
+        from agentos.persistence.postgres.schema import agent_runs
+
+        engine = getattr(self.store, "_engine", None)
+        if engine is None:
+            return []
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    select(agent_runs.c.agent_id, agent_runs.c.conversation_id).where(agent_runs.c.state == "queued")
+                ).all()
+        except Exception:
+            return []
+        started: list[str] = []
+        for row in rows:
+            aid = str(row[0] or "")
+            cid = str(row[1] or "")
+            if not aid:
+                continue
+            live = BACKGROUND_AGENTS.get(cid, aid)
+            if live is not None and live.status in {"running", "stalled"}:
+                continue
+            if self.resume_subagent(aid, runs_dir=runs_dir):
+                started.append(aid)
+        return started
 
     def _context_window_session_kwargs(self, engine, turn: dict[str, object], effective_window) -> dict[str, object]:
         kwargs: dict[str, object] = {}

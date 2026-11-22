@@ -238,7 +238,7 @@ class TaskBoardStore:
             "title": clean_title,
             "description": str(description or ""),
             "status": clean_status,
-            "owner_agent_id": str(owner_agent_id).strip()[:64] if owner_agent_id else None,
+            "owner_agent_id": str(owner_agent_id).strip()[:255] if owner_agent_id else None,
             "blocked_by": _clean_blocked_by(blocked_by),
             "lease_expires_at": _as_utc(lease_expires_at),
             "result_ref": str(result_ref)[:512] if result_ref is not None else None,
@@ -319,7 +319,13 @@ class TaskBoardStore:
         if description is not None:
             updates["description"] = str(description)
         if status is not None:
-            updates["status"] = _validate_status(status)
+            clean_status = _validate_status(status)
+            updates["status"] = clean_status
+            if clean_status == "pending":
+                updates["owner_agent_id"] = None
+                updates["lease_expires_at"] = None
+            elif clean_status in {"done", "cancelled"}:
+                updates["lease_expires_at"] = None
         if blocked_by is not None:
             updates["blocked_by"] = _clean_blocked_by(blocked_by)
         if team_name is not None:
@@ -354,7 +360,7 @@ class TaskBoardStore:
         now: datetime | None = None,
     ) -> TaskBoardItemRecord | None:
         iid = str(item_id or "").strip()
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         cid = str(conversation_id or "").strip()
         if not iid or not aid or not cid:
             return None
@@ -396,7 +402,7 @@ class TaskBoardStore:
         now: datetime | None = None,
     ) -> TaskBoardItemRecord | None:
         iid = str(item_id or "").strip()
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         cid = str(conversation_id or "").strip()
         if not iid or not aid or not cid:
             return None
@@ -439,7 +445,7 @@ class TaskBoardStore:
         now: datetime | None = None,
     ) -> TaskBoardItemRecord | None:
         iid = str(item_id or "").strip()
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         cid = str(conversation_id or "").strip()
         if not iid or not aid or not cid:
             return None

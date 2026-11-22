@@ -46,14 +46,17 @@ class TaskTools:
             raise AgentToolError("status must be 'pending', 'in_progress', or 'completed'.")
         board = self._active_task_board()
         if board is not None:
-            record = board.create(
-                title=task_subject,
-                description=str(description or "").strip()[:1000],
-                status=clean_status,
-                owner_agent_id=str(owner).strip()[:64] if owner is not None and str(owner).strip() else None,
-                blocked_by=blocked_by or (),
-                team_name=str(team_name).strip()[:64] if team_name is not None and str(team_name).strip() else None,
-            )
+            try:
+                record = board.create(
+                    title=task_subject,
+                    description=str(description or "").strip()[:1000],
+                    status=clean_status,
+                    owner_agent_id=str(owner).strip()[:255] if owner is not None and str(owner).strip() else None,
+                    blocked_by=blocked_by or (),
+                    team_name=str(team_name).strip()[:64] if team_name is not None and str(team_name).strip() else None,
+                )
+            except ValueError as exc:
+                raise AgentToolError(str(exc)) from exc
             self._touch_task_board_lease()
             entry = record_to_task_dict(record)
             board_list = [record_to_task_dict(item) for item in board.list_items()]
@@ -123,15 +126,18 @@ class TaskTools:
                     raise AgentToolError("status must be 'pending', 'in_progress', 'completed', or 'deleted'.")
             else:
                 clean_status = None
-            updated = board.update(
-                target_id,
-                title=str(subject).strip()[:300] if subject is not None and str(subject).strip() else None,
-                description=str(description).strip()[:1000] if description is not None else None,
-                status=clean_status,
-                add_blocked_by=add_blocked_by,
-                add_blocks=add_blocks,
-                acting_agent_id=self._task_board_actor_id(),
-            )
+            try:
+                updated = board.update(
+                    target_id,
+                    title=str(subject).strip()[:300] if subject is not None and str(subject).strip() else None,
+                    description=str(description).strip()[:1000] if description is not None else None,
+                    status=clean_status,
+                    add_blocked_by=add_blocked_by,
+                    add_blocks=add_blocks,
+                    acting_agent_id=self._task_board_actor_id(),
+                )
+            except ValueError as exc:
+                raise AgentToolError(str(exc)) from exc
             if updated is None:
                 raise AgentToolError(f"Task '{target_id}' not found.")
             self._touch_task_board_lease()

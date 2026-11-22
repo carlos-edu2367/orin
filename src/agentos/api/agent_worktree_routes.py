@@ -8,10 +8,14 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 
+from agentos.agentic.background_agents import BACKGROUND_AGENTS
 from agentos.code_mode.agent_worktree import AgentWorktreeManager
 from agentos.code_mode.worktree import WorktreeError
+from agentos.persistence.postgres.agent_runs import AgentRunStore
 from agentos.persistence.postgres.agent_worktrees import AgentWorktreeStore
+from agentos.persistence.postgres.schema import conversation_agents
 
 from .friend_routes import engine_from_services
 from .security import AuthenticatedPrincipal
@@ -43,6 +47,80 @@ def register_agent_worktree_routes(
             root = Path(conversation_root(conversation_id, principal)).resolve()
             engine = engine_from_services(services)
             store = AgentWorktreeStore(engine) if engine is not None else None
+
+            # Verify agent ownership & active status before touching any worktree on disk (RT-B-10).
+            if engine is not None:
+                run = AgentRunStore(engine).get(agent_id)
+                if run is not None:
+                    if run.conversation_id != conversation_id or run.user_id != principal.user_id:
+                        return JSONResponse(
+                            {
+                                "error": {
+                                    "code": "worktree_not_found",
+                                    "category": "NOT_FOUND",
+                                    "message": "Worktree não encontrada nesta conversa.",
+                                }
+                            },
+                            status_code=404,
+                        )
+                    if run.state in {"running", "stalled"}:
+                        return JSONResponse(
+                            {
+                                "error": {
+                                    "code": "worktree_agent_running",
+                                    "category": "CONFLICT",
+                                    "message": "Não é possível descartar a worktree enquanto o subagente ainda está em execução.",
+                                }
+                            },
+                            status_code=409,
+                        )
+                with engine.connect() as conn:
+                    agent_row = conn.execute(
+                        select(
+                            conversation_agents.c.conversation_id,
+                            conversation_agents.c.user_id,
+                            conversation_agents.c.state,
+                        ).where(conversation_agents.c.agent_id == agent_id)
+                    ).mappings().first()
+                if agent_row is not None:
+                    if (
+                        str(agent_row["conversation_id"]) != conversation_id
+                        or str(agent_row["user_id"]) != principal.user_id
+                    ):
+                        return JSONResponse(
+                            {
+                                "error": {
+                                    "code": "worktree_not_found",
+                                    "category": "NOT_FOUND",
+                                    "message": "Worktree não encontrada nesta conversa.",
+                                }
+                            },
+                            status_code=404,
+                        )
+                    if str(agent_row["state"]) in {"running", "working", "stalled"}:
+                        return JSONResponse(
+                            {
+                                "error": {
+                                    "code": "worktree_agent_running",
+                                    "category": "CONFLICT",
+                                    "message": "Não é possível descartar a worktree enquanto o subagente ainda está em execução.",
+                                }
+                            },
+                            status_code=409,
+                        )
+
+            live_bg = BACKGROUND_AGENTS.get(conversation_id, agent_id)
+            if live_bg is not None and (live_bg.status in {"running", "stalled"} or not live_bg.future.done()):
+                return JSONResponse(
+                    {
+                        "error": {
+                            "code": "worktree_agent_running",
+                            "category": "CONFLICT",
+                            "message": "Não é possível descartar a worktree enquanto o subagente ainda está em execução.",
+                        }
+                    },
+                    status_code=409,
+                )
 
             if store is not None:
                 rec = store.get(agent_id)

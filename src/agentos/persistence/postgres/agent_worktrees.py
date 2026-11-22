@@ -98,7 +98,7 @@ class AgentWorktreeStore:
         merged_at: datetime | None = None,
     ) -> AgentWorktreeRecord:
         if record is not None:
-            aid = str(record.agent_id).strip()[:64]
+            aid = str(record.agent_id).strip()[:255]
             ws = str(record.workspace_root)[:1024]
             base = str(record.base_commit)[:64]
             br = str(record.branch)[:255]
@@ -109,7 +109,7 @@ class AgentWorktreeStore:
         else:
             if not agent_id or not workspace_root or not base_commit or not branch:
                 raise ValueError("agent_id, workspace_root, base_commit and branch are required")
-            aid = str(agent_id).strip()[:64]
+            aid = str(agent_id).strip()[:255]
             ws = str(workspace_root)[:1024]
             base = str(base_commit)[:64]
             br = str(branch)[:255]
@@ -143,7 +143,7 @@ class AgentWorktreeStore:
     create = upsert
 
     def get(self, agent_id: str) -> AgentWorktreeRecord | None:
-        aid = str(agent_id).strip()[:64]
+        aid = str(agent_id).strip()[:255]
         if not aid:
             return None
         with self._engine.connect() as conn:
@@ -161,7 +161,7 @@ class AgentWorktreeStore:
         queued_at: datetime | None = None,
         merged_at: datetime | None = None,
     ) -> AgentWorktreeRecord | None:
-        aid = str(agent_id).strip()[:64]
+        aid = str(agent_id).strip()[:255]
         if not aid:
             return None
         clean_state = _validate_merge_state(merge_state)
@@ -198,7 +198,7 @@ class AgentWorktreeStore:
         return [_row_to_record(r) for r in rows]
 
     def delete(self, agent_id: str) -> bool:
-        aid = str(agent_id).strip()[:64]
+        aid = str(agent_id).strip()[:255]
         if not aid:
             return False
         with self._engine.begin() as conn:

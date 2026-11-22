@@ -1140,7 +1140,7 @@ conversation_agent_controls = Table(
     Column("consumed_at", DateTime(timezone=True), nullable=True),
     Column("outcome", String(16), nullable=True),
     Column("sender_kind", String(16), nullable=False, server_default="user"),
-    Column("sender_agent_id", String(64), nullable=True),
+    Column("sender_agent_id", String(255), nullable=True),
     Column("delivered_at", DateTime(timezone=True), nullable=True),
 )
 Index(
@@ -1436,7 +1436,7 @@ verification_findings = Table(
 agent_runs = Table(
     "agent_runs",
     metadata,
-    Column("agent_id", String(64), primary_key=True),
+    Column("agent_id", String(255), primary_key=True),
     Column("user_id", String(255), nullable=False),
     Column("conversation_id", String(255), nullable=False),
     Column("turn_id", String(255), nullable=False),
@@ -1465,7 +1465,7 @@ Index("ix_agent_runs_state", agent_runs.c.state)
 agent_worktrees = Table(
     "agent_worktrees",
     metadata,
-    Column("agent_id", String(64), primary_key=True),
+    Column("agent_id", String(255), primary_key=True),
     Column("workspace_root", String(1024), nullable=False),
     Column("base_commit", String(64), nullable=False),
     Column("branch", String(255), nullable=False),
@@ -1485,7 +1485,7 @@ task_board_items = Table(
     Column("title", String(500), nullable=False),
     Column("description", Text, nullable=False, server_default=""),
     Column("status", String(16), nullable=False, server_default="pending"),
-    Column("owner_agent_id", String(64), nullable=True),
+    Column("owner_agent_id", String(255), nullable=True),
     Column("blocked_by", JSON, nullable=False, default=list),
     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
     Column("result_ref", String(512), nullable=True),

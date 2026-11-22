@@ -71,7 +71,7 @@ export function draftOf(form: Form): AgentDraft {
     disallowedTools: names(form.disallowed), model: form.model.trim() || null, permissionMode: form.permissionMode || null,
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null, effort: form.effort || null,
     ...(form.memory ? { memory: form.memory } : {}),
-    ...(form.isolation ? { isolation: form.isolation } : {}),
+    isolation: form.isolation === 'worktree' ? 'worktree' : null,
   }
 }
 

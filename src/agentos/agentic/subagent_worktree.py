@@ -47,19 +47,24 @@ def _worktree_settings(session: Any) -> tuple[bool, tuple[str, ...], str | None]
     settings = getattr(session, "effective_settings", None)
     if settings is None:
         return False, DEFAULT_WORKTREE_LINK_DIRS, None
+    trusted_fn = getattr(session, "_workspace_trusted", None)
+    is_trusted = bool(trusted_fn()) if callable(trusted_fn) else bool(getattr(settings, "trusted", True))
     enabled = bool(resolve_setting(settings, "orchestration.worktree.enabled").value)
-    raw_links = resolve_setting(settings, "orchestration.worktree.linkDirs").value
-    link_dirs = (
-        tuple(str(item) for item in raw_links if isinstance(item, str) and item.strip())
-        if isinstance(raw_links, (list, tuple))
-        else DEFAULT_WORKTREE_LINK_DIRS
-    )
+    link_resolved = resolve_setting(settings, "orchestration.worktree.linkDirs")
+    link_layer = getattr(link_resolved, "layer", None)
+    if not is_trusted and link_layer in {"project", "local"}:
+        link_dirs = DEFAULT_WORKTREE_LINK_DIRS
+    else:
+        raw_links = link_resolved.value
+        link_dirs = (
+            tuple(str(item) for item in raw_links if isinstance(item, str) and item.strip())
+            if isinstance(raw_links, (list, tuple))
+            else DEFAULT_WORKTREE_LINK_DIRS
+        )
     raw_cmd = resolve_setting(settings, "orchestration.worktree.mergeCheckCommand").value
     merge_cmd = str(raw_cmd).strip() if isinstance(raw_cmd, str) and raw_cmd.strip() else None
-    if merge_cmd is not None:
-        trusted_fn = getattr(session, "_workspace_trusted", None)
-        if callable(trusted_fn) and not trusted_fn():
-            merge_cmd = None
+    if merge_cmd is not None and not is_trusted:
+        merge_cmd = None
     return enabled, link_dirs, merge_cmd
 
 

@@ -74,6 +74,8 @@ UNTRUSTED_IGNORED_FROM_PROJECT = (
     "orchestration.verifier.threshold",
     # Worktree merge check executes a shell command: never honour from an untrusted repository.
     "orchestration.worktree.mergeCheckCommand",
+    # Worktree linkDirs creates writable directory junctions/symlinks into parent folders: never honour from untrusted repos.
+    "orchestration.worktree.linkDirs",
 )
 # A repository can never turn these on: it may only switch them off (a restriction).
 PROJECT_TRUE_IGNORED = (

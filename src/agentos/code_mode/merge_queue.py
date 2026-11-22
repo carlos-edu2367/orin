@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -19,6 +20,7 @@ from agentos.persistence.postgres.agent_worktrees import AgentWorktreeStore
 from .agent_worktree import (
     AgentWorktree,
     AgentWorktreeManager,
+    _is_escaped_or_linked_path,
     _is_junction,
     _sha256_file,
 )
@@ -37,6 +39,21 @@ _PROCESS_LOCKS: dict[str, threading.Lock] = {}
 _PROCESS_LOCKS_GUARD = threading.Lock()
 _LOCKFILE_POLL_SECONDS = 0.02
 _CHECK_TIMEOUT_SECONDS = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class _ParentFileSnapshot:
+    exists: bool
+    content: bytes | None = None
+    mode: int | None = None
+    symlink_target: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _ParentIndexSnapshot:
+    entries: tuple[str, ...]
+    raw_index_path: Path | None = None
+    raw_index_bytes: bytes | None = None
 
 
 def _workspace_lock_key(workspace_root: Path) -> str:
@@ -330,17 +347,21 @@ class MergeQueue:
         head_commit = self.manager._head_commit(wt.path)
         if base_commit and head_commit and head_commit != base_commit:
             committed = self._run_git_text(
-                ["-c", "core.quotepath=false", "diff", "--name-status", "-z", base_commit, head_commit],
+                ["-c", "core.quotepath=false", "diff", "--raw", "-z", base_commit, head_commit],
                 cwd=wt.path,
             )
             if committed.returncode == 0 and committed.stdout:
                 parts = committed.stdout.split("\0")
                 i = 0
                 while i < len(parts):
-                    status_code = parts[i]
+                    hdr = parts[i]
                     i += 1
-                    if not status_code or i >= len(parts):
-                        break
+                    if not hdr.startswith(":") or i >= len(parts):
+                        continue
+                    hdr_bits = hdr[1:].split()
+                    old_mode = hdr_bits[0] if len(hdr_bits) > 0 else ""
+                    new_mode = hdr_bits[1] if len(hdr_bits) > 1 else ""
+                    status_code = hdr_bits[4] if len(hdr_bits) > 4 else ""
                     if status_code.startswith(("R", "C")):
                         old_rel = parts[i].replace("\\", "/")
                         i += 1
@@ -348,10 +369,13 @@ class MergeQueue:
                             break
                         new_rel = parts[i].replace("\\", "/")
                         i += 1
-                        if not _is_ignored_rel(old_rel):
+                        if new_mode in {"120000", "160000"}:
+                            continue
+                        if not _is_ignored_rel(old_rel) and old_mode not in {"120000", "160000"}:
                             to_remove.add(old_rel)
-                        if not _is_ignored_rel(new_rel):
-                            if (wt.path / new_rel).exists():
+                        if not _is_ignored_rel(new_rel) and not _is_escaped_or_linked_path(wt.path, new_rel):
+                            new_full = wt.path / new_rel
+                            if new_full.exists() and not new_full.is_symlink() and not _is_junction(new_full):
                                 to_add.add(new_rel)
                             else:
                                 to_remove.add(new_rel)
@@ -360,9 +384,14 @@ class MergeQueue:
                         i += 1
                         if _is_ignored_rel(rel):
                             continue
-                        if status_code.startswith("D") or not (wt.path / rel).exists():
+                        if new_mode in {"120000", "160000"} or (new_mode == "000000" and old_mode in {"120000", "160000"}):
+                            continue
+                        if _is_escaped_or_linked_path(wt.path, rel):
+                            continue
+                        full_rel = wt.path / rel
+                        if status_code.startswith("D") or not full_rel.exists():
                             to_remove.add(rel)
-                        else:
+                        elif not full_rel.is_symlink() and not _is_junction(full_rel) and full_rel.is_file():
                             to_add.add(rel)
 
         # 2. Inspect working tree & untracked files in worktree.
@@ -383,9 +412,12 @@ class MergeQueue:
                 if xy[0] in {"R", "C"} or xy[1] in {"R", "C"}:
                     orig_rel = tokens[i].replace("\\", "/") if i < len(tokens) else ""
                     i += 1
-                    if orig_rel and not _is_ignored_rel(orig_rel):
+                    if orig_rel and not _is_ignored_rel(orig_rel) and not _is_escaped_or_linked_path(wt.path, orig_rel):
                         to_remove.add(orig_rel)
                 if _is_ignored_rel(rel):
+                    continue
+                if _is_escaped_or_linked_path(wt.path, rel):
+                    to_add.discard(rel)
                     continue
                 full = wt.path / rel
                 if xy == "??":
@@ -404,7 +436,7 @@ class MergeQueue:
                 if "D" in xy or not full.exists():
                     to_remove.add(rel)
                     to_add.discard(rel)
-                elif full.is_file():
+                elif not full.is_symlink() and not _is_junction(full) and full.is_file():
                     to_add.add(rel)
                     to_remove.discard(rel)
 
@@ -422,7 +454,7 @@ class MergeQueue:
             if to_add:
                 for batch in _chunks(sorted(to_add)):
                     self._run_git_text(
-                        ["-c", "core.longpaths=true", "-c", "core.autocrlf=false", "add", "-f", "--", *batch],
+                        ["-c", "core.longpaths=true", "add", "-f", "--", *batch],
                         cwd=wt.path,
                         env=env,
                     )
@@ -434,8 +466,41 @@ class MergeQueue:
                         env=env,
                     )
 
+            # Security guard (RT-B-01): strip any newly added/modified symlink (120000) or gitlink (160000)
+            # from the temporary index so they can never be emitted or applied to the parent workspace.
+            raw_diff = self._run_git_text(
+                ["-c", "core.quotepath=false", "diff", "--cached", "--raw", "-z", base_commit],
+                cwd=wt.path,
+                env=env,
+            )
+            forbidden_paths: list[str] = []
+            if raw_diff.returncode == 0 and raw_diff.stdout:
+                dparts = raw_diff.stdout.split("\0")
+                di = 0
+                while di < len(dparts):
+                    dhdr = dparts[di]
+                    di += 1
+                    if not dhdr.startswith(":") or di >= len(dparts):
+                        continue
+                    dbits = dhdr[1:].split()
+                    d_old_mode = dbits[0] if len(dbits) > 0 else ""
+                    d_new_mode = dbits[1] if len(dbits) > 1 else ""
+                    d_status = dbits[4] if len(dbits) > 4 else ""
+                    d_rel = dparts[di].replace("\\", "/")
+                    di += 1
+                    if d_status.startswith(("R", "C")) and di < len(dparts):
+                        d_rel = dparts[di].replace("\\", "/")
+                        di += 1
+                    if d_new_mode in {"120000", "160000"} or d_old_mode in {"120000", "160000"}:
+                        forbidden_paths.append(d_rel)
+            if forbidden_paths:
+                for batch in _chunks(sorted(set(forbidden_paths))):
+                    # Restore forbidden path back to base_commit state (or remove if absent in base_commit).
+                    self._run_git_text(["rm", "--cached", "--ignore-unmatch", "-f", "--", *batch], cwd=wt.path, env=env)
+                    self._run_git_text(["reset", "-q", base_commit, "--", *batch], cwd=wt.path, env=env)
+
             diff_proc = self._run_git_bytes(
-                ["-c", "core.quotepath=false", "-c", "core.autocrlf=false", "diff", "--cached", "--binary", base_commit],
+                ["-c", "core.quotepath=false", "diff", "--cached", "--binary", base_commit],
                 cwd=wt.path,
                 env=env,
             )
@@ -454,41 +519,93 @@ class MergeQueue:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @staticmethod
-    def _snapshot_parent_files(parent: Path, rel_paths: list[str]) -> dict[str, bytes | None]:
-        snap: dict[str, bytes | None] = {}
+    def _snapshot_parent_files(parent: Path, rel_paths: list[str]) -> dict[str, _ParentFileSnapshot]:
+        snap: dict[str, _ParentFileSnapshot] = {}
         for rel in rel_paths:
             full = parent / rel
-            if full.is_file():
-                snap[rel] = full.read_bytes()
+            try:
+                st = os.lstat(full)
+            except OSError:
+                snap[rel] = _ParentFileSnapshot(exists=False)
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                try:
+                    target = os.readlink(full)
+                except OSError:
+                    target = ""
+                snap[rel] = _ParentFileSnapshot(
+                    exists=True,
+                    mode=stat.S_IMODE(st.st_mode),
+                    symlink_target=target,
+                )
+            elif stat.S_ISREG(st.st_mode):
+                snap[rel] = _ParentFileSnapshot(
+                    exists=True,
+                    content=full.read_bytes(),
+                    mode=stat.S_IMODE(st.st_mode),
+                )
             else:
-                snap[rel] = None
+                snap[rel] = _ParentFileSnapshot(exists=False)
         return snap
 
-    def _snapshot_parent_index(self, parent: Path, rel_paths: list[str]) -> list[str]:
-        if not rel_paths:
-            return []
+    def _snapshot_parent_index(self, parent: Path, rel_paths: list[str]) -> _ParentIndexSnapshot:
         entries: list[str] = []
-        for batch in _chunks(rel_paths):
-            proc = self._run_git_text(["ls-files", "--stage", "-z", "--", *batch], cwd=parent)
-            if proc.returncode == 0 and proc.stdout:
-                for raw in proc.stdout.split("\0"):
-                    if raw:
-                        entries.append(raw)
-        return entries
+        if rel_paths:
+            for batch in _chunks(rel_paths):
+                proc = self._run_git_text(["ls-files", "--stage", "-z", "--", *batch], cwd=parent)
+                if proc.returncode == 0 and proc.stdout:
+                    for raw in proc.stdout.split("\0"):
+                        if raw:
+                            entries.append(raw)
+        raw_index_path: Path | None = None
+        raw_index_bytes: bytes | None = None
+        idx_proc = self._run_git_text(["rev-parse", "--git-path", "index"], cwd=parent)
+        if idx_proc.returncode == 0 and idx_proc.stdout.strip():
+            candidate = Path(idx_proc.stdout.strip())
+            if not candidate.is_absolute():
+                candidate = (parent / candidate).resolve()
+            if candidate.is_file():
+                try:
+                    raw_index_bytes = candidate.read_bytes()
+                    raw_index_path = candidate
+                except OSError:
+                    raw_index_path = None
+                    raw_index_bytes = None
+        return _ParentIndexSnapshot(
+            entries=tuple(entries),
+            raw_index_path=raw_index_path,
+            raw_index_bytes=raw_index_bytes,
+        )
 
     def _rollback_parent(
         self,
         parent: Path,
         rel_paths: list[str],
-        disk_snapshot: dict[str, bytes | None],
-        index_snapshot: list[str],
+        disk_snapshot: dict[str, _ParentFileSnapshot | bytes | None],
+        index_snapshot: _ParentIndexSnapshot | list[str],
     ) -> None:
-        # 1. Restore exact bytes on disk (or remove newly created files & empty parent dirs).
-        for rel, content in disk_snapshot.items():
+        # 1. Restore exact bytes, permissions (st_mode), and symlinks on disk.
+        for rel, entry_snap in disk_snapshot.items():
             target = parent / rel
-            if content is None:
+            if isinstance(entry_snap, _ParentFileSnapshot):
+                exists = entry_snap.exists
+                content = entry_snap.content
+                mode = entry_snap.mode
+                symlink_target = entry_snap.symlink_target
+            else:
+                exists = entry_snap is not None
+                content = entry_snap
+                mode = None
+                symlink_target = None
+
+            if not exists:
                 if target.exists() or target.is_symlink():
                     try:
+                        if target.is_file() and not target.is_symlink():
+                            try:
+                                os.chmod(target, 0o644)
+                            except OSError:
+                                pass
                         target.unlink()
                     except OSError:
                         pass
@@ -499,23 +616,62 @@ class MergeQueue:
                     except OSError:
                         break
                     cur = cur.parent
-            else:
+            elif symlink_target is not None:
+                if target.exists() or target.is_symlink():
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(symlink_target, target)
+            elif content is not None:
+                if target.is_symlink():
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+                elif target.exists():
+                    try:
+                        os.chmod(target, 0o644)
+                    except OSError:
+                        pass
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(content)
+                if mode is not None:
+                    try:
+                        os.chmod(target, mode)
+                    except OSError:
+                        pass
 
-        # 2. Restore parent Git index entries for touched paths.
+        # 2. Restore parent Git index atomically (prefer binary backup of .git/index; fallback to update-index --index-info).
+        if isinstance(index_snapshot, _ParentIndexSnapshot):
+            if index_snapshot.raw_index_path is not None and index_snapshot.raw_index_bytes is not None:
+                tmp_idx = index_snapshot.raw_index_path.parent / f".orin-index-restore-{os.getpid()}-{threading.get_ident()}.tmp"
+                try:
+                    tmp_idx.write_bytes(index_snapshot.raw_index_bytes)
+                    os.replace(tmp_idx, index_snapshot.raw_index_path)
+                    return
+                except OSError:
+                    try:
+                        tmp_idx.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            entries = list(index_snapshot.entries)
+        else:
+            entries = list(index_snapshot)
+
         for batch in _chunks(rel_paths):
             self._run_git_text(["update-index", "--force-remove", "--", *batch], cwd=parent)
-        if index_snapshot:
+        if entries:
             lines: list[str] = []
-            for entry in index_snapshot:
+            for entry in entries:
                 # Format from `ls-files --stage`: "<mode> <sha> <stage>\t<path>"
                 if "\t" not in entry:
                     continue
                 meta_part, path_part = entry.split("\t", 1)
                 bits = meta_part.split()
-                if len(bits) >= 2:
-                    lines.append(f"{bits[0]} {bits[1]}\t{path_part}")
+                if len(bits) >= 3:
+                    lines.append(f"{bits[0]} {bits[1]} {bits[2]}\t{path_part}")
             if lines:
                 self._run_git_text(
                     ["update-index", "--index-info"],
@@ -532,8 +688,6 @@ class MergeQueue:
                 [
                     "-c",
                     "core.longpaths=true",
-                    "-c",
-                    "core.autocrlf=false",
                     "apply",
                     "--3way",
                     "--whitespace=nowarn",

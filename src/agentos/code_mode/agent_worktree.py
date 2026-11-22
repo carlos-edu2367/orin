@@ -107,6 +107,28 @@ def _is_junction(path: Path) -> bool:
     return False
 
 
+def _is_escaped_or_linked_path(wt_path: Path, rel_posix: str) -> bool:
+    """Return True if ``rel_posix`` or any ancestor inside ``wt_path`` is a symlink/junction or escapes ``wt_path``."""
+    cleaned = str(rel_posix or "").replace("\\", "/").strip()
+    if not cleaned or cleaned.startswith("/") or ":" in cleaned:
+        return True
+    parts = [part for part in cleaned.split("/") if part]
+    if not parts or any(part in {".", ".."} for part in parts):
+        return True
+    root = wt_path.resolve()
+    cur = wt_path
+    for part in parts:
+        cur = cur / part
+        if _is_junction(cur) or cur.is_symlink():
+            return True
+    if cur.exists():
+        try:
+            resolve_contained(cur, root)
+        except Exception:  # noqa: BLE001
+            return True
+    return False
+
+
 def validate_link_dir(raw: str, parent_root: Path) -> tuple[str, Path] | None:
     """Validate one ``linkDirs`` entry against traversal, drives, and symlink escapes."""
     text = str(raw or "").strip()
@@ -516,11 +538,6 @@ class AgentWorktreeManager(WorktreeManager):
 
         meta = self.read_agent_meta(wt_path)
         base_commit = str(meta.get("base_commit") or "").strip()
-        if base_commit:
-            current_head = self._head_commit(wt_path)
-            if current_head and current_head != base_commit:
-                return True
-
         linked_dirs = {
             str(d).replace("\\", "/").strip("/")
             for d in (meta.get("linked_dirs") or ())
@@ -530,6 +547,42 @@ class AgentWorktreeManager(WorktreeManager):
             str(k).replace("\\", "/"): str(v)
             for k, v in (meta.get("copied_files_sha256") or {}).items()
         }
+
+        if base_commit:
+            current_head = self._head_commit(wt_path)
+            if current_head and current_head != base_commit:
+                diff_raw = self._run_git(
+                    ["-c", "core.quotepath=false", "diff", "--raw", "-z", base_commit, current_head],
+                    cwd=wt_path,
+                )
+                if diff_raw.returncode == 0 and diff_raw.stdout:
+                    parts = diff_raw.stdout.split("\0")
+                    i = 0
+                    while i < len(parts):
+                        hdr = parts[i]
+                        i += 1
+                        if not hdr.startswith(":") or i >= len(parts):
+                            continue
+                        hdr_bits = hdr[1:].split()
+                        old_mode = hdr_bits[0] if len(hdr_bits) > 0 else ""
+                        new_mode = hdr_bits[1] if len(hdr_bits) > 1 else ""
+                        status_code = hdr_bits[4] if len(hdr_bits) > 4 else ""
+                        rel_path = parts[i].replace("\\", "/")
+                        i += 1
+                        if status_code.startswith(("R", "C")) and i < len(parts):
+                            rel_path = parts[i].replace("\\", "/")
+                            i += 1
+                        if rel_path == ".orin" or rel_path.startswith(".orin/"):
+                            continue
+                        if any(rel_path == ld or rel_path.startswith(f"{ld}/") for ld in linked_dirs):
+                            continue
+                        if new_mode in {"120000", "160000"} or (new_mode == "000000" and old_mode in {"120000", "160000"}):
+                            continue
+                        if _is_escaped_or_linked_path(wt_path, rel_path):
+                            continue
+                        return True
+                else:
+                    return True
 
         completed = self._run_git(
             ["-c", "core.quotepath=false", "status", "--porcelain", "-uall", "-z"],
@@ -554,10 +607,10 @@ class AgentWorktreeManager(WorktreeManager):
                 continue
             if any(rel == ld or rel.startswith(f"{ld}/") for ld in linked_dirs):
                 continue
+            if _is_escaped_or_linked_path(wt_path, rel):
+                continue
             if xy == "??":
                 full = wt_path / rel
-                if _is_junction(full) or full.is_symlink():
-                    continue
                 expected_hash = copied_hashes.get(rel)
                 if expected_hash is not None and full.is_file():
                     try:

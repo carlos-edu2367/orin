@@ -71,27 +71,22 @@ def _dispatch_resume_turn(
     notice: str,
     task_hint: str = "",
 ) -> dict[str, Any]:
-    """Queue or start a continuation turn instructing the leader to resume ``run.agent_id``."""
+    """Dispatch deterministic background subagent resumption without injecting fake user chat messages (RT-B-05).
+
+    Uses ``app_port.dispatch_agent_resume(run, notice=notice)`` when wired; otherwise relies on
+    the durable ``agent_runs.state = 'queued'`` row consumed by ``ChatWorker.resume_queued_subagents()``
+    which directly invokes ``TurnSession.resume_interrupted_subagent(agent_id)``.
+    """
+    del task_hint
     custom_dispatcher = getattr(app_port, "dispatch_agent_resume", None)
     if callable(custom_dispatcher):
         result = custom_dispatcher(run, notice=notice)
-        return dict(result) if isinstance(result, dict) else {"dispatched": True}
-
-    enqueue = getattr(app_port, "enqueue", None)
-    if callable(enqueue):
-        task_part = f" Original task: {task_hint}" if task_hint else ""
-        prompt = (
-            f"Resume interrupted background subagent `{run.agent_id}` "
-            f"(subagent_type={run.subagent_type}). {notice}{task_part}"
-        )
-        idem = f"resume:{run.agent_id}:{int(datetime.now(UTC).timestamp())}"
-        try:
-            res = enqueue(run.user_id, run.conversation_id, prompt, idem)
-            if isinstance(res, dict):
-                return res
-        except Exception:  # noqa: BLE001 - queueing may fail if provider isn't configured in test harness
-            pass
-    return {"dispatched": False}
+        if isinstance(result, dict):
+            if result.get("dispatched") is False:
+                raise RuntimeError("Custom agent resume dispatcher rejected the request.")
+            return dict(result)
+        return {"dispatched": True, "mode": "custom"}
+    return {"dispatched": True, "mode": "worker_queue", "agent_id": run.agent_id}
 
 
 def register_agent_run_routes(
@@ -174,12 +169,33 @@ def register_agent_run_routes(
                     status_code=409,
                 )
 
+            now = datetime.now(UTC)
+            # RT-B-13: atomic conditional state transition prevents concurrent double-resume.
+            transitioned = recorder.store.transition_state(
+                agent_id,
+                from_state="interrupted",
+                to_state="queued",
+                last_activity_at=now,
+            )
+            if transitioned is None:
+                latest = recorder.get(agent_id)
+                latest_state = latest.state if latest is not None else run.state
+                return JSONResponse(
+                    jsonable(
+                        {
+                            "detail": f"Agent run '{agent_id}' is in state '{latest_state}' and cannot be resumed.",
+                            "error_code": "AGENT_NOT_RESUMABLE",
+                            "agent_id": agent_id,
+                            "state": latest_state,
+                        }
+                    ),
+                    status_code=409,
+                )
+
             restored = recorder.restore_history(agent_id, history_path=run.history_path)
             notice = restored.resume_notice()
             task_hint = str(restored.metadata.get("task") or "")
 
-            now = datetime.now(UTC)
-            recorder.store.touch(agent_id, state="queued", last_activity_at=now)
             with engine.begin() as conn:
                 conn.execute(
                     update(conversation_agents)
@@ -191,7 +207,34 @@ def register_agent_run_routes(
                     .values(state="working", updated_at=now)
                 )
 
-            dispatch_info = _dispatch_resume_turn(app_port, run, notice=notice, task_hint=task_hint)
+            try:
+                dispatch_info = _dispatch_resume_turn(app_port, transitioned, notice=notice, task_hint=task_hint)
+            except Exception as exc:  # noqa: BLE001
+                # RT-B-05: revert state back to 'interrupted' on dispatch failure so the run is never stuck in 'queued'.
+                rollback_ts = datetime.now(UTC)
+                recorder.store.touch(agent_id, state="interrupted", last_activity_at=rollback_ts)
+                with engine.begin() as conn:
+                    conn.execute(
+                        update(conversation_agents)
+                        .where(
+                            conversation_agents.c.agent_id == agent_id,
+                            conversation_agents.c.conversation_id == conversation_id,
+                            conversation_agents.c.user_id == principal.user_id,
+                        )
+                        .values(state="interrupted", updated_at=rollback_ts)
+                    )
+                return JSONResponse(
+                    jsonable(
+                        {
+                            "detail": f"Failed to dispatch resume for agent '{agent_id}': {exc}",
+                            "error_code": "AGENT_RESUME_DISPATCH_FAILED",
+                            "agent_id": agent_id,
+                            "state": "interrupted",
+                        }
+                    ),
+                    status_code=503,
+                )
+
             return JSONResponse(
                 jsonable(
                     {

@@ -6,10 +6,13 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+import random
+import time
 from typing import Any
 
 from sqlalchemy import and_, asc, insert, select, update
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 from .schema import agent_runs
 
@@ -321,6 +324,53 @@ class AgentRunStore:
                 return None
             row = conn.execute(select(t).where(t.c.agent_id == aid)).mappings().one()
         return _row_to_record(row)
+
+    def transition_state(
+        self,
+        agent_id: str,
+        *,
+        from_state: str,
+        to_state: str,
+        last_activity_at: datetime | None = None,
+        finished_at: datetime | None = None,
+    ) -> AgentRunRecord | None:
+        """Atomically transition ``agent_id`` from ``from_state`` to ``to_state`` (RT-B-13).
+
+        Uses a single conditional ``UPDATE ... WHERE agent_id = :aid AND state = :from_state``
+        so concurrent callers cannot double-dispatch a resume.
+        """
+        aid = str(agent_id).strip()
+        if not aid:
+            return None
+        clean_from = _validate_state(from_state)
+        clean_to = _validate_state(to_state)
+        updates: dict[str, Any] = {
+            "state": clean_to,
+            "last_activity_at": _as_utc(last_activity_at) or self._now(),
+        }
+        if finished_at is not None:
+            updates["finished_at"] = _as_utc(finished_at)
+
+        t = agent_runs
+        for attempt in range(8):
+            try:
+                with self._engine.begin() as conn:
+                    res = conn.execute(
+                        update(t)
+                        .where(and_(t.c.agent_id == aid, t.c.state == clean_from))
+                        .values(**updates)
+                    )
+                    if int(res.rowcount or 0) != 1:
+                        return None
+                    row = conn.execute(select(t).where(t.c.agent_id == aid)).mappings().one()
+                return _row_to_record(row)
+            except OperationalError as exc:
+                msg = str(exc).lower()
+                if ("locked" in msg or "busy" in msg) and attempt < 7:
+                    time.sleep(0.01 * (attempt + 1) + random.uniform(0.0, 0.015))
+                    continue
+                raise
+        return None
 
     def mark_interrupted_on_boot(
         self,

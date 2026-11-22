@@ -120,6 +120,27 @@ class BackgroundAgentRegistry:
         self._active_turns: dict[str, int] = {}
         self._histories: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._executors: dict[str, ThreadPoolExecutor] = {}
+        self._progress_trackers: dict[str, Any] = {}
+
+    def get_or_create_progress_tracker(self, conversation_id: str, factory: Callable[[], Any]) -> Any:
+        """Share a live ``ProgressTracker`` across turns for the same ``conversation_id`` (RT-B-06)."""
+        conv_key = str(conversation_id or "").strip()
+        if not conv_key:
+            return factory()
+        with self._lock:
+            existing = self._progress_trackers.get(conv_key)
+            if existing is not None:
+                return existing
+            created = factory()
+            self._progress_trackers[conv_key] = created
+            return created
+
+    def get_progress_tracker(self, conversation_id: str) -> Any | None:
+        conv_key = str(conversation_id or "").strip()
+        if not conv_key:
+            return None
+        with self._lock:
+            return self._progress_trackers.get(conv_key)
 
     def executor_for(self, conversation_id: str, *, max_workers: int = 32) -> ThreadPoolExecutor:
         conv_key = str(conversation_id or "_default")
@@ -429,9 +450,16 @@ class BackgroundAgentRegistry:
             self._active_waiters.clear()
             self._active_turns.clear()
             self._histories.clear()
+            self._progress_trackers.clear()
             pools = list(self._executors.values())
             self._executors.clear()
             self._cond.notify_all()
+        try:
+            from agentos.agentic.agent_progress import clear_shared_progress_for_tests
+
+            clear_shared_progress_for_tests()
+        except Exception:  # noqa: BLE001
+            pass
         for pool in pools:
             pool.shutdown(wait=False)
 
@@ -464,7 +492,7 @@ def fail_orphaned_running_agents(
             select(
                 conversation_agents.c.agent_id,
                 conversation_agents.c.conversation_id,
-            ).where(conversation_agents.c.state.in_(("running", "working", "stalled")))
+            ).where(conversation_agents.c.state.in_(("running", "working", "stalled", "queued")))
         ).mappings().all()
         for row in rows:
             agent_id = str(row["agent_id"] or "")
@@ -499,7 +527,7 @@ def fail_orphaned_running_agents(
                 select(
                     agent_runs.c.agent_id,
                     agent_runs.c.conversation_id,
-                ).where(agent_runs.c.state.in_(("running", "stalled")))
+                ).where(agent_runs.c.state.in_(("running", "stalled", "queued")))
             ).mappings().all()
             for rrow in run_rows:
                 raid = str(rrow["agent_id"] or "")

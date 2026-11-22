@@ -361,6 +361,13 @@ class AgentRunRecorder:
         meta["auto_resumed_at"] = self._clock().astimezone(UTC).isoformat()
         self.save_history(agent_id, restored.messages, metadata=meta)
 
+    def clear_auto_resumed(self, agent_id: str) -> None:
+        restored = self.restore_history(agent_id)
+        meta = dict(restored.metadata)
+        meta["auto_resumed"] = False
+        meta["auto_resumed_at"] = None
+        self.save_history(agent_id, restored.messages, metadata=meta)
+
     def start(
         self,
         *,
@@ -460,12 +467,42 @@ class AgentRunRecorder:
                     return None
             self._last_touch_mono[str(agent_id)] = now_mono
 
+        # RT-B-06: preserve monotonically aggregated subtree metrics (child + grandchildren)
+        # so direct caller touches never overwrite subtree tokens/cost recorded by ProgressTracker.
+        from agentos.agentic.agent_progress import shared_progress_snapshot
+
+        snap = shared_progress_snapshot(self._engine, agent_id)
+        existing = self.store.get(agent_id)
+        eff_tool_calls = tool_calls
+        eff_input = input_tokens
+        eff_output = output_tokens
+        eff_cost = cost_usd
+        if snap is not None:
+            eff_tool_calls = max(int(tool_calls or 0), int(snap.tool_calls)) if (tool_calls is not None or snap.tool_calls > 0) else None
+            eff_input = max(int(input_tokens or 0), int(snap.input_tokens)) if (input_tokens is not None or snap.input_tokens > 0) else None
+            eff_output = max(int(output_tokens or 0), int(snap.output_tokens)) if (output_tokens is not None or snap.output_tokens > 0) else None
+            if eff_cost is None and snap.cost_usd > 0:
+                eff_cost = snap.cost_usd
+            elif eff_cost is not None:
+                eff_cost = max(float(eff_cost), float(snap.cost_usd))
+        if existing is not None:
+            if eff_tool_calls is not None:
+                eff_tool_calls = max(int(eff_tool_calls), int(existing.tool_calls))
+            if eff_input is not None:
+                eff_input = max(int(eff_input), int(existing.input_tokens))
+            if eff_output is not None:
+                eff_output = max(int(eff_output), int(existing.output_tokens))
+            if eff_cost is None and existing.cost_usd is not None:
+                eff_cost = float(existing.cost_usd)
+            elif eff_cost is not None and existing.cost_usd is not None:
+                eff_cost = max(float(eff_cost), float(existing.cost_usd))
+
         return self.store.touch(
             agent_id,
-            tool_calls=tool_calls,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost_usd,
+            tool_calls=eff_tool_calls,
+            input_tokens=eff_input,
+            output_tokens=eff_output,
+            cost_usd=eff_cost,
             last_activity_at=self._clock(),
             state=state,
             result_ref=result_ref,
@@ -495,14 +532,51 @@ class AgentRunRecorder:
         with self._lock:
             self._last_touch_mono[str(agent_id)] = self._monotonic()
 
+        # RT-B-06 & RT-B-13: preserve aggregated subtree metrics and never overwrite 'cancelled'
+        # (e.g. from stall.autoCancel) with 'failed' when the worker thread unwinds.
+        from agentos.agentic.agent_progress import shared_progress_snapshot
+
+        snap = shared_progress_snapshot(self._engine, agent_id)
+        existing = self.store.get(agent_id)
+        eff_state = state
+        if state == "failed" and (
+            (existing is not None and existing.state == "cancelled")
+            or (snap is not None and snap.state == "cancelled")
+        ):
+            eff_state = "cancelled"
+
+        eff_tool_calls = tool_calls
+        eff_input = input_tokens
+        eff_output = output_tokens
+        eff_cost = cost_usd
+        if snap is not None:
+            eff_tool_calls = max(int(tool_calls or 0), int(snap.tool_calls)) if (tool_calls is not None or snap.tool_calls > 0) else None
+            eff_input = max(int(input_tokens or 0), int(snap.input_tokens)) if (input_tokens is not None or snap.input_tokens > 0) else None
+            eff_output = max(int(output_tokens or 0), int(snap.output_tokens)) if (output_tokens is not None or snap.output_tokens > 0) else None
+            if eff_cost is None and snap.cost_usd > 0:
+                eff_cost = snap.cost_usd
+            elif eff_cost is not None:
+                eff_cost = max(float(eff_cost), float(snap.cost_usd))
+        if existing is not None:
+            if eff_tool_calls is not None:
+                eff_tool_calls = max(int(eff_tool_calls), int(existing.tool_calls))
+            if eff_input is not None:
+                eff_input = max(int(eff_input), int(existing.input_tokens))
+            if eff_output is not None:
+                eff_output = max(int(eff_output), int(existing.output_tokens))
+            if eff_cost is None and existing.cost_usd is not None:
+                eff_cost = float(existing.cost_usd)
+            elif eff_cost is not None and existing.cost_usd is not None:
+                eff_cost = max(float(eff_cost), float(existing.cost_usd))
+
         return self.store.touch(
             agent_id,
-            tool_calls=tool_calls,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cost_usd=cost_usd,
+            tool_calls=eff_tool_calls,
+            input_tokens=eff_input,
+            output_tokens=eff_output,
+            cost_usd=eff_cost,
             last_activity_at=now,
-            state=state,
+            state=eff_state,
             result_ref=result_ref,
             finished_at=now,
         )

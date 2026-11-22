@@ -24,15 +24,15 @@ class TaskClaimTools:
     def _task_board_actor_id(self) -> str:
         explicit = str(getattr(self, "_task_board_agent_id", None) or "").strip()
         if explicit:
-            return explicit[:64]
+            return explicit[:255]
         lifecycle_ctx = getattr(self, "_lifecycle_context", None)
         if isinstance(lifecycle_ctx, dict):
             from_ctx = str(lifecycle_ctx.get("agent_id") or "").strip()
             if from_ctx:
-                return from_ctx[:64]
+                return from_ctx[:255]
         from_var = str(get_current_agent_id() or "").strip()
         if from_var:
-            return from_var[:64]
+            return from_var[:255]
         return "agent:main"
 
     def _touch_task_board_lease(self) -> None:

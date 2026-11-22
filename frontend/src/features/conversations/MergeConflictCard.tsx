@@ -37,6 +37,42 @@ function asStringList(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
 }
 
+function formatMergeDetail(raw: unknown): string | null {
+  const plain = asString(raw)
+  if (plain) return plain
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const obj = raw as Record<string, unknown>
+  const parts: string[] = []
+  const command = asString(obj.command)
+  if (command) {
+    const exitCode = typeof obj.exit_code === 'number' && Number.isFinite(obj.exit_code)
+      ? ` (exit code ${obj.exit_code})`
+      : ''
+    parts.push(`$ ${command}${exitCode}`)
+  }
+  const message = asString(obj.message)
+  if (message) parts.push(message)
+  const hunks = asRecord(obj.hunks)
+  const hunkEntries = Object.entries(hunks)
+    .map(([file, snippet]) => {
+      const text = asString(snippet)
+      return text ? `--- ${file} ---\n${text}` : null
+    })
+    .filter((entry): entry is string => entry !== null)
+  if (hunkEntries.length > 0) {
+    parts.push(hunkEntries.join('\n\n'))
+  }
+  const checkOutput = asString(obj.check_output)
+  if (checkOutput) parts.push(checkOutput)
+  const stderr = asString(obj.stderr)
+  if (stderr) parts.push(stderr)
+  if (parts.length === 0) {
+    const reason = asString(obj.reason)
+    if (reason) parts.push(reason)
+  }
+  return parts.length > 0 ? parts.join('\n\n') : null
+}
+
 function resolveMergeKind(event: ConversationActivityEvent): MergeKind {
   if (event.type === 'merge.applied') return 'applied'
   if (event.type === 'merge.check_failed') return 'check_failed'
@@ -81,7 +117,7 @@ export function MergeConflictCard({
   const files = asStringList(payload.files)
   const worktreePath = asString(payload.worktree_path)
   const branch = asString(payload.branch)
-  const detail = asString(payload.conflict_detail) ?? asString(payload.detail)
+  const detail = formatMergeDetail(payload.conflict_detail) ?? formatMergeDetail(payload.detail)
 
   const [discardState, setDiscardState] = useState<'idle' | 'working' | 'discarded' | 'failed'>('idle')
   const [statusNotice, setStatusNotice] = useState<string | null>(null)

@@ -50,7 +50,7 @@ def upgrade() -> None:
     if AGENT_RUNS_TABLE not in tables:
         op.create_table(
             AGENT_RUNS_TABLE,
-            sa.Column("agent_id", sa.String(length=64), primary_key=True),
+            sa.Column("agent_id", sa.String(length=255), primary_key=True),
             sa.Column("user_id", sa.String(length=255), nullable=False),
             sa.Column("conversation_id", sa.String(length=255), nullable=False),
             sa.Column("turn_id", sa.String(length=255), nullable=False),
@@ -85,7 +85,7 @@ def upgrade() -> None:
     if AGENT_WORKTREES_TABLE not in tables:
         op.create_table(
             AGENT_WORKTREES_TABLE,
-            sa.Column("agent_id", sa.String(length=64), primary_key=True),
+            sa.Column("agent_id", sa.String(length=255), primary_key=True),
             sa.Column("workspace_root", sa.String(length=1024), nullable=False),
             sa.Column("base_commit", sa.String(length=64), nullable=False),
             sa.Column("branch", sa.String(length=255), nullable=False),
@@ -110,7 +110,7 @@ def upgrade() -> None:
             sa.Column("title", sa.String(length=500), nullable=False),
             sa.Column("description", sa.Text(), nullable=False, server_default=""),
             sa.Column("status", sa.String(length=16), nullable=False, server_default="pending"),
-            sa.Column("owner_agent_id", sa.String(length=64), nullable=True),
+            sa.Column("owner_agent_id", sa.String(length=255), nullable=True),
             sa.Column("blocked_by", sa.JSON(), nullable=False),
             sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("result_ref", sa.String(length=512), nullable=True),

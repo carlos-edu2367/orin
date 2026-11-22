@@ -124,7 +124,7 @@ class _InMemoryTaskBoardStore:
         clean_status = normalize_board_status(status)
         iid = str(item_id or uuid4().hex[:16]).strip()[:64]
         clean_team = str(team_name).strip()[:64] if team_name is not None and str(team_name).strip() else None
-        clean_owner = str(owner_agent_id).strip()[:64] if owner_agent_id is not None and str(owner_agent_id).strip() else None
+        clean_owner = str(owner_agent_id).strip()[:255] if owner_agent_id is not None and str(owner_agent_id).strip() else None
         clean_result = str(result_ref)[:512] if result_ref is not None else None
         now = self._now()
         record = TaskBoardItemRecord(
@@ -209,6 +209,14 @@ class _InMemoryTaskBoardStore:
             if team_name is not None:
                 new_team = str(team_name).strip()[:64] if str(team_name).strip() else None
             new_result = str(result_ref)[:512] if result_ref is not None else existing.result_ref
+            new_owner = existing.owner_agent_id
+            new_lease = existing.lease_expires_at
+            if status is not None:
+                if new_status == "pending":
+                    new_owner = None
+                    new_lease = None
+                elif new_status in {"done", "cancelled"}:
+                    new_lease = None
             updated = TaskBoardItemRecord(
                 item_id=existing.item_id,
                 conversation_id=existing.conversation_id,
@@ -216,9 +224,9 @@ class _InMemoryTaskBoardStore:
                 title=new_title,
                 description=new_desc,
                 status=new_status,
-                owner_agent_id=existing.owner_agent_id,
+                owner_agent_id=new_owner,
                 blocked_by=new_blocked,
-                lease_expires_at=existing.lease_expires_at,
+                lease_expires_at=new_lease,
                 result_ref=new_result,
                 created_at=existing.created_at,
                 updated_at=self._now(),
@@ -236,7 +244,7 @@ class _InMemoryTaskBoardStore:
         now: datetime | None = None,
     ) -> TaskBoardItemRecord | None:
         iid = str(item_id or "").strip()
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         cid = str(conversation_id or "").strip()
         if not iid or not aid or not cid:
             return None
@@ -279,7 +287,7 @@ class _InMemoryTaskBoardStore:
         now: datetime | None = None,
     ) -> TaskBoardItemRecord | None:
         iid = str(item_id or "").strip()
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         cid = str(conversation_id or "").strip()
         if not iid or not aid or not cid:
             return None
@@ -318,7 +326,7 @@ class _InMemoryTaskBoardStore:
         now: datetime | None = None,
     ) -> TaskBoardItemRecord | None:
         iid = str(item_id or "").strip()
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         cid = str(conversation_id or "").strip()
         if not iid or not aid or not cid:
             return None
@@ -376,6 +384,31 @@ class _InMemoryTaskBoardStore:
         return expired
 
 
+def _is_main_actor(actor_id: str | None, conversation_id: str) -> bool:
+    if not actor_id:
+        return False
+    return actor_id in {"agent:main", f"agent:{conversation_id}:main"} or actor_id.endswith(":main")
+
+
+def _has_dependency_cycle(graph: dict[str, set[str]]) -> bool:
+    state: dict[str, int] = {}  # 0=unvisited, 1=visiting, 2=visited
+
+    def _visit(node: str) -> bool:
+        st = state.get(node, 0)
+        if st == 1:
+            return True
+        if st == 2:
+            return False
+        state[node] = 1
+        for dep in graph.get(node, ()):
+            if dep == node or _visit(dep):
+                return True
+        state[node] = 2
+        return False
+
+    return any(_visit(node) for node in list(graph.keys()))
+
+
 class TaskBoard:
     """Conversation-scoped shared task board wrapping ``TaskBoardStore`` (or thread-safe memory fallback)."""
 
@@ -429,20 +462,36 @@ class TaskBoard:
         result_ref: str | None = None,
     ) -> TaskBoardItemRecord:
         board_status = normalize_board_status(status)
+        clean_owner = str(owner_agent_id).strip()[:255] if owner_agent_id is not None and str(owner_agent_id).strip() else None
+        clean_blocked = _clean_blocked_by(blocked_by)
+        clean_iid = str(item_id).strip()[:64] if item_id is not None and str(item_id).strip() else None
+        if clean_iid and clean_iid in clean_blocked:
+            raise ValueError(f"Task '{clean_iid}' cannot depend on itself.")
+        if board_status == "in_progress":
+            if not clean_owner:
+                raise ValueError(
+                    "Cannot create a task in 'in_progress' status without an owner; create as 'pending' and use TaskClaim."
+                )
+            for dep_id in clean_blocked:
+                blocker = self._store.get(dep_id, conversation_id=self.conversation_id)
+                if blocker is None or blocker.status != "done":
+                    raise ValueError(
+                        f"Cannot create task in 'in_progress' status while dependency '{dep_id}' is unfinished."
+                    )
         lease_exp = (
             self._now() + timedelta(seconds=self._lease_seconds)
-            if board_status == "in_progress" and owner_agent_id
+            if board_status == "in_progress" and clean_owner
             else None
         )
         return self._store.create(
             conversation_id=self.conversation_id,
             title=title,
             description=description,
-            item_id=item_id,
+            item_id=clean_iid,
             team_name=team_name,
             status=board_status,
-            owner_agent_id=owner_agent_id,
-            blocked_by=blocked_by,
+            owner_agent_id=clean_owner,
+            blocked_by=clean_blocked,
             lease_expires_at=lease_exp,
             result_ref=result_ref,
         )
@@ -488,22 +537,86 @@ class TaskBoard:
         if existing is None:
             return None
 
+        clean_actor = str(acting_agent_id or "").strip()[:255] or None
+        board_status = normalize_board_status(status) if status is not None else None
+
+        # RT-B-04: enforce ownership when an item is actively claimed in_progress.
+        if (
+            existing.status == "in_progress"
+            and existing.owner_agent_id
+            and clean_actor
+            and clean_actor != existing.owner_agent_id
+            and not _is_main_actor(clean_actor, self.conversation_id)
+        ):
+            raise ValueError(
+                f"Task '{existing.item_id}' is currently claimed by '{existing.owner_agent_id}' "
+                f"and cannot be modified by '{clean_actor}'."
+            )
+
+        # RT-B-12: reject self-dependencies and dependency cycles before mutating any state.
         merged_blocked: list[str] | None = None
         if blocked_by is not None:
-            merged_blocked = list(_clean_blocked_by(blocked_by))
+            cleaned_direct = list(_clean_blocked_by(blocked_by))
+            if existing.item_id in cleaned_direct:
+                raise ValueError(f"Task '{existing.item_id}' cannot depend on itself.")
+            merged_blocked = cleaned_direct
         if add_blocked_by:
             base = list(merged_blocked if merged_blocked is not None else existing.blocked_by)
             for dep in add_blocked_by:
                 dep_id = str(dep or "").strip()[:64]
-                if dep_id and dep_id != existing.item_id and dep_id not in base:
+                if not dep_id:
+                    continue
+                if dep_id == existing.item_id:
+                    raise ValueError(f"Task '{existing.item_id}' cannot depend on itself.")
+                if dep_id not in base:
                     base.append(dep_id)
             merged_blocked = base
 
-        board_status = normalize_board_status(status) if status is not None else None
-        clean_actor = str(acting_agent_id or "").strip()[:64] or None
+        cleaned_add_blocks: list[str] = []
+        if add_blocks:
+            for raw_target in add_blocks:
+                target_id = str(raw_target or "").strip()[:64]
+                if not target_id:
+                    continue
+                if target_id == existing.item_id:
+                    raise ValueError(f"Task '{existing.item_id}' cannot block itself.")
+                if target_id not in cleaned_add_blocks:
+                    cleaned_add_blocks.append(target_id)
+
+        if merged_blocked is not None or cleaned_add_blocks:
+            all_items = self._store.list_for_conversation(self.conversation_id)
+            graph: dict[str, set[str]] = {item.item_id: set(item.blocked_by) for item in all_items}
+            if merged_blocked is not None:
+                graph[existing.item_id] = set(merged_blocked)
+            for target_id in cleaned_add_blocks:
+                if target_id in graph:
+                    graph[target_id].add(existing.item_id)
+            if _has_dependency_cycle(graph):
+                raise ValueError("Dependency cycle detected in task board.")
 
         updated: TaskBoardItemRecord | None
-        if (
+        if board_status == "in_progress" and existing.status != "in_progress":
+            # RT-B-04: never bypass TaskClaim / blocked_by / lease_expires_at when transitioning to in_progress.
+            if not clean_actor:
+                raise ValueError(
+                    "Cannot set status to 'in_progress' without an acting agent; use TaskClaim instead."
+                )
+            if any(val is not None for val in (title, description, merged_blocked, team_name, result_ref)):
+                self._store.update(
+                    existing.item_id,
+                    conversation_id=self.conversation_id,
+                    title=title,
+                    description=description,
+                    blocked_by=merged_blocked,
+                    team_name=team_name,
+                    result_ref=result_ref,
+                )
+            claimed = self.claim(existing.item_id, clean_actor)
+            if claimed is None:
+                _code, msg = self.explain_claim_failure(existing.item_id, clean_actor)
+                raise ValueError(msg)
+            updated = claimed
+        elif (
             board_status == "done"
             and clean_actor
             and existing.status == "in_progress"
@@ -544,11 +657,8 @@ class TaskBoard:
                 result_ref=result_ref,
             )
 
-        if updated is not None and add_blocks:
-            for raw_target in add_blocks:
-                target_id = str(raw_target or "").strip()[:64]
-                if not target_id or target_id == updated.item_id:
-                    continue
+        if updated is not None and cleaned_add_blocks:
+            for target_id in cleaned_add_blocks:
                 target = self._store.get(target_id, conversation_id=self.conversation_id)
                 if target is not None and updated.item_id not in target.blocked_by:
                     self._store.update(
@@ -574,7 +684,7 @@ class TaskBoard:
             now=self._now(),
         )
         if claimed is not None:
-            aid = str(agent_id or "").strip()[:64]
+            aid = str(agent_id or "").strip()[:255]
             with self._renew_lock:
                 self._last_renewed_at.pop(aid, None)
         return claimed
@@ -625,7 +735,7 @@ class TaskBoard:
         force: bool = False,
     ) -> int:
         """Extend leases on all active ``in_progress`` items owned by ``agent_id`` (lightly throttled)."""
-        aid = str(agent_id or "").strip()[:64]
+        aid = str(agent_id or "").strip()[:255]
         if not aid:
             return 0
         now = self._now()

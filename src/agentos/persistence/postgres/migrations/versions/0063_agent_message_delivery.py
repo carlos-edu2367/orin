@@ -29,7 +29,7 @@ def upgrade() -> None:
         if "sender_agent_id" not in control_columns:
             op.add_column(
                 CONTROLS_TABLE,
-                sa.Column("sender_agent_id", sa.String(length=64), nullable=True),
+                sa.Column("sender_agent_id", sa.String(length=255), nullable=True),
             )
         if "delivered_at" not in control_columns:
             op.add_column(

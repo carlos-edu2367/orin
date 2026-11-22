@@ -208,7 +208,7 @@ export function draftOf(form: AgentForm): CustomAgentDraft {
     permissionMode: form.permissionMode || null,
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null,
     memory: form.memory || 'project',
-    isolation: form.isolation || 'none',
+    isolation: form.isolation === 'worktree' ? 'worktree' : null,
     enabled: form.enabled,
   }
 }

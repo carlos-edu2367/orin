@@ -7,7 +7,13 @@ import { useKeybindingHandlers } from '../keybindings/engine'
 import { AgentMessageBox } from './AgentMessageBox'
 import { AgentProgressRow } from './AgentProgressRow'
 import type { AgentMessagesState } from './agentMessages'
-import { hydrateAgentRuns, mergeAgentProgress, orderAgentTree, type AgentProgressMap } from './agentTree'
+import {
+  hydrateAgentRuns,
+  mergeAgentProgress,
+  orderAgentTree,
+  reconcileAgentProgress,
+  type AgentProgressMap,
+} from './agentTree'
 
 /** `depth` is 0 for an agent the main agent started, 1 for one that agent started, and so on. */
 export type BackgroundAgent = { agentId: string; name: string; role: string; state: string; parentAgentId: string | null; depth: number }
@@ -141,7 +147,8 @@ export function TasksPanel({
     const merged: AgentProgressMap = { ...runProgress }
     if (liveAgentProgress) {
       for (const [id, data] of Object.entries(liveAgentProgress)) {
-        merged[id] = mergeAgentProgress(merged[id], data)
+        const reconciled = reconcileAgentProgress(merged[id], data)
+        if (reconciled) merged[id] = reconciled
       }
     }
     return merged
