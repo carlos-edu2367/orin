@@ -185,6 +185,8 @@ class MergeQueue:
         merge_check_command: str | None = None,
         command_authorizer: CommandAuthorizer | None = None,
         cancelled: Callable[[], bool] | None = None,
+        before_apply: Callable[[Path, list[str]], None] | None = None,
+        on_rollback: Callable[[Path, list[str]], None] | None = None,
     ) -> MergeResult:
         """Integrate ``agent_id``'s worktree changes into the parent workspace, one at a time."""
         aid = str(agent_id or "").strip()
@@ -216,11 +218,18 @@ class MergeQueue:
             parent = wt.parent_root
             disk_snapshot = self._snapshot_parent_files(parent, changed_files)
             index_snapshot = self._snapshot_parent_index(parent, changed_files)
+            if before_apply is not None:
+                before_apply(parent, list(changed_files))
 
-            apply_proc = self._apply_patch_3way(parent, patch_bytes)
+            def _rollback_with_callback() -> None:
+                self._rollback_parent(parent, changed_files, disk_snapshot, index_snapshot)
+                if on_rollback is not None:
+                    on_rollback(parent, list(changed_files))
+
+            apply_proc = self._apply_patch_3way(parent, patch_bytes, changed_files=changed_files)
             if apply_proc.returncode != 0:
                 conflict_files, snippets = self._extract_conflict_info(parent, changed_files, apply_proc.stderr)
-                self._rollback_parent(parent, changed_files, disk_snapshot, index_snapshot)
+                _rollback_with_callback()
                 detail: dict[str, Any] = {
                     "files": conflict_files or list(changed_files),
                     "hunks": snippets,
@@ -238,7 +247,7 @@ class MergeQueue:
                 )
 
             if is_cancelled():
-                self._rollback_parent(parent, changed_files, disk_snapshot, index_snapshot)
+                _rollback_with_callback()
                 detail = {
                     "files": list(changed_files),
                     "reason": "cancelled",
@@ -261,7 +270,7 @@ class MergeQueue:
                 else:
                     allowed, reason = (False, "no permission authorizer configured")
                 if not allowed:
-                    self._rollback_parent(parent, changed_files, disk_snapshot, index_snapshot)
+                    _rollback_with_callback()
                     detail = {
                         "files": list(changed_files),
                         "reason": "permission_denied",
@@ -284,7 +293,7 @@ class MergeQueue:
                     parent, effective_cmd, cancelled=is_cancelled
                 )
                 if was_cancelled or check_rc != 0:
-                    self._rollback_parent(parent, changed_files, disk_snapshot, index_snapshot)
+                    _rollback_with_callback()
                     detail = {
                         "files": list(changed_files),
                         "reason": "cancelled" if was_cancelled else "check_failed",
@@ -333,6 +342,11 @@ class MergeQueue:
         copied_hashes: dict[str, str] = {
             str(k).replace("\\", "/"): str(v)
             for k, v in (meta.get("copied_files_sha256") or {}).items()
+        }
+        copied_blobs: dict[str, str] = {
+            str(k).replace("\\", "/"): str(v).strip()
+            for k, v in (meta.get("copied_files_blobs") or {}).items()
+            if str(v or "").strip()
         }
 
         to_add: set[str] = set()
@@ -451,6 +465,24 @@ class MergeQueue:
             if read_tree.returncode != 0:
                 return b"", []
 
+            base_tree = base_commit
+            if copied_blobs:
+                added_any = False
+                for rel, blob_oid in sorted(copied_blobs.items()):
+                    if _is_ignored_rel(rel):
+                        continue
+                    upd = self._run_git_text(
+                        ["update-index", "--add", "--cacheinfo", f"100644,{blob_oid},{rel}"],
+                        cwd=wt.path,
+                        env=env,
+                    )
+                    if upd.returncode == 0:
+                        added_any = True
+                if added_any:
+                    wt_tree = self._run_git_text(["write-tree"], cwd=wt.path, env=env)
+                    if wt_tree.returncode == 0 and wt_tree.stdout.strip():
+                        base_tree = wt_tree.stdout.strip()
+
             if to_add:
                 for batch in _chunks(sorted(to_add)):
                     self._run_git_text(
@@ -469,7 +501,7 @@ class MergeQueue:
             # Security guard (RT-B-01): strip any newly added/modified symlink (120000) or gitlink (160000)
             # from the temporary index so they can never be emitted or applied to the parent workspace.
             raw_diff = self._run_git_text(
-                ["-c", "core.quotepath=false", "diff", "--cached", "--raw", "-z", base_commit],
+                ["-c", "core.quotepath=false", "diff", "--cached", "--raw", "-z", base_tree],
                 cwd=wt.path,
                 env=env,
             )
@@ -495,17 +527,17 @@ class MergeQueue:
                         forbidden_paths.append(d_rel)
             if forbidden_paths:
                 for batch in _chunks(sorted(set(forbidden_paths))):
-                    # Restore forbidden path back to base_commit state (or remove if absent in base_commit).
+                    # Restore forbidden path back to base_tree state (or remove if absent in base_tree).
                     self._run_git_text(["rm", "--cached", "--ignore-unmatch", "-f", "--", *batch], cwd=wt.path, env=env)
-                    self._run_git_text(["reset", "-q", base_commit, "--", *batch], cwd=wt.path, env=env)
+                    self._run_git_text(["reset", "-q", base_tree, "--", *batch], cwd=wt.path, env=env)
 
             diff_proc = self._run_git_bytes(
-                ["-c", "core.quotepath=false", "diff", "--cached", "--binary", base_commit],
+                ["-c", "core.quotepath=false", "diff", "--cached", "--binary", base_tree],
                 cwd=wt.path,
                 env=env,
             )
             names_proc = self._run_git_text(
-                ["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z", base_commit],
+                ["-c", "core.quotepath=false", "diff", "--cached", "--name-only", "-z", base_tree],
                 cwd=wt.path,
                 env=env,
             )
@@ -679,11 +711,45 @@ class MergeQueue:
                     input_text="\n".join(lines) + "\n",
                 )
 
-    def _apply_patch_3way(self, parent: Path, patch_bytes: bytes) -> subprocess.CompletedProcess[str]:
+    def _apply_patch_3way(
+        self,
+        parent: Path,
+        patch_bytes: bytes,
+        changed_files: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         tmp_dir = Path(tempfile.mkdtemp(prefix="orin-apply-"))
         patch_file = tmp_dir / "worktree.patch"
+        tmp_index = tmp_dir / "index"
+        env = {**os.environ, "GIT_INDEX_FILE": str(tmp_index)}
         try:
             patch_file.write_bytes(patch_bytes)
+            # Initialize temporary index from parent HEAD plus parent's current on-disk state
+            # for changed_files so git apply --3way merges cleanly against unstaged/untracked
+            # parent files without ever mutating the parent's real .git/index.
+            self._run_git_text(["read-tree", "HEAD"], cwd=parent, env=env)
+            if changed_files:
+                existing: list[str] = []
+                missing: list[str] = []
+                for rel in changed_files:
+                    full = parent / rel
+                    if full.is_file() and not full.is_symlink() and not _is_junction(full):
+                        existing.append(rel)
+                    elif not full.exists() and not full.is_symlink():
+                        missing.append(rel)
+                if existing:
+                    for batch in _chunks(existing):
+                        self._run_git_text(
+                            ["-c", "core.longpaths=true", "add", "-f", "--", *batch],
+                            cwd=parent,
+                            env=env,
+                        )
+                if missing:
+                    for batch in _chunks(missing):
+                        self._run_git_text(
+                            ["rm", "--cached", "--ignore-unmatch", "-f", "--", *batch],
+                            cwd=parent,
+                            env=env,
+                        )
             return self._run_git_text(
                 [
                     "-c",
@@ -694,6 +760,7 @@ class MergeQueue:
                     str(patch_file),
                 ],
                 cwd=parent,
+                env=env,
             )
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

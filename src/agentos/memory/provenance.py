@@ -19,6 +19,12 @@ from .models_write import MemoryWriteContext, SourceKind
 
 _MAX_SOURCE_REF_CHARS = 512
 
+_FRIEND_MESSAGE_PREFIX = "Mensagem enviada pelo Orin Friend em nome do usuário:"
+_TRAILING_SYSTEM_REMINDER_RE = re.compile(
+    r"(?:\s*<system-reminder>[\s\S]*?</system-reminder>\s*)+$",
+    re.IGNORECASE,
+)
+
 _WEB_TOOL_NAMES: frozenset[str] = frozenset({
     "fetch_url",
     "web_fetch",
@@ -430,6 +436,46 @@ def build_write_context_from_turn(
     )
 
 
+def _strip_trailing_system_reminders(text: str) -> str:
+    """Remove trailing hook-appended ``<system-reminder>`` blocks for provenance matching."""
+    return _TRAILING_SYSTEM_REMINDER_RE.sub("", text).strip()
+
+
+def _starts_with_friend_prefix(text: str) -> bool:
+    return text.lstrip().casefold().startswith(_FRIEND_MESSAGE_PREFIX.casefold())
+
+
+def _is_friend_origin_turn(store: Any, turn: Mapping[str, Any], user_msg: str) -> bool:
+    """Return True when the current turn was started or promoted by Orin Friend."""
+    if str(turn.get("origin") or "").strip().lower() == "friend":
+        return True
+    idem = str(turn.get("idempotency_key") or "").strip()
+    if idem.lower().startswith("friend:"):
+        return True
+    if idem.lower().startswith(("queue:", "defer:")):
+        qid = idem.split(":", 1)[1].strip()
+        if qid:
+            lookup = getattr(store, "queued_inputs_by_ids", None)
+            if callable(lookup):
+                try:
+                    found = lookup([qid])
+                except Exception:  # noqa: BLE001
+                    found = None
+                rec: Any = None
+                if isinstance(found, Mapping):
+                    rec = found.get(qid)
+                elif isinstance(found, Sequence) and not isinstance(found, (str, bytes)):
+                    for item in found:
+                        if isinstance(item, Mapping) and str(item.get("queue_id") or item.get("id") or "") == qid:
+                            rec = item
+                            break
+                if isinstance(rec, Mapping) and str(rec.get("origin") or "").strip().lower() == "friend":
+                    return True
+    if user_msg and _starts_with_friend_prefix(_strip_trailing_system_reminders(user_msg)):
+        return True
+    return False
+
+
 def _is_human_user_history_entry(entry: Any, non_user_queued_texts: frozenset[str]) -> bool:
     """Return True only for plain human user messages, rejecting tool_result lists and non-human injections."""
     if not isinstance(entry, Mapping):
@@ -452,7 +498,12 @@ def _is_human_user_history_entry(entry: Any, non_user_queued_texts: frozenset[st
         return False
     if stripped.startswith("<system-reminder>") and stripped.endswith("</system-reminder>"):
         return False
-    if stripped in non_user_queued_texts:
+    base_stripped = _strip_trailing_system_reminders(stripped)
+    if not base_stripped:
+        return False
+    if _starts_with_friend_prefix(stripped) or _starts_with_friend_prefix(base_stripped):
+        return False
+    if stripped in non_user_queued_texts or base_stripped in non_user_queued_texts:
         return False
     return True
 
@@ -569,6 +620,8 @@ def session_memory_turn_state(session: Any) -> dict[str, Any]:
             user_msg = raw_turn_msg
     if not user_msg:
         user_msg = history_user_msg
+    if _is_friend_origin_turn(store, turn, user_msg):
+        user_msg = ""
 
     # Only messages AFTER the last real user message belong to the current (resumed) turn.
     current_turn_history = history[last_user_idx + 1:] if last_user_idx >= 0 else []

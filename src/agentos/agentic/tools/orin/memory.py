@@ -50,11 +50,10 @@ class MemoryTools:
             state["conversation_id"] = getattr(self, "conversation_id", None) or getattr(self, "_conversation_id", None)
         if not state.get("turn_id"):
             state["turn_id"] = getattr(self, "turn_id", None) or getattr(self, "_turn_id", None)
-        if not state.get("workspace_root"):
-            ws = getattr(self, "workspace", None)
-            root = getattr(ws, "root", None) if ws is not None else None
-            if root is not None:
-                state["workspace_root"] = str(root)
+        ws = getattr(self, "workspace", None)
+        root = getattr(ws, "root", None) if ws is not None else None
+        if root is not None:
+            state["workspace_root"] = str(root)
         if not state.get("read_files"):
             read_state = getattr(self, "_read_file_state", None)
             if isinstance(read_state, Mapping) and read_state:

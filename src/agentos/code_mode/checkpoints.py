@@ -156,6 +156,26 @@ class FileCheckpointStore:
         self._save_manifest(turn_id, manifest)
         return dict(entry)
 
+    def forget_snapshot(self, turn_id: str | None, path: str) -> None:
+        """Drop a snapshot entry recorded for ``path`` in ``turn_id`` (e.g. rolled-back merge)."""
+        if not turn_id or not str(turn_id).strip():
+            return
+        rel_path = _normalize_rel_path(path, self.workspace_root)
+        if not rel_path:
+            return
+        manifest = self._load_manifest(turn_id)
+        if manifest is None:
+            return
+        files_map = manifest.get("files")
+        if not isinstance(files_map, dict) or rel_path not in files_map:
+            return
+        files_map.pop(rel_path, None)
+        if not files_map:
+            shutil.rmtree(self.turn_dir(turn_id), ignore_errors=True)
+            return
+        manifest["updated_at"] = datetime.now(UTC).isoformat()
+        self._save_manifest(turn_id, manifest)
+
     def get_checkpoint(self, turn_id: str) -> dict[str, Any] | None:
         manifest = self._load_manifest(turn_id)
         if manifest is None:

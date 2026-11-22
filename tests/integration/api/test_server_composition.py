@@ -15,6 +15,8 @@ ORIGIN = "https://orin.test"
 
 @pytest.fixture()
 def server_app(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCALHOST_TRUST_ENABLED", raising=False)
+    monkeypatch.delenv("WEB_DIST_DIR", raising=False)
     monkeypatch.setenv("ORIN_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("AGENTOS_PROVIDER_ENCRYPTION_KEY", KEY)
     reset_cached_paths()

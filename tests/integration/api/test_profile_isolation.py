@@ -33,6 +33,11 @@ OWNED = {
     ("GET", "/v1/projects/{project_id}/memories"), ("DELETE", "/v1/projects/{project_id}/memories/{memory_id}"),
     ("DELETE", "/v1/schedules/{schedule_id}"),
     ("DELETE", "/v1/memories/{memory_id}"), ("PATCH", "/v1/memories/{memory_id}"),
+    ("GET", "/v1/memory/{memory_id}/history"),
+    ("POST", "/v1/memory/{memory_id}/approve"),
+    ("POST", "/v1/memory/{memory_id}/reject"),
+    ("POST", "/v1/memory/{memory_id}/resolve-conflict"),
+    ("POST", "/v1/memory/{memory_id}/restore"),
     ("DELETE", "/v1/friend/memories/{memory_id}"),
     ("GET", "/v1/conversations/{conversation_id}"), ("DELETE", "/v1/conversations/{conversation_id}"),
     ("GET", "/v1/conversations/{conversation_id}/messages"),
@@ -50,7 +55,11 @@ OWNED = {
     ("POST", "/v1/conversations/{conversation_id}/messages"),
     ("POST", "/v1/conversations/{conversation_id}/cancel"),
     ("POST", "/v1/conversations/{conversation_id}/agents/{agent_id}/stop"),
+    ("GET", "/v1/conversations/{conversation_id}/agents/{agent_id}/messages"),
     ("POST", "/v1/conversations/{conversation_id}/agents/{agent_id}/messages"),
+    ("POST", "/v1/conversations/{conversation_id}/agents/{agent_id}/resume"),
+    ("GET", "/v1/conversations/{conversation_id}/agent-runs"),
+    ("POST", "/v1/conversations/{conversation_id}/worktrees/{agent_id}/discard"),
     ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/resume"),
     ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/rewind"),
     ("POST", "/v1/conversations/{conversation_id}/messages/{message_id}/rewind"),
@@ -59,6 +68,7 @@ OWNED = {
     ("DELETE", "/v1/conversations/{conversation_id}/directories/{directory_id}"),
     ("POST", "/v1/conversations/{conversation_id}/queue"), ("GET", "/v1/conversations/{conversation_id}/queue"),
     ("DELETE", "/v1/conversations/{conversation_id}/queue/{queue_id}"),
+    ("POST", "/v1/conversations/{conversation_id}/queue/{queue_id}/defer"),
     ("GET", "/v1/conversations/{conversation_id}/context"), ("POST", "/v1/conversations/{conversation_id}/compact"),
     ("GET", "/v1/conversations/{conversation_id}/workspace-trust"), ("POST", "/v1/conversations/{conversation_id}/workspace-trust"),
     ("POST", "/v1/conversations/{conversation_id}/turns/{turn_id}/tool-permission"),
@@ -96,7 +106,8 @@ OWNED = {
 }
 LISTING = {
     ("GET", "/v1/conversations"), ("GET", "/v1/schedules"), ("GET", "/v1/projects"), ("GET", "/v1/projects/sidebar"),
-    ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/skills"), ("GET", "/v1/skill-proposals"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
+    ("GET", "/v1/memories"), ("GET", "/v1/friend/memories"), ("GET", "/v1/memory/review"),
+    ("GET", "/v1/orchestration/verifier/metrics"), ("GET", "/v1/quota"), ("GET", "/v1/context/windows"), ("GET", "/v1/skills"), ("GET", "/v1/skill-proposals"), ("GET", "/v1/plugins"), ("GET", "/v1/plugins/commands"),
     ("GET", "/v1/plugins/marketplaces"), ("GET", "/v1/mcp/servers"), ("GET", "/v1/executions"),
     ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"), ("GET", "/v1/custom-agents"),
     ("GET", "/v1/scene/characters"),
@@ -125,6 +136,9 @@ SCOPED = {
     # Skill preferences keyed by (caller, agent_id): an agent id names a role,
     # not a record someone owns, so every profile reads and writes its own row.
     ("GET", "/v1/agents/{agent_id}/skills"), ("PUT", "/v1/agents/{agent_id}/skills"),
+    ("DELETE", "/v1/context/windows/{provider}/{model_id:path}"),
+    ("GET", "/v1/quota/stream"),
+    ("POST", "/v1/memory/lint"),
 }
 CREATE = {
     ("POST", "/v1/executions"), ("POST", "/v1/uploads"), ("POST", "/v1/workspaces/inspect"), ("POST", "/v1/conversations"),
@@ -151,6 +165,7 @@ INSTANCE = {
     ("GET", "/v1/mcp/oauth/callback"),
     # W7: host settings files (local profile only; a shared server answers 404 to every one of them).
     ("GET", "/v1/settings/effective"), ("PUT", "/v1/settings/permissions"),
+    ("GET", "/v1/settings/orchestration"), ("PUT", "/v1/settings/orchestration"),
     ("GET", "/v1/settings/hooks"), ("PUT", "/v1/settings/hooks"),
     ("GET", "/v1/settings/agents"), ("PUT", "/v1/settings/agents/{name}"), ("DELETE", "/v1/settings/agents/{name}"),
     ("GET", "/v1/settings/output-styles"), ("PUT", "/v1/settings/output-styles"),

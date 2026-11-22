@@ -256,7 +256,10 @@ class FileHistory:
             with _LOCK:
                 manifest = self._load(message_id)
                 if manifest is not None and manifest["files"].pop(os.path.normcase(str(Path(target))), None) is not None:
-                    self._save(message_id, manifest)
+                    if not manifest["files"]:
+                        self._manifest_path(message_id).unlink(missing_ok=True)
+                    else:
+                        self._save(message_id, manifest)
         except Exception:  # noqa: BLE001 - history is best-effort
             logger.warning("file history could not drop the entry for %s", target, exc_info=True)
 

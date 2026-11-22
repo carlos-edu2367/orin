@@ -180,6 +180,7 @@ def finalize_subagent_worktree(
     agent_id: str,
     parent_agent_id: str | None,
     cancelled: Callable[[], bool] | None = None,
+    parent_tools: Any | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Clean up or integrate ``active`` worktree when a subagent completes, emitting events."""
     if active is None:
@@ -197,6 +198,72 @@ def finalize_subagent_worktree(
         )
         return {"merge_state": "empty", "merge_detail": {"reason": "no_changes"}, "worktree_path": None}, ""
 
+    effective_parent_tools = (
+        parent_tools
+        if parent_tools is not None
+        else (getattr(session, "toolset", None) or getattr(session, "_main_toolset_ref", None))
+    )
+    checkpoint_store = (
+        getattr(effective_parent_tools, "_checkpoint_store", None)
+        if effective_parent_tools is not None
+        else None
+    )
+    file_history = getattr(session, "file_history", None)
+    turn = getattr(session, "turn", None) or {}
+    turn_id = str(turn.get("turn_id") or "").strip() or None
+    user_message_id = str(turn.get("user_message_id") or "").strip() or None
+
+    newly_snapshotted_cp: list[str] = []
+    newly_snapshotted_fh: list[Path] = []
+
+    def _before_apply(parent_root: Path, changed_files: list[str]) -> None:
+        existing_cp_paths: set[str] = set()
+        if checkpoint_store is not None and turn_id:
+            try:
+                existing_cp = checkpoint_store.get_checkpoint(turn_id)
+                if isinstance(existing_cp, dict):
+                    by_path = existing_cp.get("files_by_path")
+                    if isinstance(by_path, dict):
+                        existing_cp_paths.update(str(k) for k in by_path.keys())
+            except Exception:  # noqa: BLE001
+                pass
+        for rel in changed_files:
+            if checkpoint_store is not None and turn_id:
+                try:
+                    had_cp = rel in existing_cp_paths
+                    snap = checkpoint_store.snapshot_before_write(turn_id, rel)
+                    if snap is not None and not had_cp:
+                        newly_snapshotted_cp.append(rel)
+                except Exception:  # noqa: BLE001
+                    pass
+            if file_history is not None and user_message_id:
+                try:
+                    target = (parent_root / rel).resolve()
+                    had_fh = bool(file_history.has_snapshot(user_message_id, target))
+                    snap_fh = file_history.snapshot_before_write(
+                        user_message_id,
+                        target,
+                        turn_id=turn_id or "",
+                    )
+                    if snap_fh is not None and not had_fh:
+                        newly_snapshotted_fh.append(target)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def _on_rollback(_parent_root: Path, _changed_files: list[str]) -> None:
+        if checkpoint_store is not None and turn_id and hasattr(checkpoint_store, "forget_snapshot"):
+            for rel in newly_snapshotted_cp:
+                try:
+                    checkpoint_store.forget_snapshot(turn_id, rel)
+                except Exception:  # noqa: BLE001
+                    pass
+        if file_history is not None and user_message_id and hasattr(file_history, "forget_snapshot"):
+            for target in newly_snapshotted_fh:
+                try:
+                    file_history.forget_snapshot(user_message_id, target)
+                except Exception:  # noqa: BLE001
+                    pass
+
     queue = MergeQueue(
         active.worktree.parent_root,
         manager=active.manager,
@@ -204,7 +271,12 @@ def finalize_subagent_worktree(
         merge_check_command=active.merge_check_command,
         command_authorizer=lambda cmd: _authorize_merge_check_command(session, cmd),
     )
-    result: MergeResult = queue.enqueue(agent_id, cancelled=cancelled)
+    result: MergeResult = queue.enqueue(
+        agent_id,
+        cancelled=cancelled,
+        before_apply=_before_apply,
+        on_rollback=_on_rollback,
+    )
     wt_payload = result.to_payload()
 
     if result.state == "applied":

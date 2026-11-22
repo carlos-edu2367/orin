@@ -272,12 +272,18 @@ def upgrade() -> None:
 
 
 def _deduplicate_for_downgrade(bind) -> None:
-    """Deduplicate (user_id, scope_type, project_id, fact) keeping the newest row before recreating legacy UNIQUE."""
+    """Deduplicate (user_id, scope_type, project_id, fact) keeping active then newest row before legacy UNIQUE."""
+    has_status = "status" in _column_names(bind, MEMORIES_TABLE)
+    order_sql = (
+        "ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END ASC, "
+        "updated_at DESC, created_at DESC, memory_id DESC"
+        if has_status
+        else "ORDER BY updated_at DESC, created_at DESC, memory_id DESC"
+    )
     rows = bind.execute(
         sa.text(
             "SELECT memory_id, user_id, scope_type, project_id, fact, updated_at, created_at "
-            "FROM agent_memories "
-            "ORDER BY updated_at DESC, created_at DESC, memory_id DESC"
+            f"FROM agent_memories {order_sql}"
         )
     ).mappings().all()
     seen: set[tuple[str, str, str | None, str]] = set()
@@ -336,6 +342,15 @@ def downgrade() -> None:
             if col in mem_cols
         ]
         need_uq = "uq_agent_memories_scope_fact" not in uqs
+
+        if "status" in mem_cols:
+            bind.execute(
+                sa.text(
+                    "DELETE FROM agent_memories "
+                    "WHERE status IN ('deleted', 'quarantined', 'invalid', 'proposed') "
+                    "   OR scope_type = 'agent'"
+                )
+            )
 
         if need_uq:
             _deduplicate_for_downgrade(bind)

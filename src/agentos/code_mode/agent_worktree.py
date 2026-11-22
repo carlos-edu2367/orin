@@ -300,7 +300,13 @@ class AgentWorktreeManager(WorktreeManager):
             "O repositório Git ainda não possui um commit inicial (HEAD).",
         )
 
-    def _copy_parent_untracked(self, parent: Path, worktree_path: Path, hashes: dict[str, str]) -> list[str]:
+    def _copy_parent_untracked(
+        self,
+        parent: Path,
+        worktree_path: Path,
+        hashes: dict[str, str],
+        blobs: dict[str, str] | None = None,
+    ) -> list[str]:
         listed = self._run_git(["ls-files", "--others", "--exclude-standard", "-z"], cwd=parent)
         if listed.returncode != 0 or not listed.stdout:
             return []
@@ -322,6 +328,10 @@ class AgentWorktreeManager(WorktreeManager):
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(resolved, dest)
                 hashes[rel] = _sha256_file(dest)
+                if blobs is not None:
+                    hashed = self._run_git(["hash-object", "-w", "--", str(dest)], cwd=parent)
+                    if hashed.returncode == 0 and hashed.stdout.strip():
+                        blobs[rel] = hashed.stdout.strip()
                 copied.append(rel)
             except OSError:
                 continue
@@ -364,6 +374,7 @@ class AgentWorktreeManager(WorktreeManager):
         self,
         wt: AgentWorktree,
         copied_hashes: dict[str, str],
+        copied_blobs: dict[str, str] | None = None,
     ) -> None:
         meta_file = wt.path / WORKTREE_META_REL
         meta_file.parent.mkdir(parents=True, exist_ok=True)
@@ -376,6 +387,7 @@ class AgentWorktreeManager(WorktreeManager):
             "worktree_path": str(wt.path),
             "linked_dirs": list(wt.linked_dirs),
             "copied_files_sha256": copied_hashes,
+            "copied_files_blobs": dict(copied_blobs or {}),
         }
         meta_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -442,15 +454,21 @@ class AgentWorktreeManager(WorktreeManager):
         self._run_git(["config", "core.longpaths", "true"], cwd=worktree_path)
 
         copied_hashes: dict[str, str] = {}
-        copied_untracked = self._copy_parent_untracked(parent, worktree_path, copied_hashes)
+        copied_blobs: dict[str, str] = {}
+        copied_untracked = self._copy_parent_untracked(parent, worktree_path, copied_hashes, copied_blobs)
         copied_included = self.copy_worktreeinclude_files(parent, worktree_path)
         for rel in copied_included:
             dest = worktree_path / rel
-            if dest.is_file() and rel not in copied_hashes:
-                try:
-                    copied_hashes[rel] = _sha256_file(dest)
-                except OSError:
-                    pass
+            if dest.is_file():
+                if rel not in copied_hashes:
+                    try:
+                        copied_hashes[rel] = _sha256_file(dest)
+                    except OSError:
+                        pass
+                if rel not in copied_blobs:
+                    hashed = self._run_git(["hash-object", "-w", "--", str(dest)], cwd=parent)
+                    if hashed.returncode == 0 and hashed.stdout.strip():
+                        copied_blobs[rel] = hashed.stdout.strip()
 
         effective_link_dirs = tuple(DEFAULT_WORKTREE_LINK_DIRS) if link_dirs is None else tuple(link_dirs)
         linked = self._link_dependency_dirs(parent, worktree_path, effective_link_dirs)
@@ -466,7 +484,7 @@ class AgentWorktreeManager(WorktreeManager):
             copied_untracked=tuple(copied_untracked),
             copied_included=tuple(copied_included),
         )
-        self._write_agent_meta(wt, copied_hashes)
+        self._write_agent_meta(wt, copied_hashes, copied_blobs)
         self._active[str(agent_id)] = wt
 
         active_store = store or self._store

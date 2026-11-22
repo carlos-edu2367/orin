@@ -4325,6 +4325,7 @@ class TurnSession:
         active_wt = None
         wt_finalized = False
         wt_merge_state: str | None = None
+        wt_applied_files: tuple[str, ...] = ()
         try:
             # A read-only caller only starts read-only subagents.
             read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only")) or caller.read_only
@@ -4732,13 +4733,25 @@ class TurnSession:
                 content = f"{clean} reported:\n\n{answer}"
             if active_wt is not None:
                 wt_finalized = True
+                wt_parent_tools = (
+                    caller.toolset
+                    if caller.toolset is not None
+                    else (getattr(self, "toolset", None) or getattr(self, "_main_toolset_ref", None))
+                )
                 wt_payload, wt_note = finalize_subagent_worktree(
                     self, active_wt, agent_id=agent_id, parent_agent_id=parent_agent_id,
                     cancelled=lambda: bool(sub_cancelled(subagent_turn)),
+                    parent_tools=wt_parent_tools,
                 )
                 if wt_payload is not None:
                     payload["worktree"] = wt_payload
                     wt_merge_state = str(wt_payload.get("merge_state") or "") or None
+                    if wt_merge_state == "applied":
+                        wt_applied_files = tuple(
+                            str(f)
+                            for f in ((wt_payload.get("merge_detail") or {}).get("files") or ())
+                            if str(f).strip()
+                        )
                 if wt_note:
                     content += wt_note
             return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
@@ -4750,23 +4763,35 @@ class TurnSession:
                         active_wt.manager.cleanup_if_unchanged(agent_id, store=_worktree_store(self))
                 except Exception:
                     logger.debug("cleanup_if_unchanged on aborted subagent failed for %s", agent_id, exc_info=True)
+            propagated_paths: set[str] = set()
+            if subagent_tools is not None and getattr(subagent_tools, "_changed_paths", None):
+                propagated_paths.update(subagent_tools._changed_paths)
+            if active_wt is not None and wt_merge_state == "applied" and wt_applied_files:
+                propagated_paths.update(wt_applied_files)
             if (
-                subagent_tools is not None
-                and getattr(subagent_tools, "_changed_paths", None)
+                propagated_paths
                 and builtin_key not in {"verifier", "explore", "plan"}
                 and (active_wt is None or wt_merge_state == "applied")
             ):
                 # Changes go up one level; the caller hands them on when it finishes.
-                parent_tools = caller.toolset if caller.toolset is not None else getattr(self, "toolset", None)
+                parent_tools = (
+                    caller.toolset
+                    if caller.toolset is not None
+                    else (getattr(self, "toolset", None) or getattr(self, "_main_toolset_ref", None))
+                )
                 if parent_tools is not None and hasattr(parent_tools, "_changed_paths"):
                     had_unverified_parent_changes = bool(
                         parent_tools._changed_paths and not getattr(parent_tools, "_code_mode_verified", False)
                     )
-                    parent_tools._changed_paths.update(subagent_tools._changed_paths)
-                    parent_tools._change_events = getattr(parent_tools, "_change_events", 0) + getattr(
-                        subagent_tools, "_change_events", 0
+                    parent_tools._changed_paths.update(propagated_paths)
+                    sub_events = getattr(subagent_tools, "_change_events", 0) if subagent_tools is not None else 0
+                    added_events = max(
+                        sub_events,
+                        len(wt_applied_files) if (active_wt is not None and wt_merge_state == "applied") else 0,
                     )
-                    if not getattr(subagent_tools, "_code_mode_verified", False):
+                    parent_tools._change_events = getattr(parent_tools, "_change_events", 0) + added_events
+                    sub_verified = bool(getattr(subagent_tools, "_code_mode_verified", False)) if subagent_tools is not None else False
+                    if not sub_verified:
                         parent_tools._code_mode_verified = False
                     elif not had_unverified_parent_changes:
                         parent_tools._code_mode_verified = True
@@ -6445,7 +6470,7 @@ class TurnSession:
             host_folders=self.host_folders,
             interactive_permissions=interactive_permissions,
             turn_id=str(self.turn.get("turn_id") or "") or None,
-            file_history=self.file_history,
+            file_history=None if workspace_override is not None else self.file_history,
             user_message_id=str(self.turn.get("user_message_id") or "") or None,
             web_answerer=self._web_answer,
             conversation_id=str(self.turn.get("conversation_id") or "") or None,

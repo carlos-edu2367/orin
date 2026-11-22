@@ -21,6 +21,7 @@ import { MemorySettingsPanel } from './MemorySettingsPanel'
 
 type MemoryCardItem = {
   id: string
+  reactKey: string
   title: string
   fullText: string
   scopeLabel: MemoryScopeLabel
@@ -44,6 +45,7 @@ function mapApiMemoryToCard(item: ManagedMemory): MemoryCardItem {
   const metaLabel = dateLabel ? 'Criada pelo Orin' : 'Lembrança ativa'
   return {
     id: item.memory_id,
+    reactKey: item.memory_id,
     title: item.fact,
     fullText: item.fact,
     scopeLabel,
@@ -199,8 +201,10 @@ export function MemoryPage({
     const nextApiScope: 'user' | 'project' = nextSemantic === 'project' ? 'project' : 'user'
 
     if (isCreating || !selectedCard) {
+      const localId = `custom-mem-${Date.now()}`
       const newCard: MemoryCardItem = {
-        id: `custom-mem-${Date.now()}`,
+        id: localId,
+        reactKey: localId,
         title: trimmed,
         fullText: trimmed,
         scopeLabel: draftScope,
@@ -418,7 +422,7 @@ export function MemoryPage({
                     const tagMod = getTagModifierClass(item.semanticScope)
                     return (
                       <article
-                        key={item.id}
+                        key={item.reactKey}
                         className={`memory-card-v6${isSelected ? ' is-selected' : ''}`}
                         onClick={() => handleSelectCard(item)}
                       >
