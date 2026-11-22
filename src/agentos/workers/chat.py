@@ -1190,8 +1190,14 @@ class ChatWorker:
 
             cli_catalog_window = cached_cli_context_window_for(model_id)
             fixed_catalog_window = fixed_context_window_for(model_id)
-            if fixed_catalog_window is None and row_window is not None:
-                fixed_catalog_window = row_window
+            if cli_catalog_window is None and row_window is not None:
+                is_stale_200k = (
+                    row_window == 200_000
+                    and fixed_catalog_window is not None
+                    and fixed_catalog_window > row_window
+                )
+                if not is_stale_200k:
+                    cli_catalog_window = row_window
 
             ew = effective_window_for(
                 provider,

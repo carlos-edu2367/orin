@@ -1,6 +1,7 @@
 import pytest
 
 from agentos.agentic import agent_tools
+from agentos.agentic.tools import _shared as shared_tools
 
 
 def test_a_child_that_already_exited_is_reaped_and_reported_as_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,6 +40,7 @@ def test_a_pid_that_is_no_longer_our_child_falls_back_to_kill_zero(monkeypatch: 
 
     monkeypatch.setattr(agent_tools.os, "waitpid", waitpid_not_our_child)
     monkeypatch.setattr(agent_tools.os, "kill", lambda pid, sig: None)  # succeeds -- pid exists
+    monkeypatch.setattr(shared_tools, "_is_zombie", lambda _pid: False)
 
     assert agent_tools._process_is_running(4242) is True
 
