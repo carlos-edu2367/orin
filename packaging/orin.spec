@@ -58,6 +58,10 @@ a = Analysis(
         # Child services are imported from their string entrypoints only after
         # the frozen launcher re-executes itself.
         "agentos.api.asgi", "agentos.workers.publisher", "agentos.workers.scheduler",
+        # Several agentos modules are loaded through importlib.import_module
+        # (e.g. persistence.postgres.memory_promotion), which PyInstaller cannot
+        # detect. Bundle the whole package so frozen services never miss one.
+        *collect_submodules("agentos"),
     ],
 )
 pyz = PYZ(a.pure)
