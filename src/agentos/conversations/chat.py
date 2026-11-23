@@ -16,13 +16,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import delete, func, insert, select, update
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from agentos.api.contracts import ApplicationConflictError, ApplicationNotFoundError, ApplicationValidationError
 from agentos.conversations.agent_controls import AgentControlStore
 from agentos.api.events import CursorError
 from agentos.agentic.events import AgentActivityEvent, AgentActivityEventType
+from agentos.agentic.text_sanitize import sanitize_assistant_text
 from agentos.agentic.workspace import WorkspaceError, _directory_name, resolve_workspace
 from agentos.installation import orin_paths
 from agentos.persistence.postgres.agentic_activity import (
@@ -3267,6 +3268,27 @@ class PostgresChatStore:
         """Public activity seam used by the agentic runtime and its tools."""
         self._activity(turn, event_type, summary, payload, agent_id=agent_id, parent_agent_id=parent_agent_id)
 
+    @staticmethod
+    def _sanitize_saved_assistant_text(c: Connection, turn: Mapping[str, object], now: datetime) -> None:
+        """Last door before the assistant message is final: whatever the streams let through is cleaned here.
+
+        The streaming filters hide a fake tool call as it arrives, but the saved text is the sum of the deltas, so
+        a path that forgot to filter (or a marker split in a way a filter did not expect) would leave raw
+        `<invoke>` markup in the conversation, the Discord channel and any export. The corrected text goes out as
+        a `message.reset`, which is what a connected client already knows how to apply.
+        """
+        message_id = turn.get("assistant_message_id")
+        if not message_id:
+            return
+        content = c.execute(select(conversation_messages.c.content).where(conversation_messages.c.message_id == message_id)).scalar()
+        if not isinstance(content, str) or not content:
+            return
+        clean = sanitize_assistant_text(content)
+        if clean == content:
+            return
+        c.execute(update(conversation_messages).where(conversation_messages.c.message_id == message_id).values(content=clean, updated_at=now))
+        c.execute(insert(conversation_events).values(conversation_id=turn["conversation_id"], user_id=turn["user_id"], event_type="message.reset", message_id=message_id, payload={"content": clean}, created_at=now))
+
     def finish(self, turn: dict[str, object], *, failed: bool = False, code: str | None = None) -> None:
         self._live_mode_turns.pop(str(turn.get("turn_id") or ""), None)
         self._effort_boost_turns.pop(str(turn.get("turn_id") or ""), None)
@@ -3281,6 +3303,7 @@ class PostgresChatStore:
             current = c.execute(select(conversation_turns.c.state).where(conversation_turns.c.turn_id == turn["turn_id"])).scalar()
             if str(current) in ("completed", "failed", "cancelled", "waiting_user"):
                 return
+            self._sanitize_saved_assistant_text(c, turn, now)
             c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn["turn_id"]).values(state=state, last_error=code, updated_at=now))
             # W7 (W6-R14): a finished turn's CLI options (which may hold --mcp-config headers or --settings env) are
             # cleared; a turn waiting for the person keeps them, it runs again.

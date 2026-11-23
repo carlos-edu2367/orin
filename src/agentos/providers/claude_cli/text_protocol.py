@@ -1246,14 +1246,20 @@ class ResidualToolTextStreamFilter:
         self._consume_glued_assistant: bool = False
         self._glue_after_close: bool = True
         self._in_code_fence: bool = False
+        # Trailing backticks of what was already shown: a ``` fence marker can arrive split across chunks.
+        self._tick_run: int = 0
         # True once the model wrote an Anthropic-style tool call/result as text (`<invoke>`, `<function_calls>`,
         # `<function_results>`, orphan closers). That call never ran: native turns use it to tell the model so.
         self.saw_text_tool_call: bool = False
 
     def _update_fence_state(self, emitted: str) -> None:
-        count = emitted.count("```")
+        carried = "`" * self._tick_run
+        combined = carried + emitted
+        count = combined.count("```") - carried.count("```")
         if count % 2 == 1:
             self._in_code_fence = not self._in_code_fence
+        stripped = combined.rstrip("`")
+        self._tick_run = len(combined) - len(stripped)
 
     def feed(self, chunk: str) -> str:
         if not chunk:

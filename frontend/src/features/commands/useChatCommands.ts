@@ -12,6 +12,7 @@ import { chooseOutputStyle } from '../../api/settings'
 import type { ThemeAccent } from '../../app/ThemeContext'
 import { moreCommandHandlers, type EffortCommandController } from './moreCommands'
 import { BUILTIN_COMMANDS, type BuiltinCommand, findBuiltin, isExcludedCommand, parseSlash } from './builtins'
+import { sanitizeAssistantText } from '../conversations/residualToolBlocks'
 
 export type InfoPanel =
   | { kind: 'help' }
@@ -81,15 +82,19 @@ export function folderPage(section: string, conversationId: string): string {
 }
 
 function lastAssistant(messages: ChatCommandDeps['messages'], nth: number): string | null {
-  const answers = messages.filter((item) => item.role === 'assistant' && item.content.trim())
-  return answers[answers.length - nth]?.content ?? null
+  const answers = messages
+    .filter((item) => item.role === 'assistant')
+    .map((item) => sanitizeAssistantText(item.content))
+    .filter((text) => text.trim())
+  return answers[answers.length - nth] ?? null
 }
 
 function transcript(deps: ChatCommandDeps): string {
   const lines = [`# ${deps.title || 'Conversa do Orin'}`, '']
   for (const item of deps.messages) {
-    if (!item.content.trim()) continue
-    lines.push(item.role === 'user' ? 'Você:' : 'Orin:', item.content.trim(), '')
+    const body = item.role === 'user' ? item.content : sanitizeAssistantText(item.content)
+    if (!body.trim()) continue
+    lines.push(item.role === 'user' ? 'Você:' : 'Orin:', body.trim(), '')
   }
   return lines.join('\n')
 }

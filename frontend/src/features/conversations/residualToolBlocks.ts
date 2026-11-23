@@ -6,7 +6,7 @@ export type MessageContentSegment =
   | { kind: 'activity'; group: ActivityGroup }
 
 const FAST_RESIDUAL_MARKER_RE =
-  /Tool\s+(?:Use|Result)|orin_tool_call|(?:<|&lt;)\s*\/?\s*tool_call\b|(?:<|&lt;)\s*\/?\s*tool_result\b|(?:<|&lt;)\s*\/?\s*speak\b|(?:<|&lt;)\s*\/?\s*(?:function_calls|function_results|invoke)\b/i
+  /Tool\s+(?:Use|Result)|\(Orin log:|orin_tool_call|(?:<|&lt;)\s*\/?\s*tool_call\b|(?:<|&lt;)\s*\/?\s*tool_result\b|(?:<|&lt;)\s*\/?\s*speak\b|(?:<|&lt;)\s*\/?\s*(?:function_calls|function_results|invoke)\b/i
 
 /**
  * Anthropic-native tool syntax the model typed as plain text (it never ran, so there is no real tool card):
@@ -16,6 +16,14 @@ const FAST_RESIDUAL_MARKER_RE =
  */
 const ANTHROPIC_XML_TEXT_RE =
   /(?:(?:<|&lt;)\/(?:output|result)\s*(?:>|&gt;)\s*)*(?:<|&lt;)\/function_results\s*(?:>|&gt;)|(?:<|&lt;)\/(?:function_calls|invoke)\s*(?:>|&gt;)|(?:<|&lt;)(?:(function_calls|function_results)\b|invoke\s+name\s*=)/gi
+
+/**
+ * `(Orin log: ...)` is Orin's own past-tense record of tool use, replayed to the model when a session reopens.
+ * A model that copies it writes a call that never ran, so it is hidden like the XML calls: a use record is one
+ * line, a result record runs to `(end of Orin log)` (or the end of the text while it streams).
+ */
+const ORIN_LOG_START_RE = /\(Orin log: (?:the assistant used tool|result of tool) [^\n]*(?:\n|$)/gi
+const ORIN_LOG_END_RE = /\(end of Orin log\)[ \t]*(?:\r?\n|$)/gi
 
 const SPEAK_TAG_RE = /(?:<|&lt;)\s*\/?\s*speak\b(?:[^>&]|&(?!gt;))*?(?:>|&gt;)/gi
 
@@ -575,6 +583,19 @@ function findFenceEnd(content: string, fenceStartEndIndex: number, fenceMarker: 
 }
 
 /**
+ * The text of an assistant message without tool calls or results the model wrote as text: what an export or a
+ * copy should carry. The backend does the same before it saves (`sanitize_assistant_text`); both read
+ * `tests/fixtures/text_tool_leak_cases.json`, so they cannot drift apart. Fenced code is kept.
+ */
+export function sanitizeAssistantText(content: string): string {
+  if (!content) return ''
+  if (!hasResidualToolMarkers(content)) return content
+  return parseResidualToolBlocks(content)
+    .map((segment) => (segment.kind === 'markdown' ? segment.content : ''))
+    .join('')
+}
+
+/**
  * Splits assistant message `content` into ordered Markdown and ActivityGroup
  * segments, collapsing leaked raw `[Tool Use ...]` / `[Tool Result ...]`,
  * `&#91;Tool Use ...]`, `<orin_tool_call>`, and `<tool_call>` blocks into
@@ -609,9 +630,13 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
     ANTHROPIC_XML_TEXT_RE.lastIndex = pos
     const anthropicMatch = ANTHROPIC_XML_TEXT_RE.exec(content)
 
+    ORIN_LOG_START_RE.lastIndex = pos
+    const logMatch = ORIN_LOG_START_RE.exec(content)
+
     const nextMarkerIndex = Math.min(
       toolMatch ? toolMatch.index : Number.POSITIVE_INFINITY,
       anthropicMatch ? anthropicMatch.index : Number.POSITIVE_INFINITY,
+      logMatch ? logMatch.index : Number.POSITIVE_INFINITY,
     )
 
     if (fenceMatch && fenceMatch.index < nextMarkerIndex) {
@@ -623,7 +648,11 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
       continue
     }
 
-    if (anthropicMatch && (!toolMatch || anthropicMatch.index < toolMatch.index)) {
+    if (
+      anthropicMatch &&
+      (!toolMatch || anthropicMatch.index < toolMatch.index) &&
+      (!logMatch || anthropicMatch.index < logMatch.index)
+    ) {
       markdownBuffer += stripSpeakTags(content.slice(pos, anthropicMatch.index))
       const openedTag = anthropicMatch[1] ?? (/^(?:<|&lt;)invoke/i.test(anthropicMatch[0]) ? 'invoke' : undefined)
       let dropEnd = anthropicMatch.index + anthropicMatch[0].length
@@ -632,6 +661,18 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
         closeRe.lastIndex = dropEnd
         const closeMatch = closeRe.exec(content)
         dropEnd = closeMatch ? closeMatch.index + closeMatch[0].length : content.length
+      }
+      pos = dropEnd
+      continue
+    }
+
+    if (logMatch && (!toolMatch || logMatch.index < toolMatch.index)) {
+      markdownBuffer += stripSpeakTags(content.slice(pos, logMatch.index))
+      let dropEnd = logMatch.index + logMatch[0].length
+      if (/^\(Orin log: result of tool/i.test(logMatch[0])) {
+        ORIN_LOG_END_RE.lastIndex = dropEnd
+        const endMatch = ORIN_LOG_END_RE.exec(content)
+        dropEnd = endMatch ? endMatch.index + endMatch[0].length : content.length
       }
       pos = dropEnd
       continue

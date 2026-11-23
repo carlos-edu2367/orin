@@ -38,11 +38,10 @@ from agentos.providers.claude_cli.native_loop import (
 )
 from agentos.providers.claude_cli.stream import CliInit, CliUsage
 from agentos.providers.claude_cli.text_protocol import (
-    ResidualToolTextStreamFilter,
     TranscriptState,
     _extract_content_text_and_images,
-    strip_residual_tool_protocol_blocks,
 )
+from agentos.agentic.text_sanitize import new_assistant_text_stream, sanitize_assistant_text
 from agentos.agentic.tool_media import save_tool_images, tool_media_note
 from agentos.agentic.tool_text_rules import (
     HISTORY_HEADER,
@@ -1965,7 +1964,7 @@ class _RunnerSink:
             self._is_live_or_friend and runner.turn.get("live_mode") is not False
         )
         self.speak_state = _SpeakState()
-        self._residual_tool_filter = ResidualToolTextStreamFilter()
+        self._residual_tool_filter = new_assistant_text_stream()
         # The model typed a tool call as plain text since the last real tool batch (it never ran).
         self._text_tool_call_seen = False
         self._speak_parser: SpeakStreamParser | None = (
@@ -2096,7 +2095,7 @@ class _RunnerSink:
 
     def settled_assistant_text(self) -> str:
         self._flush_residual_tool_filter()
-        return strip_residual_tool_protocol_blocks("".join(self.text_parts)).strip()
+        return sanitize_assistant_text("".join(self.text_parts)).strip()
 
     def discard_synthetic_error_text(
         self,
@@ -2136,7 +2135,7 @@ class _RunnerSink:
         self._flush_residual_tool_filter()
         # A real tool ran after the fake text: the model already recovered, nothing to correct.
         self._text_tool_call_seen = False
-        self._residual_tool_filter = ResidualToolTextStreamFilter()
+        self._residual_tool_filter = new_assistant_text_stream()
         if self._speak_parser is not None:
             fin_res = self._speak_parser.finish(live_voice_enabled=False)
             fin_tail = self._runner.runtime._emit_speak_events(
@@ -2189,7 +2188,7 @@ class _RunnerSink:
         self._message_wrote_text = False
         self._current_sink_message_id = None
         self._absorb_text_tool_call_flag()
-        self._residual_tool_filter = ResidualToolTextStreamFilter()
+        self._residual_tool_filter = new_assistant_text_stream()
         self._reset_model_heartbeat()
         if self._is_live_or_friend:
             self.speak_state.iteration_had_speak = False

@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 import re
 from typing import Any
 
-from agentos.providers.claude_cli.text_protocol import strip_residual_tool_protocol_blocks
+from agentos.agentic.text_sanitize import sanitize_assistant_text
 
 DISCORD_MESSAGE_MAX_CHARS = 2000
 DEFAULT_SPLIT_LIMIT = 1950
@@ -224,7 +224,7 @@ def strip_residual_speak_tags(text: str) -> str:
     """Remove residual tool protocol blocks (`[Tool Use]`, `[Tool Result]`, `&#91;...]`) and `<speak>` tags."""
     if not isinstance(text, str) or not text:
         return ""
-    cleaned = strip_residual_tool_protocol_blocks(text)
+    cleaned = sanitize_assistant_text(text)
     cleaned = _SPEAK_TAG_RE.sub("", cleaned)
     cleaned = _EXCESS_NEWLINES_RE.sub("\n\n", cleaned)
     return cleaned.strip()

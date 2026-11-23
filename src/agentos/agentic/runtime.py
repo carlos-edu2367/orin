@@ -22,6 +22,7 @@ from .action_loop import ActionLoop, MalformedToolCall
 from .events import AgentActivityEventType
 from .provider_stream import ANTHROPIC_REQUIRED_MAX_TOKENS, NormalizedStreamItem, StreamKind
 from .speak_stream import SpeakParseResult, SpeakStreamParser
+from .text_sanitize import new_assistant_text_stream
 from .contract import ContractError, TaskContract, parse as parse_contract, synthesize as synthesize_contract
 from .quality import TurnQualityCounters
 from .learning import LearnedMemory, TurnLearningLedger
@@ -1161,6 +1162,9 @@ class AgenticTurnRuntime:
             )
             speak_state.iteration_had_speak = False
 
+            # A model that writes a tool call as text must not have it saved: same rule as native turns.
+            text_filter = new_assistant_text_stream()
+
             def emit_speak_parse_result(parse_result: SpeakParseResult) -> str:
                 return self._emit_speak_events(
                     turn,
@@ -1255,8 +1259,8 @@ class AgenticTurnRuntime:
                                 flush_thinking_buffer()
                     if event.kind is StreamKind.TEXT and event.text:
                         flush_thinking_buffer()
-                        chunk_text = event.text
-                        if speak_parser is not None:
+                        chunk_text = text_filter.feed(event.text)
+                        if speak_parser is not None and chunk_text:
                             chunk_text = emit_speak_parse_result(speak_parser.feed(chunk_text))
                         if chunk_text:
                             if (
@@ -1343,6 +1347,16 @@ class AgenticTurnRuntime:
                             context_overflow_error = True
                         retryable_error = event.error.retryability.value == "SAFE"
                 flush_thinking_buffer()
+                filter_tail = text_filter.finish()
+                if speak_parser is not None and filter_tail:
+                    filter_tail = emit_speak_parse_result(speak_parser.feed(filter_tail))
+                if filter_tail:
+                    text_parts.append(filter_tail)
+                    self.store.delta(turn, filter_tail)
+                    if filter_tail.strip():
+                        self._note_visible_text()
+                    emitted_text_in_turn = True
+                    last_emitted_text_ended_with_newline = filter_tail.endswith("\n")
                 if speak_parser is not None:
                     allow_fallback = live_fallback_enabled and not calls and not speak_state.pending_retraction
                     fin_res = speak_parser.finish(live_voice_enabled=allow_fallback)

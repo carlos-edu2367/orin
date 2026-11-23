@@ -63,6 +63,7 @@ from .read_state import copy_read_state, prepare_carried_state
 from .reminders import ReminderQueue, render_memory_prompt_lines, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
+from .text_sanitize import sanitize_assistant_text
 from .usage_budget import EXCEEDED_ERROR_CODE, BudgetLimits, BudgetRegistry, default_subagent_budget, effective_budget, parse_budget
 from .structured_output import SCHEMA_INVALID, StructuredRun, output_instruction, run_with_output_schema, validate_output_schema
 from .runtime import CODE_MODE_CORE_TOOLS, AgenticLimits, AgenticTurnRuntime
@@ -1325,7 +1326,7 @@ class _SubagentStore:
 
     def snapshot_transcript(self) -> list[dict[str, Any]]:
         snap = [dict(item) for item in self._transcript]
-        pending = "".join(self.text).strip()
+        pending = sanitize_assistant_text("".join(self.text)).strip()
         if pending:
             if not snap or snap[-1].get("role") != "assistant" or snap[-1].get("content") != pending:
                 snap.append({"role": "assistant", "content": pending})
@@ -1427,7 +1428,7 @@ class _SubagentStore:
         )
         kind = str(values.get("kind") or "")
         if has_tool_calls:
-            text_part = "".join(self.text).strip()
+            text_part = sanitize_assistant_text("".join(self.text)).strip()
             calls_raw = payload.get("calls") if isinstance(payload, Mapping) else None
             call_names: list[str] = []
             if isinstance(calls_raw, list):
@@ -1461,7 +1462,10 @@ class _SubagentStore:
             recorder(turn, **values)
 
     def final_answer(self) -> str:
-        return "".join(self.text).strip() or "".join(self.prior_text).strip()
+        return (
+            sanitize_assistant_text("".join(self.text)).strip()
+            or sanitize_assistant_text("".join(self.prior_text)).strip()
+        )
 
 
 class _MainAgentStore:

@@ -1,0 +1,50 @@
+{
+  "description": "Assistant text with a tool call written as text. `input` is what the model wrote; `expected` is what stays visible and saved. Read by tests/unit/agentic/test_text_sanitize.py (sanitize_assistant_text) and by frontend/src/features/conversations/__tests__/textToolLeakParity.test.ts (residualToolBlocks.ts): both must agree. The frontend compares only the markdown it renders, with whitespace collapsed.",
+  "cases": [
+    {
+      "name": "print: orphan closers, prose, then an invoke that never closes",
+      "input": "</output>\n</result>\n</function_results>Por código: os 10 PACOTE_344 são idênticos ao texto oficial...\nGravo os 21 suspeitos da w1 como meus bloqueios e listo os 19 restantes para ler.\n<invoke name=\"Bash\"> <parameter name=\"command\">cd /c/Users/... && node -e \" ... \"",
+      "expected": "Por código: os 10 PACOTE_344 são idênticos ao texto oficial...\nGravo os 21 suspeitos da w1 como meus bloqueios e listo os 19 restantes para ler.\n"
+    },
+    {
+      "name": "html-escaped invoke",
+      "input": "Vou conferir.\n&lt;invoke name=\"Bash\"&gt;&lt;parameter name=\"command\"&gt;ls&lt;/parameter&gt;&lt;/invoke&gt;\nPronto.",
+      "expected": "Vou conferir.\n\nPronto."
+    },
+    {
+      "name": "invoke inside a code fence stays",
+      "input": "Exemplo do formato:\n```xml\n<invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke>\n```\nFim.",
+      "expected": "Exemplo do formato:\n```xml\n<invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke>\n```\nFim."
+    },
+    {
+      "name": "legitimate result and output tags stay",
+      "input": "O XML devolvido tem <result>ok</result> e <output>42</output> no corpo.",
+      "expected": "O XML devolvido tem <result>ok</result> e <output>42</output> no corpo."
+    },
+    {
+      "name": "old [Tool Use] and [Tool Result] blocks",
+      "input": "Vou ler o arquivo.\n[Tool Use id=call_1 name=Read]\n{\"name\": \"Read\", \"arguments\": {\"file_path\": \"a.txt\"}}\n[/Tool Use]\n[Tool Result id=call_1 name=Read status=ok]\nconteudo\n[/Tool Result]\nLi o arquivo.",
+      "expected": "Vou ler o arquivo.\n\n\nLi o arquivo."
+    },
+    {
+      "name": "new Orin log record",
+      "input": "Vou rodar.\n(Orin log: the assistant used tool Bash (call id=call_1); arguments: command=\"pytest -q\")\n(Orin log: result of tool Bash (call id=call_1), status ok)\n1 passed\n(end of Orin log)\nPronto.",
+      "expected": "Vou rodar.\nPronto."
+    },
+    {
+      "name": "invoke without a closing tag runs to the end",
+      "input": "Rodando agora.\n<invoke name=\"Bash\"><parameter name=\"command\">ls -la\nainda escrevendo e nunca fecha",
+      "expected": "Rodando agora.\n"
+    },
+    {
+      "name": "function_calls block with its made-up results",
+      "input": "Antes.\n<function_calls>\n<invoke name=\"Read\"><parameter name=\"file_path\">a</parameter></invoke>\n</function_calls>\n<function_results>\n<result><output>x</output></result>\n</function_results>\nDepois.",
+      "expected": "Antes.\n\n\nDepois."
+    },
+    {
+      "name": "plain prose is untouched",
+      "input": "Nada de ferramenta aqui. Use a tag <b>negrito</b> e o termo invoke em prosa.",
+      "expected": "Nada de ferramenta aqui. Use a tag <b>negrito</b> e o termo invoke em prosa."
+    }
+  ]
+}
