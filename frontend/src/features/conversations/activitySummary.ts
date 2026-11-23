@@ -1002,6 +1002,16 @@ export function isVerifierEvent(event: ConversationActivityEvent): boolean {
   )
 }
 
+/** `pipeline.*` of one run fold into one card (0.13 WS-C11); the run id is in the payload. */
+export function isPipelineRunEvent(event: ConversationActivityEvent): boolean {
+  return event.type.startsWith('pipeline.') && pipelineRunIdOf(event) !== ''
+}
+
+export function pipelineRunIdOf(event: ConversationActivityEvent): string {
+  const runId = event.payload?.run_id
+  return typeof runId === 'string' ? runId : ''
+}
+
 export function isMergeEvent(event: ConversationActivityEvent): boolean {
   return (
     event.type === 'merge.applied' ||
@@ -1093,6 +1103,9 @@ export function isRenderable(event: ConversationActivityEvent, settled: Set<stri
 }
 
 export function groupingKey(event: ConversationActivityEvent): string {
+  if (isPipelineRunEvent(event)) {
+    return `pipeline:${pipelineRunIdOf(event)}`
+  }
   if (isVerifierEvent(event)) {
     return `verifier:${event.agentId}:${event.turnId ?? ''}`
   }
@@ -1191,6 +1204,7 @@ export function processExitedLabel(event: ConversationActivityEvent): string {
 
 export function groupLabel(group: ActivityGroup): string {
   const first = group.events[0]
+  if (first && isPipelineRunEvent(first)) return 'Pipeline'
   if (first && isVerifierEvent(first)) return 'Verificação independente'
   if (first && isMergeEvent(first)) return 'Integração da worktree'
   if (group.kind === 'tool') return toolGroupLabel(group)

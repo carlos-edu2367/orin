@@ -8,6 +8,7 @@ import { getInstallationStatus } from '../../api/installation'
 import { getInstance } from '../../api/sessionTools'
 import type { ThemeAccent } from '../../app/ThemeContext'
 import { EFFORT_LEVELS, effortLabel, normalizeEffortLevel } from '../conversations/useEffortSelection'
+import { pipelineCommandHandlers } from '../pipelines/pipelineCommands'
 
 export type EffortCommandController = {
   current: string | null
@@ -20,6 +21,8 @@ export type EffortCommandController = {
 
 export type MoreCommandDeps = {
   client: ApiClient
+  /** The conversation the command runs in; `/goal` needs it. */
+  conversationId?: string
   navigate: (path: string) => void
   send: (text: string) => Promise<void>
   notify: (text: string) => void
@@ -64,6 +67,8 @@ export function moreCommandHandlers(deps: MoreCommandDeps): Record<string, Handl
   const answers = Object.fromEntries(Object.entries(NOT_IN_ORIN).map(([name, panel]) => [name, () => deps.openInfo({ kind: 'text', ...panel })]))
   return {
     ...answers,
+    // 0.13 WS-C11: /goal, /pipeline and /pipelines (nothing here is sent to the model).
+    ...pipelineCommandHandlers(deps),
     subtask: async (args) => {
       if (!args) { deps.notify('Diga a tarefa: /subtask <tarefa>'); return }
       await deps.send(`${SUBTASK_PROMPT}\n${args}`)

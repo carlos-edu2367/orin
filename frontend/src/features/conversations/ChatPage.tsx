@@ -78,6 +78,9 @@ import { notifySystem, windowIsAway } from '../notifications/systemNotify'
 import { TurnTimeline } from './TurnTimeline'
 import { WorkspaceFilePreview, type WorkspaceFileReference } from './WorkspaceFileCard'
 import { activityReducer, createActivityState } from './activityReducer'
+import { GoalBanner } from '../pipelines/GoalBanner'
+import { PipelineProjectionContext } from '../pipelines/PipelineRunCard'
+import { isGoalEvent } from '../pipelines/pipelineProjection'
 import { applyAgentMessageEvent, recordOptimisticAgentMessage, type AgentMessagesState } from './agentMessages'
 import { reduceAgentProgressEvents } from './agentTree'
 import { applyFriendDeliveryStatusEvent, type FriendDeliveryItem } from './FriendDeliveryCard'
@@ -227,6 +230,9 @@ export function ChatPage() {
   const [optimisticAgentMsgs, setOptimisticAgentMsgs] = useState<AgentMessagesState>({})
   const agentMessages = useMemo(() => activity.events.reduce(applyAgentMessageEvent, optimisticAgentMsgs), [activity.events, optimisticAgentMsgs])
   const agentProgress = useMemo(() => reduceAgentProgressEvents(activity.events), [activity.events])
+  // The /goal strip reads again when a goal.* event arrives, when a turn starts or ends, and when the turn count changes.
+  const lastGoalEventId = useMemo(() => [...activity.events].reverse().find(isGoalEvent)?.eventId ?? '', [activity.events])
+  const goalRefreshKey = `${lastGoalEventId}:${activity.status}:${conversation?.turns.length ?? 0}`
   const friendDeliveries = useMemo(() => activity.events.reduce(applyFriendDeliveryStatusEvent, {} as Record<string, FriendDeliveryItem>), [activity.events])
   const handleAgentMessageSent = useCallback((item: { controlId: string; agentId: string; message: string }) => {
     setOptimisticAgentMsgs((prev) => recordOptimisticAgentMessage(prev, item))
@@ -2708,6 +2714,7 @@ export function ChatPage() {
   } = useChatPaneWidth({ enabled: isCodeSplit, containerRef: chatMainRef })
 
   return (
+    <PipelineProjectionContext.Provider value={activity.pipelines}>
     <main
       ref={chatMainRef}
       className={
@@ -3600,6 +3607,7 @@ export function ChatPage() {
           onResolve={(requestId, decision) => { void handleResolveDockPermission(requestId, decision) }}
         />
         {commandNotice && <p className="chat__command-notice" role="status">{commandNotice}</p>}
+        <GoalBanner client={client} conversationId={conversationId} refreshKey={goalRefreshKey} />
         <QueuePanel
           items={queue}
           busy={queueBusy}
@@ -3794,6 +3802,7 @@ export function ChatPage() {
         onClose={() => setLiveVoiceSettingsOpen(false)}
       />
     </main>
+    </PipelineProjectionContext.Provider>
   )
 }
 

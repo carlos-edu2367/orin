@@ -9,6 +9,7 @@ import { AgentProgressRow } from './AgentProgressRow'
 import type { AgentMessagesState } from './agentMessages'
 import {
   hydrateAgentRuns,
+  groupAgentTreeByPipelineRun,
   mergeAgentProgress,
   orderAgentTree,
   reconcileAgentProgress,
@@ -16,7 +17,16 @@ import {
 } from './agentTree'
 
 /** `depth` is 0 for an agent the main agent started, 1 for one that agent started, and so on. */
-export type BackgroundAgent = { agentId: string; name: string; role: string; state: string; parentAgentId: string | null; depth: number }
+export type BackgroundAgent = {
+  agentId: string
+  name: string
+  role: string
+  state: string
+  parentAgentId: string | null
+  depth: number
+  /** Set when a pipeline run started this agent (0.13 WS-C11): such agents are listed together under the run. */
+  pipelineRunId?: string | null
+}
 
 const SHELL_STATE: Record<ShellTask['state'], string> = { running: 'rodando', finished: 'terminado', unknown: 'estado desconhecido' }
 const AGENT_STATE: Record<string, string> = {
@@ -102,7 +112,7 @@ export function TasksPanel({
       const overviewAgents = overview.status === 'fulfilled'
         ? overview.value.agents.filter((agent) => agent.parent_agent_id != null)
         : []
-      const byId = new Map<string, { agent_id: string; name: string; role: string; state: string; parent_agent_id: string | null }>()
+      const byId = new Map<string, { agent_id: string; name: string; role: string; state: string; parent_agent_id: string | null; pipeline_run_id?: string | null }>()
       for (const agent of overviewAgents) {
         byId.set(agent.agent_id, { ...agent })
       }
@@ -110,6 +120,7 @@ export function TasksPanel({
         const existing = byId.get(run.agent_id)
         if (existing) {
           existing.state = run.stalled ? 'stalled' : run.state
+          existing.pipeline_run_id = run.pipeline_run_id
         } else {
           byId.set(run.agent_id, {
             agent_id: run.agent_id,
@@ -117,6 +128,7 @@ export function TasksPanel({
             role: run.subagent_type,
             state: run.stalled ? 'stalled' : run.state,
             parent_agent_id: run.parent_agent_id,
+            pipeline_run_id: run.pipeline_run_id,
           })
         }
       }
@@ -130,6 +142,7 @@ export function TasksPanel({
             state: agent.state,
             parentAgentId: agent.parent_agent_id,
             depth,
+            pipelineRunId: agent.pipeline_run_id ?? null,
           })),
         )
       }
@@ -181,6 +194,10 @@ export function TasksPanel({
   }
 
   const empty = shells !== null && shells.length === 0 && agents.length === 0
+  const agentSections = useMemo(
+    () => groupAgentTreeByPipelineRun(agents.map((agent) => ({ item: agent, depth: agent.depth })), (agent) => agent.pipelineRunId),
+    [agents],
+  )
   return (
     <div className="command-info__backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
       <section className="command-info tasks-panel" role="dialog" aria-modal="true" aria-labelledby="tasks-title">
@@ -227,7 +244,13 @@ export function TasksPanel({
             <>
               <h3>Agentes</h3>
               <ul className="tasks-panel__list">
-                {agents.map((agent) => {
+                {agentSections.flatMap((section) => [
+                  ...(section.runId ? [(
+                    <li key={`run-${section.runId}`} className="tasks-panel__run" data-testid="tasks-panel-pipeline-run">
+                      Pipeline <code>{section.runId}</code>
+                    </li>
+                  )] : []),
+                  ...section.entries.map(({ item: agent }) => {
                   const progress = effectiveProgress[agent.agentId]
                   const displayState: string = progress?.stalled ? 'stalled' : progress?.state ?? agent.state
                   return (
@@ -261,7 +284,8 @@ export function TasksPanel({
                       />
                     </li>
                   )
-                })}
+                  }),
+                ])}
               </ul>
             </>
           )}

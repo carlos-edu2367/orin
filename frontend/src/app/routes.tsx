@@ -5,6 +5,8 @@ import { createBrowserApiClient } from '../api/client'
 import { collaborationFixtureEvents, fixtureExecutions } from '../features/executions/fixtures'
 import { ExecutionPage } from '../features/executions/ExecutionPage'
 import { ExecutionRoute } from '../features/executions/ExecutionRoute'
+import { PipelinesPage } from '../features/pipelines/PipelinesPage'
+import { PipelineRunPage } from '../features/pipelines/PipelineRunView'
 import { ProvidersSection } from '../features/providers/ProvidersSection'
 import { ProviderDetail } from '../features/providers/ProviderDetail'
 import { MediaModelsSetting } from '../features/providers/MediaModelsSetting'
@@ -61,6 +63,10 @@ export const routes: RouteDefinition[] = [
   { path: '/projects/:projectId/chats/:conversationId/overview', element: <ConversationRoute /> },
   { path: '/projects/:projectId', element: <ProjectPage /> },
   { path: '/projects/:projectId/memory', element: <ProjectMemoryRoute /> },
+  { path: '/pipelines', element: <WorkspaceShell><PipelinesPage /></WorkspaceShell> },
+  { path: '/pipelines/runs/:runId', element: <WorkspaceShell><PipelineRunPage /></WorkspaceShell> },
+  { path: '/projects/:projectId/pipelines', element: <WorkspaceShell><PipelinesPage /></WorkspaceShell> },
+  { path: '/projects/:projectId/pipelines/runs/:runId', element: <WorkspaceShell><PipelineRunPage /></WorkspaceShell> },
   { path: '/library', element: <WorkspaceShell><LibraryHubPage /></WorkspaceShell> },
   { path: '/library/:tab', element: <WorkspaceShell><LibraryHubPage /></WorkspaceShell> },
   { path: '/library/:tab/:itemId', element: <WorkspaceShell><LibraryHubPage /></WorkspaceShell> },

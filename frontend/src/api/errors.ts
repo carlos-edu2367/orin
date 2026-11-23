@@ -8,7 +8,16 @@ export type ApiErrorDetails = {
   retryAfter: number | null
 }
 
-type ApiErrorInput = Partial<Omit<ApiErrorDetails, 'status'>> & Pick<ApiErrorDetails, 'status'> & { problems?: unknown; files?: unknown }
+type ApiErrorInput = Partial<Omit<ApiErrorDetails, 'status'>> & Pick<ApiErrorDetails, 'status'> & {
+  problems?: unknown
+  files?: unknown
+  details?: unknown
+  serverMessage?: unknown
+}
+
+/** 0.13 WS-C11: the server's `details` object is kept (bounded) for the few answers the interface acts on. */
+const MAX_DETAILS_BYTES = 32_000
+const MAX_SERVER_MESSAGE_CHARS = 500
 
 /** W7: a file a 409 `rewind_blocked` names (`details.files`), and why it blocked the rewind. */
 export type BlockedFile = { path: string; reason: string }
@@ -40,6 +49,10 @@ export class ApiError extends Error {
   readonly retryAfter: number | null
   readonly problems: readonly string[]
   readonly blockedFiles: readonly BlockedFile[]
+  /** The answer's `details` object (pipeline refusals carry options, a review or the current hash). Empty when absent. */
+  readonly details: Readonly<Record<string, unknown>>
+  /** The server's own pt-BR sentence for the refusal, when it sent one. Show it as text only. */
+  readonly serverMessage: string | null
 
   constructor(input: ApiErrorInput) {
     const code = safeString(input.code) ?? 'request_failed'
@@ -55,6 +68,10 @@ export class ApiError extends Error {
     this.retryAfter = safeRetryAfter(input.retryAfter)
     this.problems = Object.freeze(safeProblems(input.problems))
     this.blockedFiles = Object.freeze(safeFiles(input.files))
+    this.details = safeDetails(input.details)
+    this.serverMessage = typeof input.serverMessage === 'string' && input.serverMessage.trim()
+      ? input.serverMessage.trim().slice(0, MAX_SERVER_MESSAGE_CHARS)
+      : null
   }
 
   toPublicDetails(): ApiErrorDetails {
@@ -84,7 +101,18 @@ export function parseApiError(status: number, value: unknown): ApiError {
     retryAfter: safeRetryAfter(envelope.retry_after),
     problems: isRecord(envelope.details) ? envelope.details.problems : undefined,
     files: isRecord(envelope.details) ? envelope.details.files : undefined,
+    details: envelope.details,
+    serverMessage: envelope.message,
   })
+}
+
+function safeDetails(value: unknown): Readonly<Record<string, unknown>> {
+  if (!isRecord(value)) return Object.freeze({})
+  try {
+    return JSON.stringify(value).length <= MAX_DETAILS_BYTES ? Object.freeze({ ...value }) : Object.freeze({})
+  } catch {
+    return Object.freeze({})
+  }
 }
 
 function safeFiles(value: unknown): BlockedFile[] {

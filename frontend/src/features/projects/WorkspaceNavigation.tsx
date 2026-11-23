@@ -257,6 +257,7 @@ export function WorkspaceNavigation({
     location.pathname.startsWith('/settings/mcp') ||
     location.pathname.startsWith('/settings/vision')
   const isSchedulesActive = location.pathname.startsWith('/schedules')
+  const isPipelinesActive = location.pathname.startsWith('/pipelines') || /^\/projects\/[^/]+\/pipelines/.test(location.pathname)
   const isSettingsActive =
     location.pathname === '/settings' ||
     location.pathname.startsWith('/settings/general') ||
@@ -644,6 +645,25 @@ export function WorkspaceNavigation({
               </svg>
             </span>
             <span className="project-navigation__hub-label">Ações agendadas</span>
+          </Link>
+
+          <Link
+            to={activeProjectId ? `/projects/${encodeURIComponent(activeProjectId)}/pipelines` : '/pipelines'}
+            onClick={() => setMobileOpen(false)}
+            aria-current={isPipelinesActive ? 'page' : undefined}
+            aria-label="Pipelines"
+            className={`project-navigation__hub-link${isPipelinesActive ? ' is-active' : ''}`}
+            title="Pipelines: fluxos de agentes com etapas, gates e orçamento"
+          >
+            <span className="project-navigation__hub-icon" aria-hidden="true">
+              <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1.75" y="2.5" width="4" height="3.5" rx="1" />
+                <rect x="10.25" y="2.5" width="4" height="3.5" rx="1" />
+                <rect x="6" y="10" width="4" height="3.5" rx="1" />
+                <path d="M5.75 4.25h4.5M3.75 6v2.25a1 1 0 0 0 1 1H8M12.25 6v2.25a1 1 0 0 1-1 1H8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </span>
+            <span className="project-navigation__hub-label">Pipelines</span>
           </Link>
         </div>
 

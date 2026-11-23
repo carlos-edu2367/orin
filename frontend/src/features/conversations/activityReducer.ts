@@ -1,4 +1,5 @@
 import type { ActivityEvent, ActivityToolCall, ConversationActivityEvent, TodoItem } from './activityTypes'
+import { isPipelineEvent, projectPipelineEvents, type PipelineProjection } from '../pipelines/pipelineProjection'
 
 export type { ActivityEvent, ActivityToolCall }
 export type ActivityConnectionState = 'snapshot' | 'connecting' | 'live' | 'degraded' | 'resyncing'
@@ -12,6 +13,8 @@ export type ActivityStoreState = {
   todos: TodoItem[]
   activePhase: string | null
   status: TurnLifecycleStatus
+  /** 0.13 WS-C11: one model per pipeline run, folded from the `pipeline.*` events of the conversation. */
+  pipelines: PipelineProjection
 }
 
 export type TurnActivityState = ActivityStoreState
@@ -167,6 +170,7 @@ export function createActivityState(cursor = '0'): ActivityStoreState {
     todos: [],
     activePhase: null,
     status: 'idle',
+    pipelines: {},
   }
 }
 
@@ -176,7 +180,21 @@ function isSubagentActivityEvent(event: ConversationActivityEvent): boolean {
   return Boolean(event.parentAgentId || event.payload?.parent_agent_id)
 }
 
+/** Keeps `pipelines` in step with `events`: recomputed only when a pipeline event arrived or the history was replaced. */
+function withPipelines(prev: ActivityStoreState, next: ActivityStoreState, arrived?: ConversationActivityEvent): ActivityStoreState {
+  if (next === prev) return next
+  const carried = next.pipelines ?? prev.pipelines ?? {}
+  if (next.events === prev.events) return next.pipelines === carried ? next : { ...next, pipelines: carried }
+  const touched = arrived ? isPipelineEvent(arrived) : Object.keys(carried).length > 0 || next.events.some(isPipelineEvent)
+  const pipelines = touched ? projectPipelineEvents(next.events) : carried
+  return pipelines === next.pipelines ? next : { ...next, pipelines }
+}
+
 export function applyActivityEvent(state: ActivityStoreState, event: ConversationActivityEvent): ActivityStoreState {
+  return withPipelines(state, applyEventToState(state, event), event)
+}
+
+function applyEventToState(state: ActivityStoreState, event: ConversationActivityEvent): ActivityStoreState {
   // Identity is the real duplicate guard. The cursor comparison only blocks a
   // genuine regression: if a cursor cannot be ordered at all, dropping the event
   // would silently empty the feed, which is far worse than showing it twice —
@@ -241,6 +259,10 @@ export function applyActivityEvent(state: ActivityStoreState, event: Conversatio
 }
 
 export function activityReducer(state: ActivityStoreState, action: ActivityAction): ActivityStoreState {
+  return withPipelines(state, reduceActivity(state, action), action.type === 'event' ? action.event : undefined)
+}
+
+function reduceActivity(state: ActivityStoreState, action: ActivityAction): ActivityStoreState {
   switch (action.type) {
     case 'snapshot': {
       // The durable snapshot is the authority for the whole conversation, so it
@@ -276,6 +298,7 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
         todos,
         activePhase,
         status,
+        pipelines: {},
       }
     }
     case 'reconcile_snapshot': {
@@ -353,7 +376,7 @@ export function activityReducer(state: ActivityStoreState, action: ActivityActio
       }
     }
     case 'event':
-      return applyActivityEvent(state, action.event)
+      return applyEventToState(state, action.event)
     case 'cursor': {
       const nextConnection =
         state.connection === 'connecting' || state.connection === 'degraded'

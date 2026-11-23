@@ -86,6 +86,10 @@ export function ProjectNavigation({ standalone, projects, onCreateProject, onNew
         <span className="project-navigation__action-icon project-navigation__action-icon--schedule" aria-hidden="true">◷</span>
         <span>Ações agendadas</span>
       </Link>
+      <Link className="project-navigation__action project-navigation__action--secondary" to={activeProjectId ? `/projects/${encodeURIComponent(activeProjectId)}/pipelines` : '/pipelines'}>
+        <span className="project-navigation__action-icon" aria-hidden="true">≡</span>
+        <span>Pipelines</span>
+      </Link>
     </div>
   </nav>
 }

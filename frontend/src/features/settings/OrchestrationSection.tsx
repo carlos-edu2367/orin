@@ -9,6 +9,7 @@ import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation } f
 import { AgentMessagesSettingsBlock } from './AgentMessagesSettingsBlock'
 import { BackgroundSettingsBlock } from './BackgroundSettingsBlock'
 import { FriendDeliverySettingsBlock } from './FriendDeliverySettingsBlock'
+import { OrchestrationPipelinesSettings, isPipelineSettingPath } from '../pipelines/OrchestrationPipelinesSettings'
 import { SettingsSection } from './SettingsSection'
 import { TaskBoardSettingsBlock } from './TaskBoardSettingsBlock'
 import { VerifierMetricsTable } from './VerifierMetricsTable'
@@ -16,7 +17,7 @@ import { VerifierSettingsBlocks } from './VerifierSettingsBlocks'
 import { WorktreeSettingsBlock } from './WorktreeSettingsBlock'
 import './orchestrationSettings.css'
 
-const GROUPS_QUERY = 'messages,friend,verifier,worktree,task_board,background'
+const GROUPS_QUERY = 'messages,friend,verifier,worktree,task_board,background,pipelines,budget,goal'
 
 export function OrchestrationSection({ client }: { client?: ApiClient }) {
   const apiClient = useMemo(() => client ?? createBrowserApiClient(), [client])
@@ -96,6 +97,10 @@ export function OrchestrationSection({ client }: { client?: ApiClient }) {
   )
   const backgroundItems = useMemo(
     () => (report?.items ?? []).filter((item) => item.group === 'background'),
+    [report],
+  )
+  const pipelineItems = useMemo(
+    () => (report?.items ?? []).filter((item) => isPipelineSettingPath(item.path)),
     [report],
   )
 
@@ -188,6 +193,21 @@ export function OrchestrationSection({ client }: { client?: ApiClient }) {
                 </p>
                 <TaskBoardSettingsBlock
                   items={taskBoardItems}
+                  busy={saving}
+                  onSave={handleSave}
+                />
+              </Card>
+            </div>
+          )}
+
+          {pipelineItems.length > 0 && (
+            <div data-testid="orchestration-section-pipelines">
+              <Card title="Pipelines" id="orchestration-heading-pipelines">
+                <p className="code-settings__muted">
+                  Fluxos declarativos de agentes e o <code>/goal</code>. Nada disso roda sem um comando seu; aqui ficam as chaves, os tetos de gasto e a ferramenta que deixa o agente iniciar pipelines aprovados.
+                </p>
+                <OrchestrationPipelinesSettings
+                  items={pipelineItems}
                   busy={saving}
                   onSave={handleSave}
                 />

@@ -4,6 +4,7 @@ import { renderActivityGroup } from './ActivityStream'
 import { CodeToolCallBlock, formatToolSignature, resolveVisualStatus } from './CodeToolCallBlock'
 import { CaveatsNotice, UnverifiedNotice } from './CodeModeCard'
 import { VerificationCard } from './VerificationCard'
+import { PipelineRunCard } from '../pipelines/PipelineRunCard'
 import { MergeConflictCard, type MergeResolveDetails } from './MergeConflictCard'
 import { PlanApprovalCard, extractPlanApprovalDetails } from './PlanApprovalCard'
 import type { ApiClient } from '../../api/client'
@@ -1152,6 +1153,10 @@ export const TurnTimeline = memo(function TurnTimeline({
           onOpenTarget={onOpenTargetConversation}
         />
       )
+    }
+
+    if (group.id.startsWith('pipeline:')) {
+      return <PipelineRunCard group={group} />
     }
 
     if (group.id.startsWith('verifier:') || first.type.startsWith('verifier.')) {

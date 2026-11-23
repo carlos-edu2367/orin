@@ -38,6 +38,32 @@ export function orderAgentTree<T>(
   return ordered
 }
 
+export type AgentRunSection<T> = { runId: string | null; entries: Array<{ item: T; depth: number }> }
+
+/**
+ * 0.13 WS-C11: the children of a pipeline run are shown together, under the run, in the order the tree already gives
+ * (a parent before the agents it started). `ordered` comes from `orderAgentTree`; an agent that is not part of a run
+ * stays in the `null` section, which keeps its own relative order and comes first.
+ */
+export function groupAgentTreeByPipelineRun<T>(
+  ordered: ReadonlyArray<{ item: T; depth: number }>,
+  runOf: (item: T) => string | null | undefined,
+): Array<AgentRunSection<T>> {
+  const plain: AgentRunSection<T> = { runId: null, entries: [] }
+  const runs = new Map<string, AgentRunSection<T>>()
+  for (const entry of ordered) {
+    const runId = runOf(entry.item)
+    if (!runId) {
+      plain.entries.push(entry)
+      continue
+    }
+    const section = runs.get(runId) ?? { runId, entries: [] }
+    section.entries.push(entry)
+    runs.set(runId, section)
+  }
+  return [...(plain.entries.length ? [plain] : []), ...runs.values()]
+}
+
 export type AgentRunState =
   | 'queued'
   | 'running'

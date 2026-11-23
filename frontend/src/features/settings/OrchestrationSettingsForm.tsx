@@ -56,13 +56,18 @@ function NumberControl({
   item: OrchestrationSettingItem
   inputId: string
   disabled: boolean
-  onSave: (value: number) => void
+  onSave: (value: number | null) => void
 }) {
   const [draft, setDraft] = useState(() => (typeof item.value === 'number' ? String(item.value) : ''))
 
   function submit(event: FormEvent) {
     event.preventDefault()
     if (disabled) return
+    // An empty field clears the value (0.13 WS-C11: the budget ceilings are "no ceiling" when empty).
+    if (draft.trim() === '') {
+      if (item.value !== null) onSave(null)
+      return
+    }
     const parsed = Number(draft)
     if (!Number.isFinite(parsed)) return
     onSave(parsed)
@@ -75,7 +80,7 @@ function NumberControl({
         type="number"
         min={item.minimum ?? undefined}
         max={item.maximum ?? undefined}
-        step="1"
+        step={item.minimum !== null && !Number.isInteger(item.minimum) ? 'any' : '1'}
         value={draft}
         disabled={disabled}
         onChange={(event) => setDraft(event.target.value)}

@@ -10,6 +10,7 @@ import type { AgentProgressMap } from './agentTree'
 import { CodeModeCard } from './CodeModeCard'
 import { MergeConflictCard, type MergeResolveDetails } from './MergeConflictCard'
 import { VerificationCard } from './VerificationCard'
+import { PipelineRunCard } from '../pipelines/PipelineRunCard'
 import { CodeSessionProposalCard, type CodeSessionProposalDecision } from './CodeSessionProposalCard'
 import {
   extractFriendDeliveryFromEvent,
@@ -216,6 +217,7 @@ export function renderActivityGroup(
       />
     )
   }
+  if (group.id.startsWith('pipeline:')) return <PipelineRunCard group={group} />
   if (first.type.startsWith('verifier.')) return <VerificationCard group={group} />
   if (group.id.startsWith('merge:') || isMergeEvent(first)) {
     return (

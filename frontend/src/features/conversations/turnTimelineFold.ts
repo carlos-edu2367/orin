@@ -12,6 +12,7 @@ import {
   isCodeModeEvent,
   isFriendQueuedInputEvent,
   isMergeEvent,
+  isPipelineRunEvent,
   isRenderable,
   isSubagentCoordinationOrWaitEvent,
   isSubagentDelegationFailed,
@@ -349,6 +350,7 @@ export function buildTurnTimeline(
   } | null = null
   const renderedCodeRuns = new Set<string>()
   const verifierItems = new Map<string, TimelineActivityItem>()
+  const pipelineItems = new Map<string, TimelineActivityItem>()
   const mergeItems = new Map<string, TimelineActivityItem>()
   const subagentWaveItems = new Map<string, TimelineActivityItem>()
   const settledWaveSubagents = new Set<string>()
@@ -654,6 +656,39 @@ export function buildTurnTimeline(
       }
     }
     const key = groupingKey(event)
+    if (isPipelineRunEvent(event)) {
+      // 0.13 WS-C11: every `pipeline.*` event of one run is the same card, which reads its model from the projection.
+      flushGroup()
+      const existing = pipelineItems.get(key)
+      if (existing) {
+        // Not `applyEventToGroup`: it keeps only the latest lifecycle event, and the card folds the whole run.
+        existing.group.events.push(event)
+        existing.group.count = existing.group.events.length
+        existing.group.state = event.state
+        existing.event = event
+        continue
+      }
+      const pipelineGroup: ActivityGroup = {
+        id: key,
+        kind: 'lifecycle',
+        state: event.state,
+        label: 'Pipeline',
+        count: 1,
+        events: [event],
+        agentId: event.agentId,
+        agentName: event.agentName,
+        failed: false,
+      }
+      const nextItem: TimelineActivityItem = {
+        id: `activity:${pipelineGroup.id}:${event.originEventId ?? event.eventId}`,
+        kind: 'activity',
+        group: pipelineGroup,
+        event,
+      }
+      items.push(nextItem)
+      pipelineItems.set(key, nextItem)
+      continue
+    }
     if (isVerifierEvent(event)) {
       flushGroup()
       const existing = verifierItems.get(key)
