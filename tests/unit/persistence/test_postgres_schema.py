@@ -88,6 +88,8 @@ def test_persistence_schema_contains_only_the_durable_boundary_tables():
             "agent_runs",
             "agent_worktrees",
             "task_board_items",
+            "pipeline_runs",
+            "pipeline_step_runs",
         }
 
 

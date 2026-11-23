@@ -24,6 +24,7 @@ from agentos.persistence.postgres.memory_lifecycle import MemoryLifecycle
 from agentos.persistence.postgres.quota import QuotaSnapshotStore
 from agentos.persistence.postgres.schema import projects, workspace_roots
 from agentos.persistence.sqlite import create_local_engine
+from agentos.pipelines.store import PIPELINE_RETENTION_DAYS, PipelineStore
 from agentos.scheduler.scheduled_chats import ScheduledChatService
 from agentos.settings.loader import load_effective_settings
 from agentos.settings.registry import resolve as resolve_setting
@@ -34,6 +35,7 @@ ACTIVITY_PRUNE_BATCH_SIZE = 2000
 ACTIVITY_PRUNE_MAX_BATCHES = 10
 ACTIVITY_PRUNE_BACKLOG_INTERVAL_SECONDS = 60.0
 ACTIVITY_PRUNE_IDLE_INTERVAL_SECONDS = 6 * 3600.0
+PIPELINE_PRUNE_INTERVAL_SECONDS = 6 * 3600.0
 QUOTA_SNAPSHOT_RETENTION_DAYS = 14
 DEFAULT_TOMBSTONE_RETENTION_DAYS = 90
 
@@ -89,6 +91,22 @@ def _maybe_prune_activity_events(
         else ACTIVITY_PRUNE_IDLE_INTERVAL_SECONDS
     )
     return now_mono + interval
+
+
+def _maybe_prune_pipeline_runs(
+    pipeline_store: PipelineStore,
+    *,
+    now_mono: float,
+    next_prune_mono: float,
+) -> float:
+    """Delete finished pipeline runs older than the retention window, at most once per interval."""
+    if now_mono < next_prune_mono:
+        return next_prune_mono
+    try:
+        pipeline_store.prune(datetime.now(UTC) - timedelta(days=PIPELINE_RETENTION_DAYS))
+    except Exception:
+        logging.getLogger("agentos.workers.scheduler").exception("pipeline run prune failed")
+    return now_mono + PIPELINE_PRUNE_INTERVAL_SECONDS
 
 
 def _discover_lint_targets(engine: Engine) -> list[tuple[str, Path, str | None]]:
@@ -196,6 +214,8 @@ def main() -> None:
     quota_store = QuotaSnapshotStore(engine)
     memory_lifecycle = MemoryLifecycle(engine)
     promotion_gate = MemoryPromotionGate(engine)
+    pipeline_store = PipelineStore(engine)
+    next_pipeline_prune_mono = 0.0
     lint_state = InstructionLintState()
     next_prune_mono = 0.0
     last_heartbeat_mono: float | None = None
@@ -213,6 +233,11 @@ def main() -> None:
                 quota_store=quota_store,
                 memory_lifecycle=memory_lifecycle,
                 promotion_gate=promotion_gate,
+            )
+            next_pipeline_prune_mono = _maybe_prune_pipeline_runs(
+                pipeline_store,
+                now_mono=time.monotonic(),
+                next_prune_mono=next_pipeline_prune_mono,
             )
             _maybe_run_instruction_lint(engine, state=lint_state)
         except Exception:

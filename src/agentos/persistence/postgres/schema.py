@@ -1498,6 +1498,61 @@ Index(
     task_board_items.c.status,
 )
 
+pipeline_runs = Table(
+    "pipeline_runs",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("user_id", String(255), nullable=False),
+    Column("conversation_id", String(255), nullable=False),
+    Column("workspace_root", String(1024), nullable=False),
+    Column("pipeline_id", String(64), nullable=False),
+    Column("definition_hash", String(64), nullable=False),
+    Column("source", String(16), nullable=False),
+    Column("inputs", JSON, nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("used_tokens", Integer, nullable=False, server_default="0"),
+    Column("used_cost_usd", Numeric(12, 6), nullable=True),
+    Column("used_seconds", Integer, nullable=False, server_default="0"),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("definition_snapshot", Text, nullable=False, server_default=""),
+    Column("turn_id", String(255), nullable=True),
+    Column("stop_reason", String(32), nullable=True),
+)
+Index(
+    "ix_pipeline_runs_conversation_started",
+    pipeline_runs.c.conversation_id,
+    desc(pipeline_runs.c.started_at),
+)
+Index("ix_pipeline_runs_user_state", pipeline_runs.c.user_id, pipeline_runs.c.state)
+
+pipeline_step_runs = Table(
+    "pipeline_step_runs",
+    metadata,
+    Column("run_id", String(64), primary_key=True),
+    Column("step_id", String(64), primary_key=True),
+    Column("item_key", String(255), primary_key=True, server_default=""),
+    Column("attempt", Integer, primary_key=True, autoincrement=False),
+    Column("input_hash", String(64), nullable=False),
+    Column("state", String(16), nullable=False),
+    Column("agent_id", String(64), nullable=True),
+    Column("output", JSON, nullable=True),
+    Column("error", String(2000), nullable=True),
+    Column("loop_count", SmallInteger, nullable=False, server_default="0"),
+    Column("input_tokens", Integer, nullable=False, server_default="0"),
+    Column("output_tokens", Integer, nullable=False, server_default="0"),
+    Column("cost_usd", Numeric(12, 6), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index(
+    "ix_pipeline_step_runs_reuse",
+    pipeline_step_runs.c.run_id,
+    pipeline_step_runs.c.step_id,
+    pipeline_step_runs.c.loop_count,
+)
+Index("ix_pipeline_step_runs_agent", pipeline_step_runs.c.agent_id)
+
 
 def create_engine_for_tests(url: str = "sqlite:///:memory:", **kwargs):
     return create_engine(url, future=True, **kwargs)
@@ -1562,5 +1617,7 @@ __all__ = [
     "agent_runs",
     "agent_worktrees",
     "task_board_items",
+    "pipeline_runs",
+    "pipeline_step_runs",
     "create_engine_for_tests",
 ]

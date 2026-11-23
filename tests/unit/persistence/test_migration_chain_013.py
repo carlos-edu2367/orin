@@ -29,6 +29,7 @@ EXPECTED_013_CHAIN = [
     "0064_memory_lifecycle_and_agent_scope",
     "0065_verification_reviews",
     "0066_agent_runs_and_task_board",
+    "0067_pipeline_runs",
 ]
 
 

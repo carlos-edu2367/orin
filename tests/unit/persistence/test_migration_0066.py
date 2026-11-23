@@ -100,7 +100,7 @@ def test_migration_0066_upgrades_creates_tables_isolation_column_and_preserves_0
     pre_controls_cols = {c["name"] for c in pre_inspector.get_columns("conversation_agent_controls")}
     pre_queue_cols = {c["name"] for c in pre_inspector.get_columns("conversation_input_queue")}
 
-    upgrade(engine, "head")
+    upgrade(engine, TARGET_REVISION)
 
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
