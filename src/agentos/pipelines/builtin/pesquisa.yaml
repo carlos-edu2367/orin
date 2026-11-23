@@ -1,0 +1,72 @@
+# Pronto: pesquisa.
+# Gasta tokens de 1 agente que divide a pergunta, de 1 explorador por subpergunta (de 2 a 8, quatro por vez, esforço
+# baixo) e de 1 agente que cruza as respostas. Teto: 500.000 tokens e 30 minutos.
+# Entradas: `pergunta` e `max_exploradores` (quantas subperguntas pedir, de 1 a 8; o limite duro é 8).
+# Se um explorador falhar, a pesquisa segue: o relatório diz quais subperguntas ficaram sem resposta.
+# Nenhum modelo fixo: cada etapa usa o provedor e o modelo da conversa que iniciou o pipeline.
+version: 1
+id: pesquisa
+name: Pesquisa
+description: Divide a pergunta em subperguntas, explora cada uma em paralelo e cruza as respostas em um relatório que cita as fontes.
+inputs:
+  pergunta: {type: string, required: true, max_length: 4000}
+  max_exploradores: {type: integer, default: 4}
+budget:
+  max_tokens: 500000
+  max_minutes: 30
+defaults:
+  retries: {max: 1, on: [failed, stalled]}
+  stall_minutes: 10
+steps:
+  - id: dividir
+    agent: explore
+    effort: low
+    description: Divide a pergunta em subperguntas independentes
+    prompt: |
+      Split the research question below into independent sub-questions that can be investigated separately.
+      Return at least 2 and at most ${{ inputs.max_exploradores }} sub-questions (never more than 8), each one
+      complete and understandable on its own. Do not answer them. Answer with only one JSON object: subperguntas.
+      Question: ${{ inputs.pergunta }}
+    output_schema:
+      type: object
+      required: [subperguntas]
+      properties:
+        subperguntas:
+          type: array
+          minItems: 2
+          maxItems: 8
+          items: {type: string, minLength: 1}
+
+  - id: explorar
+    agent: explore
+    effort: low
+    description: Um explorador por subpergunta
+    map:
+      over: ${{ steps.dividir.output.subperguntas }}
+      as: subpergunta
+      max_parallel: 4
+      fail_fast: false
+    on_fail: continue
+    prompt: |
+      Investigate this sub-question of a larger research question and report what you found. Read-only work:
+      do not edit files.
+      For each claim give its source (a URL, or a file path and line). Quote or copy the evidence; do not paraphrase
+      it into something the source does not say. If you cannot find an answer, say so plainly instead of guessing.
+      Larger question: ${{ inputs.pergunta }}
+      Your sub-question: ${{ subpergunta }}
+
+  - id: reduzir
+    agent: plan
+    effort: medium
+    description: Cruza as respostas e cita as fontes
+    prompt: |
+      Write the final research report in markdown from the explorers' answers below.
+      Each entry of the answers list is the answer to the sub-question in the same position of the sub-questions list;
+      null means that explorer failed.
+      Cross the answers, point out where they agree or contradict each other, and answer the question as far as the
+      evidence allows. Never state a claim that no explorer supported.
+      End the report with a section titled "Fontes" that lists every source the explorers cited, and a section titled
+      "Sem resposta" that lists the sub-questions left unanswered (failed explorers or no evidence found).
+      Question: ${{ inputs.pergunta }}
+      Sub-questions: ${{ steps.dividir.output.subperguntas }}
+      Answers: ${{ steps.explorar.output }}

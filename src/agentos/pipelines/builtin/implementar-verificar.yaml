@@ -1,0 +1,87 @@
+# Pronto: implementar e verificar.
+# Gasta tokens de 1 agente de plano, de 1 agente por tarefa (até 8, três por vez), de 1 agente de correção por volta
+# (no máximo 2 voltas) e de 1 verificador independente. Teto do pipeline: 2.000.000 de tokens, US$ 15 e 120 minutos.
+# Entradas: `objetivo` (o que fazer) e `testes` (o comando que roda os testes, por exemplo `pytest -q`).
+# Nenhum modelo fixo: cada etapa usa o provedor e o modelo da conversa que iniciou o pipeline.
+# Sem isolamento por worktree (ele exige a Orquestração ligada): as tarefas do plano não dividem arquivos.
+version: 1
+id: implementar-verificar
+name: Implementar e verificar
+description: Planeja, implementa em paralelo, roda os testes, pede a um verificador independente e corrige até passar (no máximo 2 voltas).
+inputs:
+  objetivo: {type: string, required: true, max_length: 8000}
+  testes: {type: string, default: "pytest -q"}
+budget:
+  max_tokens: 2000000
+  max_cost_usd: 15
+  max_minutes: 120
+defaults:
+  effort: medium
+  retries: {max: 1, on: [failed, stalled]}
+  stall_minutes: 10
+steps:
+  - id: plano
+    agent: plan
+    effort: high
+    description: Divide o objetivo em tarefas independentes
+    prompt: |
+      Plan the work for the goal below and split it into independent tasks that can run in parallel.
+      Each task needs a short title and the list of files it will create or change.
+      Tasks must not share files: another agent works on each of the other tasks at the same time.
+      Do not edit files. Answer with only a JSON object that matches the output schema.
+      Goal: ${{ inputs.objetivo }}
+    output_schema:
+      type: object
+      required: [tarefas]
+      properties:
+        tarefas:
+          type: array
+          minItems: 1
+          maxItems: 8
+          items:
+            type: object
+            required: [titulo, arquivos]
+            properties:
+              titulo: {type: string, minLength: 1}
+              arquivos: {type: array, items: {type: string}}
+
+  - id: implementar
+    agent: general
+    description: Uma tarefa do plano por agente, até três ao mesmo tempo
+    map:
+      over: ${{ steps.plano.output.tarefas }}
+      as: tarefa
+      max_parallel: 3
+    budget: {max_tokens: 400000}
+    prompt: |
+      Implement one task of a larger plan. Change only the files listed for your task: other agents are working
+      on the other tasks in the same project at the same time.
+      Write or update the tests that show your task works. Do not run the whole test suite; the next step does that.
+      Overall goal: ${{ inputs.objetivo }}
+      Your task: ${{ tarefa.titulo }}
+      Files of your task: ${{ tarefa.arquivos }}
+
+  - id: verificar
+    description: Roda os testes e pede a revisão de um verificador de outra família
+    gate:
+      all:
+        - command: ${{ inputs.testes }}
+          timeout_seconds: 900
+        - verifier:
+            policy: cross_family
+            effort: high
+            pass_on: [pass]
+    on_fail:
+      goto: corrigir
+      max_loops: 2
+
+  - id: corrigir
+    agent: general
+    description: Corrige o que o gate reprovou e volta a verificar
+    when: ${{ steps.verificar.failed }}
+    prompt: |
+      The verification of the work failed. Fix the problems listed below in the project, then stop.
+      Fix the cause, not the symptom: do not delete or weaken tests to make them pass.
+      Overall goal: ${{ inputs.objetivo }}
+      Failures and confirmed findings: ${{ steps.verificar.findings }}
+    next: verificar

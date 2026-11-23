@@ -1,0 +1,126 @@
+# Pronto: revisão com vários modelos.
+# Gasta tokens de até 3 revisores (um por modelo, em paralelo) mais 1 agente de consolidação. Teto: 1.000.000 de
+# tokens, US$ 10 e 60 minutos.
+# Entradas: `alvo` (o que revisar), `revisores` (até 3 modelos no formato provedor/modelo; `auto` escolhe modelos de
+# famílias diferentes entre os que você tem conectados, e a lista fica gravada no início da execução) e `esforco`.
+# Os revisores não veem o trabalho um do outro. Com menos de 3 famílias disponíveis a revisão segue com menos
+# revisores e a consolidação não declara consenso que não existe.
+version: 1
+id: revisao-multimodelo
+name: Revisão com vários modelos
+description: Até três modelos de famílias diferentes revisam o mesmo alvo sem ver o trabalho um do outro, e uma etapa final lista cada achado com os revisores que o provaram.
+inputs:
+  alvo: {type: string, default: "as mudanças não commitadas do workspace", max_length: 4000}
+  revisores: {type: models, default: auto}
+  esforco: {type: string, default: high}
+budget:
+  max_tokens: 1000000
+  max_cost_usd: 10
+  max_minutes: 60
+defaults:
+  retries: {max: 1, on: [failed, stalled]}
+  stall_minutes: 10
+steps:
+  - id: revisar
+    agent: verifier
+    description: Um revisor por modelo, cegos entre si
+    provider: ${{ revisor.provider }}
+    model: ${{ revisor.model }}
+    effort: ${{ inputs.esforco }}
+    map:
+      over: ${{ inputs.revisores }}
+      as: revisor
+      max_parallel: 3
+      fail_fast: false
+    on_fail: continue
+    prompt: |
+      You are one of several independent reviewers. The others review the same target on their own: you cannot see
+      their work, so do not guess it and do not wait for it.
+      Review target: ${{ inputs.alvo }}
+      Your reviewer id: ${{ revisor.provider }}/${{ revisor.model }}
+      Read the changes and run the project's own tests, linters and builds when they exist. Report only what you can show.
+      A finding of severity major or blocker needs evidence: a failing test, a command with its exit code, or a file
+      and line with the reason. Without evidence its severity is unproven.
+      Do not edit files.
+      Answer with only one JSON object that matches the output schema: reviewer (exactly your reviewer id), verdict,
+      findings and unverified.
+    output_schema:
+      type: object
+      required: [reviewer, verdict, findings]
+      properties:
+        reviewer: {type: string, minLength: 1}
+        verdict: {enum: [pass, fail, inconclusive]}
+        findings:
+          type: array
+          items:
+            type: object
+            required: [id, severity, category, claim]
+            properties:
+              id: {type: string}
+              severity: {enum: [blocker, major, minor, nit, unproven]}
+              category: {enum: [bug, regression, security, requirement, test, performance, consistency]}
+              claim: {type: string, minLength: 1}
+              evidence:
+                type: object
+                required: [kind]
+                properties:
+                  kind: {enum: [failing_test, command, code_ref]}
+                  command: {type: string}
+                  exit_code: {type: integer}
+                  output_excerpt: {type: string}
+                  file: {type: string}
+                  line: {type: integer}
+                  reason: {type: string}
+              suggested_fix: {type: string}
+        unverified:
+          type: array
+          items: {type: string}
+
+  - id: consolidar
+    agent: plan
+    effort: high
+    description: Junta os relatórios e lista cada achado com os revisores que o provaram
+    prompt: |
+      Consolidate the independent review reports below into one list of findings.
+      Each entry of the list is the report of one reviewer; null means that reviewer failed and gave no report.
+      Reports: ${{ steps.revisar.output }}
+      Rules:
+      - List a finding once, even when several reviewers reported it (the same problem in the same place).
+      - proven_by lists only the reviewers that supplied evidence for the finding. Use the ids written in the field
+        reviewer of each report and never invent a reviewer.
+      - A finding of severity major or blocker needs at least one reviewer in proven_by. When no reviewer proved it,
+        use severity unproven.
+      - reviewers lists the ids of the reviewers whose report you used. When only one reviewer answered, say so in
+        note and do not describe the result as agreement.
+      - Do not edit files. Answer with only one JSON object that matches the output schema.
+    output_schema:
+      type: object
+      required: [reviewers, findings]
+      properties:
+        reviewers:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {type: string, minLength: 1}
+        note: {type: string}
+        findings:
+          type: array
+          items:
+            type: object
+            required: [claim, severity, category, proven_by, evidence_summary]
+            properties:
+              claim: {type: string, minLength: 1}
+              severity: {enum: [blocker, major, minor, nit, unproven]}
+              category: {type: string}
+              proven_by:
+                type: array
+                uniqueItems: true
+                items: {type: string, minLength: 1}
+              evidence_summary: {type: string}
+            if:
+              properties:
+                severity: {enum: [blocker, major]}
+              required: [severity]
+            then:
+              properties:
+                proven_by: {minItems: 1}

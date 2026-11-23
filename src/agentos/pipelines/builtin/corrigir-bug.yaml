@@ -1,0 +1,110 @@
+# Pronto: corrigir bug com teste que reproduz.
+# Gasta tokens de 1 agente que escreve o teste de reprodução, 1 que corrige (mais 1 por volta de correção) e 1
+# verificador independente. Até 2 voltas na reprodução e 2 na correção. Teto: 1.500.000 de tokens, US$ 10 e 90 minutos.
+# Entradas: `descricao` (o bug), `comando_reproducao` (o comando que roda só o teste novo; o agente grava o teste de
+# modo que exatamente esse comando o execute) e `testes` (a suíte inteira).
+# Os comandos dos gates vêm só destas entradas, nunca do que um modelo escreveu. Limitação conhecida: um teste que
+# falha por outro motivo (erro de sintaxe, por exemplo) também "reproduz"; a falha esperada informada no primeiro passo
+# e o verificador no fim reduzem esse risco, mas não o eliminam.
+# Nenhum modelo fixo: cada etapa usa o provedor e o modelo da conversa que iniciou o pipeline.
+version: 1
+id: corrigir-bug
+name: Corrigir bug com teste de reprodução
+description: Escreve um teste que reproduz o bug e confirma que ele falha, corrige, confirma que o teste novo e a suíte passam e pede a um verificador independente.
+inputs:
+  descricao: {type: string, required: true, max_length: 8000}
+  comando_reproducao: {type: string, default: "pytest -q tests/test_repro_bug.py"}
+  testes: {type: string, default: "pytest -q"}
+budget:
+  max_tokens: 1500000
+  max_cost_usd: 10
+  max_minutes: 90
+defaults:
+  effort: medium
+  retries: {max: 1, on: [failed, stalled]}
+  stall_minutes: 10
+steps:
+  - id: reproduzir
+    agent: general
+    description: Escreve o teste que reproduz o bug
+    prompt: |
+      Write one new automated test that reproduces the bug below and fails because of it.
+      Write the test so that exactly this command runs it (and nothing else needs to be typed): ${{ inputs.comando_reproducao }}
+      Run that command and confirm the test fails for the reason the bug describes, not because of a syntax, import
+      or setup error. Do not change the production code yet.
+      Answer with only one JSON object: arquivo (the test file you wrote) and falha_esperada (the failure message you saw).
+      Bug: ${{ inputs.descricao }}
+    output_schema:
+      type: object
+      required: [arquivo, falha_esperada]
+      properties:
+        arquivo: {type: string, minLength: 1}
+        falha_esperada: {type: string, minLength: 1}
+
+  - id: confirmar_falha
+    description: O teste novo precisa falhar de verdade
+    gate:
+      all:
+        - command: ${{ inputs.comando_reproducao }}
+          expect: nonzero
+          timeout_seconds: 600
+    on_fail:
+      goto: reproduzir_de_novo
+      max_loops: 2
+
+  - id: reproduzir_de_novo
+    agent: general
+    description: Refaz o teste de reprodução quando ele não falhou
+    when: ${{ steps.confirmar_falha.failed }}
+    prompt: |
+      The reproduction test did not fail the way it must: the command either passed, could not run, or timed out.
+      Read the result below, fix the test (or how it is run) and make it fail because of the bug. Do not change the
+      production code. The command that must run it is unchanged: ${{ inputs.comando_reproducao }}
+      Answer with only one JSON object: arquivo and falha_esperada.
+      Bug: ${{ inputs.descricao }}
+      Previous test: ${{ steps.reproduzir.output }}
+      Result of the command: ${{ steps.confirmar_falha.findings }}
+    output_schema:
+      type: object
+      required: [arquivo, falha_esperada]
+      properties:
+        arquivo: {type: string, minLength: 1}
+        falha_esperada: {type: string, minLength: 1}
+    next: confirmar_falha
+
+  - id: corrigir
+    agent: general
+    description: Corrige o código de produção
+    prompt: |
+      Fix the bug in the production code so the reproduction test passes without breaking anything else.
+      Do not edit or weaken the reproduction test.
+      Bug: ${{ inputs.descricao }}
+      Reproduction test (file and the failure it must show): ${{ steps.reproduzir.output }}
+      Reproduction command: ${{ inputs.comando_reproducao }}
+
+  - id: confirmar_correcao
+    description: O teste novo, a suíte e o verificador independente
+    gate:
+      all:
+        - command: ${{ inputs.comando_reproducao }}
+          timeout_seconds: 600
+        - command: ${{ inputs.testes }}
+          timeout_seconds: 1800
+        - verifier:
+            policy: cross_family
+            effort: high
+            pass_on: [pass]
+    on_fail:
+      goto: corrigir_achados
+      max_loops: 2
+
+  - id: corrigir_achados
+    agent: general
+    description: Corrige o que a confirmação reprovou e volta a confirmar
+    when: ${{ steps.confirmar_correcao.failed }}
+    prompt: |
+      The check of the fix failed. Fix the problems listed below in the production code, then stop.
+      Do not edit or weaken the reproduction test and do not delete other tests.
+      Bug: ${{ inputs.descricao }}
+      Failures and confirmed findings: ${{ steps.confirmar_correcao.findings }}
+    next: confirmar_correcao
