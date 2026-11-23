@@ -398,7 +398,9 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     context_observations = ContextObservationStore(engine)
     verification_reviews = VerificationReviewStore(engine)
     quota_store = QuotaSnapshotStore(engine)
-    quota_service = QuotaService(quota_store)
+    from agentos.quota.active_probe import default_active_probes
+
+    quota_service = QuotaService(quota_store, active_probes=default_active_probes())
     quota_poller = QuotaPoller(quota_service)
     return ApiServices(
         security=security,

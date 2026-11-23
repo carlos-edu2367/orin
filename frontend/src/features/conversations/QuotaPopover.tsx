@@ -3,19 +3,45 @@ import {
   emptyProviderQuota,
   ensureAllSubscriptions,
   formatQuotaAge,
-  formatResetTime,
+  formatQuotaRelease,
   highestKnownPercent,
   isQuotaRejected,
+  isQuotaWindowRenewed,
   normalizeSubscriptionProvider,
   quotaConfidenceLabel,
   quotaSourceLabel,
   quotaStatusLabel,
   quotaWindowLabel,
+  sortQuotaWindows,
   subscriptionDisplayName,
   type ProviderQuota,
+  type QuotaWindow,
 } from '../../api/quota'
 import { QuotaRing, quotaToneFor } from '../../components/QuotaRing'
+import { useQuotaNow } from './useQuotaNow'
 import './QuotaPopover.css'
+
+function windowValueText(win: QuotaWindow): string {
+  return win.used_percent !== null ? `${Math.round(win.used_percent)}%` : quotaStatusLabel(win.status)
+}
+
+function windowNoteText(win: QuotaWindow, nowMs?: number): string | null {
+  if (isQuotaWindowRenewed(win)) return 'janela renovada, aguardando leitura'
+  return formatQuotaRelease(win.resets_at, nowMs)
+}
+
+function emptyMessage(provider: string): string {
+  if (provider === 'google-antigravity') {
+    return 'Sem leitura do Antigravity ainda. Use Atualizar para consultar o CLI.'
+  }
+  return 'Sem janela registrada ainda.'
+}
+
+function usageLine(window: { tokens: number; calls: number }): string {
+  return `${window.tokens.toLocaleString('pt-BR')} tokens · ${window.calls} ${
+    window.calls === 1 ? 'chamada' : 'chamadas'
+  }`
+}
 
 export type SubscriptionQuotaCardsProps = {
   subscriptions: readonly ProviderQuota[]
@@ -44,6 +70,7 @@ export function SubscriptionQuotaCards({
         const tone = quotaToneFor(percent, rejected)
         const age = formatQuotaAge(sub.observed_at, sub.age_seconds, nowMs)
         const isCurrent = normalizedActive === sub.provider
+        const windows = sortQuotaWindows(sub.windows)
 
         return (
           <section
@@ -62,76 +89,66 @@ export function SubscriptionQuotaCards({
               </span>
             </header>
 
-            <div className="quota-card__windows">
-              {sub.windows.length > 0 ? (
-                sub.windows.map((win, index) => {
+            {windows.length > 0 ? (
+              <ul className="quota-card__windows">
+                {windows.map((win, index) => {
                   const winTone = quotaToneFor(win.used_percent, win.status === 'rejected')
-                  const reset = formatResetTime(win.resets_at, nowMs)
+                  const note = windowNoteText(win, nowMs)
+                  const label = quotaWindowLabel(win)
+                  const models = win.scope_models && win.scope_models.length > 0 ? win.scope_models.join(', ') : null
                   return (
-                    <div key={`${win.kind}-${win.scope_model ?? index}`} className="quota-card__window">
+                    <li
+                      key={`${win.kind}-${win.scope_model ?? index}`}
+                      className="quota-card__window"
+                      data-testid={`quota-window-${sub.provider}-${index}`}
+                    >
                       <div className="quota-card__window-row">
-                        <span className="quota-card__window-label">{quotaWindowLabel(win)}</span>
-                        <span className="quota-card__window-val">
-                          {win.used_percent !== null
-                            ? `${Math.round(win.used_percent)}%`
-                            : quotaStatusLabel(win.status)}
+                        <span
+                          className="quota-card__window-label"
+                          title={models ? `${label}\nModelos: ${models}` : label}
+                        >
+                          {label}
                         </span>
+                        <span className="quota-card__window-val">{windowValueText(win)}</span>
                       </div>
-                      {win.used_percent !== null && (
+                      <div className="quota-card__window-line">
                         <div className="quota-card__bar" aria-hidden="true">
-                          <span
-                            className={`quota-card__bar-fill quota-card__bar-fill--${winTone}`}
-                            style={{ width: `${Math.max(0, Math.min(100, win.used_percent))}%` }}
-                          />
+                          {win.used_percent !== null && (
+                            <span
+                              className={`quota-card__bar-fill quota-card__bar-fill--${winTone}`}
+                              style={{ width: `${Math.max(0, Math.min(100, win.used_percent))}%` }}
+                            />
+                          )}
                         </div>
-                      )}
-                      {reset && (
-                        <div className="quota-card__reset">Libera às {reset}</div>
-                      )}
-                    </div>
+                        {note && <span className="quota-card__reset">{note}</span>}
+                      </div>
+                    </li>
                   )
-                })
-              ) : (
-                <p className="quota-card__empty">
-                  {sub.provider === 'google-antigravity'
-                    ? 'O Antigravity não informa a cota.'
-                    : 'Sem janela registrada ainda.'}
-                </p>
-              )}
-            </div>
+                })}
+              </ul>
+            ) : (
+              <p className="quota-card__empty">{emptyMessage(sub.provider)}</p>
+            )}
 
-            <dl className="quota-card__meta">
-              <div>
-                <dt>Fonte</dt>
-                <dd>{quotaSourceLabel(sub.source)}</dd>
-              </div>
-              <div>
-                <dt>Idade</dt>
-                <dd>{age}</dd>
-              </div>
-            </dl>
+            <p className="quota-card__meta">
+              <span>{quotaSourceLabel(sub.source)}</span>
+              <span aria-hidden="true"> · </span>
+              <span>{age}</span>
+            </p>
 
-            <div className="quota-card__orin-usage">
-              <span className="quota-card__usage-heading">Consumo pelo Orin</span>
+            <details className="quota-card__orin-usage">
+              <summary className="quota-card__usage-heading">Consumo pelo Orin</summary>
               <dl className="quota-card__usage-grid">
                 <div>
                   <dt>5 h</dt>
-                  <dd>
-                    {sub.orin_usage.five_hour.tokens.toLocaleString('pt-BR')} tokens ·{' '}
-                    {sub.orin_usage.five_hour.calls}{' '}
-                    {sub.orin_usage.five_hour.calls === 1 ? 'chamada' : 'chamadas'}
-                  </dd>
+                  <dd>{usageLine(sub.orin_usage.five_hour)}</dd>
                 </div>
                 <div>
                   <dt>7 dias</dt>
-                  <dd>
-                    {sub.orin_usage.seven_day.tokens.toLocaleString('pt-BR')} tokens ·{' '}
-                    {sub.orin_usage.seven_day.calls}{' '}
-                    {sub.orin_usage.seven_day.calls === 1 ? 'chamada' : 'chamadas'}
-                  </dd>
+                  <dd>{usageLine(sub.orin_usage.seven_day)}</dd>
                 </div>
               </dl>
-            </div>
+            </details>
           </section>
         )
       })}
@@ -146,6 +163,7 @@ export type QuotaPopoverProps = {
   loading?: boolean
   disabled?: boolean
   compact?: boolean
+  /** Called when the panel opens and when "Atualizar" is clicked (asks the CLIs for the real usage). */
   onRefresh?: () => void
   nowMs?: number
 }
@@ -161,8 +179,19 @@ export function QuotaPopover({
   nowMs,
 }: QuotaPopoverProps) {
   const [open, setOpen] = useState(false)
+  const { nowMs: effectiveNowMs, bump: bumpNow } = useQuotaNow(nowMs, displayEnabled)
   const containerRef = useRef<HTMLDivElement>(null)
+  const onRefreshRef = useRef(onRefresh)
   const normalizedProvider = normalizeSubscriptionProvider(provider)
+
+  useEffect(() => {
+    onRefreshRef.current = onRefresh
+  }, [onRefresh])
+
+  // Opening the panel asks for fresh data (the server probes the CLIs; the result arrives through SSE).
+  useEffect(() => {
+    if (open) onRefreshRef.current?.()
+  }, [open])
 
   const currentQuota = useMemo<ProviderQuota | null>(() => {
     if (!normalizedProvider) return null
@@ -222,22 +251,25 @@ export function QuotaPopover({
         expanded={open}
         disabled={disabled}
         compact={compact}
-        nowMs={nowMs}
-        onClick={() => setOpen((current) => !current)}
+        nowMs={effectiveNowMs}
+        onClick={() => {
+          bumpNow()
+          setOpen((current) => !current)
+        }}
       />
 
       {open && (
         <div
-          className="picker-panel quota-popover__panel"
+          className="quota-popover__panel"
           role="dialog"
           aria-label="Cota das assinaturas"
           data-testid="quota-popover-panel"
         >
           <div className="quota-popover__header">
-            <div>
+            <div className="quota-popover__heading">
               <h3 className="quota-popover__title">Cota das assinaturas</h3>
               <p className="quota-popover__subtitle">
-                Leitura passiva das assinaturas locais e uso registrado pelo Orin.
+                O Orin consulta os CLIs ao abrir, a cada turno e em intervalos regulares.
               </p>
             </div>
             <div className="quota-popover__actions">
@@ -265,7 +297,7 @@ export function QuotaPopover({
           <SubscriptionQuotaCards
             subscriptions={subscriptions}
             activeProvider={normalizedProvider}
-            nowMs={nowMs}
+            nowMs={effectiveNowMs}
             layout="popover"
           />
         </div>

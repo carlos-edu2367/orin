@@ -45,7 +45,8 @@ def _make_service(
 
 
 def test_quota_service_records_unified_windows_and_antigravity_unknown(tmp_path: Path):
-    now = datetime(2026, 11, 21, 12, 0, 0, tzinfo=UTC)
+    # Before the windows' `resetsAt` (2026-10-28T17:00Z), otherwise they would count as renewed.
+    now = datetime(2026, 10, 28, 12, 0, 0, tzinfo=UTC)
     published: list[tuple[str, str]] = []
     service, engine = _make_service(
         tmp_path,

@@ -4,11 +4,34 @@
   align-items: center;
 }
 
+/*
+ * The panel is its own surface (it used to borrow `.picker-panel`, whose 380 x 340 box and `overflow: auto`
+ * squeezed the cards into overlapping columns). Vertical scroll only; nothing may widen it.
+ */
 .quota-popover__panel {
-  width: min(740px, calc(100vw - 24px));
-  max-width: calc(100vw - 24px);
-  padding: 12px;
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: 0;
   z-index: 40;
+  box-sizing: border-box;
+  width: min(432px, calc(100vw - 24px));
+  max-height: min(560px, 70vh);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 12px;
+  border: 1px solid var(--orin-border-strong, var(--line-strong));
+  border-radius: 14px;
+  background: var(--orin-surface-2, var(--surface));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(18px);
+}
+
+.canvas-header .quota-popover__panel,
+.home__bar .quota-popover__panel,
+.chat__bar .quota-popover__panel {
+  top: calc(100% + 8px);
+  bottom: auto;
 }
 
 .quota-popover__header {
@@ -21,6 +44,10 @@
   border-bottom: 1px solid var(--orin-border-subtle, var(--line));
 }
 
+.quota-popover__heading {
+  min-width: 0;
+}
+
 .quota-popover__title {
   margin: 0;
   font-size: 13px;
@@ -31,11 +58,14 @@
 .quota-popover__subtitle {
   margin: 2px 0 0;
   font-size: 11.5px;
+  line-height: 1.35;
   color: var(--orin-text-secondary, var(--muted));
+  overflow-wrap: anywhere;
 }
 
 .quota-popover__actions {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
 }
@@ -43,6 +73,7 @@
 .quota-popover__refresh {
   font-size: 11.5px;
   padding: 3px 8px;
+  white-space: nowrap;
 }
 
 .quota-popover__close {
@@ -65,23 +96,25 @@
   border-color: var(--line-strong, var(--line));
 }
 
+/* One block per subscription, stacked. The settings layout may use a wide grid. */
 .quota-cards {
   display: grid;
-  gap: 10px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
-@media (max-width: 720px) {
-  .quota-cards {
-    grid-template-columns: 1fr;
-  }
+.quota-cards--settings {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 10px;
 }
 
 .quota-card {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   align-content: start;
-  padding: 10px 12px;
+  min-width: 0;
+  padding: 9px 11px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--ink);
@@ -96,6 +129,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .quota-card__title-group {
@@ -107,12 +141,16 @@
 
 .quota-card__title {
   margin: 0;
+  overflow: hidden;
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .quota-card__active {
+  flex: 0 0 auto;
   padding: 1px 6px;
   border-radius: 999px;
   font-size: 10px;
@@ -122,6 +160,7 @@
 }
 
 .quota-card__badge {
+  flex: 0 0 auto;
   padding: 2px 7px;
   border-radius: 999px;
   font-size: 10.5px;
@@ -148,12 +187,16 @@
 
 .quota-card__windows {
   display: grid;
-  gap: 8px;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .quota-card__window {
   display: grid;
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .quota-card__window-row {
@@ -161,21 +204,37 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   font-size: 12px;
 }
 
 .quota-card__window-label {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .quota-card__window-val {
+  flex: 0 0 auto;
   font-family: var(--mono, monospace);
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.quota-card__window-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .quota-card__bar {
+  flex: 1 1 auto;
+  min-width: 48px;
   height: 5px;
   border-radius: 999px;
   overflow: hidden;
@@ -202,8 +261,14 @@
 }
 
 .quota-card__reset {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 62%;
+  overflow: hidden;
   font-size: 10.5px;
   color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .quota-card__empty {
@@ -211,18 +276,40 @@
   font-size: 11.5px;
   line-height: 1.45;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
-.quota-card__meta,
+.quota-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 2px;
+  margin: 0;
+  font-size: 10.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.quota-card__orin-usage {
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+  font-size: 11px;
+}
+
+.quota-card__usage-heading {
+  cursor: pointer;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
 .quota-card__usage-grid {
   display: grid;
   gap: 4px;
-  margin: 0;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
+  margin: 6px 0 0;
 }
 
-.quota-card__meta div,
 .quota-card__usage-grid div {
   display: flex;
   align-items: baseline;
@@ -231,28 +318,16 @@
   font-size: 11px;
 }
 
-.quota-card__meta dt,
 .quota-card__usage-grid dt {
+  flex: 0 0 auto;
   color: var(--muted);
 }
 
-.quota-card__meta dd,
 .quota-card__usage-grid dd {
   margin: 0;
+  min-width: 0;
   text-align: right;
   font-family: var(--mono, monospace);
   color: var(--text);
-}
-
-.quota-card__orin-usage {
-  display: grid;
-  gap: 4px;
-}
-
-.quota-card__usage-heading {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  text-transform: uppercase;
+  overflow-wrap: anywhere;
 }

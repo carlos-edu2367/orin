@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -9,8 +10,10 @@ from typing import Any, Protocol
 
 from agentos.providers.cli_adapter import RateLimitState
 
+from .active_probe import ActiveProbe
 from .claude_reader import ClaudeUsageCacheReader
 from .codex_reader import CodexQuotaReader
+from .matching import scope_matches_model
 from .models import (
     Confidence,
     OrinUsageSummary,
@@ -25,6 +28,12 @@ from .normalize import (
     normalize_window_kind,
     snapshots_from_rate_limit_state,
 )
+from .probe_coordinator import ProbeCoordinator, ProbeSettings, recent_probe_age_from_store
+
+logger = logging.getLogger("agentos.quota")
+
+# Window status for a window whose ``resets_at`` already passed: it was renewed and nothing newer was read yet.
+WINDOW_RENEWED = "renewed"
 
 SUBSCRIPTION_PROVIDERS: tuple[str, ...] = (
     "anthropic-cli",
@@ -77,13 +86,62 @@ def _is_snapshot_active_rejection(snap: QuotaSnapshot, now: datetime) -> bool:
     return (now - snap.observed_at) <= _RECENT_ERROR_MAX_AGE
 
 
+def _snapshot_models(snap: QuotaSnapshot) -> tuple[str, ...]:
+    models = snap.raw.get("models") if isinstance(snap.raw, dict) else None
+    if isinstance(models, (list, tuple)):
+        return tuple(str(item) for item in models if isinstance(item, str) and item.strip())
+    return ()
+
+
+def _window_from_snapshot(snap: QuotaSnapshot, now: datetime) -> QuotaWindow:
+    """A snapshot as a window; one whose reset time already passed was renewed, so its old percent is dropped."""
+    models = _snapshot_models(snap)
+    if snap.source != "error" and snap.resets_at is not None and snap.resets_at <= now:
+        return QuotaWindow(
+            kind=snap.window_kind,
+            used_percent=None,
+            resets_at=None,
+            status=WINDOW_RENEWED,
+            scope_model=snap.scope_model,
+            scope_models=models,
+        )
+    return QuotaWindow(
+        kind=snap.window_kind,
+        used_percent=snap.used_percent,
+        resets_at=snap.resets_at,
+        status=snap.status,
+        scope_model=snap.scope_model,
+        scope_models=models,
+    )
+
+
 def _window_sort_key(win: QuotaWindow) -> tuple[int, str, str]:
     order = {"five_hour": 0, "seven_day": 1, "weekly": 2, "weekly_scoped": 3}
     return (order.get(win.kind, 9), win.kind, win.scope_model or "")
 
 
+_SETTINGS_CACHE_SECONDS = 5.0
+
+
+def read_probe_settings() -> ProbeSettings:
+    """``quota.activeProbe.*`` from the user's settings files; defaults when anything is unreadable."""
+    try:
+        from agentos.settings.loader import load_effective_settings
+        from agentos.settings.registry import resolve
+
+        effective = load_effective_settings(None)
+        enabled = resolve(effective, "quota.activeProbe.enabled").value
+        minutes = resolve(effective, "quota.activeProbe.intervalMinutes").value
+        return ProbeSettings(
+            enabled=bool(enabled) if isinstance(enabled, bool) else True,
+            interval_minutes=max(2, min(60, int(minutes))),
+        )
+    except Exception:  # noqa: BLE001 - settings problems never disable quota reading
+        return ProbeSettings()
+
+
 class QuotaService:
-    """Coordinates passive file readers, runtime events, storage, and status queries."""
+    """Coordinates passive file readers, active CLI probes, runtime events, storage, and status queries."""
 
     def __init__(
         self,
@@ -93,6 +151,10 @@ class QuotaService:
         codex_reader: CodexQuotaReader | None = None,
         clock: Callable[[], datetime] | None = None,
         on_updated: Callable[[str, str], None] | None = None,
+        active_probes: Sequence[ActiveProbe] | None = None,
+        probe_settings_reader: Callable[[str], ProbeSettings] | None = None,
+        probe_clock: Callable[[], float] | None = None,
+        probe_spawn: Callable[[Callable[[], None]], Any] | None = None,
     ) -> None:
         self._store = store
         self._claude_reader = claude_reader or ClaudeUsageCacheReader()
@@ -102,6 +164,66 @@ class QuotaService:
         self._listeners: list[Callable[[str, str], None]] = []
         if on_updated is not None:
             self._listeners.append(on_updated)
+        self._probes: ProbeCoordinator | None = None
+        if active_probes:
+            extra: dict[str, Any] = {}
+            if probe_clock is not None:
+                extra["clock"] = probe_clock
+            if probe_spawn is not None:
+                extra["spawn"] = probe_spawn
+            self._probes = ProbeCoordinator(
+                active_probes,
+                record=lambda user_id, snaps: self.record_snapshots(user_id, snaps, deduplicate=False),
+                settings_reader=probe_settings_reader or self._cached_probe_settings,
+                recent=recent_probe_age_from_store(self._store, self._now),
+                **extra,
+            )
+        self._settings_cache: tuple[float, ProbeSettings] | None = None
+
+    # -- active probes -------------------------------------------------------------------------
+
+    def _cached_probe_settings(self, _user_id: str) -> ProbeSettings:
+        import time
+
+        cached = self._settings_cache
+        now = time.monotonic()
+        if cached is not None and now - cached[0] < _SETTINGS_CACHE_SECONDS:
+            return cached[1]
+        value = read_probe_settings()
+        self._settings_cache = (now, value)
+        return value
+
+    @property
+    def probe_coordinator(self) -> ProbeCoordinator | None:
+        return self._probes
+
+    def probe_settings(self, user_id: str) -> ProbeSettings:
+        """Whether active probes are on and how often the poller should run them (minutes)."""
+        if self._probes is None:
+            return ProbeSettings(enabled=False)
+        return self._probes.settings(user_id)
+
+    def refresh_active(self, user_id: str, providers: Sequence[str] | None = None, *, reason: str = "") -> list[str]:
+        """Schedule background probes (throttled, one in flight per subscription). Returns the providers scheduled."""
+        if self._probes is None:
+            return []
+        scheduled: list[str] = []
+        for provider in providers if providers is not None else self._probes.providers:
+            try:
+                if self._probes.request(user_id, provider, reason=reason):
+                    scheduled.append(normalize_provider_name(provider))
+            except Exception:  # noqa: BLE001 - probing never fails callers
+                logger.debug("could not schedule quota probe for %s", provider, exc_info=True)
+        return scheduled
+
+    def after_turn(self, user_id: str, provider: str | None) -> None:
+        """End of a turn: reread local files and probe only the subscription the turn used."""
+        try:
+            self.refresh_from_files(user_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("passive quota refresh after turn failed", exc_info=True)
+        if provider:
+            self.refresh_active(user_id, [provider], reason="after_turn")
 
     def subscribe_updates(self, listener: Callable[[str, str], None]) -> Callable[[], None]:
         scope_key = _store_scope_key(self._store)
@@ -262,16 +384,7 @@ class QuotaService:
 
         windows = tuple(
             sorted(
-                (
-                    QuotaWindow(
-                        kind=snap.window_kind,
-                        used_percent=snap.used_percent,
-                        resets_at=snap.resets_at,
-                        status=snap.status,
-                        scope_model=snap.scope_model,
-                    )
-                    for snap in relevant
-                ),
+                (_window_from_snapshot(snap, now) for snap in relevant),
                 key=_window_sort_key,
             )
         )
@@ -288,9 +401,6 @@ class QuotaService:
             confidence = Confidence.MEASURED
         elif windows:
             confidence = Confidence.PARTIAL
-        elif canon == "google-antigravity":
-            # Antigravity never exposes a quota percentage; without a recent 429 error it is always unknown.
-            confidence = Confidence.UNKNOWN
         elif orin_usage.seven_day.calls > 0 or orin_usage.five_hour.calls > 0:
             confidence = Confidence.ESTIMATED
             source = source or "orin_usage"
@@ -312,8 +422,16 @@ class QuotaService:
         )
 
     def get_all_quotas(self, user_id: str, *, refresh: bool = False) -> list[ProviderQuota]:
+        """All subscriptions with their windows.
+
+        ``refresh=True`` rereads local files synchronously and schedules active probes in the background
+        without waiting for them: the caller gets what is stored now and the probe's snapshots arrive through
+        ``quota.updated``. A probe takes up to ~6 s (Claude) and blocking an HTTP request on a CLI would make the
+        panel feel frozen. Windows already renewed (``resets_at`` passed) also schedule a throttled probe.
+        """
         if refresh:
             self.refresh_from_files(user_id)
+            self.refresh_active(user_id, reason="refresh")
         now = self._now()
         latest = self._store.latest(user_id)
         grouped: dict[str, list[QuotaSnapshot]] = {p: [] for p in SUBSCRIPTION_PROVIDERS}
@@ -324,10 +442,15 @@ class QuotaService:
         ordered_providers = list(SUBSCRIPTION_PROVIDERS) + [
             p for p in grouped if p not in SUBSCRIPTION_PROVIDERS
         ]
-        return [
+        quotas = [
             self._build_provider_quota(user_id, prov, grouped.get(prov, ()), now)
             for prov in ordered_providers
         ]
+        if not refresh:
+            expired = [q.provider for q in quotas if any(w.status == WINDOW_RENEWED for w in q.windows)]
+            if expired:
+                self.refresh_active(user_id, expired, reason="window_renewed")
+        return quotas
 
     def status_for(
         self,
@@ -346,7 +469,7 @@ class QuotaService:
         for win in pq.windows:
             if win.scope_model is None:
                 matching_windows.append(win)
-            elif model_lower and win.scope_model.lower() in model_lower:
+            elif scope_matches_model(canon, win.scope_model, model_lower, scope_models=win.scope_models):
                 matching_windows.append(win)
 
         percents = [w.used_percent for w in matching_windows if w.used_percent is not None]
@@ -354,7 +477,10 @@ class QuotaService:
 
         rejected_windows = [
             s for s in latest if _is_snapshot_active_rejection(s, now)
-            and (s.scope_model is None or (model_lower and s.scope_model.lower() in model_lower))
+            and (
+                s.scope_model is None
+                or scope_matches_model(canon, s.scope_model, model_lower, scope_models=_snapshot_models(s))
+            )
         ]
         rejected = bool(rejected_windows)
 
@@ -378,4 +504,6 @@ __all__ = [
     "QuotaService",
     "QuotaStorePort",
     "SUBSCRIPTION_PROVIDERS",
+    "WINDOW_RENEWED",
+    "read_probe_settings",
 ]

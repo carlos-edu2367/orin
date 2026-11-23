@@ -146,3 +146,74 @@ def test_get_v1_quota_runs_in_threadpool_and_does_not_block_event_loop():
 
     elapsed = asyncio.run(_run())
     assert elapsed < slow_seconds * 0.75, f"/v1/quota blocked the event loop ({elapsed:.3f}s)"
+
+
+def test_get_v1_quota_refresh_returns_without_waiting_for_the_active_probe_and_sse_event_follows(tmp_path: Path):
+    import threading
+
+    from agentos.quota.models import QuotaSnapshot
+    from agentos.quota.probe_coordinator import ProbeSettings
+
+    now = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
+    release = threading.Event()
+    started = threading.Event()
+
+    class SlowProbe:
+        provider = "openai-codex"
+        source = "codex_app_server"
+        disabled_reason = None
+
+        def available(self) -> bool:
+            return True
+
+        def read(self) -> list[QuotaSnapshot]:
+            started.set()
+            release.wait(10)
+            return [
+                QuotaSnapshot(
+                    provider="openai-codex",
+                    window_kind="seven_day",
+                    used_percent=4.0,
+                    status="allowed",
+                    resets_at=now + timedelta(days=3),
+                    source="codex_app_server",
+                    observed_at=now,
+                )
+            ]
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'api_probe.db').as_posix()}")
+    upgrade(engine, "head")
+    try:
+        events = InMemoryClientEventStream()
+        service = QuotaService(
+            QuotaSnapshotStore(engine),
+            claude_reader=ClaudeUsageCacheReader(ClaudeAccountReader(tmp_path / "missing.json")),
+            codex_reader=CodexQuotaReader(tmp_path / "missing-codex"),
+            clock=lambda: now,
+            active_probes=[SlowProbe()],
+            probe_settings_reader=lambda user: ProbeSettings(),
+        )
+        client = TestClient(_make_app(service, events=events))
+
+        began = time.monotonic()
+        resp = client.get("/v1/quota?refresh=true", headers={"Authorization": "Bearer pat"})
+        assert resp.status_code == 200
+        assert time.monotonic() - began < 5.0
+        assert started.wait(5)
+        codex = {item["provider"]: item for item in resp.json()["subscriptions"]}["openai-codex"]
+        assert codex["windows"] == []
+
+        release.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not any(ev.event_type == "quota.updated" for ev in events._events):
+            time.sleep(0.05)
+        assert any(ev.event_type == "quota.updated" for ev in events._events)
+
+        after = client.get("/v1/quota", headers={"Authorization": "Bearer pat"}).json()
+        codex = {item["provider"]: item for item in after["subscriptions"]}["openai-codex"]
+        assert codex["source"] == "codex_app_server"
+        assert codex["windows"][0]["used_percent"] == 4.0
+        assert "scope_models" in codex["windows"][0]
+    finally:
+        release.set()
+        engine.dispose()

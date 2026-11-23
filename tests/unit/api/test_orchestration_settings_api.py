@@ -103,7 +103,10 @@ def test_get_returns_registered_keys_with_defaults_layers_and_filters(tmp_path: 
     quota_only = client.get("/v1/settings/orchestration", params={"group": "quota"}, headers=AUTH)
     assert quota_only.status_code == 200
     assert all(item["group"] == "quota" for item in quota_only.json()["items"])
-    assert len(quota_only.json()["items"]) == 6
+    assert len(quota_only.json()["items"]) == 8
+    assert {"quota.activeProbe.enabled", "quota.activeProbe.intervalMinutes"} <= {
+        item["path"] for item in quota_only.json()["items"]
+    }
 
     # Prefix filter
     prefix_only = client.get("/v1/settings/orchestration", params={"prefix": "effort."}, headers=AUTH)

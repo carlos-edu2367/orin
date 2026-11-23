@@ -1,6 +1,7 @@
 import {
   formatQuotaAge,
-  formatResetTime,
+  formatQuotaRelease,
+  sortQuotaWindows,
   highestKnownPercent,
   isQuotaRejected,
   normalizeSubscriptionProvider,
@@ -49,21 +50,15 @@ export function buildQuotaTooltip(
   const lines: string[] = [name]
 
   if (quota && quota.windows.length > 0) {
-    for (const win of quota.windows) {
+    for (const win of sortQuotaWindows(quota.windows)) {
       const label = quotaWindowLabel(win)
       const valuePart =
         win.used_percent !== null
           ? `${Math.round(win.used_percent)}%`
           : quotaStatusLabel(win.status)
-      const resetPart = formatResetTime(win.resets_at, nowMs)
-      lines.push(
-        resetPart
-          ? `${label}: ${valuePart} (libera às ${resetPart})`
-          : `${label}: ${valuePart}`,
-      )
+      const resetPart = formatQuotaRelease(win.resets_at, nowMs)
+      lines.push(resetPart ? `${label}: ${valuePart} (${resetPart})` : `${label}: ${valuePart}`)
     }
-  } else if (effectiveProvider === 'google-antigravity') {
-    lines.push('O Antigravity não informa a cota.')
   } else if (rejected) {
     lines.push('Assinatura temporariamente esgotada.')
   } else if (percent === null) {
@@ -114,9 +109,7 @@ export function QuotaRing({
       ? `Cota ${name}: ${Math.round(percent)}%`
       : rejected
         ? `Cota ${name}: esgotada`
-        : effectiveProvider === 'google-antigravity'
-          ? `Cota ${name}: O Antigravity não informa a cota`
-          : `Cota ${name}: indisponível`
+        : `Cota ${name}: indisponível`
 
   return (
     <button

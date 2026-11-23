@@ -145,11 +145,27 @@ describe('QuotaPanel', () => {
                 },
                 {
                   provider: 'google-antigravity',
-                  windows: [],
-                  confidence: 'unknown',
-                  observed_at: null,
-                  age_seconds: null,
-                  source: null,
+                  windows: [
+                    {
+                      kind: 'five_hour',
+                      used_percent: 17,
+                      resets_at: '2026-11-21T17:20:26Z',
+                      status: 'allowed',
+                      scope_model: 'Gemini',
+                      scope_models: ['Gemini 4 Argon', 'Gemini 3.8 Flash'],
+                    },
+                    {
+                      kind: 'seven_day',
+                      used_percent: 9,
+                      resets_at: '2026-11-25T18:03:09Z',
+                      status: 'allowed',
+                      scope_model: 'Claude e GPT',
+                    },
+                  ],
+                  confidence: 'measured',
+                  observed_at: '2026-11-21T12:58:00Z',
+                  age_seconds: 120,
+                  source: 'agy_usage_command',
                   orin_usage: {
                     five_hour: { tokens: 0, calls: 0 },
                     seven_day: { tokens: 4200, calls: 1 },
@@ -179,9 +195,13 @@ describe('QuotaPanel', () => {
     })
 
     expect(screen.getByTestId('quota-card-openai-codex')).toHaveTextContent('88%')
-    expect(screen.getByTestId('quota-card-google-antigravity')).toHaveTextContent(
-      'O Antigravity não informa a cota',
-    )
+    const agyCard = screen.getByTestId('quota-card-google-antigravity')
+    expect(agyCard).toHaveTextContent('5 h · Gemini')
+    expect(agyCard).toHaveTextContent('17%')
+    expect(agyCard).toHaveTextContent('Semanal · Claude e GPT')
+    expect(agyCard).toHaveTextContent('Consulta ao Antigravity (/usage)')
+    expect(agyCard).not.toHaveTextContent('não informa')
+    expect(screen.getByTestId('quota-subscriptions-grid')).toHaveClass('quota-cards--settings')
 
     // Verify settings controls and origin layer badges
     const displayRow = screen.getByTestId('setting-row-quota.display.enabled')
@@ -196,5 +216,54 @@ describe('QuotaPanel', () => {
 
     const chainRow = screen.getByTestId('setting-row-quota.fallback.chain')
     expect(within(chainRow).getByText('openai-codex/gpt-5')).toBeInTheDocument()
+  })
+
+  it('lists the active probe settings before the policy ones and refreshes with ?refresh=true on Atualizar', async () => {
+    const user = userEvent.setup()
+    const urls: string[] = []
+    const fetchImpl = vi.fn<typeof fetch>((input) => {
+      urls.push(String(input))
+      return Promise.resolve(
+        new Response(JSON.stringify({ subscriptions: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    })
+    const client = new ApiClient({ baseUrl: 'http://localhost', fetchImpl, maxAttempts: 1 })
+    const base = makeQuotaSettingItems()[0]
+    const items: OrchestrationSettingItem[] = [
+      ...makeQuotaSettingItems(),
+      {
+        ...base,
+        path: 'quota.activeProbe.intervalMinutes',
+        type: 'number',
+        label: 'Intervalo da consulta de cota (minutos)',
+        description: 'De quantos em quantos minutos.',
+        defaultValue: 5,
+        value: 5,
+        minimum: 2,
+        maximum: 60,
+      },
+      {
+        ...base,
+        path: 'quota.activeProbe.enabled',
+        label: 'Consultar a cota nas assinaturas',
+        description: 'Pergunta aos CLIs.',
+      },
+    ]
+    render(<QuotaPanel client={client} items={items} onSave={vi.fn()} nowMs={Date.parse('2026-11-21T13:00:00Z')} />)
+
+    const rows = await screen.findAllByTestId(/^setting-row-quota\./)
+    const paths = rows.map((row) => row.getAttribute('data-testid'))
+    expect(paths.indexOf('setting-row-quota.activeProbe.enabled')).toBe(1)
+    expect(paths.indexOf('setting-row-quota.activeProbe.intervalMinutes')).toBe(2)
+
+    await waitFor(() => expect(urls.length).toBeGreaterThan(0))
+    await user.click(screen.getByRole('button', { name: 'Atualizar' }))
+    await waitFor(() => expect(urls.some((url) => url.includes('refresh=true'))).toBe(true))
+    expect(
+      screen.getByTestId('quota-card-google-antigravity'),
+    ).toHaveTextContent('Sem leitura do Antigravity ainda')
   })
 })

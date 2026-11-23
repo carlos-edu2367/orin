@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ApiClient } from '../../api/client'
 import type { OrchestrationSettingItem } from '../../api/orchestrationSettings'
-import { getQuota, type ProviderQuota } from '../../api/quota'
+import { getQuota, QUOTA_PROBE_FOLLOW_UP_MS, type ProviderQuota } from '../../api/quota'
 import { SubscriptionQuotaCards } from '../conversations/QuotaPopover'
+import { useQuotaNow } from '../conversations/useQuotaNow'
 import { OrchestrationSettingsForm } from './OrchestrationSettingsForm'
 import './orchestrationSettings.css'
 
 const ORDERED_QUOTA_PATHS = [
   'quota.display.enabled',
+  'quota.activeProbe.enabled',
+  'quota.activeProbe.intervalMinutes',
   'quota.policy.enabled',
   'quota.policy.warnPercent',
   'quota.policy.blockBackgroundPercent',
@@ -34,6 +37,8 @@ export function QuotaPanel({
 }: QuotaPanelProps) {
   const [subscriptions, setSubscriptions] = useState<ProviderQuota[]>(initialSubscriptions ?? [])
   const [loadingQuota, setLoadingQuota] = useState(Boolean(client && !initialSubscriptions))
+  const { nowMs: clockMs } = useQuotaNow(nowMs)
+  const followUpTimer = useRef<number | null>(null)
 
   const loadQuota = useCallback(
     async (refresh = false, signal?: AbortSignal) => {
@@ -71,6 +76,23 @@ export function QuotaPanel({
     return () => controller.abort()
   }, [client])
 
+  useEffect(
+    () => () => {
+      if (followUpTimer.current !== null) window.clearTimeout(followUpTimer.current)
+    },
+    [],
+  )
+
+  // The refresh answers at once with what is stored; the CLI probes finish a few seconds later.
+  const refreshQuota = useCallback(() => {
+    void loadQuota(true)
+    if (followUpTimer.current !== null) window.clearTimeout(followUpTimer.current)
+    followUpTimer.current = window.setTimeout(() => {
+      followUpTimer.current = null
+      void loadQuota(false)
+    }, QUOTA_PROBE_FOLLOW_UP_MS)
+  }, [loadQuota])
+
   const orderedItems = useMemo(() => {
     const byPath = new Map(items.map((item) => [item.path, item]))
     const result: OrchestrationSettingItem[] = []
@@ -95,7 +117,7 @@ export function QuotaPanel({
           <div>
             <h3 className="quota-panel__subhead">Assinaturas monitoradas</h3>
             <p className="code-settings__muted">
-              Leitura passiva das janelas conhecidas, idade do dado e consumo acumulado pelo Orin.
+              Janelas de 5 h e semanal lidas dos CLIs, idade do dado e consumo acumulado pelo Orin.
             </p>
           </div>
           {client && (
@@ -103,7 +125,7 @@ export function QuotaPanel({
               type="button"
               className="button button--quiet"
               disabled={loadingQuota}
-              onClick={() => void loadQuota(true)}
+              onClick={refreshQuota}
             >
               {loadingQuota ? 'Atualizando…' : 'Atualizar'}
             </button>
@@ -111,7 +133,7 @@ export function QuotaPanel({
         </div>
         <SubscriptionQuotaCards
           subscriptions={subscriptions}
-          nowMs={nowMs}
+          nowMs={clockMs}
           layout="settings"
         />
       </div>
