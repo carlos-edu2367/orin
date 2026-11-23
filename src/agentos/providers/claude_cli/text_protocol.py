@@ -10,10 +10,8 @@ from uuid import uuid4
 from agentos.agentic.tool_text_rules import (
     LOG_OPEN,
     RECORD_MARKER_ESCAPE_RE,
-    RESULT_RECORD_BLOCK_RE,
     RESULT_RECORD_END,
     RESULT_RECORD_PREFIX,
-    USE_RECORD_LINE_RE,
     USE_RECORD_PREFIX,
 )
 from agentos.agentic.tools.public_names import PUBLIC_NAMES
@@ -778,15 +776,98 @@ def _parse_json_objects(inner: str) -> list[Mapping[str, Any]]:
     return results
 
 
-def _find_earliest_hallucinated_marker(buf: str, *, outside_json_strings: bool = False) -> int:
+# Markdown code state while scanning prose: ("text", ""), ("inline", "`" * n) or ("fence", "```" / "~~~").
+_CodeState = tuple[str, str]
+_NO_CODE: _CodeState = ("text", "")
+
+
+def _quoted_code_ranges(buf: str, state: _CodeState = _NO_CODE) -> tuple[list[tuple[int, int, str]], _CodeState]:
+    """Spans of `buf` inside inline code or a fence, given the code state at its start, and the state at its end.
+
+    Inline code opens with one or two backticks and ends at the same run or at the end of the line; three or more
+    backticks (or `~~~`) open a fence that ends at the next same marker. A tag inside these spans is a quotation.
+    """
+    ranges: list[tuple[int, int, str]] = []
+    mode, mark = state
+    pos = 0
+    size = len(buf)
+    while pos < size:
+        if mode == "fence":
+            idx = buf.find(mark, pos)
+            end = size if idx == -1 else idx + len(mark)
+            ranges.append((pos, end, "fence"))
+            pos = end
+            if idx == -1:
+                break
+            mode, mark = _NO_CODE
+            continue
+        if mode == "inline":
+            end = size
+            still_open = True
+            for m_stop in _INLINE_CODE_STOP_RE.finditer(buf, pos):
+                if m_stop.group(0) == "\n":
+                    end, still_open = m_stop.start(), False
+                    break
+                if len(m_stop.group(0)) == len(mark):
+                    end, still_open = m_stop.end(), False
+                    break
+            ranges.append((pos, end, "inline"))
+            pos = end
+            if still_open:
+                break
+            mode, mark = _NO_CODE
+            continue
+        m_code = _CODE_START_RE.search(buf, pos)
+        if m_code is None:
+            break
+        run = m_code.group(0)
+        if run.startswith("~") or len(run) >= 3:
+            mode, mark = "fence", run[:3]
+            ranges.append((m_code.start(), m_code.start() + 3, "fence"))
+            pos = m_code.start() + 3
+        else:
+            mode, mark = "inline", run
+            ranges.append((m_code.start(), m_code.end(), "inline"))
+            pos = m_code.end()
+    return ranges, (mode, mark)
+
+
+def quoted_code_spans(text: str) -> list[tuple[int, int]]:
+    """(start, end) of every inline code or fenced span of `text`: tool markup inside them is a quotation."""
+    return [(start, end) for start, end, _kind in _quoted_code_ranges(text or "")[0]]
+
+
+def _inside(pos: int, ranges: Sequence[tuple[int, int, str]], kinds: tuple[str, ...]) -> bool:
+    return any(start <= pos < end and kind in kinds for start, end, kind in ranges)
+
+
+def _search_outside(
+    pattern: re.Pattern[str], buf: str, ranges: Sequence[tuple[int, int, str]], kinds: tuple[str, ...]
+) -> re.Match[str] | None:
+    pos = 0
+    while True:
+        match = pattern.search(buf, pos)
+        if match is None or not _inside(match.start(), ranges, kinds):
+            return match
+        pos = match.start() + 1
+
+
+def _find_earliest_hallucinated_marker(
+    buf: str,
+    *,
+    outside_json_strings: bool = False,
+    quoted: Sequence[tuple[int, int, str]] = (),
+) -> int:
+    """Earliest made-up tool result marker; occurrences inside `quoted` spans (inline code, fences) do not count."""
     best = -1
     buf_lower = buf.lower()
     for marker in _HALLUCINATED_RESULT_MARKERS:
-        pos = (
-            _find_token_outside_json_strings(buf, marker)
-            if outside_json_strings
-            else buf_lower.find(marker.lower())
-        )
+        if outside_json_strings:
+            pos = _find_token_outside_json_strings(buf, marker)
+        else:
+            pos = buf_lower.find(marker.lower())
+            while pos != -1 and _inside(pos, quoted, ("inline", "fence")):
+                pos = buf_lower.find(marker.lower(), pos + 1)
         if pos != -1 and (best == -1 or pos < best):
             best = pos
     return best
@@ -817,6 +898,13 @@ class ToolCallStreamParser:
         self._active_call_id: str | None = None
         self._active_name_hint: str | None = None
         self._seen_call_ids: set[str] = set()
+        # Markdown code state of the text already shown: a tag quoted in inline code is prose, never a call, and a
+        # result marker quoted in inline code or a fence never stops the turn.
+        self._code_state: _CodeState = _NO_CODE
+
+    def _text_event(self, text: str) -> TextProtocolEvent:
+        self._code_state = _quoted_code_ranges(text, self._code_state)[1]
+        return TextProtocolEvent(kind="text", text=text)
 
     def _allocate_call_id(self, preferred: str | None) -> str:
         candidate = (preferred or "").strip()
@@ -899,9 +987,10 @@ class ToolCallStreamParser:
 
         while self._buf and not self.stopped:
             if self._active_close_tokens is None:
-                hallucinated_pos = _find_earliest_hallucinated_marker(self._buf)
-                xml_match = _OPEN_TAG_RE.search(self._buf)
-                bracket_match = _BRACKET_OPEN_TAG_RE.search(self._buf)
+                quoted, _ = _quoted_code_ranges(self._buf, self._code_state)
+                hallucinated_pos = _find_earliest_hallucinated_marker(self._buf, quoted=quoted)
+                xml_match = _search_outside(_OPEN_TAG_RE, self._buf, quoted, ("inline",))
+                bracket_match = _search_outside(_BRACKET_OPEN_TAG_RE, self._buf, quoted, ("inline",))
 
                 chosen_kind: Literal["xml", "bracket"] | None = None
                 tag_match: re.Match[str] | None = None
@@ -926,7 +1015,7 @@ class ToolCallStreamParser:
                 ):
                     before = self._buf[:hallucinated_pos].rstrip()
                     if before:
-                        events.append(TextProtocolEvent(kind="text", text=before))
+                        events.append(self._text_event(before))
                     events.append(TextProtocolEvent(kind="stop"))
                     self.stopped = True
                     self._buf = ""
@@ -935,7 +1024,7 @@ class ToolCallStreamParser:
                 if tag_match is not None and chosen_kind is not None:
                     before = self._buf[:tag_pos]
                     if before:
-                        events.append(TextProtocolEvent(kind="text", text=before))
+                        events.append(self._text_event(before))
                     if chosen_kind == "xml":
                         tag_name = tag_match.group("tag").lower()
                         self._active_close_tokens = (
@@ -996,6 +1085,13 @@ class ToolCallStreamParser:
                     last_b_open = lower_buf.rfind(bracket_prefix.lower())
                     if last_b_open != -1 and "]" not in self._buf[last_b_open:]:
                         hold_len = max(hold_len, len(self._buf) - last_b_open)
+                if hold_len > 0 and _inside(len(self._buf) - hold_len, quoted, ("inline", "fence")):
+                    # A partial tag inside inline code or a fence is a quotation: nothing to wait for.
+                    hold_len = 0
+                m_ticks = _TRAILING_CODE_MARK_RE.search(self._buf)
+                if m_ticks is not None:
+                    # A backtick run split across chunks decides what is quoted next.
+                    hold_len = max(hold_len, len(m_ticks.group(0)))
 
                 if hold_len > 0:
                     emit_part = self._buf[:-hold_len]
@@ -1005,7 +1101,7 @@ class ToolCallStreamParser:
                     self._buf = ""
 
                 if emit_part:
-                    events.append(TextProtocolEvent(kind="text", text=emit_part))
+                    events.append(self._text_event(emit_part))
                 break
             else:
                 close_pos, close_len = _find_earliest_close_token(
@@ -1086,54 +1182,19 @@ class ToolCallStreamParser:
             return events
 
         if leftover:
-            hallucinated_pos = _find_earliest_hallucinated_marker(leftover)
+            quoted, _ = _quoted_code_ranges(leftover, self._code_state)
+            hallucinated_pos = _find_earliest_hallucinated_marker(leftover, quoted=quoted)
             if hallucinated_pos != -1:
                 before = leftover[:hallucinated_pos].rstrip()
                 if before:
-                    events.append(TextProtocolEvent(kind="text", text=before))
+                    events.append(self._text_event(before))
                 events.append(TextProtocolEvent(kind="stop"))
                 self.stopped = True
             else:
-                events.append(TextProtocolEvent(kind="text", text=leftover))
+                events.append(self._text_event(leftover))
         return events
 
 
-_CODE_FENCE_SPLIT_RE = re.compile(r"(```[\s\S]*?(?:```|\Z)|~~~[\s\S]*?(?:~~~|\Z))")
-_RESIDUAL_CLOSED_TOOL_BLOCK_RE = re.compile(
-    r"(?:\[|&#91;|&#x5b;)\s*Tool (?:Use|Result)\b[^\]]*\][\s\S]*?"
-    r"(?:\[|&#91;|&#x5b;)\s*/Tool (?:Use|Result)\s*\]"
-    r"(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)?",
-    re.IGNORECASE,
-)
-_RESIDUAL_UNCLOSED_TOOL_BLOCK_RE = re.compile(
-    r"(?:\[|&#91;|&#x5b;)\s*Tool (?:Use|Result)\b[^\]]*\][\s\S]*\Z",
-    re.IGNORECASE,
-)
-_RESIDUAL_XML_TOOL_BLOCK_RE = re.compile(
-    r"(?:<|&lt;)(?:orin_tool_call|tool_call)\b[^>&]*(?:>|&gt;)[\s\S]*?"
-    r"(?:(?:<|&lt;)/(?:orin_tool_call|tool_call)\s*(?:>|&gt;)|\Z)",
-    re.IGNORECASE,
-)
-_XML_ATTRS = r"(?:[^>&]|&(?!gt;))*"
-# Anthropic-native tool syntax a model sometimes types as plain text instead of calling the tool:
-# `<function_calls><invoke name="X"><parameter name="p">v</parameter></invoke></function_calls>` and the
-# made-up `<function_results><result><output>...</output></result></function_results>` that follows it.
-_RESIDUAL_ANTHROPIC_BLOCK_RE = re.compile(
-    r"(?:<|&lt;)(?P<tag>function_calls|function_results)\b[^>&]*(?:>|&gt;)[\s\S]*?"
-    r"(?:(?:<|&lt;)/(?P=tag)\s*(?:>|&gt;)|\Z)"
-    r"|(?:<|&lt;)invoke\s+name\s*=" + _XML_ATTRS + r"(?:>|&gt;)[\s\S]*?"
-    r"(?:(?:<|&lt;)/invoke\s*(?:>|&gt;)|\Z)",
-    re.IGNORECASE,
-)
-# Closers left over when the opening half was already filtered/streamed away. `</output>`/`</result>` only count
-# glued to a `</function_results>`: on their own they are ordinary text.
-_ORPHAN_RESULT_CLOSERS = (
-    r"(?:(?:<|&lt;)/(?:output|result)\s*(?:>|&gt;)\s*)*(?:<|&lt;)/function_results\s*(?:>|&gt;)"
-)
-_ORPHAN_CALL_CLOSERS = r"(?:<|&lt;)/(?:function_calls|invoke)\s*(?:>|&gt;)"
-_RESIDUAL_ORPHAN_CLOSER_RE = re.compile(
-    rf"{_ORPHAN_RESULT_CLOSERS}|{_ORPHAN_CALL_CLOSERS}", re.IGNORECASE
-)
 _RESIDUAL_STREAM_PREFIXES: tuple[str, ...] = (
     "[Tool Use",
     "[Tool Result",
@@ -1153,6 +1214,17 @@ _RESIDUAL_STREAM_PREFIXES: tuple[str, ...] = (
     "&lt;invoke",
     LOG_OPEN,
 )
+_XML_ATTRS = r"(?:[^>&]|&(?!gt;))*"
+# Closers left over when the opening half was already filtered/streamed away. `</output>`/`</result>` only count
+# glued to a `</function_results>`: on their own they are ordinary text.
+_ORPHAN_RESULT_CLOSERS = (
+    r"(?:(?:<|&lt;)/(?:output|result)\s*(?:>|&gt;)\s*)*(?:<|&lt;)/function_results\s*(?:>|&gt;)"
+)
+_ORPHAN_CALL_CLOSERS = r"(?:<|&lt;)/(?:function_calls|invoke)\s*(?:>|&gt;)"
+# Opening of every block a model may type instead of calling a tool:
+# `[Tool Use ...]`/`[Tool Result ...]` (and `&#91;`), `<orin_tool_call>`/`<tool_call>`, the Anthropic-native
+# `<function_calls>`, `<invoke name=...>` and `<function_results>`, Orin's own `(Orin log: ...)` records, and the
+# orphan closers of a block whose opening was already filtered.
 _RESIDUAL_STREAM_OPEN_RE = re.compile(
     r"(?:\[|&#91;|&#x5b;)\s*Tool (?P<bkind>Use|Result)\b[^\]]*\]"
     r"|(?:<|&lt;)(?P<xtag>orin_tool_call|tool_call)\b[^>&]*(?:>|&gt;)"
@@ -1162,10 +1234,33 @@ _RESIDUAL_STREAM_OPEN_RE = re.compile(
     rf"|(?P<orphan>{_ORPHAN_RESULT_CLOSERS}|{_ORPHAN_CALL_CLOSERS})",
     re.IGNORECASE,
 )
+# A tool use record is one line; a result record runs to `(end of Orin log)`.
+_USE_RECORD_REST_RE = re.compile(r"[^\n]*\n")
+_RESULT_RECORD_CLOSE_RE = re.compile(re.escape(RESULT_RECORD_END) + r"(?:[ \t]*\r?\n)?", re.IGNORECASE)
+# Markdown code: a run of backticks (one or two open inline code, three or more a fence) or a `~~~` fence.
+_CODE_START_RE = re.compile(r"`+|~~~")
+_INLINE_CODE_STOP_RE = re.compile(r"`+|\n")
+_TRAILING_CODE_MARK_RE = re.compile(r"(?:`+|~{1,2})\Z")
 _ORPHAN_PENDING_CLOSERS = ("</output>", "</result>")
 _ORPHAN_PENDING_TARGETS = ("</output>", "</result>", "</function_results>", "</function_calls>", "</invoke>")
 _ORPHAN_PENDING_WINDOW = 160
 _PARTIAL_ENTITY_TAIL_RE = re.compile(r"&(?:l|lt|g|gt)?\Z", re.IGNORECASE)
+_GLUED_ASSISTANT_PREFIX_RE = re.compile(
+    r"^(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)",
+)
+_RESIDUAL_FAST_MARKERS: tuple[str, ...] = (
+    "tool use",
+    "tool result",
+    "orin_tool_call",
+    "<tool_call",
+    "&lt;tool_call",
+    "function_calls",
+    "function_results",
+    "invoke",
+    "orin log",
+)
+_MID_LINE_BLOCK_LIMIT = 1_048_576
+_LINE_START_BLOCK_LIMIT = 65_536
 
 
 def _orphan_closer_pending(rest: str) -> bool:
@@ -1197,220 +1292,299 @@ def _orphan_closer_hold(buf: str) -> int:
             if _orphan_closer_pending(buf[idx:]):
                 return len(buf) - idx
     return 0
-_GLUED_ASSISTANT_PREFIX_RE = re.compile(
-    r"^(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]\s*|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)",
-)
+
+
+def _residual_open_hold(buf: str) -> int:
+    """Length of the buffer tail that may still become the opening of a residual block, or 0."""
+    hold = max((_longest_suffix_prefix(buf, p) for p in _RESIDUAL_STREAM_PREFIXES), default=0)
+    lower_buf = buf.lower()
+    for p in _RESIDUAL_STREAM_PREFIXES:
+        idx = lower_buf.rfind(p.lower())
+        if idx == -1:
+            continue
+        tail = buf[idx:]
+        if p.startswith(("[", "&")) and "tool " in p.lower() and "]" not in tail and len(tail) < 256:
+            hold = max(hold, len(tail))
+        elif p.startswith(("<", "&lt;")) and ">" not in tail and "&gt;" not in tail and len(tail) < 256:
+            hold = max(hold, len(tail))
+        elif p == LOG_OPEN and len(tail) < 40 and "\n" not in tail:
+            hold = max(hold, len(tail))
+    return max(hold, _orphan_closer_hold(buf))
 
 
 def strip_residual_tool_protocol_blocks(text: str) -> str:
-    """Strip leaked `[Tool Use ...][/Tool Use]`, `[Tool Result ...][/Tool Result]`, `&#91;...]`, `<orin_tool_call>` and Anthropic `<function_calls>`/`<invoke>`/`<function_results>` blocks outside code fences."""
+    """Remove tool calls/results a model typed as text, keeping every quotation of them.
+
+    Removed: `[Tool Use ...][/Tool Use]`, `[Tool Result ...][/Tool Result]` (and `&#91;`), `<orin_tool_call>`,
+    `<tool_call>`, the Anthropic `<function_calls>`/`<invoke>`/`<function_results>` blocks, `(Orin log: ...)` records
+    and orphan closers. Kept: anything inside a code fence or inline code (single or double backticks), and an
+    opening tag that never closes unless it starts a line: a tag in the middle of a sentence is prose. The rules are
+    the ones of `ResidualToolTextStreamFilter`, which this runs over the whole text at once.
+    """
     if not isinstance(text, str) or not text:
         return ""
     lowered = text.lower()
-    if (
-        "tool use" not in lowered
-        and "tool result" not in lowered
-        and "orin_tool_call" not in lowered
-        and "<tool_call" not in lowered
-        and "&lt;tool_call" not in lowered
-        and "function_calls" not in lowered
-        and "function_results" not in lowered
-        and "invoke" not in lowered
-        and "orin log" not in lowered
-    ):
+    if not any(marker in lowered for marker in _RESIDUAL_FAST_MARKERS):
         return text
-
-    parts = _CODE_FENCE_SPLIT_RE.split(text)
-    cleaned_parts: list[str] = []
-    for idx, part in enumerate(parts):
-        if idx % 2 == 1:
-            cleaned_parts.append(part)
-            continue
-        segment = _RESIDUAL_CLOSED_TOOL_BLOCK_RE.sub("", part)
-        segment = _RESIDUAL_UNCLOSED_TOOL_BLOCK_RE.sub("", segment)
-        segment = _RESIDUAL_XML_TOOL_BLOCK_RE.sub("", segment)
-        segment = _RESIDUAL_ANTHROPIC_BLOCK_RE.sub("", segment)
-        segment = RESULT_RECORD_BLOCK_RE.sub("", segment)
-        segment = USE_RECORD_LINE_RE.sub("", segment)
-        segment = _RESIDUAL_ORPHAN_CLOSER_RE.sub("", segment)
-        cleaned_parts.append(segment)
-    return "".join(cleaned_parts)
+    stream = ResidualToolTextStreamFilter()
+    return stream.feed(text) + stream.finish()
 
 
 class ResidualToolTextStreamFilter:
-    """Stateful stream filter that suppresses hallucinated `[Tool Use]` / `[Tool Result]` / `&#91;Tool Use]` text blocks in native turns."""
+    """Stream filter that hides tool calls/results a model typed as text, chunk by chunk.
+
+    Same rules as `strip_residual_tool_protocol_blocks`:
+    - code fences and inline code are quotations: nothing inside them is touched;
+    - a block with its closing tag is removed wherever it starts;
+    - a block that never closes is removed up to the end only when its opening starts a line (spaces before it are
+      fine); in the middle of a sentence the tag is prose and stays. Such a tag is held until its closing tag or the
+      end of the turn decides, and plain text is never held for that.
+    """
 
     def __init__(self) -> None:
         self._buf: str = ""
-        self._active_close_re: re.Pattern[str] | None = None
+        self._mode: Literal["text", "fence", "inline", "block"] = "text"
+        self._fence_marker: str = "```"
+        self._inline_len: int = 0
+        # True while only spaces/tabs were shown since the last line break (the start of the text counts).
+        self._line_blank: bool = True
+        self._block_kind: str = ""
+        self._block_close_re: re.Pattern[str] | None = None
+        self._block_open: str = ""
+        self._block_open_line_blank: bool = False
         self._consume_glued_assistant: bool = False
-        self._glue_after_close: bool = True
-        self._in_code_fence: bool = False
-        # Trailing backticks of what was already shown: a ``` fence marker can arrive split across chunks.
-        self._tick_run: int = 0
-        # True once the model wrote an Anthropic-style tool call/result as text (`<invoke>`, `<function_calls>`,
-        # `<function_results>`, orphan closers). That call never ran: native turns use it to tell the model so.
+        # True once the model wrote an Anthropic-style tool call/result (`<invoke>`, `<function_calls>`,
+        # `<function_results>`, orphan closers) or an `(Orin log: ...)` record as text. That call never ran:
+        # native turns use it to tell the model so.
         self.saw_text_tool_call: bool = False
 
-    def _update_fence_state(self, emitted: str) -> None:
-        carried = "`" * self._tick_run
-        combined = carried + emitted
-        count = combined.count("```") - carried.count("```")
-        if count % 2 == 1:
-            self._in_code_fence = not self._in_code_fence
-        stripped = combined.rstrip("`")
-        self._tick_run = len(combined) - len(stripped)
+    def _emit(self, out: list[str], text: str) -> None:
+        if not text:
+            return
+        out.append(text)
+        newline = text.rfind("\n")
+        if newline != -1:
+            self._line_blank = not text[newline + 1 :].strip(" \t\r")
+        elif text.strip(" \t\r"):
+            self._line_blank = False
 
     def feed(self, chunk: str) -> str:
         if not chunk:
             return ""
         if (
             not self._buf
-            and self._active_close_re is None
+            and self._mode == "text"
             and not self._consume_glued_assistant
-            and "[" not in chunk
-            and "&" not in chunk
-            and "<" not in chunk
-            and "(" not in chunk
+            and not any(ch in chunk for ch in "[&<(`~")
         ):
-            self._update_fence_state(chunk)
+            self._emit([], chunk)
             return chunk
-
         self._buf += chunk
-        out: list[str] = []
+        return self._drain(final=False)
 
+    def finish(self) -> str:
+        tail = self._drain(final=True)
+        self._buf = ""
+        self._mode = "text"
+        self._inline_len = 0
+        self._line_blank = True
+        self._block_close_re = None
+        self._block_kind = ""
+        self._block_open = ""
+        self._consume_glued_assistant = False
+        return tail
+
+    def _open_block(self, match: re.Match[str]) -> bool:
+        """Start a block at `match`; False for an orphan closer, which is simply dropped."""
+        if match.group("orphan"):
+            self.saw_text_tool_call = True
+            return False
+        self._block_open = match.group(0)
+        self._block_open_line_blank = self._line_blank
+        bkind = match.group("bkind")
+        xtag = match.group("xtag")
+        atag = match.group("atag") or match.group("itag")
+        lkind = match.group("lkind")
+        if lkind:
+            self._block_kind = "result" if lkind.lower().startswith("result") else "use"
+            self._block_close_re = _RESULT_RECORD_CLOSE_RE if self._block_kind == "result" else None
+        elif atag:
+            self._block_kind = "anthropic"
+            self._block_close_re = re.compile(
+                rf"(?:<|&lt;)/{re.escape(atag.lower())}\s*(?:>|&gt;)", re.IGNORECASE
+            )
+        elif bkind:
+            self._block_kind = "bracket"
+            self._block_close_re = re.compile(
+                rf"(?:\[|&#91;|&#x5b;)\s*/Tool {re.escape(bkind)}\s*\]", re.IGNORECASE
+            )
+        else:
+            self._block_kind = "xml"
+            self._block_close_re = re.compile(
+                rf"(?:<|&lt;)/{re.escape((xtag or 'orin_tool_call').lower())}\s*(?:>|&gt;)", re.IGNORECASE
+            )
+        if self._block_open_line_blank and self._block_kind in ("anthropic", "use", "result"):
+            # It starts a line, so it is dropped whether or not it closes: the model typed a call as text.
+            self.saw_text_tool_call = True
+        self._mode = "block"
+        return True
+
+    def _drop_block(self, removed_tail: str) -> None:
+        if self._block_kind in ("anthropic", "use", "result"):
+            self.saw_text_tool_call = True
+        if removed_tail.endswith("\n"):
+            self._line_blank = True
+        self._consume_glued_assistant = self._block_kind in ("bracket", "xml")
+        self._mode = "text"
+        self._block_close_re = None
+        self._block_open = ""
+
+    def _keep_block_open_as_text(self, out: list[str]) -> None:
+        """The opening tag was prose (mid-sentence, never closed): show it and scan what followed it again."""
+        opening = self._block_open
+        self._mode = "text"
+        self._block_close_re = None
+        self._block_open = ""
+        self._emit(out, opening)
+
+    def _drain(self, *, final: bool) -> str:
+        out: list[str] = []
         while self._buf:
             if self._consume_glued_assistant:
-                if len(self._buf) < 16 and any(
+                if not final and len(self._buf) < 16 and any(
                     cand.startswith(self._buf)
                     for cand in ("Assistant", "[Assistant]", "&#91;Assistant]", " [Assistant]", "\n[Assistant]")
                 ):
                     break
                 m_glued = _GLUED_ASSISTANT_PREFIX_RE.match(self._buf)
                 if m_glued is not None:
+                    if m_glued.group(0).endswith("\n"):
+                        self._line_blank = True
                     self._buf = self._buf[m_glued.end() :]
                 self._consume_glued_assistant = False
-                if not self._buf:
-                    break
+                continue
 
-            if self._active_close_re is not None:
-                m_close = self._active_close_re.search(self._buf)
-                if m_close is None:
-                    # Keep bounded tail while waiting for close tag so memory stays small
-                    if len(self._buf) > 65_536:
+            if self._mode == "block":
+                if self._block_kind == "use":
+                    m_line = _USE_RECORD_REST_RE.match(self._buf)
+                    if m_line is None and not final:
+                        break
+                    rest = m_line.group(0) if m_line is not None else self._buf
+                    if self._block_open_line_blank or rest.rstrip().endswith(")"):
+                        self._buf = self._buf[len(rest) :]
+                        self._drop_block(rest)
+                    else:
+                        self._keep_block_open_as_text(out)
+                    continue
+                assert self._block_close_re is not None
+                m_close = self._block_close_re.search(self._buf)
+                if m_close is not None:
+                    removed = self._buf[: m_close.end()]
+                    self._buf = self._buf[m_close.end() :]
+                    self._drop_block(removed)
+                    continue
+                if final:
+                    if self._block_open_line_blank:
+                        self._buf = ""
+                        self._drop_block("")
+                        break
+                    self._keep_block_open_as_text(out)
+                    continue
+                if self._block_open_line_blank:
+                    if len(self._buf) > _LINE_START_BLOCK_LIMIT:
+                        # Keep a bounded tail while waiting for the closing tag so memory stays small.
                         self._buf = self._buf[-128:]
-                    break
-                after = self._buf[m_close.end() :]
-                self._active_close_re = None
-                self._consume_glued_assistant = self._glue_after_close
-                self._buf = after
-                continue
-
-            m_open = None if self._in_code_fence else _RESIDUAL_STREAM_OPEN_RE.search(self._buf)
-            if m_open is not None:
-                before = self._buf[: m_open.start()]
-                if before:
-                    self._update_fence_state(before)
-                    out.append(before)
-                    if self._in_code_fence:
-                        # Opened a fence right before the match; emit match literally
-                        lit = self._buf[m_open.start() : m_open.end()]
-                        self._update_fence_state(lit)
-                        out.append(lit)
-                        self._buf = self._buf[m_open.end() :]
-                        continue
-                bkind = m_open.group("bkind")
-                xtag = m_open.group("xtag")
-                atag = m_open.group("atag") or m_open.group("itag")
-                self._glue_after_close = True
-                if m_open.group("orphan"):
-                    self.saw_text_tool_call = True
-                    self._buf = self._buf[m_open.end() :]
+                elif len(self._buf) > _MID_LINE_BLOCK_LIMIT:
+                    self._keep_block_open_as_text(out)
                     continue
-                if m_open.group("lkind"):
-                    # `(Orin log: ...)` is Orin's own record of past tool use: the model must never write one.
-                    self.saw_text_tool_call = True
-                    self._glue_after_close = False
-                    self._active_close_re = re.compile(
-                        re.escape(RESULT_RECORD_END)
-                        if m_open.group("lkind").startswith("result")
-                        else r"\)[ \t]*\r?\n"
-                    )
-                    self._buf = self._buf[m_open.end() :]
-                    continue
-                if atag:
-                    self.saw_text_tool_call = True
-                    self._glue_after_close = False
-                    self._active_close_re = re.compile(
-                        rf"(?:<|&lt;)/{re.escape(atag.lower())}\s*(?:>|&gt;)", re.IGNORECASE
-                    )
-                    self._buf = self._buf[m_open.end() :]
-                    continue
-                if bkind:
-                    self._active_close_re = re.compile(
-                        rf"(?:\[|&#91;|&#x5b;)\s*/Tool {re.escape(bkind)}\s*\]",
-                        re.IGNORECASE,
-                    )
-                else:
-                    self._active_close_re = re.compile(
-                        rf"(?:<|&lt;)/{re.escape(xtag or 'orin_tool_call')}\s*(?:>|&gt;)",
-                        re.IGNORECASE,
-                    )
-                self._buf = self._buf[m_open.end() :]
-                continue
-
-            if self._in_code_fence:
-                emit_all = self._buf
-                self._buf = ""
-                self._update_fence_state(emit_all)
-                out.append(emit_all)
                 break
 
-            hold = max(
-                (_longest_suffix_prefix(self._buf, p) for p in _RESIDUAL_STREAM_PREFIXES),
-                default=0,
-            )
-            lower_buf = self._buf.lower()
-            for p in _RESIDUAL_STREAM_PREFIXES:
-                idx = lower_buf.rfind(p.lower())
+            if self._mode == "fence":
+                idx = self._buf.find(self._fence_marker)
                 if idx != -1:
-                    tail = self._buf[idx:]
-                    if p.startswith(("[", "&")) and "tool " in p.lower() and "]" not in tail and len(tail) < 256:
-                        hold = max(hold, len(tail))
-                    elif p.startswith(("<", "&lt;")) and ">" not in tail and "&gt;" not in tail and len(tail) < 256:
-                        hold = max(hold, len(tail))
-                    elif p == LOG_OPEN and len(tail) < 40 and "\n" not in tail:
-                        hold = max(hold, len(tail))
-            hold = max(hold, _orphan_closer_hold(self._buf))
+                    end = idx + len(self._fence_marker)
+                    self._emit(out, self._buf[:end])
+                    self._buf = self._buf[end:]
+                    self._mode = "text"
+                    continue
+                if final:
+                    self._emit(out, self._buf)
+                    self._buf = ""
+                    break
+                mark = self._fence_marker[0]
+                keep = len(self._buf) - len(self._buf.rstrip(mark))
+                keep = min(keep, len(self._fence_marker) - 1)
+                self._emit(out, self._buf[: len(self._buf) - keep])
+                self._buf = self._buf[len(self._buf) - keep :]
+                break
 
-            if hold > 0:
-                emit_part = self._buf[:-hold]
-                self._buf = self._buf[-hold:]
-            else:
-                emit_part = self._buf
+            if self._mode == "inline":
+                closed = False
+                waiting = False
+                for m_stop in _INLINE_CODE_STOP_RE.finditer(self._buf):
+                    if m_stop.group(0) == "\n":
+                        # Inline code never spans lines: the backtick was a stray one.
+                        self._emit(out, self._buf[: m_stop.start()])
+                        self._buf = self._buf[m_stop.start() :]
+                        self._mode = "text"
+                        closed = True
+                        break
+                    if m_stop.end() == len(self._buf) and not final:
+                        # The run may still grow in the next chunk.
+                        self._emit(out, self._buf[: m_stop.start()])
+                        self._buf = self._buf[m_stop.start() :]
+                        waiting = True
+                        break
+                    if len(m_stop.group(0)) == self._inline_len:
+                        self._emit(out, self._buf[: m_stop.end()])
+                        self._buf = self._buf[m_stop.end() :]
+                        self._mode = "text"
+                        closed = True
+                        break
+                if closed:
+                    continue
+                if waiting:
+                    break
+                self._emit(out, self._buf)
                 self._buf = ""
+                break
 
-            if emit_part:
-                self._update_fence_state(emit_part)
-                out.append(emit_part)
+            # Text mode: the earliest of a code start and a block opening decides.
+            m_open = _RESIDUAL_STREAM_OPEN_RE.search(self._buf)
+            m_code = _CODE_START_RE.search(self._buf)
+            if m_code is not None and (m_open is None or m_code.start() < m_open.start()):
+                self._emit(out, self._buf[: m_code.start()])
+                self._buf = self._buf[m_code.start() :]
+                run = m_code.group(0)
+                if not final and len(run) == len(self._buf) and run.startswith("`"):
+                    break  # `` ` `` or ``` `` ``` may still become a fence
+                if run.startswith("~") or len(run) >= 3:
+                    self._fence_marker = run[:3]
+                    self._emit(out, self._buf[:3])
+                    self._buf = self._buf[3:]
+                    self._mode = "fence"
+                else:
+                    self._inline_len = len(run)
+                    self._emit(out, run)
+                    self._buf = self._buf[len(run) :]
+                    self._mode = "inline"
+                continue
+            if m_open is not None:
+                self._emit(out, self._buf[: m_open.start()])
+                self._buf = self._buf[m_open.end() :]
+                self._open_block(m_open)
+                continue
+            if final:
+                self._emit(out, self._buf)
+                self._buf = ""
+                break
+            hold = _residual_open_hold(self._buf)
+            m_mark = _TRAILING_CODE_MARK_RE.search(self._buf)
+            if m_mark is not None:
+                hold = max(hold, len(m_mark.group(0)))
+            if hold >= len(self._buf):
+                break
+            self._emit(out, self._buf[: len(self._buf) - hold])
+            self._buf = self._buf[len(self._buf) - hold :]
             break
-
         return "".join(out)
-
-    def finish(self) -> str:
-        if self._active_close_re is not None:
-            # Unclosed residual tool block at EOF: drop it cleanly
-            self._buf = ""
-            self._active_close_re = None
-            self._consume_glued_assistant = False
-            return ""
-        if self._consume_glued_assistant and self._buf:
-            m_glued = _GLUED_ASSISTANT_PREFIX_RE.match(self._buf)
-            if m_glued is not None:
-                self._buf = self._buf[m_glued.end() :]
-            self._consume_glued_assistant = False
-        leftover = strip_residual_tool_protocol_blocks(self._buf)
-        self._buf = ""
-        if leftover:
-            self._update_fence_state(leftover)
-        return leftover

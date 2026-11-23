@@ -29,6 +29,13 @@ const SPEAK_TAG_RE = /(?:<|&lt;)\s*\/?\s*speak\b(?:[^>&]|&(?!gt;))*?(?:>|&gt;)/g
 
 const FENCE_OPEN_RE = /^[ \t]{0,3}(`{3,}|~{3,})[^\r\n]*(?:\r?\n|$)/gm
 
+/**
+ * Markdown code anywhere in a line: one or two backticks open inline code (closed by the same run or the end of
+ * the line), three or more (or `~~~`) a fence up to the next same marker. Tool markup inside is a quotation and stays,
+ * the same rule as the backend (`strip_residual_tool_protocol_blocks`).
+ */
+const CODE_START_RE = /`+|~~~/g
+
 const TOOL_BLOCK_START_RE =
   /(?:(?:\[|&#91;|&#x5b;)\s*Tool\s+(?:Use|Result)\b|(?:<|&lt;)\s*(?:orin_tool_call|tool_call|orin_tool_result|tool_result)\b)/gi
 
@@ -569,6 +576,29 @@ function buildActivityGroupFromBlocks(blocks: ParsedRawBlock[], groupIndex: numb
   return draftGroup
 }
 
+function quotedCodeEnd(content: string, start: number, run: string): number {
+  if (run.startsWith('~') || run.length >= 3) {
+    const marker = run.slice(0, 3)
+    const idx = content.indexOf(marker, start + 3)
+    return idx === -1 ? content.length : idx + 3
+  }
+  const stopRe = /`+|\n/g
+  stopRe.lastIndex = start + run.length
+  let stop: RegExpExecArray | null
+  while ((stop = stopRe.exec(content)) !== null) {
+    if (stop[0] === '\n') return stop.index
+    if (stop[0].length === run.length) return stop.index + stop[0].length
+  }
+  return content.length
+}
+
+function lineBlankAfter(text: string, wasBlank: boolean): boolean {
+  if (!text) return wasBlank
+  const newline = text.lastIndexOf('\n')
+  if (newline !== -1) return text.slice(newline + 1).trim() === ''
+  return wasBlank && text.trim() === ''
+}
+
 function findFenceEnd(content: string, fenceStartEndIndex: number, fenceMarker: string): number {
   const fenceChar = fenceMarker[0]
   const minLen = fenceMarker.length
@@ -611,6 +641,16 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
   let markdownBuffer = ''
   let pos = 0
   let groupCounter = 0
+  // True while only spaces/tabs were kept since the last line break. A block that never closes only runs to the
+  // end when its opening starts a line; in the middle of a sentence the tag is prose and stays.
+  let lineBlank = true
+
+  const keep = (text: string, raw = false) => {
+    if (!text) return
+    const kept = raw ? text : stripSpeakTags(text)
+    markdownBuffer += kept
+    lineBlank = lineBlankAfter(kept, lineBlank)
+  }
 
   const flushMarkdown = () => {
     if (!markdownBuffer) return
@@ -633,18 +673,30 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
     ORIN_LOG_START_RE.lastIndex = pos
     const logMatch = ORIN_LOG_START_RE.exec(content)
 
+    CODE_START_RE.lastIndex = pos
+    const codeMatch = CODE_START_RE.exec(content)
+
     const nextMarkerIndex = Math.min(
       toolMatch ? toolMatch.index : Number.POSITIVE_INFINITY,
       anthropicMatch ? anthropicMatch.index : Number.POSITIVE_INFINITY,
       logMatch ? logMatch.index : Number.POSITIVE_INFINITY,
     )
+    const codeIndex = codeMatch ? codeMatch.index : Number.POSITIVE_INFINITY
 
-    if (fenceMatch && fenceMatch.index < nextMarkerIndex) {
-      markdownBuffer += stripSpeakTags(content.slice(pos, fenceMatch.index))
+    if (fenceMatch && fenceMatch.index < nextMarkerIndex && fenceMatch.index <= codeIndex) {
+      keep(content.slice(pos, fenceMatch.index))
       const fenceOpenEnd = fenceMatch.index + fenceMatch[0].length
       const fenceEnd = findFenceEnd(content, fenceOpenEnd, fenceMatch[1])
-      markdownBuffer += content.slice(fenceMatch.index, fenceEnd)
+      keep(content.slice(fenceMatch.index, fenceEnd), true)
       pos = fenceEnd
+      continue
+    }
+
+    if (codeMatch && codeIndex < nextMarkerIndex) {
+      keep(content.slice(pos, codeIndex))
+      const codeEnd = quotedCodeEnd(content, codeIndex, codeMatch[0])
+      keep(content.slice(codeIndex, codeEnd), true)
+      pos = codeEnd
       continue
     }
 
@@ -653,13 +705,19 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
       (!toolMatch || anthropicMatch.index < toolMatch.index) &&
       (!logMatch || anthropicMatch.index < logMatch.index)
     ) {
-      markdownBuffer += stripSpeakTags(content.slice(pos, anthropicMatch.index))
+      keep(content.slice(pos, anthropicMatch.index))
       const openedTag = anthropicMatch[1] ?? (/^(?:<|&lt;)invoke/i.test(anthropicMatch[0]) ? 'invoke' : undefined)
       let dropEnd = anthropicMatch.index + anthropicMatch[0].length
       if (openedTag) {
         const closeRe = new RegExp(String.raw`(?:<|&lt;)\/${openedTag}\s*(?:>|&gt;)`, 'gi')
         closeRe.lastIndex = dropEnd
         const closeMatch = closeRe.exec(content)
+        if (!closeMatch && !lineBlank) {
+          // A tag in the middle of a sentence that never closes is prose.
+          keep(anthropicMatch[0])
+          pos = dropEnd
+          continue
+        }
         dropEnd = closeMatch ? closeMatch.index + closeMatch[0].length : content.length
       }
       pos = dropEnd
@@ -667,33 +725,46 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
     }
 
     if (logMatch && (!toolMatch || logMatch.index < toolMatch.index)) {
-      markdownBuffer += stripSpeakTags(content.slice(pos, logMatch.index))
+      keep(content.slice(pos, logMatch.index))
       let dropEnd = logMatch.index + logMatch[0].length
+      let unclosed: boolean
       if (/^\(Orin log: result of tool/i.test(logMatch[0])) {
         ORIN_LOG_END_RE.lastIndex = dropEnd
         const endMatch = ORIN_LOG_END_RE.exec(content)
+        unclosed = !endMatch
         dropEnd = endMatch ? endMatch.index + endMatch[0].length : content.length
+      } else {
+        unclosed = !logMatch[0].trimEnd().endsWith(')')
       }
+      if (unclosed && !lineBlank) {
+        keep(content[logMatch.index])
+        pos = logMatch.index + 1
+        continue
+      }
+      if (/\n[ \t]*$/.test(content.slice(logMatch.index, dropEnd))) lineBlank = true
       pos = dropEnd
       continue
     }
 
     if (!toolMatch) {
-      markdownBuffer += stripSpeakTags(content.slice(pos))
+      keep(content.slice(pos))
       break
     }
 
     // A tool block starts at toolMatch.index
     if (toolMatch.index > pos) {
-      markdownBuffer += stripSpeakTags(content.slice(pos, toolMatch.index))
+      keep(content.slice(pos, toolMatch.index))
     }
 
     const batchBlocks: ParsedRawBlock[] = []
     let cursor = toolMatch.index
+    let blockLineBlank: boolean = lineBlank
 
     while (cursor < content.length) {
       const parsedBlock = parseSingleToolBlockAt(content, cursor)
       if (!parsedBlock) break
+      // An opening that never closes is only a block when it starts a line.
+      if (!parsedBlock.closed && !blockLineBlank) break
       batchBlocks.push(parsedBlock)
       cursor = parsedBlock.endIndex
       if (!parsedBlock.closed) break
@@ -703,6 +774,9 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
       const nextNonWs = cursor + (wsMatch ? wsMatch[0].length : 0)
       const nextBlock = parseSingleToolBlockAt(content, nextNonWs)
       if (!nextBlock) break
+      const nextLineBlank: boolean = blockLineBlank || (wsMatch ? wsMatch[0].includes('\n') : false)
+      if (!nextBlock.closed && !nextLineBlank) break
+      blockLineBlank = nextLineBlank
       cursor = nextNonWs
     }
 
@@ -711,10 +785,11 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
       groupCounter += 1
       const group = buildActivityGroupFromBlocks(batchBlocks, groupCounter)
       segments.push({ kind: 'activity', group })
+      if (/\n[ \t]*$/.test(content.slice(toolMatch.index, cursor))) lineBlank = true
       pos = cursor
     } else {
-      // Fallback safety: advance one character so we never loop infinitely
-      markdownBuffer += content[toolMatch.index]
+      // Not a block (or a mid-sentence opening that never closes): keep the character and scan on.
+      keep(content[toolMatch.index])
       pos = toolMatch.index + 1
     }
   }

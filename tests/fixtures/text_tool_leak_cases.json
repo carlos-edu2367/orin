@@ -45,6 +45,51 @@
       "name": "plain prose is untouched",
       "input": "Nada de ferramenta aqui. Use a tag <b>negrito</b> e o termo invoke em prosa.",
       "expected": "Nada de ferramenta aqui. Use a tag <b>negrito</b> e o termo invoke em prosa."
+    },
+    {
+      "name": "tag quoted in single backticks stays (orin_tool_call)",
+      "input": "O modo native_history=False (`<orin_tool_call>`) continua igual. Resto do relatorio aqui.",
+      "expected": "O modo native_history=False (`<orin_tool_call>`) continua igual. Resto do relatorio aqui."
+    },
+    {
+      "name": "tag quoted in single backticks stays (invoke)",
+      "input": "Use `<invoke name=\"Bash\">` para X. Depois segue.",
+      "expected": "Use `<invoke name=\"Bash\">` para X. Depois segue."
+    },
+    {
+      "name": "tag quoted in single backticks stays ([Tool Use])",
+      "input": "Texto com `[Tool Use]` inline e mais texto.",
+      "expected": "Texto com `[Tool Use]` inline e mais texto."
+    },
+    {
+      "name": "tags quoted in double backticks stay",
+      "input": "Em crase dupla: ``<function_calls>`` e ``[Tool Result id=1]`` ficam. Fim.",
+      "expected": "Em crase dupla: ``<function_calls>`` e ``[Tool Result id=1]`` ficam. Fim."
+    },
+    {
+      "name": "loose tag in the middle of a sentence without a closing tag stays",
+      "input": "O filtro remove a tag <invoke name=\"Bash\"> quando ela abre um bloco. O resto fica.\nQuando o modelo escreve <function_calls> no meio da frase, nada roda.\nO marcador [Tool Use id=1 name=Bash] no meio da frase fica.\nVeja (Orin log: the assistant used tool Bash sem fechar e segue",
+      "expected": "O filtro remove a tag <invoke name=\"Bash\"> quando ela abre um bloco. O resto fica.\nQuando o modelo escreve <function_calls> no meio da frase, nada roda.\nO marcador [Tool Use id=1 name=Bash] no meio da frase fica.\nVeja (Orin log: the assistant used tool Bash sem fechar e segue"
+    },
+    {
+      "name": "markdown report quoting several tags stays whole",
+      "input": "## Relatorio\n- O modo native_history=False (`<orin_tool_call>`) continua igual.\n- O XML da Anthropic (`<function_calls>`, `<invoke name=\"X\">`, `</function_results>`) some da tela.\n- O marcador antigo ``[Tool Use id=1]`` e o novo `(Orin log: the assistant used tool Bash` ficam citados.\n- Fechamentos citados: `</invoke>` e `</output></result></function_results>`.\n\nExemplo:\n```xml\n<invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke>\n```\nFim do relatorio.",
+      "expected": "## Relatorio\n- O modo native_history=False (`<orin_tool_call>`) continua igual.\n- O XML da Anthropic (`<function_calls>`, `<invoke name=\"X\">`, `</function_results>`) some da tela.\n- O marcador antigo ``[Tool Use id=1]`` e o novo `(Orin log: the assistant used tool Bash` ficam citados.\n- Fechamentos citados: `</invoke>` e `</output></result></function_results>`.\n\nExemplo:\n```xml\n<invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke>\n```\nFim do relatorio."
+    },
+    {
+      "name": "complete block in the middle of a line is still removed",
+      "input": "Antes <invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke> depois.",
+      "expected": "Antes  depois."
+    },
+    {
+      "name": "quoted tag then a real complete block on the same line",
+      "input": "Cito `<invoke>` e depois <invoke name=\"Bash\"><parameter name=\"c\">x</parameter></invoke> fim.",
+      "expected": "Cito `<invoke>` e depois  fim."
+    },
+    {
+      "name": "unclosed block indented at line start runs to the end, backticks inside it too",
+      "input": "Vou rodar.\n   <function_calls>\n<invoke name=\"Bash\"><parameter name=\"command\">echo `date`</parameter>",
+      "expected": "Vou rodar.\n   "
     }
   ]
 }

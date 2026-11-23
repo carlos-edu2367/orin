@@ -24,6 +24,7 @@ from agentos.agentic.provider_stream import (
 from agentos.agentic.retry import parse_retry_after
 from agentos.agentic.tools.public_names import internal_name, public_name
 from agentos.process_identity import kill_verified, process_created
+from agentos.providers.claude_cli.text_protocol import quoted_code_spans
 from agentos.providers.models import (
     FinishReason,
     ProviderError,
@@ -854,18 +855,29 @@ _BRACKET_TOOL_ID_ATTR_RE = re.compile(
 _RESIDUAL_TOOL_RESULT_SPAN_RE = re.compile(
     r"(?:\[|&#91;|&#x5b;)\s*Tool Result\b[^\]]*\][\s\S]*?"
     r"(?:(?:\[|&#91;|&#x5b;)\s*/Tool Result\s*\]"
-    r"(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)?|\Z)",
+    r"(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)?)",
     re.IGNORECASE,
 )
 
 
 def _strip_hallucinated_tool_results(text: str) -> str:
+    """Drop made-up `[Tool Result]` blocks: closed ones anywhere, an unclosed one only from the start of a line.
+
+    A marker quoted in inline code or a fence, or loose in the middle of a sentence, is prose and stays.
+    """
     if not text:
         return ""
     lowered = text.lower()
     if "tool result" not in lowered and "tool use" not in lowered:
         return text
-    cleaned = _RESIDUAL_TOOL_RESULT_SPAN_RE.sub("", text)
+    quoted = quoted_code_spans(text)
+
+    def _drop_unquoted(match: re.Match[str]) -> str:
+        if any(start <= match.start() < end for start, end in quoted):
+            return match.group(0)
+        return ""
+
+    cleaned = _RESIDUAL_TOOL_RESULT_SPAN_RE.sub(_drop_unquoted, text)
     cleaned = _HALLUCINATED_TOOL_RESULT_RE.sub("", cleaned)
     return cleaned.strip()
 

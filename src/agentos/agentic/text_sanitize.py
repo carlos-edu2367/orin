@@ -7,8 +7,10 @@ show in the conversation, the Discord channel and any export. The filters live i
 stores or sends assistant text has one function to call and one contract test (`tests/unit/agentic/
 test_text_sanitize_contract.py`) that lists the places that already do.
 
-Markup inside fenced code blocks is kept (a user can ask for an example), and ordinary `<result>` / `<output>` tags
-are kept: they only count next to a `</function_results>`.
+Markup inside fenced code blocks or inline code (single or double backticks) is kept: it is a quotation, as in a
+report that cites a tag. An opening tag that never closes is only removed up to the end when it starts a line; in the
+middle of a sentence it is prose and stays. Ordinary `<result>` / `<output>` tags are kept: they only count next to a
+`</function_results>`.
 """
 
 from __future__ import annotations

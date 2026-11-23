@@ -17,7 +17,7 @@ const words = (text: string) => text.split(/\s+/).filter(Boolean).join(' ')
 describe('text tool leak fixtures shared with the backend', () => {
   it('has the cases the contract requires', () => {
     const names = cases.map((item) => item.name).join(' | ')
-    for (const needed of ['print', 'html-escaped', 'code fence', 'legitimate result', '[Tool Use]', 'Orin log', 'without a closing']) {
+    for (const needed of ['print', 'html-escaped', 'code fence', 'legitimate result', '[Tool Use]', 'Orin log', 'without a closing', 'single backticks', 'double backticks', 'middle of a sentence', 'markdown report']) {
       expect(names).toContain(needed)
     }
   })

@@ -14,7 +14,8 @@ CASES = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
 
 def test_the_shared_fixture_covers_the_required_cases() -> None:
     names = " | ".join(case["name"] for case in CASES)
-    for needed in ("print", "html-escaped", "code fence", "legitimate result", "[Tool Use]", "Orin log", "without a closing"):
+    for needed in ("print", "html-escaped", "code fence", "legitimate result", "[Tool Use]", "Orin log", "without a closing",
+                   "single backticks", "double backticks", "middle of a sentence", "markdown report"):
         assert needed in names, needed
 
 

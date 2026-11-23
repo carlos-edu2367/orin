@@ -30,11 +30,6 @@ RESULT_RECORD_END = "(end of Orin log)"
 _LEGACY_RESULT_PREFIXES: tuple[str, ...] = ("[Tool Result", "&#91;Tool Result")
 RESULT_BLOCK_PREFIXES: tuple[str, ...] = (RESULT_RECORD_PREFIX, *_LEGACY_RESULT_PREFIXES)
 
-# Display filters: one use record line, and a result record up to its end marker (or the end of the text).
-USE_RECORD_LINE_RE = re.compile(r"\(Orin log: the assistant used tool [^\n]*(?:\n|\Z)")
-RESULT_RECORD_BLOCK_RE = re.compile(
-    r"\(Orin log: result of tool [\s\S]*?(?:\(end of Orin log\)[ \t]*(?:\n|\Z)|\Z)"
-)
 # Compaction: a use record inside an assistant block, with the line break before it.
 _USE_RECORD_SPAN_RE = re.compile(r"\n?\(Orin log: the assistant used tool [^\n]*")
 _LEGACY_USE_SPAN_RE = re.compile(
