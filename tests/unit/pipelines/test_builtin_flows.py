@@ -397,7 +397,7 @@ def test_reproduction_must_fail_then_fix_then_new_test_and_suite_and_verifier_pa
     assert dict(h.launcher.launch_count_by_step) == {"reproduzir": 1, "corrigir": 1}
     fix = _prompts(h, "corrigir")[0]
     assert "tests/test_repro_bug.py" in fix and "assert 3 == 4" in fix  # the reproduction reaches the fixer
-    assert h.gates.timeouts[0] == 600 and h.gates.timeouts[2] == 1800
+    assert h.gates.timeouts[0] == 600 and h.gates.timeouts[2] == 600  # 600 s is the gate ceiling (Bash tool)
 
 
 def test_a_reproduction_that_passes_sends_the_loop_back_to_reproduce_again(tmp_path) -> None:

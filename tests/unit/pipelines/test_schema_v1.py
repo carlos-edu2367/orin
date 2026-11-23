@@ -36,7 +36,7 @@ def test_spec_example_validates_and_builds_the_definition() -> None:
     assert isinstance(verificar, GateStep)
     first, second = verificar.gate.items
     assert verificar.gate.mode == "all"
-    assert isinstance(first, CommandGate) and first.timeout_seconds == 900 and first.expect == "zero"
+    assert isinstance(first, CommandGate) and first.timeout_seconds == 600 and first.expect == "zero"
     assert isinstance(second, VerifierGate) and second.policy == "cross_family" and second.pass_on == ("pass",)
     assert verificar.on_fail.action == "goto" and verificar.on_fail.goto == "corrigir"
     assert verificar.on_fail.max_loops == 2
@@ -281,7 +281,7 @@ def test_gate_shape() -> None:
 def test_command_gate_fields() -> None:
     assert "E_TYPE" in codes(pipeline("- id: g\n  gate: {all: [{command: pytest, expect: maybe}]}\n"))
     assert "E_TYPE" in codes(pipeline("- id: g\n  gate: {all: [{command: pytest, timeout_seconds: 0}]}\n"))
-    assert "E_TYPE" in codes(pipeline("- id: g\n  gate: {all: [{command: pytest, timeout_seconds: 3601}]}\n"))
+    assert "E_TYPE" in codes(pipeline("- id: g\n  gate: {all: [{command: pytest, timeout_seconds: 601}]}\n"))
     definition = validate_structure(pipeline("- id: g\n  gate: {all: [{command: pytest, expect: nonzero}]}\n"))[0]
     assert definition is not None and isinstance(definition.steps[0], GateStep)
     item = definition.steps[0].gate.items[0]

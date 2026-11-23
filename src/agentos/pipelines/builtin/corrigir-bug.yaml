@@ -89,7 +89,7 @@ steps:
         - command: ${{ inputs.comando_reproducao }}
           timeout_seconds: 600
         - command: ${{ inputs.testes }}
-          timeout_seconds: 1800
+          timeout_seconds: 600
         - verifier:
             policy: cross_family
             effort: high
