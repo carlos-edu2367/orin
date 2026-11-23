@@ -14,7 +14,7 @@ from agentos.permissions.trust import WorkspaceTrustStore
 
 from . import paths as _paths
 from .errors import PipelineError
-from .model import PipelineDefinition, Source, compute_definition_hash
+from .model import PipelineDefinition, Source, compute_definition_hash, normalize_text
 from .validator import validate_structure
 
 _PRECEDENCE: tuple[Source, ...] = ("project", "user", "builtin")
@@ -29,6 +29,7 @@ class DiscoveryEntry:
     errors: tuple[PipelineError, ...] = ()
     warnings: tuple[PipelineError, ...] = ()
     definition_hash: str = ""
+    text: str = ""  # the text that was validated; empty when the file could not be read safely (link out, too large, not UTF-8)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,31 +47,39 @@ class DiscoveryDisabled(Exception):
         super().__init__(self.error.format())
 
 
-def _failed(path: Path, source: Source, code: str, message: str, text_hash: str = "") -> DiscoveryEntry:
-    return DiscoveryEntry(path.stem, source, path, None, (PipelineError(code, message),), (), text_hash)
+def read_checked(path: Path, base: Path) -> tuple[str, PipelineError | None]:
+    """The text of a pipeline file, or the reason it may not be read: the one reader of these files.
 
-
-def _read_entry(path: Path, base: Path, source: Source) -> DiscoveryEntry:
+    ``base`` is the resolved pipelines folder. A link that leaves it (``E_YAML_FORBIDDEN``), a file over the size
+    limit (``E_TOO_LARGE``) or one that is not UTF-8 never gives its content back.
+    """
     try:
         resolved = path.resolve(strict=True)
     except OSError:
-        return _failed(path, source, "E_YAML_SYNTAX", "não foi possível abrir o arquivo")
+        return "", PipelineError("E_YAML_SYNTAX", "não foi possível abrir o arquivo")
     if not resolved.is_relative_to(base):
-        return _failed(path, source, "E_YAML_FORBIDDEN", "o arquivo é um atalho que aponta para fora da pasta de pipelines e foi ignorado")
+        return "", PipelineError("E_YAML_FORBIDDEN", "o arquivo é um atalho que aponta para fora da pasta de pipelines e foi ignorado")
     limit = _paths.MAX_FILE_BYTES
+    too_large = PipelineError("E_TOO_LARGE", f"o arquivo passa de {limit // 1024} KB e foi ignorado")
     try:
         if resolved.stat().st_size > limit:
-            return _failed(path, source, "E_TOO_LARGE", f"o arquivo passa de {limit // 1024} KB e foi ignorado")
+            return "", too_large
         with resolved.open("rb") as handle:
             raw = handle.read(limit + 1)
     except OSError:
-        return _failed(path, source, "E_YAML_SYNTAX", "não foi possível ler o arquivo")
+        return "", PipelineError("E_YAML_SYNTAX", "não foi possível ler o arquivo")
     if len(raw) > limit:
-        return _failed(path, source, "E_TOO_LARGE", f"o arquivo passa de {limit // 1024} KB e foi ignorado")
+        return "", too_large
     try:
-        text = raw.decode("utf-8-sig")
+        return raw.decode("utf-8-sig"), None
     except UnicodeDecodeError:
-        return _failed(path, source, "E_YAML_SYNTAX", "o arquivo não está em UTF-8")
+        return "", PipelineError("E_YAML_SYNTAX", "o arquivo não está em UTF-8")
+
+
+def _read_entry(path: Path, base: Path, source: Source) -> DiscoveryEntry:
+    text, problem = read_checked(path, base)
+    if problem is not None:
+        return DiscoveryEntry(path.stem, source, path, None, (problem,), (), "")
     digest = compute_definition_hash(text)
     definition, report = validate_structure(text, source)
     errors = report.errors
@@ -84,7 +93,7 @@ def _read_entry(path: Path, base: Path, source: Source) -> DiscoveryEntry:
             ),
         )
         definition = None
-    return DiscoveryEntry(path.stem, source, path, definition, errors, report.warnings, digest)
+    return DiscoveryEntry(path.stem, source, path, definition, errors, report.warnings, digest, normalize_text(text))
 
 
 def _scan(directory: Path | None, source: Source) -> list[DiscoveryEntry]:
@@ -168,4 +177,5 @@ __all__ = [
     "DiscoveryResult",
     "discover",
     "get_pipeline",
+    "read_checked",
 ]

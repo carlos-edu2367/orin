@@ -90,3 +90,15 @@ def test_yaml_examples_pass_structural_validation() -> None:
         definition, report = validate_structure(block, "user")
         assert report.ok, report.errors
         assert definition is not None
+
+
+def test_the_program_selecting_rule_is_documented_where_the_agent_and_the_quoting_are() -> None:
+    """C10 security review (P1, S2): the first word of a command selects the program, the agent may not fill it."""
+    from agentos.pipelines import command_quoting
+
+    quoting = TEXT.split("## Citação de `inputs` em gates", 1)[1].split("\n## ", 1)[0]
+    tool = TEXT.split("## A ferramenta `RunPipeline`", 1)[1].split("\n## ", 1)[0]
+    assert "seleciona o programa" in quoting and "primeira palavra" in quoting and "classify_references" in quoting
+    assert hasattr(command_quoting, "classify_references")
+    assert "seleciona o programa" in tool and "PIPELINE_INPUT_NOT_ALLOWED" in tool
+    assert "15 dígitos" in TEXT

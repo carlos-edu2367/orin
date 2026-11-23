@@ -123,6 +123,31 @@ def test_save_update_with_if_match_and_delete(world) -> None:  # noqa: ANN001
     assert world.client.delete("/v1/pipelines/meu", params={"scope": "user"}, headers=AUTH).status_code == 404
 
 
+def test_c10_review_p3_files_too_large_not_utf8_or_linked_out_never_leak_nor_500(world) -> None:  # noqa: ANN001
+    folder = world.tmp / "orin-home" / "pipelines"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "huge.yaml").write_text("#" * (300 * 1024), encoding="utf-8")
+    (folder / "binario.yaml").write_bytes(b"\xff\xfe\x00\x80invalid")
+    huge = world.client.get("/v1/pipelines/huge", headers=AUTH)
+    assert huge.status_code == 200 and huge.json()["text"] == "" and huge.json()["errors"][0]["code"] == "E_TOO_LARGE"
+    binary = world.client.get("/v1/pipelines/binario", headers=AUTH)
+    assert binary.status_code == 200 and binary.json()["text"] == ""
+    saved = world.client.put("/v1/pipelines/binario", json={"text": DOC.replace("id: meu", "id: binario"), "scope": "user"}, headers={**AUTH, "If-Match": "0" * 64})
+    assert saved.status_code == 422 and error_code(saved) == "PIPELINE_FILE_UNREADABLE"
+    deleted = world.client.delete("/v1/pipelines/binario", params={"scope": "user"}, headers={**AUTH, "If-Match": "0" * 64})
+    assert deleted.status_code == 409 and error_code(deleted) == "PIPELINE_CONFLICT"
+    secret = world.tmp / "segredo.txt"
+    secret.write_text("SUPER_SECRET_TOKEN=xyz123", encoding="utf-8")
+    try:
+        (folder / "vaza.yaml").symlink_to(secret)
+    except (OSError, NotImplementedError):
+        return  # a symlink needs a privilege on Windows; the service test covers the rest
+    leak = world.client.get("/v1/pipelines/vaza", headers=AUTH)
+    assert leak.status_code == 200 and "SUPER_SECRET" not in leak.text and leak.json()["errors"][0]["code"] == "E_YAML_FORBIDDEN"
+    blocked = world.client.delete("/v1/pipelines/vaza", params={"scope": "user"}, headers=AUTH)
+    assert blocked.status_code == 422 and error_code(blocked) == "PIPELINE_PATH_INVALID"
+
+
 def test_the_cli_token_runs_but_never_edits_or_approves(world) -> None:  # noqa: ANN001
     assert world.client.put("/v1/pipelines/meu", json={"text": DOC}, headers=CLI).status_code == 403
     assert world.client.post("/v1/pipelines/meu/approve", json={"definition_hash": "0" * 64}, headers=CLI).status_code == 403

@@ -18,7 +18,8 @@ from pathlib import Path
 from agentos.settings.writer import SettingsWriteError, update_settings_file
 
 from . import paths as _paths
-from .expressions import TemplateRef, split_template, ExpressionError
+from .command_quoting import ROLE_PROGRAM, ROLE_WHOLE, classify_references
+from .expressions import ExpressionError, split_template
 from .model import CommandGate, GateStep, PipelineDefinition
 
 USER_LEVEL_KEY = "@user"
@@ -43,6 +44,7 @@ class CommandReview:
     timeout_seconds: int
     inputs: tuple[str, ...]
     whole_value: bool
+    program_inputs: tuple[str, ...] = ()  # inputs that choose the program (the whole command or its first word)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,20 +154,29 @@ class ApprovalStore:
             for item in step.gate.items:
                 if not isinstance(item, CommandGate):
                     continue
-                names, whole = _inputs_in(item.command)
-                commands.append(CommandReview(step.id, item.command, item.expect, item.timeout_seconds, names, whole))
+                names, whole, program = _inputs_in(item.command)
+                commands.append(CommandReview(step.id, item.command, item.expect, item.timeout_seconds, names, whole, program))
         return ReviewInfo(definition.id, definition.definition_hash, tuple(commands), _notice(commands))
 
 
-def _inputs_in(command: str) -> tuple[tuple[str, ...], bool]:
+def _inputs_in(command: str) -> tuple[tuple[str, ...], bool, tuple[str, ...]]:
+    """``(inputs the command uses, whether one is the whole command, inputs that choose the program)``.
+
+    The roles come from ``command_quoting.classify_references``, the same function the gate renderer uses.
+    """
     try:
-        parts = split_template(command)
+        roles = classify_references(split_template(command))
     except ExpressionError:
-        return (), False
-    refs = [part for part in parts if isinstance(part, TemplateRef)]
-    names = tuple(dict.fromkeys(ref.path.segments[1] for ref in refs if len(ref.path.segments) > 1 and ref.path.segments[0] == "inputs"))
-    whole = len(parts) == 1 and len(refs) == 1
-    return names, whole
+        return (), False, ()
+
+    def name_of(role) -> str | None:  # noqa: ANN001
+        segments = role.ref.path.segments
+        return segments[1] if len(segments) > 1 and segments[0] == "inputs" else None
+
+    names = tuple(dict.fromkeys(name for role in roles if (name := name_of(role))))
+    whole = any(role.role == ROLE_WHOLE for role in roles)
+    program = tuple(dict.fromkeys(name for role in roles if role.role in {ROLE_WHOLE, ROLE_PROGRAM} and (name := name_of(role))))
+    return names, whole, program
 
 
 def _notice(commands: list[CommandReview]) -> str:
@@ -176,13 +187,18 @@ def _notice(commands: list[CommandReview]) -> str:
         "Qualquer mudança no arquivo, até em comentário, pede uma nova aprovação."
     ]
     whole = [item for item in commands if item.whole_value]
-    inline = [item for item in commands if item.inputs and not item.whole_value]
+    program = {name for item in commands if not item.whole_value for name in item.program_inputs}
+    inline = {name for item in commands for name in item.inputs} - program - {name for item in whole for name in item.inputs}
     if inline:
-        names = ", ".join(sorted({name for item in inline for name in item.inputs}))
-        lines.append(f"As entradas ({names}) entram no comando entre aspas, como um argumento só.")
+        lines.append(f"As entradas ({', '.join(sorted(inline))}) entram no comando entre aspas, como um argumento só.")
     if whole:
         names = ", ".join(sorted({name for item in whole for name in item.inputs}))
         lines.append(f"A entrada ({names}) é o comando inteiro: quem inicia o pipeline escolhe o programa; o valor é separado em palavras e cada palavra vai entre aspas.")
+    if program:
+        lines.append(
+            f"ATENÇÃO: a entrada ({', '.join(sorted(program))}) ocupa a posição do programa (a primeira palavra do comando): "
+            "quem inicia o pipeline escolhe o que será executado. O agente não pode preencher essa entrada."
+        )
     return " ".join(lines)
 
 

@@ -358,8 +358,10 @@ def test_the_agent_may_only_start_approved_pipelines_and_never_pick_a_whole_comm
     detail = world.service.get_pipeline(USER, world.root, "so-cmd")
     world.service.approve(USER, world.root, "so-cmd", detail["definition_hash"])
     assert code(lambda: agent_start(world, "so-cmd", {"comando": "rm -rf x"})) == "PIPELINE_INPUT_NOT_ALLOWED"
-    pending, _ = agent_start(world, "so-cmd")  # the default is used
-    assert pending.inputs == {"comando": "pytest -q"}
+    pending, info = agent_start(world, "so-cmd")  # the default is used
+    assert pending.inputs == {}  # the agent's own inputs: resolved again after the turn (C10 security review, P2)
+    assert info["inputs"] == {"comando": "pytest -q"}
+    service_module._take_pending("turn-agent")
     names = [item["id"] for item in world.service.agent_startable(USER, world.root)]
     assert "so-cmd" in names and "pesquisa" in names
 
@@ -450,6 +452,112 @@ def test_the_after_turn_handler_is_registered_and_ignores_turns_without_pending_
     after_turn.install_default_handlers()  # other tests clear the registry
     assert any(entry.handler is start_pending_handler for entry in after_turn._HANDLERS)
     start_pending_handler(SimpleNamespace(_engine=object()), {"turn_id": "sem-pendencia"}, "completed")
+
+
+# ------------------------------------------------------------- C10 security review (23/11): P2, P3, P6, S1
+def test_p2_an_agent_start_of_implementar_verificar_runs_after_the_turn(world: World) -> None:
+    world.settings = {"pipelines": {"agentMayStart": True}}
+    pending, info = agent_start(world, "implementar-verificar", {"objetivo": "corrigir bug"}, turn_id="t-p2a")
+    assert pending.inputs == {"objetivo": "corrigir bug"} and info["inputs"]["testes"] == "pytest -q"
+    started = world.service.run_pending({"turn_id": "t-p2a", "user_id": USER}, "completed")
+    assert len(started) == 1 and world.chat.store.activity == []  # no `agent_start_refused`
+    assert world.service.store.get_run(started[0]["run_id"]).inputs["testes"] == "pytest -q"
+
+
+def test_p2_an_agent_start_of_corrigir_bug_runs_after_the_turn(world: World) -> None:
+    world.settings = {"pipelines": {"agentMayStart": True}}
+    detail = world.service.get_pipeline(USER, world.root, "corrigir-bug")
+    required = {i["name"]: "x" for i in detail["inputs"] if i["required"] and i["agent_settable"]}
+    agent_start(world, "corrigir-bug", required, turn_id="t-p2b")
+    assert len(world.service.run_pending({"turn_id": "t-p2b", "user_id": USER}, "completed")) == 1
+
+
+def test_p2_the_degraded_auto_note_survives_the_after_turn_start(world: World) -> None:
+    world.settings = {"pipelines": {"agentMayStart": True}}
+    world.service._favorites = lambda user_id: {"anthropic": ("claude-sonnet-5-5",)}
+    _, info = agent_start(world, "revisao-multimodelo", {"alvo": "src/"}, turn_id="t-p2c")
+    assert info["degraded"][0]["reason"] == "models_auto_partial"
+    (started,) = world.service.run_pending({"turn_id": "t-p2c", "user_id": USER}, "completed")
+    assert started["degraded"][0]["reason"] == "models_auto_partial"
+    assert [event.type.value for _, event in world.emitted] == ["pipeline.degraded"]
+
+
+def test_p3_get_pipeline_never_returns_a_file_too_large_or_not_utf8(world: World) -> None:
+    (world.user_dir / "huge.yaml").write_text("#" * (300 * 1024), encoding="utf-8")
+    (world.user_dir / "binario.yaml").write_bytes(b"\xff\xfe\x00\x80invalid")
+    huge = world.service.get_pipeline(USER, world.root, "huge")
+    assert huge["errors"][0]["code"] == "E_TOO_LARGE" and huge["text"] == ""
+    binary = world.service.get_pipeline(USER, world.root, "binario")
+    assert binary["errors"][0]["code"] == "E_YAML_SYNTAX" and binary["text"] == ""
+    for pipeline_id in ("huge", "binario"):
+        assert code(lambda: world.service.save_pipeline(USER, world.root, pipeline_id, doc(pipeline_id), scope="user", if_match="0" * 64)) == "PIPELINE_FILE_UNREADABLE"
+        assert code(lambda: world.service.delete_pipeline(USER, world.root, pipeline_id, scope="user", if_match="0" * 64)) == "PIPELINE_CONFLICT"
+        world.service.delete_pipeline(USER, world.root, pipeline_id, scope="user")  # without If-Match a broken file can go
+        assert not (world.user_dir / f"{pipeline_id}.yaml").exists()
+
+
+def test_p3_a_link_out_of_the_folder_is_never_read_written_or_deleted(world: World, tmp_path: Path) -> None:
+    secret = tmp_path / "segredo.txt"
+    secret.write_text("SUPER_SECRET_TOKEN=xyz123", encoding="utf-8")
+    try:
+        (world.user_dir / "vaza.yaml").symlink_to(secret)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating a symlink needs a privilege on this machine")
+    detail = world.service.get_pipeline(USER, world.root, "vaza")
+    assert detail["errors"][0]["code"] == "E_YAML_FORBIDDEN" and detail["text"] == ""
+    assert code(lambda: world.service.save_pipeline(USER, world.root, "vaza", doc("vaza"), scope="user", if_match="0" * 64)) == "PIPELINE_PATH_INVALID"
+    assert code(lambda: world.service.delete_pipeline(USER, world.root, "vaza", scope="user")) == "PIPELINE_PATH_INVALID"
+    assert secret.read_text(encoding="utf-8") == "SUPER_SECRET_TOKEN=xyz123"
+
+
+def test_p6_the_default_budget_lowered_by_the_user_ceiling_says_so(world: World) -> None:
+    from agentos.pipelines import schema_v1 as sv
+
+    world.trust.trust(USER, world.root)
+    text = doc("sem-orcamento").replace("budget: {max_tokens: 1000000}\n", "")
+    world.write("project", "sem-orcamento", text)
+    world.settings = {"orchestration": {"budget": {"subagent": {"maxTokens": 50000}}}}
+    detail = world.service.get_pipeline(USER, world.root, "sem-orcamento")
+    world.service.approve(USER, world.root, "sem-orcamento", detail["definition_hash"])
+    budget = world.start("sem-orcamento")["budget"]
+    assert 50000 < sv.DEFAULT_BUDGET_TOKENS
+    assert budget["max_tokens"] == 50000 and budget["is_default"] is True and budget["lowered_by_user_ceiling"] is True
+    world.settings = {}
+    budget = world.start("sem-orcamento")["budget"]
+    assert budget["max_tokens"] == sv.DEFAULT_BUDGET_TOKENS and budget["lowered_by_user_ceiling"] is False
+
+
+def test_s1_two_saves_with_the_same_if_match_cannot_both_win(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    saved = world.service.save_pipeline(USER, world.root, "corrida", doc("corrida"), scope="user")
+    real_hash = PipelineService._existing_hash
+    gate = threading.Barrier(2, timeout=5)
+
+    def slow_hash(folder, existing):  # noqa: ANN001, ANN202 - both writers read the old hash before either replaces
+        current = real_hash(folder, existing)
+        try:
+            gate.wait(timeout=0.5)
+        except threading.BrokenBarrierError:
+            pass
+        return current
+
+    monkeypatch.setattr(PipelineService, "_existing_hash", staticmethod(slow_hash))
+    results: list[str] = []
+
+    def save(name: str) -> None:
+        try:
+            world.service.save_pipeline(USER, world.root, "corrida", doc("corrida").replace("Nome", name), scope="user", if_match=saved["definition_hash"])
+            results.append("ok")
+        except ServiceError as error:
+            results.append(error.code)
+
+    threads = [threading.Thread(target=save, args=(name,)) for name in ("A", "B")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert sorted(results) == ["PIPELINE_CONFLICT", "ok"]
 
 
 # ---------------------------------------------------------------- the two driver hooks C10 added

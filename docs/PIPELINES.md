@@ -134,7 +134,7 @@ O nome da entrada usa letras minúsculas, números e `_`.
 | `max_length` | inteiro | não | De 1 a 100000; vale só para `string`. |
 <!-- /schema -->
 
-O tipo `models` é uma lista de até 3 modelos no formato `provedor/modelo`, ou o texto `auto`. Antes de criar a execução o Orin resolve `auto` (modelos favoritos de famílias diferentes, sem os de cota recusada, sempre diferentes do autor quando possível) e grava a lista resolvida nas entradas, então a retomada é estável. Se houver menos famílias que o pedido, sai `pipeline.degraded` com `reason="models_auto_partial"`; sem nenhum modelo a API responde 422 `PIPELINE_MODELS_UNAVAILABLE`. A faixa de uma entrada `integer` não é validada pelo v1.
+O tipo `models` é uma lista de até 3 modelos no formato `provedor/modelo`, ou o texto `auto`. Antes de criar a execução o Orin resolve `auto` (modelos favoritos de famílias diferentes, sem os de cota recusada, sempre diferentes do autor quando possível) e grava a lista resolvida nas entradas, então a retomada é estável. Se houver menos famílias que o pedido, sai `pipeline.degraded` com `reason="models_auto_partial"`; sem nenhum modelo a API responde 422 `PIPELINE_MODELS_UNAVAILABLE`. Uma lista explícita de `models`, digitada ou vinda do `default` do arquivo, só aceita modelos favoritos (`PIPELINE_INPUT_INVALID`). Uma entrada `integer` aceita no máximo 15 dígitos, em texto ou como número JSON; fora isso, a faixa não é validada pelo v1.
 
 ### Orçamento (`budget`)
 
@@ -299,7 +299,8 @@ Entradas entram no comando já citadas pelo Orin, nunca cruas:
 
 - Dialeto `posix` (Git Bash no Windows, `/bin/sh` nos demais): `shlex.quote`.
 - Referência no meio do texto do comando: um único argumento citado.
-- Referência que é o valor inteiro de `command` (`command: ${{ inputs.testes }}` com `testes = "pytest -q"`): o valor é separado em palavras (`shlex.split`) e cada palavra é citada. Assim `pytest -q` funciona e `pytest -q; rm -rf x` nunca vira um segundo comando.
+- Referência que é o valor inteiro de `command` (`command: ${{ inputs.testes }}` com `testes = "pytest -q"`): o valor é separado em palavras (`shlex.split`) e cada palavra é citada. Assim `pytest -q` funciona e `pytest -q; rm -rf x` nunca vira um segundo comando. Espaços e quebras de linha nas bordas não contam (`command: |` com só a referência também é o comando inteiro): a carga apara as bordas de `command`.
+- Entrada que **seleciona o programa**: a referência é o comando inteiro ou está na primeira palavra de um comando (`command: ${{ inputs.prog }} --flag`, `./${{ inputs.prog }}`, depois de `;`, `&&`, `|`, de `NOME=valor` ou de `env`/`sudo`/`exec`/`bash -c`). Quem preenche essa entrada escolhe o que roda: ela aparece com ATENÇÃO na revisão de aprovação (`program_inputs` em cada comando, `selects_program` na entrada) e o agente não pode preenchê-la. A classificação vem de uma única função (`command_quoting.classify_references`), usada pela execução, pela revisão e pela regra do agente.
 - Dialeto `cmd` (sem Git Bash no Windows): não há citação segura geral. Gate com entrada citada é recusado com `GATE_SHELL_UNSUPPORTED` e a mensagem manda instalar o Git for Windows. Comando sem `${{ inputs.* }}` roda normalmente.
 - Referência já entre aspas (`'${{ inputs.x }}'`, `"${{ inputs.x }}"`) ou depois de barra invertida: recusada na carga com `E_EXPR_SYNTAX` (aponta a linha do `command`) e de novo na execução (`GATE_INPUT_INVALID`), porque as aspas do autor quebrariam a citação do Orin. Escreva a referência sem aspas.
 - Antes de rodar, o motor confere que as palavras do comando final são iguais às do modelo com cada referência trocada pelo valor bruto, e que o comando está no conjunto permitido calculado a partir das entradas (`GATE_REF_UNTRUSTED` fora dele).
@@ -388,7 +389,8 @@ Com `pipelines.agentMayStart` ligada (padrão desligada, só você pode ligar), 
 - Só inicia pipelines aprovados para agente (tabela de aprovação acima).
 - Nunca roda dentro do turno do agente: valida, registra um início pendente (até 3 por turno, `PIPELINE_PENDING_LIMIT`) e responde. O gancho pós-turno inicia os pendentes se o turno terminou bem e descarta os demais. O registro é do processo do worker: perdê-lo numa queda significa não gastar nada.
 - Filhos de um pipeline nunca recebem `RunPipeline`.
-- O agente não fornece valor para uma entrada que é o comando inteiro de um gate: vale o `default` do arquivo (`PIPELINE_INPUT_NOT_ALLOWED`).
+- O agente não fornece valor para uma entrada que seleciona o programa de um gate (o comando inteiro ou a primeira palavra dele, ver "Citação de `inputs` em gates"): vale o `default` do arquivo (`PIPELINE_INPUT_NOT_ALLOWED`).
+- O início pendente guarda as entradas que o agente digitou, não as resolvidas. O gancho pós-turno resolve de novo: o `default` das entradas que selecionam o programa e o aviso `pipeline.degraded` de `auto` continuam valendo.
 - O pedido de permissão do broker mostra apenas o nome da ferramenta; id, entradas e orçamento aparecem nos argumentos da chamada e no resultado.
 
 ## API
@@ -399,9 +401,9 @@ Todas as rotas exigem pessoa autenticada e uma das ações `pipeline.read`, `pip
 |---|---|---|
 | `GET /v1/pipelines` | read | Lista os pipelines visíveis (`conversation_id` opcional para incluir os do projeto). |
 | `POST /v1/pipelines/validate` | read | Valida um texto YAML (`text`, `source`, `conversation_id`). |
-| `GET /v1/pipelines/{pipeline_id}` | read | Definição, erros, avisos e hash. |
-| `PUT /v1/pipelines/{pipeline_id}` | write | Grava o arquivo (`scope` `user` ou `project`; `If-Match` com o hash atual evita sobrescrever). Não aceita o token do CLI. |
-| `DELETE /v1/pipelines/{pipeline_id}` | write | Apaga o arquivo (`scope`, `If-Match`). Não aceita o token do CLI. |
+| `GET /v1/pipelines/{pipeline_id}` | read | Definição, erros, avisos e hash. `text` é o texto que a descoberta validou: vem vazio quando o arquivo passa de 256 KB, não é UTF-8 ou é um atalho para fora da pasta. |
+| `PUT /v1/pipelines/{pipeline_id}` | write | Grava o arquivo (`scope` `user` ou `project`; `If-Match` com o hash atual evita sobrescrever; a comparação e a troca rodam sob trava de arquivo). Sobre um arquivo atual acima de 256 KB ou fora de UTF-8 responde 422 `PIPELINE_FILE_UNREADABLE`; sobre um atalho para fora da pasta, 422 `PIPELINE_PATH_INVALID`. Não aceita o token do CLI. |
+| `DELETE /v1/pipelines/{pipeline_id}` | write | Apaga o arquivo (`scope`, `If-Match`). Recusa atalho para fora da pasta (`PIPELINE_PATH_INVALID`). Não aceita o token do CLI. |
 | `POST /v1/pipelines/{pipeline_id}/approve` | write | Aprova o hash revisado (`definition_hash`). 409 se o arquivo mudou. |
 | `POST /v1/pipelines/{pipeline_id}/revoke` | write | Revoga a aprovação. |
 | `POST /v1/pipelines/{pipeline_id}/estimate` | read | Estimativa: assinaturas envolvidas e orçamento efetivo. |
@@ -419,7 +421,7 @@ Todas as rotas exigem pessoa autenticada e uma das ações `pipeline.read`, `pip
 
 Pausar e cancelar funcionam entre processos: a API grava `stop_reason="pause_requested"` e o vigia do driver, no worker, consulta o pedido a cada 0,5 s.
 
-Erros do `/goal`: `GOAL_ACTIVE` (409), `GOAL_NOT_FOUND` (404), `GOAL_NOT_RESUMABLE` (409), `GOAL_OBJECTIVE_INVALID` e `GOAL_MAX_TOKENS_INVALID` (422). Erros comuns de pipeline: `PIPELINE_NOT_FOUND`, `PIPELINE_INVALID` (422, com a lista de erros), `PIPELINE_NOT_APPROVED`, `PIPELINE_CHANGED`, `PIPELINE_CONFLICT`, `PIPELINE_PLAN_MODE`, `PIPELINE_RUN_NOT_FOUND`, `PIPELINE_NOT_RUNNING`, `PIPELINE_NOT_CANCELLABLE`, `PIPELINE_NOT_RESUMABLE`, `PIPELINE_SNAPSHOT_MISSING`, `PIPELINE_INPUT_REQUIRED`, `PIPELINE_INPUT_UNKNOWN`, `PIPELINE_INPUT_INVALID`, `PIPELINE_MODELS_UNAVAILABLE`.
+Erros do `/goal`: `GOAL_ACTIVE` (409), `GOAL_NOT_FOUND` (404), `GOAL_NOT_RESUMABLE` (409), `GOAL_OBJECTIVE_INVALID` e `GOAL_MAX_TOKENS_INVALID` (422). Erros comuns de pipeline: `PIPELINE_NOT_FOUND`, `PIPELINE_INVALID` (422, com a lista de erros), `PIPELINE_NOT_APPROVED`, `PIPELINE_CHANGED`, `PIPELINE_CONFLICT`, `PIPELINE_BUSY`, `PIPELINE_FILE_UNREADABLE`, `PIPELINE_PATH_INVALID`, `PIPELINE_PLAN_MODE`, `PIPELINE_RUN_NOT_FOUND`, `PIPELINE_NOT_RUNNING`, `PIPELINE_NOT_CANCELLABLE`, `PIPELINE_NOT_RESUMABLE`, `PIPELINE_SNAPSHOT_MISSING`, `PIPELINE_INPUT_REQUIRED`, `PIPELINE_INPUT_UNKNOWN`, `PIPELINE_INPUT_INVALID`, `PIPELINE_MODELS_UNAVAILABLE`.
 
 ## CLI `orin pipeline`
 
@@ -503,3 +505,4 @@ Códigos de execução (não fazem parte da lista fechada da carga): `E_RENDER` 
 - A correção de `output_schema` roda sem worktree: o agente corrige só o texto.
 - Um teste de reprodução do `corrigir-bug` que falha por outro motivo também conta como "reproduziu".
 - `RunPipeline` e o início pendente só existem em memória do processo do worker.
+- A detecção de "seleciona o programa" cobre a primeira palavra, `NOME=valor`, `;`/`&&`/`|`/`$(...)` e os invólucros `env`, `sudo`, `exec`, `nohup`, `nice`, `time`, `command`, `builtin`, `eval` e `sh/bash -c`. Não segue invólucros com opções que levam valor (`sudo -u root ${{ inputs.x }}`, `xargs -n 1 ...`) nem intérpretes que leem código (`python -c ${{ inputs.x }}`): a pessoa vê o comando inteiro ao aprovar o arquivo.

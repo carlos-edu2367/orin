@@ -5,8 +5,9 @@
 result is what the run stores in ``inputs``: a resumed run sees the same reviewers (G13). ``auto`` picks reviewers of
 different families with ``FavoritesModelCatalog.pick_reviewers`` (K21) and says so when it found fewer than asked.
 
-An input that is the whole value of a gate command (``command: ${{ inputs.testes }}``) chooses the program that will
-run; a value that comes from the agent is refused and the YAML ``default`` is used instead (G17, R18).
+An input that chooses the program of a gate command (it is the whole ``command: ${{ inputs.testes }}`` or sits in its
+first word, ``command: ${{ inputs.prog }} --flag``) is "program-selecting": a value that comes from the agent is
+refused and the YAML ``default`` is used instead (G17, R18; WS-C10 security review, P1 and S2).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from .model import InputSpec, PipelineDefinition
 MODELS_AUTO = "auto"
 DEFAULT_STRING_MAX_LENGTH = 100_000
 _INTEGER = re.compile(r"^-?\d{1,15}$")
+MAX_INTEGER = 999_999_999_999_999  # 15 digits, for the text form and for the JSON number alike
 
 
 class InputError(Exception):
@@ -53,9 +55,15 @@ class ResolvedInputs:
 
 
 def whole_command_inputs(definition: PipelineDefinition) -> frozenset[str]:
-    """Inputs that are the entire ``command`` of a gate: the person types the program, an agent may not."""
+    """Inputs that are the entire ``command`` of a gate (a subset of ``program_inputs``)."""
     review = ApprovalStore.commands_for_review(definition)
     return frozenset(name for command in review.commands if command.whole_value for name in command.inputs)
+
+
+def program_inputs(definition: PipelineDefinition) -> frozenset[str]:
+    """Inputs that choose the program a gate runs (the whole command or its first word): the person types them, an agent may not."""
+    review = ApprovalStore.commands_for_review(definition)
+    return frozenset(name for command in review.commands for name in command.program_inputs)
 
 
 def parse_model_ref(raw: Any) -> ModelRef:
@@ -81,6 +89,7 @@ def _models_value(
     author: ModelRef | None,
     favorites: Mapping[str, Sequence[str]] | None,
     notes: list[DegradedNote],
+    from_default: bool = False,
 ) -> list[dict[str, str]]:
     wanted = sv.MODELS_INPUT_MAX
     if isinstance(value, str) and value.strip().lower() == MODELS_AUTO:
@@ -112,7 +121,8 @@ def _models_value(
         except ValueError as error:
             raise InputError("PIPELINE_INPUT_INVALID", f"{error} (entrada `{name}`).", name) from error
         if favorites is not None and ref.model not in {str(m) for m in favorites.get(ref.provider, ())}:
-            raise InputError("PIPELINE_INPUT_INVALID", f"`{ref}` não é um modelo favorito (entrada `{name}`).", name)
+            origin = ", valor padrão do pipeline" if from_default else ""
+            raise InputError("PIPELINE_INPUT_INVALID", f"`{ref}` não é um modelo favorito (entrada `{name}`{origin}).", name)
         if ref not in refs:
             refs.append(ref)
     return [{"provider": ref.provider, "model": ref.model} for ref in refs]
@@ -131,6 +141,8 @@ def _scalar(spec: InputSpec, value: Any) -> Any:
         if isinstance(value, bool):
             raise InputError("PIPELINE_INPUT_INVALID", f"A entrada `{name}` deve ser um número inteiro.", name)
         if isinstance(value, int):
+            if abs(value) > MAX_INTEGER:
+                raise InputError("PIPELINE_INPUT_INVALID", f"A entrada `{name}` passa de 15 dígitos.", name)
             return value
         if isinstance(value, str) and _INTEGER.match(value.strip()):
             return int(value.strip())
@@ -167,7 +179,7 @@ def resolve_inputs(
             f"O pipeline não tem a(s) entrada(s): {', '.join(unknown)}. Entradas: {', '.join(sorted(declared)) or 'nenhuma'}.",
             unknown[0],
         )
-    commands = whole_command_inputs(definition) if from_agent else frozenset()
+    commands = program_inputs(definition) if from_agent else frozenset()
     values: dict[str, Any] = {}
     models: dict[str, list[dict[str, str]]] = {}
     notes: list[DegradedNote] = []
@@ -175,19 +187,21 @@ def resolve_inputs(
         if spec.name in commands and spec.name in given:
             raise InputError(
                 "PIPELINE_INPUT_NOT_ALLOWED",
-                f"A entrada `{spec.name}` é o comando inteiro de um gate: só quem inicia o pipeline pode escolhê-la. "
+                f"A entrada `{spec.name}` escolhe o programa de um gate (é o comando inteiro ou a primeira palavra dele): só quem inicia o pipeline pode escolhê-la. "
                 "Omita-a para usar o valor padrão do pipeline.",
                 spec.name,
             )
         value = given.get(spec.name) if spec.name not in commands else None
+        from_default = False
         if _missing(value):
-            value = spec.default
+            value, from_default = spec.default, True
         if _missing(value):
             if spec.required:
                 raise InputError("PIPELINE_INPUT_REQUIRED", f"A entrada `{spec.name}` é obrigatória.", spec.name)
             continue
         if spec.type == "models":
-            resolved = _models_value(spec.name, value, catalog=catalog, author=author, favorites=favorites if spec.name in given else None, notes=notes)
+            # always checked against the favorites: the ``default`` of a file is no more trusted than a typed value
+            resolved = _models_value(spec.name, value, catalog=catalog, author=author, favorites=favorites, notes=notes, from_default=from_default)
             values[spec.name] = resolved
             models[spec.name] = resolved
         else:
@@ -201,6 +215,7 @@ __all__ = [
     "MODELS_AUTO",
     "ResolvedInputs",
     "parse_model_ref",
+    "program_inputs",
     "resolve_inputs",
     "whole_command_inputs",
 ]

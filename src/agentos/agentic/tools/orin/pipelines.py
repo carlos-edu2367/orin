@@ -66,7 +66,7 @@ class PipelineTools:
                 f"Orçamento: {budget.get('max_tokens')} tokens, {budget.get('max_minutes')} min. Provedores: {providers}. "
                 "O usuário acompanha e pode cancelar pela tela de execuções."
             ),
-            "payload": {"pending_id": pending.pending_id, "pipeline_id": pipeline_id, "inputs": dict(pending.inputs), **info},
+            "payload": {"pending_id": pending.pending_id, "pipeline_id": pipeline_id, **info},  # ``inputs``: the resolved values
         }
 
 

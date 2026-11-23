@@ -13,7 +13,8 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -22,17 +23,18 @@ from sqlalchemy import select, update
 
 from agentos.permissions.trust import WorkspaceTrustStore
 from agentos.persistence.postgres.schema import pipeline_runs
+from agentos.settings.writer import SettingsWriteError, _file_lock
 
 from . import events as pipeline_events
 from . import paths as _paths
 from .adapters.catalog import FavoritesModelCatalog, ModelRef
 from .approvals import ApprovalStore
-from .discovery import DiscoveryDisabled, DiscoveryEntry, discover
+from .discovery import DiscoveryDisabled, DiscoveryEntry, discover, read_checked
 from .driver import PAUSE_REQUESTED, active_run_ids, cancel_run, pause_run
 from .errors import PipelineError, ValidationReport
 from .goal import GOAL_PIPELINE_ID, GoalController, GoalError
-from .inputs import DegradedNote, InputError, resolve_inputs, whole_command_inputs
-from .model import PipelineDefinition, compute_definition_hash
+from .inputs import DegradedNote, InputError, program_inputs, resolve_inputs, whole_command_inputs
+from .model import Budget, PipelineDefinition, compute_definition_hash
 from .resume import unwrap_envelope
 from .settings import PipelineSettings, cap_budget_to_ceiling, ceiling_from_settings
 from .store import PipelineStore, PipelineStoreError, RunRecord
@@ -45,6 +47,9 @@ RESUMABLE_STATES = frozenset({"interrupted", "failed", "cancelled", "budget_exce
 OUTPUT_LIMIT_BYTES = 256 * 1024
 MAX_PENDING_PER_TURN = 3
 COMPLETED_TURN_STATES = frozenset({"completed", "completed_with_caveats"})
+# Serialises the If-Match comparison and the replace of a pipeline file inside this process; the lock file next to
+# the target (``<id>.yaml.lock``, not a pipeline suffix) serialises processes (WS-C10 security review, S1).
+_WRITE_LOCK = threading.Lock()
 
 
 class ServiceError(Exception):
@@ -84,7 +89,7 @@ class PendingStart:
     turn_id: str
     workspace_root: str
     pipeline_id: str
-    inputs: Mapping[str, Any]
+    inputs: Mapping[str, Any]  # what the agent typed, NOT the resolved values: re-resolved after the turn (review P2)
     definition_hash: str
 
 
@@ -280,9 +285,11 @@ class PipelineService:
         if definition is None:
             return out
         whole = whole_command_inputs(definition)
+        program = program_inputs(definition)  # the whole command or its first word: only the person types these
         out["inputs"] = [
             {"name": spec.name, "type": spec.type, "required": spec.required, "default": spec.default,
-             "max_length": spec.max_length, "agent_settable": spec.name not in whole, "whole_command": spec.name in whole}
+             "max_length": spec.max_length, "agent_settable": spec.name not in program, "whole_command": spec.name in whole,
+             "selects_program": spec.name in program}
             for spec in definition.inputs
         ]
         out["steps"] = [{"id": step.id, "name": step.name, "kind": step.kind} for step in definition.steps]
@@ -307,10 +314,8 @@ class PipelineService:
         self._require_enabled(root)
         entry = self._entry(user_id, root, pipeline_id)
         out = self._entry_dict(user_id, root, entry)
-        try:
-            out["text"] = entry.path.read_text(encoding="utf-8-sig")
-        except OSError:
-            out["text"] = ""
+        # the text discovery validated; empty for a link out of the folder, a file too large or not UTF-8 (review P3)
+        out["text"] = entry.text
         out["context"] = {"errors": [], "warnings": []}
         if entry.definition is not None:
             out["review"] = review_dict(entry.definition)
@@ -347,6 +352,28 @@ class PipelineService:
                 return candidate
         return None
 
+    @staticmethod
+    def _existing_hash(folder: Path, existing: Path) -> str | None:
+        """The hash of the file on disk read through the discovery reader, ``None`` when it is too large or not UTF-8.
+
+        A link that leaves the folder is refused outright: neither its content nor its hash may come back (review P3).
+        """
+        text, problem = read_checked(existing, folder.resolve())
+        if problem is None:
+            return compute_definition_hash(text)
+        if problem.code == "E_YAML_FORBIDDEN":
+            raise ServiceError("PIPELINE_PATH_INVALID", "O arquivo atual é um atalho para fora da pasta de pipelines; corrija-o fora do Orin.", 422)
+        return None
+
+    @staticmethod
+    @contextmanager
+    def _write_lock(folder: Path, pipeline_id: str) -> Iterator[None]:
+        try:
+            with _WRITE_LOCK, _file_lock(folder / f"{pipeline_id}.yaml"):
+                yield
+        except SettingsWriteError as error:
+            raise ServiceError("PIPELINE_BUSY", "Outro processo está gravando este pipeline. Tente de novo.", 409) from error
+
     def save_pipeline(
         self, user_id: str, root: Path | None, pipeline_id: str, text: str, *, scope: str, if_match: str | None = None
     ) -> dict[str, Any]:
@@ -358,21 +385,26 @@ class PipelineService:
             errors = report["errors"] or [issue(PipelineError("E_ID", f"o `id` do arquivo deve ser `{pipeline_id}`", None, None, "id"))]
             raise ServiceError("PIPELINE_INVALID", "O pipeline tem erros e não foi gravado.", 422, {"errors": errors})
         folder = self._target_dir(user_id, root, scope)
-        existing = self._existing_file(folder, pipeline_id)
-        if existing is not None:
-            current = compute_definition_hash(existing.read_text(encoding="utf-8-sig"))
-            if if_match != current:
-                raise ServiceError("PIPELINE_CONFLICT", "O arquivo mudou (ou já existe). Recarregue antes de gravar.", 409, {"current_hash": current})
-        elif if_match:
-            raise ServiceError("PIPELINE_CONFLICT", "O arquivo não existe mais.", 409)
-        target = existing or folder / f"{pipeline_id}.yaml"
         folder.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-        try:
-            temporary.write_text(text, encoding="utf-8", newline="\n")
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with self._write_lock(folder, pipeline_id):  # the If-Match comparison and the replace happen as one step (S1)
+            existing = self._existing_file(folder, pipeline_id)
+            if existing is not None:
+                current = self._existing_hash(folder, existing)
+                if current is None:
+                    raise ServiceError(
+                        "PIPELINE_FILE_UNREADABLE", "O arquivo atual passa de 256 KB ou não está em UTF-8; apague-o ou corrija-o fora do Orin.", 422
+                    )
+                if if_match != current:
+                    raise ServiceError("PIPELINE_CONFLICT", "O arquivo mudou (ou já existe). Recarregue antes de gravar.", 409, {"current_hash": current})
+            elif if_match:
+                raise ServiceError("PIPELINE_CONFLICT", "O arquivo não existe mais.", 409)
+            target = existing or folder / f"{pipeline_id}.yaml"
+            temporary = target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                temporary.write_text(text, encoding="utf-8", newline="\n")
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
         return self.get_pipeline(user_id, root, pipeline_id)
 
     def delete_pipeline(self, user_id: str, root: Path | None, pipeline_id: str, *, scope: str, if_match: str | None = None) -> None:
@@ -382,9 +414,14 @@ class PipelineService:
         existing = self._existing_file(folder, pipeline_id)
         if existing is None:
             raise ServiceError("PIPELINE_NOT_FOUND", f"O pipeline `{pipeline_id}` não existe neste escopo.", 404)
-        if if_match is not None and if_match != compute_definition_hash(existing.read_text(encoding="utf-8-sig")):
-            raise ServiceError("PIPELINE_CONFLICT", "O arquivo mudou. Recarregue antes de apagar.", 409)
-        existing.unlink()
+        with self._write_lock(folder, pipeline_id):
+            existing = self._existing_file(folder, pipeline_id)
+            if existing is None:
+                raise ServiceError("PIPELINE_NOT_FOUND", f"O pipeline `{pipeline_id}` não existe neste escopo.", 404)
+            current = self._existing_hash(folder, existing)  # also refuses a link that leaves the folder
+            if if_match is not None and if_match != current:
+                raise ServiceError("PIPELINE_CONFLICT", "O arquivo mudou. Recarregue antes de apagar.", 409, {"current_hash": current or ""})
+            existing.unlink()
 
     # ---------------------------------------------------------------------------- approval
     def _approvable(self, user_id: str, root: Path | None, pipeline_id: str, definition_hash: str) -> PipelineDefinition:
@@ -491,15 +528,14 @@ class PipelineService:
     def _effective_budget(definition: PipelineDefinition, ceiling: Any) -> dict[str, Any]:
         from . import schema_v1 as sv
 
-        capped = cap_budget_to_ceiling(definition, ceiling)
-        budget = capped.budget
-        is_default = budget is None or budget.is_empty
-        if is_default:
-            return {"max_tokens": sv.DEFAULT_BUDGET_TOKENS, "max_cost_usd": sv.DEFAULT_BUDGET_COST_USD, "max_minutes": sv.DEFAULT_BUDGET_MINUTES,
-                    "is_default": True, "lowered_by_user_ceiling": False}
+        default = Budget(sv.DEFAULT_BUDGET_TOKENS, sv.DEFAULT_BUDGET_COST_USD, sv.DEFAULT_BUDGET_MINUTES)
         declared = definition.budget
+        is_default = declared is None or declared.is_empty
+        asked = default if is_default else declared  # the default ceiling (G8) is lowered by the user's ceiling too
+        capped = cap_budget_to_ceiling(definition, ceiling).budget
+        budget = asked if capped is None or capped.is_empty else capped
         return {"max_tokens": budget.max_tokens, "max_cost_usd": budget.max_cost_usd, "max_minutes": budget.max_minutes,
-                "is_default": False, "lowered_by_user_ceiling": declared is not None and declared != budget}
+                "is_default": is_default, "lowered_by_user_ceiling": budget != asked}
 
     def estimate(self, user_id: str, conversation_id: str | None, root: Path | None, pipeline_id: str, supplied: Mapping[str, Any] | None = None) -> dict[str, Any]:
         """Who would spend what: steps, models, subscriptions, parallelism and budget. Never a token estimate (R-C11b)."""
@@ -565,8 +601,8 @@ class PipelineService:
         definition: PipelineDefinition = prepared["definition"]
         entry: DiscoveryEntry = prepared["entry"]
         resolved = prepared["resolved"]
-        text = entry.path.read_text(encoding="utf-8-sig")
-        if compute_definition_hash(text) != definition.definition_hash:
+        text = entry.text  # the text discovery validated and hashed (review P3): the snapshot is what was approved
+        if not text or compute_definition_hash(text) != definition.definition_hash:
             raise ServiceError("PIPELINE_CHANGED", "O arquivo mudou durante a preparação. Tente de novo.", 409)
         run_id = f"run-{uuid.uuid4().hex[:20]}"
         self.store.create_run(
@@ -778,11 +814,14 @@ class PipelineService:
                 raise ServiceError("PIPELINE_PENDING_LIMIT", f"No máximo {MAX_PENDING_PER_TURN} pipelines por turno.", 429)
             pending = PendingStart(
                 f"pending-{uuid.uuid4().hex[:12]}", user_id, conversation_id, turn_id, str(root) if root else "", pipeline_id,
-                dict(prepared["resolved"].values), definition.definition_hash,
+                # the agent's own inputs: resolving again after the turn keeps the defaults of program inputs and the
+                # `auto` notes (pipeline.degraded) instead of refusing them as typed by the agent (review P2)
+                dict(supplied or {}), definition.definition_hash,
             )
             queue.append(pending)
         providers = sorted({r["provider"] for models in prepared["resolved"].models.values() for r in models})
         return pending, {
+            "inputs": dict(prepared["resolved"].values),  # what will run; the pending start keeps the agent's own inputs
             "budget": self._effective_budget(definition, ceiling_from_settings(self.effective(root))),
             "providers": providers, "degraded": [asdict(n) for n in prepared["resolved"].degraded],
         }
@@ -832,7 +871,7 @@ def review_dict(definition: PipelineDefinition) -> dict[str, Any]:
         "pipeline_id": review.pipeline_id, "definition_hash": review.definition_hash, "notice": review.notice,
         "commands": [
             {"step_id": c.step_id, "command": c.command, "expect": c.expect, "timeout_seconds": c.timeout_seconds,
-             "inputs": list(c.inputs), "whole_value": c.whole_value}
+             "inputs": list(c.inputs), "whole_value": c.whole_value, "program_inputs": list(c.program_inputs)}
             for c in review.commands
         ],
     }

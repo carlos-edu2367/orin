@@ -505,7 +505,7 @@ class StructureBuilder:
             timeout = self.field(raw, "command_item", "timeout_seconds", path)
             expect = self.field(raw, "command_item", "expect", path)
             return CommandGate(
-                command=str(command or ""),
+                command=str(command or "").strip(),  # a block scalar (`|`) leaves a new line around the command
                 expect=expect or "zero",  # type: ignore[arg-type]
                 timeout_seconds=timeout if timeout is not None else sv.DEFAULT_TIMEOUT_SECONDS,  # type: ignore[arg-type]
             )

@@ -28,7 +28,7 @@ from typing import Any
 
 from agentos.agentic.structured_output import validate_instance
 
-from .command_quoting import quoting_problem
+from .command_quoting import ROLE_WHOLE, classify_references, quoting_problem
 from .context import RunContext
 from .expressions import ExpressionError, TemplateRef, format_value, split_template
 from .model import CommandGate, GateStep, SchemaGate, VerifierGate
@@ -88,8 +88,7 @@ def render_command(template: str, inputs: Mapping[str, Any], dialect: str = "pos
     problem = quoting_problem(parts)
     if problem is not None:
         raise GateCommandError(GATE_INPUT_INVALID, problem)
-    meaningful = [part for part in parts if not (isinstance(part, str) and not part.strip())]
-    if len(meaningful) == 1 and isinstance(meaningful[0], TemplateRef):
+    if classify_references(parts)[0].role == ROLE_WHOLE:  # the same classifier the approval review uses
         name = refs[0].path.segments[1]
         value = format_value(inputs.get(name)) if name in inputs else ""
         try:
