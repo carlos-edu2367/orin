@@ -102,6 +102,16 @@ OWNED = {
     ("PATCH", "/v1/providers/{provider}/keys/{key_id}"), ("DELETE", "/v1/providers/{provider}/keys/{key_id}"),
     ("POST", "/v1/providers/{provider}/keys/{key_id}:activate"),
     ("POST", "/v1/events/streams/{stream_id}/read"), ("GET", "/v1/events/streams/{stream_id}"),
+    # Pipelines (0.13.2): /goal hangs off A's conversation; a run, its steps and a pipeline file
+    # are looked up through the caller's own conversations and folders.
+    ("GET", "/v1/conversations/{conversation_id}/goal"), ("POST", "/v1/conversations/{conversation_id}/goal"),
+    ("POST", "/v1/conversations/{conversation_id}/goal/clear"), ("POST", "/v1/conversations/{conversation_id}/goal/resume"),
+    ("GET", "/v1/pipeline-runs/{run_id}"), ("GET", "/v1/pipeline-runs/{run_id}/steps/{step_id}/output"),
+    ("POST", "/v1/pipeline-runs/{run_id}/pause"), ("POST", "/v1/pipeline-runs/{run_id}/cancel"),
+    ("POST", "/v1/pipeline-runs/{run_id}/resume"),
+    ("GET", "/v1/pipelines/{pipeline_id}"), ("PUT", "/v1/pipelines/{pipeline_id}"), ("DELETE", "/v1/pipelines/{pipeline_id}"),
+    ("POST", "/v1/pipelines/{pipeline_id}/approve"), ("POST", "/v1/pipelines/{pipeline_id}/revoke"),
+    ("POST", "/v1/pipelines/{pipeline_id}/estimate"),
     *{("GET", f"/v1/{resource}/{{resource_id}}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},
 }
 LISTING = {
@@ -111,6 +121,7 @@ LISTING = {
     ("GET", "/v1/plugins/marketplaces"), ("GET", "/v1/mcp/servers"), ("GET", "/v1/executions"),
     ("GET", "/v1/runtime/quality"), ("GET", "/v1/files"), ("GET", "/v1/custom-agents"),
     ("GET", "/v1/scene/characters"),
+    ("GET", "/v1/pipelines"), ("GET", "/v1/pipeline-runs"),
     *{("GET", f"/v1/{resource}") for resource in ("agents", "capabilities", "tools", "workspaces", "artifacts")},
 }
 SCOPED = {
@@ -139,6 +150,7 @@ SCOPED = {
     ("DELETE", "/v1/context/windows/{provider}/{model_id:path}"),
     ("GET", "/v1/quota/stream"),
     ("POST", "/v1/memory/lint"),
+    ("POST", "/v1/pipelines/validate"),  # stateless: checks the YAML text it receives
 }
 CREATE = {
     ("POST", "/v1/executions"), ("POST", "/v1/uploads"), ("POST", "/v1/workspaces/inspect"), ("POST", "/v1/conversations"),
@@ -147,6 +159,7 @@ CREATE = {
     ("POST", "/v1/events/streams"), ("POST", "/v1/files/folders"), ("POST", "/v1/files/import"),
     ("POST", "/v1/custom-agents"),
     ("POST", "/v1/scene/characters"),
+    ("POST", "/v1/pipeline-runs"),
 }
 INSTANCE = {
     ("GET", "/v1/plugins/library"), ("GET", "/v1/mcp/catalog"), ("GET", "/v1/installation/status"), ("GET", "/v1/instance"),
