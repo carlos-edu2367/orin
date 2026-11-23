@@ -320,7 +320,7 @@ class PipelineStore:
         """Set the run's token and cost totals to the sum of its step rows (heals drift after a crash)."""
         totals = self.usage_by(run_id, "step")
         tokens = sum(row["input_tokens"] + row["output_tokens"] for row in totals)
-        known = [row["cost_usd"] for row in totals if row["cost_usd"] is not None and row["cost_known"]]
+        known = [row["cost_usd"] for row in totals if row["cost_usd"] is not None]  # a lower bound when partial
         cost = sum(known, Decimal("0")) if known else None
         with self._engine.begin() as connection:
             connection.execute(
