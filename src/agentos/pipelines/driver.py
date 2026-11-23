@@ -291,6 +291,11 @@ class PipelineDriver:
 
     def _state_refusal(self, run: RunRecord) -> DriverResult | None:
         request = self._request
+        turn_id = str(self._turn.get("turn_id") or "")
+        if run.state == "succeeded" and turn_id and run.turn_id == turn_id:
+            # The worker died after the run finished and before this very turn did: the requeued turn reports the result.
+            headline = f"**Pipeline `{run.pipeline_id}` concluído** (execução `{run.run_id}`)"
+            return DriverResult("completed", None, render_summary(self._store, run.run_id, headline))
         if run.state == "succeeded":
             return self._refuse("PIPELINE_ALREADY_DONE", f"A execução `{run.run_id}` já foi concluída; inicie uma nova execução se quiser repetir.")
         if run.state in _RESUMABLE and not request.resume:

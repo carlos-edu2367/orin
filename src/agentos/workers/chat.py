@@ -2166,6 +2166,8 @@ class ChatWorker:
         run = recorder.get(agent_id)
         if run is None or run.state not in {"queued", "interrupted"}:
             return False
+        if run.pipeline_run_id:
+            return False  # the child of a pipeline step belongs to the engine, which reruns the step on resume
         live = BACKGROUND_AGENTS.get(run.conversation_id, run.agent_id)
         if live is not None and live.status in {"running", "stalled"}:
             return True
@@ -2230,7 +2232,9 @@ class ChatWorker:
         try:
             with engine.connect() as conn:
                 rows = conn.execute(
-                    select(agent_runs.c.agent_id, agent_runs.c.conversation_id).where(agent_runs.c.state == "queued")
+                    select(agent_runs.c.agent_id, agent_runs.c.conversation_id).where(
+                        agent_runs.c.state == "queued", agent_runs.c.pipeline_run_id.is_(None),
+                    )
                 ).all()
         except Exception:
             return []

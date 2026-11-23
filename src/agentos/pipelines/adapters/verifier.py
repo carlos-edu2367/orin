@@ -120,6 +120,10 @@ class SessionVerifier:
         seen: dict[str, Any] = {}
 
         def run_child(*args: Any, **kwargs: Any) -> Any:
+            # The child watches the run's cancel event (cancel, deadline, pause) and belongs to the run like a step's child.
+            kwargs.setdefault("hook_cancel", cancel)
+            if request.pipeline_run_id:
+                kwargs.setdefault("pipeline_run_id", request.pipeline_run_id)
             outcome = self._session.run_child(*args, **kwargs)
             seen["outcome"] = outcome
             return outcome
@@ -154,7 +158,8 @@ class SessionVerifier:
                 spent_in, spent_out = int(snapshot.get("input_tokens") or 0), int(snapshot.get("output_tokens") or 0)
                 if spent_in or spent_out:
                     cost = snapshot.get("cost_usd")
-                    return spent_in, spent_out, float(cost) if cost else None
+                    known = snapshot.get("cost_known")
+                    return spent_in, spent_out, float(cost) if (known if known is not None else cost) else None
             except Exception:  # noqa: BLE001
                 logger.debug("could not read the verifier child's usage", exc_info=True)
         usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}

@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from agentos.agentic.background_agents import BACKGROUND_AGENTS
+from agentos.agentic.events import AgentActivityEventType
 from agentos.agentic.session import TurnSession
 from agentos.persistence.postgres.conversation_agents import ConversationAgentStore
 from agentos.persistence.postgres.schema import conversation_messages, conversation_turns, metadata
@@ -326,3 +327,14 @@ def test_a_gate_that_fails_as_a_tool_twice_really_runs_twice(tmp_path: Path, wor
         findings = journal.load_output("run-6", row.output)["value"]["findings"]
         assert findings[0]["timed_out"] is True and findings[0]["exit_code"] is None, findings
         assert "already failed" not in findings[0]["output_excerpt"], findings  # not the runtime's DUPLICATE_TOOL_CALL stub
+
+
+# ---- WS-C7 review F9: a pipeline turn in plan mode must not scaffold the Code-mode plan file
+def test_a_pipeline_turn_in_plan_mode_creates_no_code_mode_plan(tmp_path: Path, world) -> None:
+    session, store = _session(tmp_path, world, "/pipeline run-1", permission_mode="plan_mode", code_mode="code")
+    session.build_runtime()
+    assert not (tmp_path / ".orin" / "plans").exists()
+    assert not [item for item in store.activity if item[0] is AgentActivityEventType.CODE_MODE_PLAN_READY]
+    ordinary, other_store = _session(tmp_path, world, "faça algo", turn_kind=None, permission_mode="plan_mode", code_mode="code")
+    ordinary.build_runtime()
+    assert [item for item in other_store.activity if item[0] is AgentActivityEventType.CODE_MODE_PLAN_READY]  # an ordinary plan-mode Code turn still gets its plan

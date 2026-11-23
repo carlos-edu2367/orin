@@ -219,3 +219,12 @@ def test_pick_reviewers_is_deterministic(count: int) -> None:
     author = ModelRef("anthropic", "claude-opus-5-5")
     first = FavoritesModelCatalog(FAVORITES).pick_reviewers(count, author)
     assert first == FavoritesModelCatalog(dict(reversed(list(FAVORITES.items())))).pick_reviewers(count, author)
+
+
+# ---- WS-C7 review F4: cancelling the run (or its deadline) must reach the verifier child
+def test_the_verifier_child_watches_the_runs_cancel_event_and_carries_the_run_id() -> None:
+    session = FakeSession(_report("pass"))
+    cancel = threading.Event()
+    _verifier(session).review(_request(pipeline_run_id="run-9"), cancel)
+    kwargs = session.children[0][1]
+    assert kwargs.get("hook_cancel") is cancel and kwargs.get("pipeline_run_id") == "run-9"

@@ -230,3 +230,24 @@ def test_a_quick_command_and_an_opted_out_one_stay_in_the_foreground(tmp_path: P
     assert quick.status == "succeeded" and not quick.payload.get("background")
     slow = toolset.run_command(f'{PY} -c "import time; time.sleep(2); print(42)"', timeout_seconds=30, auto_background=False)
     assert not slow.get("background") and "42" in str(slow.get("content"))
+
+
+# ---- WS-C7 review F6: ``auto_background=False`` means the command is never sent to the background, whatever it prints
+def test_an_opted_out_command_that_prints_a_server_ready_line_still_finishes_in_the_foreground(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path)
+    code = "import time, sys; print('Listening on http://127.0.0.1:8000', flush=True); time.sleep(1.2); print('done'); sys.exit(4)"
+    outcome = toolset.run_command(f'{PY} -c "{code}"', timeout_seconds=30, auto_background=False)
+    assert not outcome.get("background") and outcome["auto_backgrounded"] is False
+    assert outcome["exit_code"] == 4 and "done" in str(outcome["content"])  # the exit code is in hand
+
+
+def test_an_opted_out_command_that_looks_like_a_dev_server_stays_in_the_foreground(tmp_path: Path) -> None:
+    toolset = _toolset(tmp_path)
+    outcome = toolset.run_command(f'{PY} -c "import time; time.sleep(2.6); print(7)" vite', timeout_seconds=30, auto_background=False)
+    assert not outcome.get("background") and outcome["auto_backgrounded"] is False and outcome["exit_code"] == 0
+
+
+def test_an_opted_out_command_is_not_moved_to_the_background_by_the_client_tool_cap(tmp_path: Path) -> None:
+    toolset = AgentToolset(ConversationWorkspace(tmp_path / "w", "c-cap"), code_mode_active=True, max_tool_call_seconds=26)  # cap - 25 s = 1 s
+    outcome = toolset.run_command(f'{PY} -c "import time; time.sleep(2); print(9)"', timeout_seconds=30, auto_background=False)
+    assert not outcome.get("background") and outcome["auto_backgrounded"] is False and outcome["exit_code"] == 0

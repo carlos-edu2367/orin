@@ -194,3 +194,17 @@ def test_tracker_batches_agent_runs_touch_to_5s_and_flushes_on_finish(tmp_path: 
         assert row.output_tokens == 30
     finally:
         engine.dispose()
+
+
+# ---- WS-C7 review F3: a call nobody priced is unknown, a priced zero is a known zero
+def test_the_cost_of_a_subtree_is_known_only_when_every_call_was_priced() -> None:
+    tracker = ProgressTracker()
+    tracker.start("agent:a", conversation_id="c", parent_agent_id=None)
+    assert tracker.snapshot("agent:a").cost_known is False  # nothing spent yet
+    tracker.on_usage("agent:a", input_tokens=10, output_tokens=5, cost_usd=0.0)
+    snap = tracker.snapshot("agent:a")
+    assert snap.cost_known is True and snap.cost_usd == 0.0 and snap.to_payload()["cost_known"] is True
+    tracker.on_usage("agent:a", input_tokens=10, output_tokens=5, cost_usd=0.25)
+    assert tracker.snapshot("agent:a").cost_known is True and tracker.snapshot("agent:a").cost_usd == 0.25
+    tracker.on_usage("agent:a", input_tokens=10, output_tokens=5)  # one call without a price makes the total a lower bound
+    assert tracker.snapshot("agent:a").cost_known is False

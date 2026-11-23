@@ -2292,7 +2292,7 @@ class PostgresChatStore:
                 ).first()
                 if already_active is not None:
                     return None
-                result = c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn_id, conversation_dispatches.c.state.in_(("pending", "enqueued"))).values(state="active", attempts=conversation_dispatches.c.attempts + 1, acquired_at=now, updated_at=now))
+                result = c.execute(update(conversation_dispatches).where(conversation_dispatches.c.turn_id == turn_id, conversation_dispatches.c.state.in_(("pending", "enqueued"))).values(state="active", attempts=conversation_dispatches.c.attempts + 1, acquired_at=now, lease_renewed_at=None, updated_at=now))
                 if result.rowcount != 1: return None
                 effective_workspace_id = func.coalesce(projects.c.workspace_id, conversation_turns.c.conversation_id)
                 turn = c.execute(
@@ -3795,7 +3795,12 @@ class PostgresChatStore:
         cutoff = datetime.now(UTC) - maximum_age
         with self._engine.connect() as c:
             rows = c.execute(
-                select(conversation_turns, projects.c.workspace_id.label("project_workspace_id"))
+                select(
+                    conversation_turns,
+                    projects.c.workspace_id.label("project_workspace_id"),
+                    # The attempt that died keys the recovery transitions, so a second recovery never collides with the first.
+                    conversation_dispatches.c.attempts.label("dispatch_attempts"),
+                )
                 .join(conversations, conversations.c.conversation_id == conversation_turns.c.conversation_id)
                 .outerjoin(projects, projects.c.project_id == conversations.c.project_id)
                 .join(conversation_dispatches, conversation_dispatches.c.turn_id == conversation_turns.c.turn_id)
@@ -3826,7 +3831,7 @@ class PostgresChatStore:
             changed = c.execute(update(conversation_dispatches).where(
                 conversation_dispatches.c.turn_id == turn["turn_id"],
                 conversation_dispatches.c.state == "active",
-            ).values(state="pending", last_error=reason, queued_at=now, acquired_at=None, updated_at=now))
+            ).values(state="pending", last_error=reason, queued_at=now, acquired_at=None, lease_renewed_at=None, updated_at=now))
             if not changed.rowcount:
                 return False
             c.execute(update(conversation_turns).where(conversation_turns.c.turn_id == turn["turn_id"]).values(state="queued", updated_at=now))

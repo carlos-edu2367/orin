@@ -180,3 +180,71 @@ def test_a_requeued_pipeline_turn_runs_again_and_resumes_the_same_run(tmp_path: 
         assert again is not None and again["turn_kind"] == "pipeline"  # the same turn comes back to be claimed
     finally:
         eng.dispose()
+
+
+# ---- WS-C7 review F2: the children of a pipeline run belong to the engine, never to the boot auto-resume
+def _child(engine, tmp_path: Path, agent_id: str, *, run_id: str | None, state: str = "interrupted"):  # noqa: ANN202
+    from agentos.agentic.agent_run_persistence import AgentRunRecorder
+
+    recorder = AgentRunRecorder(engine, runs_dir=tmp_path / "runs")
+    recorder.start(
+        agent_id=agent_id, user_id="u1", conversation_id="c1", turn_id="t1", parent_agent_id="agent:c1:main",
+        subagent_type="general", provider="anthropic", model_id="claude-sonnet-5-5", effort="medium",
+        pipeline_run_id=run_id, task="passo",
+    )
+    recorder.store.touch(agent_id, state=state)
+    return recorder
+
+
+def test_boot_auto_resume_skips_the_children_of_a_pipeline_run(engine, tmp_path: Path) -> None:
+    from agentos.workers.publisher import auto_resume_interrupted_agents
+
+    _child(engine, tmp_path, "agent:pipe", run_id="run-1")
+    _child(engine, tmp_path, "agent:plain", run_id=None)
+    resumed: list[str] = []
+    result = auto_resume_interrupted_agents(
+        engine, runs_dir=tmp_path / "runs",
+        settings_loader=lambda _u: {"orchestration": {"background": {"autoResume": True}}},
+        resume_handler=lambda run: resumed.append(run.agent_id),
+    )
+    assert result == ["agent:plain"] and resumed == ["agent:plain"]  # the engine, not the boot, resumes a step's child
+
+
+def test_the_worker_refuses_to_resume_a_pipeline_child_directly(engine, tmp_path: Path) -> None:
+    from agentos.conversations.chat import PostgresChatStore
+    from agentos.workers.chat import ChatWorker
+
+    recorder = _child(engine, tmp_path, "agent:pipe", run_id="run-1", state="queued")
+    _child(engine, tmp_path, "agent:pipe2", run_id="run-1", state="interrupted")
+    worker = ChatWorker(PostgresChatStore(engine))
+    assert worker.resume_subagent("agent:pipe", runs_dir=tmp_path / "runs") is False
+    assert worker.resume_subagent("agent:pipe2", runs_dir=tmp_path / "runs") is False
+    assert worker.resume_queued_subagents(runs_dir=tmp_path / "runs") == []
+    assert recorder.get("agent:pipe").state == "queued" and recorder.get("agent:pipe2").state == "interrupted"  # untouched
+
+
+# ---- WS-C7 review S1: a run that never got a turn is swept later, not only at boot
+def test_the_periodic_sweep_interrupts_a_turnless_run_once_it_is_old_enough(engine, tmp_path: Path) -> None:
+    from agentos.conversations.chat import PostgresChatStore
+    from agentos.workers import publisher
+
+    store = PipelineStore(engine)
+    _run(store, tmp_path, "run-young", None, started_at=datetime.now(UTC) - timedelta(minutes=3))
+    chat = PostgresChatStore(engine)
+    swept = publisher._ORPHANS_SWEPT
+    publisher._ORPHANS_SWEPT = True  # the boot sweep already ran, and the run was too young for it
+    try:
+        publisher.recover_once(chat, has_in_flight=True)
+        assert store.get_run("run-young").state == "running"
+        with engine.begin() as connection:
+            from sqlalchemy import update
+
+            from agentos.persistence.postgres.schema import pipeline_runs
+
+            connection.execute(update(pipeline_runs).where(pipeline_runs.c.run_id == "run-young").values(
+                started_at=datetime.now(UTC) - timedelta(minutes=30),
+            ))
+        publisher.recover_once(chat, has_in_flight=True)
+        assert store.get_run("run-young").state == "interrupted"
+    finally:
+        publisher._ORPHANS_SWEPT = swept

@@ -34,6 +34,8 @@ class AgentProgressSnapshot:
     stalled: bool
     parent_agent_id: str | None = None
     conversation_id: str = ""
+    # True when every model call of the subtree was priced (a 0.0 of a free model is known; no price is not a zero).
+    cost_known: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -46,6 +48,7 @@ class AgentProgressSnapshot:
             "input_tokens": int(self.input_tokens),
             "output_tokens": int(self.output_tokens),
             "cost_usd": round(float(self.cost_usd), 8),
+            "cost_known": bool(self.cost_known),
             "stalled": bool(self.stalled),
         }
 
@@ -66,6 +69,8 @@ class _AgentProgressEntry:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    priced_calls: int = 0
+    unpriced_calls: int = 0
     stalled: bool = False
     stall_notified: bool = False
     last_progress_emit_mono: float | None = None
@@ -127,6 +132,7 @@ def shared_progress_snapshot(engine: Any, agent_id: str) -> AgentProgressSnapsho
         in_tok = 0
         out_tok = 0
         cost = 0.0
+        priced = unpriced = 0
         while stack:
             cur = stack.pop()
             if cur in visited:
@@ -137,6 +143,8 @@ def shared_progress_snapshot(engine: Any, agent_id: str) -> AgentProgressSnapsho
                 in_tok += cur_entry.input_tokens
                 out_tok += cur_entry.output_tokens
                 cost += cur_entry.cost_usd
+                priced += cur_entry.priced_calls
+                unpriced += cur_entry.unpriced_calls
             for child_id in bucket.children.get(cur, ()):
                 if child_id not in visited:
                     stack.append(child_id)
@@ -155,6 +163,7 @@ def shared_progress_snapshot(engine: Any, agent_id: str) -> AgentProgressSnapsho
             stalled=entry.stalled,
             parent_agent_id=entry.parent_agent_id,
             conversation_id=entry.conversation_id,
+            cost_known=priced > 0 and unpriced == 0,
         )
 
 
@@ -240,12 +249,13 @@ class ProgressTracker:
             if parent_agent_id and str(parent_agent_id) != aid:
                 self._children.setdefault(str(parent_agent_id), set()).add(aid)
 
-    def _subtree_usage_locked(self, agent_id: str) -> tuple[int, int, float]:
+    def _subtree_usage_locked(self, agent_id: str) -> tuple[int, int, float, bool]:
         visited: set[str] = set()
         stack = [agent_id]
         in_tok = 0
         out_tok = 0
         cost = 0.0
+        priced = unpriced = 0
         while stack:
             cur = stack.pop()
             if cur in visited:
@@ -256,15 +266,17 @@ class ProgressTracker:
                 in_tok += entry.input_tokens
                 out_tok += entry.output_tokens
                 cost += entry.cost_usd
+                priced += entry.priced_calls
+                unpriced += entry.unpriced_calls
             for child_id in self._children.get(cur, ()):
                 if child_id not in visited:
                     stack.append(child_id)
-        return in_tok, out_tok, cost
+        return in_tok, out_tok, cost, priced > 0 and unpriced == 0
 
     def _build_snapshot_locked(self, entry: _AgentProgressEntry, now_m: float) -> AgentProgressSnapshot:
         end_m = entry.finished_mono if entry.finished_mono is not None else now_m
         elapsed = max(0.0, end_m - entry.started_mono)
-        in_tok, out_tok, cost = self._subtree_usage_locked(entry.agent_id)
+        in_tok, out_tok, cost, cost_known = self._subtree_usage_locked(entry.agent_id)
         return AgentProgressSnapshot(
             agent_id=entry.agent_id,
             state=entry.state,
@@ -278,6 +290,7 @@ class ProgressTracker:
             stalled=entry.stalled,
             parent_agent_id=entry.parent_agent_id,
             conversation_id=entry.conversation_id,
+            cost_known=cost_known,
         )
 
     def _maybe_emit_and_touch(
@@ -399,13 +412,19 @@ class ProgressTracker:
                 entry.input_tokens += input_tokens
             if isinstance(output_tokens, int) and not isinstance(output_tokens, bool) and output_tokens > 0:
                 entry.output_tokens += output_tokens
+            priced = False
             if cost_usd is not None:
                 try:
                     cval = float(cost_usd)
+                    priced = cval >= 0
                     if cval > 0:
                         entry.cost_usd += cval
                 except (TypeError, ValueError):
                     pass
+            if priced:
+                entry.priced_calls += 1
+            else:
+                entry.unpriced_calls += 1
         self._maybe_emit_and_touch(entry, now_m, force_touch=recovered, touch_state="running" if recovered else None)
 
     def finish(self, agent_id: str, *, state: str = "completed") -> AgentProgressSnapshot | None:
@@ -492,6 +511,7 @@ class ProgressTracker:
                     input_tokens=int(run.input_tokens),
                     output_tokens=int(run.output_tokens),
                     cost_usd=float(run.cost_usd) if run.cost_usd is not None else 0.0,
+                    cost_known=run.cost_usd is not None,
                     stalled=True,
                     parent_agent_id=run.parent_agent_id,
                     conversation_id=run.conversation_id,

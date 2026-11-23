@@ -171,7 +171,8 @@ def auto_resume_interrupted_agents(
         interrupted_ids = [
             str(row[0])
             for row in conn.execute(
-                select(agent_runs.c.agent_id).where(agent_runs.c.state == "interrupted")
+                # The children of a pipeline run are the engine's: it reruns the step when the run resumes.
+                select(agent_runs.c.agent_id).where(agent_runs.c.state == "interrupted", agent_runs.c.pipeline_run_id.is_(None))
             ).all()
             if row and row[0]
         ]
@@ -184,7 +185,7 @@ def auto_resume_interrupted_agents(
 
     for agent_id in interrupted_ids:
         run = recorder.get(agent_id)
-        if run is None or run.state != "interrupted":
+        if run is None or run.state != "interrupted" or run.pipeline_run_id:
             continue
         effective = settings_cache.get(run.user_id)
         if effective is None:
@@ -295,6 +296,16 @@ def recover_once(store, *, has_in_flight: bool = False, worker: Any = None) -> t
                 _LOGGER.debug("could not sweep orphaned running agents", exc_info=True)
         else:
             _ORPHANS_SWEPT = True
+    elif _ORPHANS_SWEPT:
+        # A run created just before the boot had no turn yet and was too young to be an orphan: it is swept later.
+        engine = getattr(store, "_engine", None)
+        if engine is not None:
+            try:
+                from agentos.pipelines.recovery import interrupt_orphaned_pipeline_runs
+
+                interrupt_orphaned_pipeline_runs(engine)
+            except Exception:
+                _LOGGER.warning("could not interrupt orphaned pipeline runs", exc_info=True)
     recovered = () if has_in_flight else ChatWorker(store).watchdog(maximum_age=UNCLAIMED_AFTER)
     stale = ChatWorker(store).recover_stale(maximum_age=STALE_AFTER)
     if recovered or stale:

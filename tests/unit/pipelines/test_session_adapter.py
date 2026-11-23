@@ -101,7 +101,7 @@ def test_a_step_child_runs_in_the_background_and_the_result_comes_back_typed(tmp
     assert entry is not None and entry.notified is True  # the end-of-turn barrier will not re-inject this child's report
     result = _wait(launcher, handle)
     assert result.status == "succeeded" and "pronto" in result.text and result.error_code is None
-    assert result.tokens == 300 and result.cost_known in (True, False)
+    assert result.tokens == 300 and result.cost_known is True and result.cost_usd == pytest.approx(0.0135)  # 150 + 150 tokens, priced for the child's model
     assert launcher.wait(handle, 0.0) is result  # a second look returns the very same result
 
 
@@ -264,10 +264,11 @@ def test_progress_reads_the_trackers_real_activity_not_the_time_since_start(tmp_
     assert started.wait(10)
     tracker = session._progress_tracker()
     tracker.on_tool_start(handle.agent_id, "Bash")
-    tracker.on_usage(handle.agent_id, input_tokens=70, output_tokens=30, cost_usd=0.5)
+    tracker.on_usage(handle.agent_id, input_tokens=70, output_tokens=30)  # a call nobody priced
     progress = launcher.progress(handle)
     assert progress.current_tool == "Bash" and progress.tool_calls == 1
-    assert progress.input_tokens == 70 and progress.output_tokens == 30 and progress.cost_usd == 0.5
+    assert progress.input_tokens == 70 and progress.output_tokens == 30
+    assert progress.cost_usd is None  # unknown, not a zero: the engine keeps the difference
     assert progress.last_activity_at is not None and progress.last_activity_at.tzinfo is not None
     before = progress.last_activity_at
     tracker.on_tool_finish(handle.agent_id, "Bash")
@@ -453,3 +454,107 @@ def test_a_map_never_has_more_children_running_than_its_cap_or_the_sessions_sema
     assert not thread.is_alive(), "deadlock between the map pool and the session's child semaphore"
     assert result["o"].state == "succeeded" and child.calls == 6
     assert child.peak <= expected_peak
+
+
+# ================================================================ review F3: the cost reaches the journal
+def test_a_priced_child_reports_its_real_cost_to_the_tracker_the_result_and_the_journal(tmp_path: Path, world) -> None:
+    child = _Scripted([_usage(_text_batch("um"), 1000)])
+    session = _session(tmp_path, world, child)
+    store = PipelineStore(world[0])
+    engine = _engine_for(session, store, _launcher(session, store), HEADER + "steps:\n  - id: a\n    agent: general\n    prompt: um\n")
+    detach = session.attach_pipeline_budget(engine.usage_budget)
+    try:
+        outcome = engine.execute()
+    finally:
+        detach()
+    assert outcome.state == "succeeded"
+    live = engine.usage_budget
+    assert live.cost_known is True and live.cost_usd == pytest.approx(0.045)
+    row = store.steps_of("run-e")[0]
+    assert row.cost_usd is not None and float(row.cost_usd) == pytest.approx(0.045)  # the journal agrees with the live budget
+    assert store.get_run("run-e").used_cost_usd is not None
+    progress = AgentHandle(row.agent_id or "", "a", "")
+    assert _launcher(session, store).progress(progress).cost_usd == pytest.approx(0.045)  # K11 reads the tracker's real cost
+
+
+def test_a_child_whose_model_has_no_price_has_an_unknown_cost_not_a_zero(tmp_path: Path, world) -> None:
+    child = _Scripted([_usage(_text_batch("um"), 1000)])
+    session = _session(tmp_path, world, child)
+    session.turn["model_id"] = "modelo-sem-preco-xyz"
+    store = _run(world[0], tmp_path)
+    store.start_step(run_id="run-1", step_id="a", input_hash="1" * 64)
+    launcher = _launcher(session, store)
+    handle = launcher.launch(_call("a"))
+    result = _wait(launcher, handle)
+    assert result.status == "succeeded" and result.tokens == 1000
+    assert result.cost_usd is None and result.cost_known is False
+
+
+def test_a_priced_but_free_child_costs_zero_and_that_zero_is_known(tmp_path: Path, world, monkeypatch) -> None:
+    monkeypatch.setattr("agentos.provider_catalog.pricing.estimate_cost_usd", lambda **_kw: 0.0)
+    child = _Scripted([_usage(_text_batch("um"), 1000)])
+    session = _session(tmp_path, world, child)
+    store = _run(world[0], tmp_path)
+    store.start_step(run_id="run-1", step_id="a", input_hash="1" * 64)
+    launcher = _launcher(session, store)
+    result = _wait(launcher, launcher.launch(_call("a")))
+    assert result.cost_usd == 0.0 and result.cost_known is True
+
+
+# ===================================================== review F5: the error code outranks an ``exit=`` line in the text
+@pytest.mark.parametrize("code", ["CODE_PERMISSION_DENIED", "HOOK_DENIED", "CODE_PLAN_MODE_READONLY"])
+def test_a_refusal_that_quotes_an_exit_line_is_still_a_refusal(code: str) -> None:
+    refused = classify_gate_result({"status": "failed", "content": "Um hook negou `run_command`:\nexit=1", "error_code": code})
+    assert refused.exit_code is None and refused.denied is True  # an ``expect: nonzero`` gate must not pass on this
+
+
+def test_a_cancelled_call_that_quotes_an_exit_line_is_still_cancelled() -> None:
+    cut = classify_gate_result({"status": "failed", "content": "Interrompido\nexit=130", "error_code": "INTERRUPTED_BY_USER"})
+    assert cut.exit_code is None and cut.cancelled is True
+
+
+def test_a_real_run_with_its_own_error_code_keeps_its_exit_code() -> None:
+    real = classify_gate_result({"status": "failed", "content": "exit=2\nOperation cancelled", "error_code": "COMMAND_CANCELLED_INTERACTIVE"})
+    assert real.exit_code == 2
+
+
+def test_a_refused_command_does_not_satisfy_an_expect_nonzero_gate() -> None:
+    from agentos.pipelines.context import RunContext
+    from agentos.pipelines.gates import GateEvaluator
+    from agentos.pipelines.model import GateStep
+
+    denied = {"status": "failed", "content": "negado\nexit=1", "error_code": "CODE_PERMISSION_DENIED"}
+    evaluator = GateEvaluator(SessionGateRunner(lambda _calls: [denied]), run_id="run-1", dialect="posix")
+    definition, _ = validate_structure(
+        "version: 1\nid: g\nname: G\nsteps:\n  - id: falha\n    gate:\n      all:\n        - command: pytest -q\n          expect: nonzero\n", "user",
+    )
+    step = definition.steps[0]
+    assert isinstance(step, GateStep)
+    assert evaluator.evaluate(step, RunContext({}), threading.Event()).passed is False
+
+
+# ========================================= review F7: a live sibling launched in a parallel map is never an orphan
+def test_the_orphan_finder_leaves_a_live_sibling_that_the_journal_has_not_learned_yet(tmp_path: Path, world) -> None:
+    import time as _time
+
+    from sqlalchemy import insert
+
+    from agentos.agentic.background_agents import BackgroundAgentEntry
+
+    engine, _agents = world
+    store = _run(engine, tmp_path)
+    session = _session(tmp_path, world, _Scripted([]))
+    with engine.begin() as connection:
+        for agent_id, state in (("agent:live-sibling", "running"), ("agent:lost", "running")):
+            connection.execute(
+                insert(agent_runs).values(
+                    agent_id=agent_id, user_id=TURN["user_id"], conversation_id=TURN["conversation_id"], turn_id=TURN["turn_id"],
+                    subagent_type="general", state=state, pipeline_run_id="run-1", created_at=_now(), last_activity_at=_now(),
+                    tool_calls=0, input_tokens=0, output_tokens=0,
+                )
+            )
+    BACKGROUND_AGENTS.register(BackgroundAgentEntry(  # what the session does when it launches the sibling, before the journal learns its id
+        agent_id="agent:live-sibling", conversation_id=TURN["conversation_id"], name="sibling", output_file="", status="running",
+        started_at=_time.time(), finished_at=None, summary="", cancel=threading.Event(), future=None,
+    ))
+    assert make_orphan_finder(session, store)("run-1") == ["agent:lost"]

@@ -636,7 +636,9 @@ class BashTools:
                         and time_auto_bg_after is not None
                         and elapsed >= time_auto_bg_after
                     )
-                    should_auto_bg = process.poll() is None and (
+                    # ``auto_background=False`` is a promise that the result is handed back in this call: no output
+                    # pattern, command shape, tool cap or clock may move the command to the background.
+                    should_auto_bg = auto_background and process.poll() is None and (
                         (ready_match_at is not None and (now - ready_match_at) >= 0.35)
                         or (is_dev_server_cmd and elapsed >= 2.0)
                         or backgrounded_by_tool_cap

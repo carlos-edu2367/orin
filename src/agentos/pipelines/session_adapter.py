@@ -160,7 +160,7 @@ class SessionAgentLauncher:
         usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
         in_tokens = spent.input_tokens or int(usage.get("input_tokens") or 0)
         out_tokens = spent.output_tokens or int(usage.get("output_tokens") or 0)
-        cost = spent.cost_usd if spent.cost_usd else None  # the tracker counts 0.0 for a model without a price
+        cost = spent.cost_usd  # None = no price for some call; a known 0.0 (free model) stays a zero
         worktree = payload.get("worktree") if isinstance(payload.get("worktree"), Mapping) else None
         return AgentResult(
             status=status,  # type: ignore[arg-type]
@@ -197,7 +197,7 @@ class SessionAgentLauncher:
             current_tool=str(payload["current_tool"]) if payload.get("current_tool") else None,
             input_tokens=int(payload.get("input_tokens") or 0),
             output_tokens=int(payload.get("output_tokens") or 0),
-            cost_usd=float(payload["cost_usd"]) if payload.get("cost_usd") else None,
+            cost_usd=_known_cost(payload),
         )
 
     # --------------------------------------------------------------- worktree
@@ -212,6 +212,13 @@ class SessionAgentLauncher:
                 self._discard(agent_id)
             except Exception:  # noqa: BLE001
                 logger.warning("could not discard the worktree of %s", agent_id, exc_info=True)
+
+
+def _known_cost(payload: Mapping[str, Any]) -> float | None:
+    """The tracker's cost, or ``None`` while it is unknown (a payload without the flag falls back to "non-zero")."""
+    flag = payload.get("cost_known")
+    known = bool(payload.get("cost_usd")) if flag is None else bool(flag)
+    return float(payload["cost_usd"]) if known and payload.get("cost_usd") is not None else None
 
 
 def _parse_time(value: object) -> datetime | None:
@@ -262,14 +269,18 @@ def classify_gate_result(result: Mapping[str, Any], *, cancelled: bool = False, 
     content = str(result.get("content") or "")
     tail = content[-_OUTPUT_TAIL_CHARS:]
     code = str(result.get("error_code") or "")
+    lowered = content.lower()
+    # The error code decides first: a refusal or a stop never ran the command, and the text it quotes (an ``exit=1``
+    # line among it) must not become the exit code an ``expect: nonzero`` gate would accept.
+    if code in _CANCELLED_CODES:
+        return CommandResult(None, tail, cancelled=True, error_code=code)
+    if code in _DENIED_CODES or (code == "TOOL_REFUSED" and "is blocked because" in lowered):
+        return CommandResult(None, tail, denied=True, error_code=code)
     found = _EXIT_LINE.search(content)
     if found is not None:
         return CommandResult(int(found.group(1)), tail)
-    if code in _CANCELLED_CODES or (cancelled and code):
-        return CommandResult(None, tail, cancelled=True, error_code=code or None)
-    lowered = content.lower()
-    if code in _DENIED_CODES or (code == "TOOL_REFUSED" and "is blocked because" in lowered):
-        return CommandResult(None, tail, denied=True, error_code=code)
+    if cancelled and code:
+        return CommandResult(None, tail, cancelled=True, error_code=code)
     if "timed out after" in lowered:
         note = f"\n[o comando foi limitado a {MAX_GATE_TIMEOUT_SECONDS} s, o teto da ferramenta Bash]" if clamped else ""
         return CommandResult(None, tail + note, timed_out=True, error_code=code or None)
@@ -352,6 +363,11 @@ def make_worktree_discarder(session: Any) -> Callable[[str], object]:
     return manager.discard_worktree
 
 
+def _is_alive(conversation_id: str, agent_id: str, alive: set[str]) -> bool:
+    entry = BACKGROUND_AGENTS.get(str(conversation_id or ""), str(agent_id))
+    return entry is not None and entry.status in alive
+
+
 def make_orphan_finder(session: Any, store: PipelineStore) -> Callable[[str], list[str]]:
     """Agents started for a run that the journal never learned about (the process died between launch and journal)."""
     from sqlalchemy import select
@@ -366,9 +382,17 @@ def make_orphan_finder(session: Any, store: PipelineStore) -> Callable[[str], li
         known = {row.agent_id for row in store.steps_of(run_id) if row.agent_id}
         with engine.connect() as connection:
             rows = connection.execute(
-                select(agent_runs.c.agent_id).where(agent_runs.c.pipeline_run_id == run_id, agent_runs.c.state.in_(_RUNNING_AGENT_STATES))
-            ).scalars()
-            return [agent_id for agent_id in rows if agent_id not in known]
+                select(agent_runs.c.agent_id, agent_runs.c.conversation_id).where(
+                    agent_runs.c.pipeline_run_id == run_id, agent_runs.c.state.in_(_RUNNING_AGENT_STATES)
+                )
+            ).all()
+        # A sibling launched a moment ago by a parallel ``map`` is registered in memory before the journal learns its
+        # id: it is alive, so it is no orphan. An orphan is a row of a process that died.
+        alive = {"running", "stalled", "queued"}
+        return [
+            agent_id for agent_id, conversation_id in rows
+            if agent_id not in known and not _is_alive(conversation_id, agent_id, alive)
+        ]
 
     return find
 

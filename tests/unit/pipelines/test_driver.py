@@ -232,9 +232,9 @@ def test_a_finished_run_is_not_started_again(tmp_path) -> None:
     h = _harness(tmp_path, pipeline("- id: a\n  agent: general\n  prompt: um\n", HEADER))
     assert _drive(h).state == "completed"
     launches = h.launcher.launches
-    again = _drive(h, request=PipelineRequest("run-1", resume=True))
+    again = _drive(h, request=PipelineRequest("run-1", resume=True), turn={**TURN, "turn_id": "turn-2"})  # another turn: a requeue of the same one is F8
     assert again.state == "failed" and again.error_code == "PIPELINE_ALREADY_DONE" and h.launcher.launches == launches
-    fresh = _drive(h)
+    fresh = _drive(h, turn={**TURN, "turn_id": "turn-3"})
     assert fresh.error_code == "PIPELINE_ALREADY_DONE"
 
 
@@ -368,3 +368,20 @@ def test_the_agent_digest_and_defaults_reach_the_engine(tmp_path) -> None:
     assert (seen["default_provider"], seen["default_model"], seen["default_effort"]) == ("anthropic", "claude-sonnet-5-5", "medium")
     assert seen["permission_mode"] == "accept_edits" and seen["shell_dialect"] == "posix"
     assert drv.active_run_ids() == ()  # the registry is always cleaned
+
+
+# ---- WS-C7 review F8: a turn requeued after its run already succeeded answers with the summary, not an error
+def test_a_requeued_turn_whose_run_already_succeeded_returns_the_completion_summary(tmp_path) -> None:  # noqa: ANN001
+    h = _harness(tmp_path)
+    first = _drive(h)
+    assert first.state == "completed" and h.store.get_run(h.run_id).state == "succeeded"
+    again = _drive(h)  # the same turn id: the worker died after the run finished and before the turn did
+    assert again.state == "completed" and again.error_code is None
+    assert "| Etapa |" in again.markdown and h.run_id in again.markdown
+
+
+def test_another_turn_still_cannot_rerun_a_succeeded_run(tmp_path) -> None:  # noqa: ANN001
+    h = _harness(tmp_path)
+    assert _drive(h).state == "completed"
+    other = _drive(h, turn={**TURN, "turn_id": "turn-2"})
+    assert other.state == "failed" and other.error_code == "PIPELINE_ALREADY_DONE"

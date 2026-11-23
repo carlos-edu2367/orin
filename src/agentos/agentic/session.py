@@ -1377,7 +1377,9 @@ class _SubagentStore:
             try:
                 in_tok = input_tokens if isinstance(input_tokens, int) and not isinstance(input_tokens, bool) else 0
                 out_tok = output_tokens if isinstance(output_tokens, int) and not isinstance(output_tokens, bool) else 0
-                self._on_usage_recorded(in_tok, out_tok, None)
+                price = getattr(self._session, "_price_model_call", None)
+                # None = the model has no price (unknown), never a zero: the tracker and the journal keep the difference.
+                self._on_usage_recorded(in_tok, out_tok, price(turn, input_tokens, output_tokens) if callable(price) else None)
             except Exception:
                 pass
         if callable(self._on_model_step):
@@ -3108,8 +3110,9 @@ class TurnSession:
         hook_cancel: threading.Event | None = None,
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
+        pipeline_run_id: str | None = None,
     ) -> ToolOutcome:
-        """Internal entry point to run a child subagent (e.g. VerificationGate)."""
+        """Internal entry point to run a child subagent (e.g. VerificationGate); ``pipeline_run_id`` ties it to a run."""
         return self._run_subagent(
             subagent_type,
             task,
@@ -3122,6 +3125,7 @@ class TurnSession:
             hook_cancel=hook_cancel,
             character_name=character_name,
             caller=caller,
+            pipeline_run_id=pipeline_run_id,
         )
 
     def _run_subagent(
@@ -4131,15 +4135,19 @@ class TurnSession:
     ) -> None:
         """Count one model call in the agent's budget (and its ancestors'); whoever goes over is stopped."""
         tokens = total_tokens if isinstance(total_tokens, int) and not isinstance(total_tokens, bool) else int(input_tokens or 0) + int(output_tokens or 0)
+        cost = self._price_model_call(turn, input_tokens, output_tokens)
+        for hit in self._usage_budgets.add(agent_id, tokens, cost):
+            self._announce_budget_exceeded(hit)
+
+    def _price_model_call(self, turn: Mapping[str, object], input_tokens: int | None, output_tokens: int | None) -> float | None:
+        """US$ of one model call at the model of ``turn``; ``None`` when that model has no price (unknown, never zero)."""
         try:
             price = self._subagent_accounting(
                 str(turn.get("model_id") or ""), code_mode=True, provider=str(turn.get("provider") or ""),
             )["cost_estimator"](input_tokens, output_tokens)
-            cost = float(price) if price is not None else None
+            return float(price) if price is not None else None
         except Exception:  # noqa: BLE001 - a model without a price counts tokens and time only
-            cost = None
-        for hit in self._usage_budgets.add(agent_id, tokens, cost):
-            self._announce_budget_exceeded(hit)
+            return None
 
     def _announce_budget_exceeded(self, hit: Any) -> None:
         if hit is None:
@@ -8231,7 +8239,8 @@ class TurnSession:
         code_turn_context = ""
         if self.turn.get("code_mode") == "code":
             plan_path = str(self.turn.get("code_mode_plan_path") or f".orin/plans/{self.turn['turn_id']}-plan.md")
-            if self._in_plan_mode and not prompt_blocked:
+            # A pipeline turn in plan mode is refused by its driver: it must not scaffold a plan file nor announce it.
+            if self._in_plan_mode and not prompt_blocked and self.turn.get("turn_kind") is None:
                 self._ensure_code_mode_plan(plan_path, task)
                 self._record(
                     AgentActivityEventType.CODE_MODE_PLAN_READY,
