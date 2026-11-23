@@ -91,7 +91,7 @@ TOOLKIT_TOOLS: Mapping[str, tuple[str, ...]] = {
     "web": ("fetch_url", "web_search"),
     "skills": _SKILL_TOOLS,
     "delegation": (
-        "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
+        "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent", "run_pipeline",
         "todo_write", "task_create", "task_update", "task_get", "task_list", "task_claim",
     ),
 }

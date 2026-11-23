@@ -105,6 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--display-name", default=None)
     reset = user_commands.add_parser("reset-password", help="issue a temporary password and end the profile's sessions")
     reset.add_argument("username")
+    from .pipelines import add_pipeline_parser
+
+    add_pipeline_parser(commands)
 
     logs = commands.add_parser("logs", help="show Orin's logs")
     logs.add_argument("--service", choices=("launcher", *SERVICES), default="launcher", help="which log to show")
@@ -719,6 +722,9 @@ def main(argv: list[str] | None = None) -> int:
         if command == "user":
             from .users import command_user
             return command_user(arguments, paths, console)
+        if command == "pipeline":
+            from .pipelines import command_pipeline
+            return command_pipeline(arguments, paths, console)
         if command in (None, "start"):
             return command_start(arguments, paths, profile, console)
         if command == "stop":

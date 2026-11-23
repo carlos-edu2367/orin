@@ -3311,6 +3311,8 @@ def create_app(services: ApiServices) -> FastAPI:
     register_agent_worktree_routes(app, services, principal_for, conversation_root)
     from .agent_run_routes import register_agent_run_routes
     register_agent_run_routes(app, services, principal_for, require_port, _jsonable)
+    from .pipeline_routes import register_pipeline_routes
+    register_pipeline_routes(app, services, principal_for, conversation_root)
     from agentos.live_voice.session import register_live_voice_routes
     register_live_voice_routes(app, services, principal_for)
 

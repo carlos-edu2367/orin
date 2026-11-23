@@ -84,8 +84,10 @@ def run_after_turn(
 def install_default_handlers() -> None:
     """Register the package's own handlers (the ``/goal`` controller). Idempotent."""
     from .goal import after_turn_handler
+    from .service import start_pending_handler  # WS-C10: pipelines the agent asked for with RunPipeline (G17)
 
     register(after_turn_handler, states=ALL_STATES, with_context=True)
+    register(start_pending_handler, states=ALL_STATES)
 
 
 install_default_handlers()

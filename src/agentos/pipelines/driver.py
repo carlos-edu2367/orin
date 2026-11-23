@@ -18,6 +18,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from agentos.agentic.usage_budget import BudgetLimits
+
 from .engine import PipelineEngine, RunOutcome
 from .model import AgentStep, PipelineDefinition
 from .ports import (
@@ -31,6 +33,7 @@ from .ports import (
     VerifierPort,
 )
 from .resume import DefinitionChanged, ResumeRefused
+from .settings import cap_budget_to_ceiling
 from .store import PipelineStore, RunRecord
 from .telemetry import UsageRow, run_summary
 from .validator import ValidationContext, validate_context, validate_structure
@@ -114,6 +117,10 @@ class DriverPorts:
     # Called with the engine once it exists; returns a function that undoes it (the session registers the run's
     # ``UsageBudget`` here, so children spend against it live).
     on_engine: Callable[[Any], Callable[[], None]] | None = None
+    # WS-C10: the user's subagent budget ceiling a *project* pipeline is lowered to (G6), and the cross-process pause
+    # request (the API runs in another process than the worker, so it cannot call ``pause_run`` directly).
+    budget_ceiling: BudgetLimits | None = None
+    pause_requested: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +153,15 @@ def _bind(run_id: str, engine: PipelineEngine) -> None:
 def _release(run_id: str) -> None:
     with _ACTIVE_LOCK:
         _ACTIVE.pop(run_id, None)
+
+
+PAUSE_REQUESTED = "pause_requested"  # ``pipeline_runs.stop_reason`` of a ``running`` run a process other than the worker asked to pause
+
+
+def pause_flag_set(store: PipelineStore, run_id: str) -> bool:
+    """The API (another process) asked this running run to drain: the driver's watcher polls this (WS-C10)."""
+    run = store.get_run(run_id)
+    return run is not None and run.state == "running" and run.stop_reason == PAUSE_REQUESTED
 
 
 def active_run_ids() -> tuple[str, ...]:
@@ -299,6 +315,8 @@ class PipelineDriver:
                 self._store.set_run_state(run.run_id, "failed", stop_reason="invalid")
             listed = "\n".join(f"- {item.format()}" for item in errors)
             return None, self._refuse("PIPELINE_INVALID", f"O pipeline `{run.pipeline_id}` não passou na validação:\n{listed}")
+        if self._ports.budget_ceiling is not None:
+            definition = cap_budget_to_ceiling(definition, self._ports.budget_ceiling)  # project files only go down (G6)
         return definition, None
 
     def _options(self, definition: PipelineDefinition) -> EngineOptions:
@@ -367,6 +385,7 @@ class PipelineDriver:
         return self._result(run, definition, outcome)
 
     def _watch(self, engine: Any, done: threading.Event) -> None:
+        paused = False
         while not done.wait(self._poll):
             try:
                 cancelled = bool(self._ports.cancelled())
@@ -375,6 +394,14 @@ class PipelineDriver:
             if cancelled:
                 engine.cancel()
                 return
+            probe = self._ports.pause_requested
+            if probe is not None and not paused:
+                try:
+                    paused = bool(probe())
+                except Exception:  # noqa: BLE001 - same: a broken probe never stops the run
+                    paused = False
+                if paused:
+                    engine.pause()
 
     # --------------------------------------------------------------------- result
     def _result(self, run: RunRecord, definition: PipelineDefinition, outcome: RunOutcome) -> DriverResult:
@@ -407,9 +434,11 @@ class PipelineDriver:
 __all__ = [
     "DriverPorts",
     "DriverResult",
+    "PAUSE_REQUESTED",
     "PipelineDriver",
     "PipelineRequest",
     "active_run_ids",
+    "pause_flag_set",
     "cancel_run",
     "parse_pipeline_request",
     "pause_run",

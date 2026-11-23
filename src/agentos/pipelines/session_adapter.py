@@ -30,9 +30,10 @@ from agentos.agentic.background_agents import BACKGROUND_AGENTS
 
 from .adapters.catalog import SessionChangeScope, SessionQuota
 from .adapters.verifier import SessionVerifier
-from .driver import DriverPorts, DriverResult, PipelineDriver, PipelineRequest
+from .driver import DriverPorts, DriverResult, PipelineDriver, PipelineRequest, pause_flag_set
 from .events import TurnSessionEventSink
 from .ports import AgentCall, AgentHandle, AgentProgress, AgentResult, CancelToken, CommandResult
+from .settings import ceiling_from_settings
 from .store import PipelineStore
 from .validator import ValidationContext
 
@@ -406,6 +407,8 @@ def build_ports(
         default_provider=str(turn.get("provider") or "") or None,
         default_model=str(turn.get("model_id") or "") or None,
         on_engine=lambda engine: session.attach_pipeline_budget(engine.usage_budget),
+        budget_ceiling=ceiling_from_settings(getattr(session, "effective_settings", None)),
+        pause_requested=lambda: pause_flag_set(store, request.run_id),
     )
 
 
