@@ -1,0 +1,59 @@
+version: 1                      # obrigatório
+id: implementar-verificar       # [a-z0-9-], único
+name: Implementar e verificar
+description: Planeja, implementa, verifica e corrige até passar.
+inputs:                         # digitados pelo usuário ao iniciar
+  objetivo: {type: string, required: true, max_length: 8000}
+  testes:   {type: string, default: "pytest -q"}
+budget:                         # teto do pipeline inteiro; qualquer um estourado para tudo
+  max_tokens: 2000000
+  max_cost_usd: 15
+  max_minutes: 120
+defaults:                       # valem para toda etapa que não sobrescrever
+  provider: anthropic
+  model: claude-sonnet-5-5
+  effort: medium
+  retries: {max: 1, on: [failed, stalled]}
+  stall_minutes: 10
+steps:
+  - id: plano
+    agent: plan                 # builtin ou agente custom
+    effort: high
+    prompt: |
+      Faça um plano para: ${{ inputs.objetivo }}
+    output_schema:              # C3: saída validada; até 5 tentativas de correção
+      type: object
+      required: [tarefas]
+      properties:
+        tarefas: {type: array, items: {type: object, required: [titulo, arquivos], properties: {titulo: {type: string}, arquivos: {type: array, items: {type: string}}}}}
+
+  - id: implementar
+    agent: general
+    map:                        # fan-out
+      over: ${{ steps.plano.output.tarefas }}
+      as: tarefa
+      max_parallel: 3           # teto; o motor também respeita o limite global de subagentes
+    isolation: worktree         # exige B-RF1 ligado; senão a etapa falha na validação
+    prompt: |
+      Implemente: ${{ tarefa.titulo }} (arquivos: ${{ tarefa.arquivos }})
+    budget: {max_tokens: 400000}
+
+  - id: verificar
+    gate:                       # etapa sem agente: só checa
+      all:
+        - command: ${{ inputs.testes }}     # passa com saída 0
+          timeout_seconds: 900
+        - verifier:                          # pacote A
+            policy: cross_family
+            effort: high
+            pass_on: [pass]
+    on_fail:
+      goto: corrigir            # ou: stop | continue
+      max_loops: 2              # condição de parada do laço
+
+  - id: corrigir
+    agent: general
+    when: ${{ steps.verificar.failed }}
+    prompt: |
+      Corrija os achados confirmados: ${{ steps.verificar.findings }}
+    next: verificar

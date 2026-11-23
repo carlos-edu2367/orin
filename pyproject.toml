@@ -28,6 +28,9 @@ dependencies = [
     "python-docx>=1.1,<2",
     "python-multipart>=0.0.9,<1",
     "python-pptx>=1,<2",
+    # Pipelines (YAML schema v1) parse with a restricted SafeLoader subclass;
+    # skills frontmatter already imported it lazily via uvicorn[standard].
+    "PyYAML>=6,<7",
     # Windows does not ship the IANA database used by zoneinfo. Keep it in the
     # application package so schedules behave the same on every supported host.
     "tzdata>=2025.2,<2027",
