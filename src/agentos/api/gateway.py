@@ -250,6 +250,7 @@ class AddDirectoryRequest(_RequestModel):
 
 # A turn in one of these states may still be writing files: a rewind now would race it (W4).
 _TURN_BUSY_STATES = frozenset({"queued", "running", "cancelling"})
+_COMPACT_BUSY_STATES = _TURN_BUSY_STATES | frozenset({"starting", "streaming", "waiting_user"})
 
 
 def _turn_in_flight(conversation: Mapping[str, object]) -> bool:
@@ -257,6 +258,16 @@ def _turn_in_flight(conversation: Mapping[str, object]) -> bool:
         return True
     turns = conversation.get("turns")
     return isinstance(turns, list) and any(isinstance(turn, Mapping) and str(turn.get("state") or "") in _TURN_BUSY_STATES for turn in turns)
+
+
+def _turn_busy_for_compact(conversation: Mapping[str, object]) -> bool:
+    if str(conversation.get("state") or "") in _COMPACT_BUSY_STATES:
+        return True
+    turns = conversation.get("turns")
+    return isinstance(turns, list) and any(
+        isinstance(turn, Mapping) and str(turn.get("state") or "") in _COMPACT_BUSY_STATES
+        for turn in turns
+    )
 
 
 class InspectWorkspaceFolderRequest(_RequestModel):
@@ -1836,6 +1847,8 @@ def create_app(services: ApiServices) -> FastAPI:
         def _sync() -> JSONResponse:
             principal = principal_for(request, mutable=True)
             services.security.authorize(principal, action="conversation.send", resource_id=conversation_id, purpose="conversation.compact")
+            if _turn_busy_for_compact(conversation_record(conversation_id, principal)):
+                return _error(409, "CONFLICT", "turn_running", retryable=True)
             idempotency = _idempotency(request)
             receipt = require_port(services.conversation_application).request_compaction(  # type: ignore[union-attr]
                 principal.user_id, conversation_id, payload.instructions or "", idempotency,
@@ -3281,12 +3294,28 @@ def create_app(services: ApiServices) -> FastAPI:
         workspace = conversation_workspace(conversation_id, principal)
         return Path(getattr(workspace, "root", workspace))
 
+    def conversation_workspace_display(conversation_id: str, principal: AuthenticatedPrincipal) -> str | None:
+        if not services.capabilities.host_folders:
+            return None
+        conv = conversation_record(conversation_id, principal)
+        state = workspace_state(conv, principal)
+        if state.get("kind") != "local":
+            return None
+        shown = state.get("path")
+        return str(shown) if isinstance(shown, str) and shown.strip() else None
+
     register_settings_routes(app, services, principal_for, conversation_root)
     from .orchestration_settings_routes import register_orchestration_settings_routes
     register_orchestration_settings_routes(app, services, principal_for, conversation_root)
     from .verifier_metrics_routes import register_verifier_metrics_routes
     register_verifier_metrics_routes(app, services, principal_for)
-    register_conversation_routes(app, services, principal_for, conversation_root)
+    register_conversation_routes(
+        app,
+        services,
+        principal_for,
+        conversation_root,
+        conversation_workspace_display=conversation_workspace_display,
+    )
     from .friend_routes import register_friend_routes
     register_friend_routes(app, services, principal_for)
     from .friend_delivery_routes import register_friend_delivery_routes

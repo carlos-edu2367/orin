@@ -80,6 +80,7 @@ OWNED = {
     ("GET", "/v1/conversations/{conversation_id}/commands"), ("POST", "/v1/conversations/{conversation_id}/statusline"),
     ("POST", "/v1/conversations/{conversation_id}/fork"), ("PATCH", "/v1/conversations/{conversation_id}/title"),
     ("POST", "/v1/conversations/{conversation_id}/shell"),
+    ("POST", "/v1/conversations/{conversation_id}/btw"),
     ("POST", "/v1/conversations/{conversation_id}/preview/start"),
     ("PUT", "/v1/custom-agents/{name}"), ("DELETE", "/v1/custom-agents/{name}"),
     ("PATCH", "/v1/scene/characters/{character_id}"), ("DELETE", "/v1/scene/characters/{character_id}"),

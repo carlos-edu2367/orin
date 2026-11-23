@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -59,6 +59,9 @@ _OPENCODE_BRIDGE_TOOLS_GATE: dict[str, bool] = {
     "write": False,
     "question": False,
     "apply_patch": False,
+}
+_OPENCODE_BRIDGE_TOOLS_DISABLED: dict[str, bool] = {
+    key: False for key in _OPENCODE_BRIDGE_TOOLS_GATE
 }
 
 _ORIN_TOOL_CALL_RE = re.compile(
@@ -451,8 +454,21 @@ def _extract_tool_declarations(
 def _build_bridge_system_prompt(
     system_parts: list[str],
     declarations: list[dict[str, object]],
+    *,
+    withheld: bool = False,
 ) -> str:
     base_system = "\n\n".join(part for part in system_parts if part.strip())
+    if withheld:
+        no_tools_instructions = (
+            "\n\n<orin-tool-bridge>\n"
+            "IMPORTANT TOOL EXECUTION PROTOCOL:\n"
+            "Tool execution is strictly DISABLED for this request (`tool_choice=\"none\"`).\n"
+            "1. NEVER invoke any native CLI or host tool (`read`, `bash`, `edit`, `write`, `glob`, `grep`, etc.).\n"
+            "2. NEVER emit `<orin_tool_call>` blocks or simulate `[Tool Result]` blocks.\n"
+            "3. Answer directly in plain text using only the conversation context already provided.\n"
+            "</orin-tool-bridge>"
+        )
+        return f"{base_system}{no_tools_instructions}" if base_system else no_tools_instructions.lstrip()
     if not declarations:
         return base_system
     tools_json = json.dumps(declarations, ensure_ascii=False)
@@ -1047,8 +1063,11 @@ def stream_opencode_bridge(
     client: httpx.Client | None = None,
     bridge_manager: Any | None = None,
     timeout: float = 180.0,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> Iterator[NormalizedStreamItem]:
     """Drive a local `opencode serve` instance and yield normalized Orin stream items."""
+    if cancel_check is not None and cancel_check():
+        return
     normalized_base = normalize_opencode_base_url(base_url)
     manager = bridge_manager or _DEFAULT_BRIDGE_MANAGER
     try:
@@ -1056,18 +1075,28 @@ def stream_opencode_bridge(
     except Exception as error:
         raise ProviderKeyRejected(str(error)) from error
 
+    if cancel_check is not None and cancel_check():
+        return
+
     withheld = isinstance(tool_choice, str) and tool_choice.lower() == "none"
     declarations, allowed_names = (
         ([], set()) if withheld else _extract_tool_declarations(tools)
     )
     system_parts, prompt_text = _format_bridge_conversation_transcript(messages)
-    system_prompt = _build_bridge_system_prompt(system_parts, declarations)
+    system_prompt = _build_bridge_system_prompt(
+        system_parts,
+        declarations,
+        withheld=withheld,
+    )
     provider_id, model_id = _resolve_model_tuple(model)
 
     owns_client = client is None
     http = client or httpx.Client(timeout=timeout)
+    session_id = ""
     try:
         try:
+            if cancel_check is not None and cancel_check():
+                return
             session_resp = http.post(f"{normalized_base}/session", json={})
             session_resp.raise_for_status()
             session_data = session_resp.json()
@@ -1079,21 +1108,46 @@ def stream_opencode_bridge(
             if not session_id:
                 raise ProviderKeyRejected("OpenCode bridge did not return a session ID")
 
+            if cancel_check is not None and cancel_check():
+                return
+
+            tools_gate = (
+                dict(_OPENCODE_BRIDGE_TOOLS_DISABLED)
+                if withheld
+                else dict(_OPENCODE_BRIDGE_TOOLS_GATE)
+            )
             payload: dict[str, object] = {
                 "model": {"providerID": provider_id, "modelID": model_id},
-                "tools": dict(_OPENCODE_BRIDGE_TOOLS_GATE),
+                "tools": tools_gate,
                 "parts": [{"type": "text", "text": prompt_text}],
             }
             if system_prompt:
                 payload["system"] = system_prompt
 
+            post_kwargs: dict[str, Any] = {"json": payload}
+            if client is not None and timeout and timeout > 0:
+                post_kwargs["timeout"] = timeout
             msg_resp = http.post(
                 f"{normalized_base}/session/{session_id}/message",
-                json=payload,
+                **post_kwargs,
             )
             msg_resp.raise_for_status()
             body = msg_resp.json()
         except httpx.HTTPStatusError as error:
+            if cancel_check is not None and cancel_check():
+                return
+            if withheld and error.response.status_code == 403:
+                yield NormalizedStreamItem(
+                    StreamKind.ERROR,
+                    1,
+                    error=ProviderError(
+                        ProviderErrorCategory.PROVIDER_INTERNAL,
+                        "TOOL_FREE_UNSUPPORTED",
+                        "Este modelo no OpenCode local exige ferramentas nativas e não suporta chamadas sem ferramentas.",
+                        Retryability.NEVER,
+                    ),
+                )
+                return
             if error.response.status_code in (401, 403, 429):
                 rejected = ProviderKeyRejected(str(error))
                 rejected.status_code = error.response.status_code
@@ -1102,8 +1156,16 @@ def stream_opencode_bridge(
                 )
                 raise rejected from error
             raise
-        except httpx.TransportError as error:
-            raise ProviderKeyRejected(str(error)) from error
+        except httpx.TimeoutException as error:
+            if cancel_check is not None and cancel_check():
+                return
+            raise TimeoutError("OpenCode bridge timed out") from error
+        except (httpx.TransportError, RuntimeError) as error:
+            if cancel_check is not None and cancel_check():
+                return
+            if isinstance(error, httpx.TransportError):
+                raise ProviderKeyRejected(str(error)) from error
+            raise
 
         if not isinstance(body, Mapping):
             yield NormalizedStreamItem(
@@ -1127,6 +1189,18 @@ def stream_opencode_bridge(
                 else {}
             )
             status_code = err_data.get("statusCode")
+            if withheld and (status_code == 403 or "FreeTier" in err_name):
+                yield NormalizedStreamItem(
+                    StreamKind.ERROR,
+                    1,
+                    error=ProviderError(
+                        ProviderErrorCategory.PROVIDER_INTERNAL,
+                        "TOOL_FREE_UNSUPPORTED",
+                        "Este modelo no OpenCode local exige ferramentas nativas e não suporta chamadas sem ferramentas.",
+                        Retryability.NEVER,
+                    ),
+                )
+                return
             if status_code in (401, 403, 429) or "FreeTier" in err_name or "Auth" in err_name:
                 rejected = ProviderKeyRejected(err_name)
                 rejected.status_code = int(status_code) if isinstance(status_code, int) else 403
@@ -1251,6 +1325,15 @@ def stream_opencode_bridge(
             StreamKind.FINISH, sequence, finish_reason=finish
         )
     finally:
+        if withheld and session_id:
+            try:
+                if not getattr(http, "is_closed", False):
+                    http.delete(f"{normalized_base}/session/{session_id}", timeout=3.0)
+                else:
+                    with httpx.Client(timeout=3.0) as cleanup_http:
+                        cleanup_http.delete(f"{normalized_base}/session/{session_id}")
+            except Exception:
+                pass
         if owns_client:
             http.close()
 

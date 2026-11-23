@@ -203,6 +203,20 @@ class CliSlotQueue:
                 return "memory"
         return None
 
+    @staticmethod
+    def _priority_key(
+        conv_id: str,
+        active_by_conv: dict[str, int],
+        last_used_seq_by_conv: dict[str, int],
+    ) -> tuple[int, int, int]:
+        # Ephemeral `/btw` side-questions always yield CLI slots to primary conversation turns.
+        ephemeral_rank = 1 if str(conv_id or "").startswith("btw:") else 0
+        return (
+            ephemeral_rank,
+            active_by_conv.get(conv_id, 0),
+            last_used_seq_by_conv.get(conv_id, 0),
+        )
+
     def _try_grant_locked(self) -> None:
         while self._waiting:
             reason = self._block_reason_locked()
@@ -212,15 +226,17 @@ class CliSlotQueue:
                 return
             best_idx = 0
             best_conv = self._waiting[0].conversation_id
-            best_key = (
-                self._active_by_conv.get(best_conv, 0),
-                self._last_used_seq_by_conv.get(best_conv, 0),
+            best_key = self._priority_key(
+                best_conv,
+                self._active_by_conv,
+                self._last_used_seq_by_conv,
             )
             for idx in range(1, len(self._waiting)):
                 cand_conv = self._waiting[idx].conversation_id
-                cand_key = (
-                    self._active_by_conv.get(cand_conv, 0),
-                    self._last_used_seq_by_conv.get(cand_conv, 0),
+                cand_key = self._priority_key(
+                    cand_conv,
+                    self._active_by_conv,
+                    self._last_used_seq_by_conv,
                 )
                 if cand_key < best_key:
                     best_key = cand_key
@@ -271,16 +287,10 @@ class CliSlotQueue:
                 step += 1
                 best_idx = 0
                 best_conv = remaining[0].conversation_id
-                best_key = (
-                    sim_active.get(best_conv, 0),
-                    sim_last_used.get(best_conv, 0),
-                )
+                best_key = self._priority_key(best_conv, sim_active, sim_last_used)
                 for idx in range(1, len(remaining)):
                     cand_conv = remaining[idx].conversation_id
-                    cand_key = (
-                        sim_active.get(cand_conv, 0),
-                        sim_last_used.get(cand_conv, 0),
-                    )
+                    cand_key = self._priority_key(cand_conv, sim_active, sim_last_used)
                     if cand_key < best_key:
                         best_key = cand_key
                         best_idx = idx

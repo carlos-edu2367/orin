@@ -24,6 +24,7 @@ export const ACTIONS: Record<string, ActionSpec> = {
   'chat:cancel': both('Chat', 'Interromper o agente', 'escape'),
   'chat:cycleMode': both('Chat', 'Trocar o modo de permissão', 'shift+tab'),
   'chat:modelPicker': both('Chat', 'Escolher o modelo', 'alt+p'),
+  'chat:btw': both('Chat', 'Pergunta paralela (/btw)', 'alt+b'),
   'chat:sendNow': both('Chat', 'Enviar agora (interrompe e envia)', 'ctrl+enter'),
   'chat:clearInput': { context: 'Chat', label: 'Limpar o campo de mensagem', browser: [], electron: ['ctrl+l'] },
   'history:search': both('Chat', 'Buscar no histórico de mensagens', 'ctrl+r'),

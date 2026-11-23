@@ -3,6 +3,7 @@
  * per-message rewind, background tasks, the command catalog and the status line.
  */
 import type { ApiClient } from './client'
+import { parseApiErrorResponse } from './errors'
 import { bool, list, num, optStr, rec, str, strings } from './parse'
 
 const base = (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}`
@@ -220,11 +221,17 @@ export function runShell(client: ApiClient, conversationId: string, command: str
   })
 }
 
-export type ForkResult = { conversationId: string; title: string; prompt: string | null; messages: number }
+export type ForkResult = { conversationId: string; title: string; prompt: string | null; messages: number; projectId: string | null }
 
 function forkResult(value: unknown): ForkResult {
   const data = rec(value)
-  return { conversationId: str(data.conversation_id), title: str(data.title), prompt: optStr(data.prompt), messages: num(data.messages) }
+  return {
+    conversationId: str(data.conversation_id),
+    title: str(data.title),
+    prompt: optStr(data.prompt),
+    messages: num(data.messages),
+    projectId: optStr(data.project_id),
+  }
 }
 
 /** /branch and /fork: a new conversation with this one's messages (or those before one of the person's messages). */
@@ -256,4 +263,184 @@ export function rewindMessage(client: ApiClient, conversationId: string, message
       return { fork: forkResult(data.fork), restored: strings(data.restored), deleted: strings(data.deleted), unbacked: strings(data.unbacked) }
     },
   })
+}
+
+export type BtwUsage = {
+  inputTokens: number | null
+  outputTokens: number | null
+  cachedInputTokens: number | null
+}
+
+export type BtwStreamEvent =
+  | {
+      type: 'start'
+      btwId: string
+      provider: string
+      modelId: string
+      effort: string | null
+      activeTurnIncluded: boolean
+      contextMessages: number
+    }
+  | { type: 'waiting'; position: number | null; limit: number | null; reason: string | null }
+  | { type: 'thinking'; delta: string }
+  | { type: 'delta'; delta: string }
+  | {
+      type: 'done'
+      btwId: string
+      text: string
+      durationMs: number
+      provider: string
+      modelId: string
+      effort: string | null
+      usage: BtwUsage
+    }
+  | { type: 'error'; code: string; message: string; retryable: boolean }
+  | { type: 'heartbeat' }
+
+function optNum(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function parseBtwSseBlock(block: string): BtwStreamEvent | null {
+  let eventName = 'message'
+  const dataLines: string[] = []
+  for (const rawLine of block.split(/\r?\n/)) {
+    if (!rawLine || rawLine.startsWith(':')) continue
+    if (rawLine.startsWith('event:')) {
+      eventName = rawLine.slice(6).trim()
+    } else if (rawLine.startsWith('data:')) {
+      dataLines.push(rawLine.slice(5).trimStart())
+    }
+  }
+  if (dataLines.length === 0) return null
+  let parsed: Record<string, unknown>
+  try {
+    parsed = rec(JSON.parse(dataLines.join('\n')))
+  } catch {
+    return null
+  }
+  switch (eventName) {
+    case 'start':
+      return {
+        type: 'start',
+        btwId: str(parsed.btw_id),
+        provider: str(parsed.provider),
+        modelId: str(parsed.model_id),
+        effort: optStr(parsed.effort),
+        activeTurnIncluded: bool(parsed.active_turn_included),
+        contextMessages: num(parsed.context_messages),
+      }
+    case 'waiting':
+      return {
+        type: 'waiting',
+        position: optNum(parsed.position),
+        limit: optNum(parsed.limit),
+        reason: optStr(parsed.reason),
+      }
+    case 'thinking':
+      return { type: 'thinking', delta: str(parsed.delta) }
+    case 'delta':
+      return { type: 'delta', delta: str(parsed.delta) }
+    case 'done': {
+      const usage = rec(parsed.usage)
+      return {
+        type: 'done',
+        btwId: str(parsed.btw_id),
+        text: str(parsed.text),
+        durationMs: num(parsed.duration_ms),
+        provider: str(parsed.provider),
+        modelId: str(parsed.model_id),
+        effort: optStr(parsed.effort),
+        usage: {
+          inputTokens: optNum(usage.input_tokens),
+          outputTokens: optNum(usage.output_tokens),
+          cachedInputTokens: optNum(usage.cached_input_tokens),
+        },
+      }
+    }
+    case 'error':
+      return {
+        type: 'error',
+        code: str(parsed.code, 'btw_error'),
+        message: str(parsed.message, 'Não foi possível responder à pergunta paralela.'),
+        retryable: typeof parsed.retryable === 'boolean' ? parsed.retryable : true,
+      }
+    case 'heartbeat':
+      return { type: 'heartbeat' }
+    default:
+      return null
+  }
+}
+
+/** `/btw`: ephemeral parallel side-question streamed over SSE without writing to the conversation history. */
+export async function streamBtwQuestion(
+  client: ApiClient,
+  conversationId: string,
+  options: {
+    question: string
+    provider?: string | null
+    modelId?: string | null
+    signal?: AbortSignal
+    onEvent: (event: BtwStreamEvent) => void
+  },
+): Promise<void> {
+  const body: Record<string, unknown> = { question: options.question }
+  if (options.provider) body.provider = options.provider
+  if (options.modelId) body.model_id = options.modelId
+
+  const response = await client.stream({
+    path: `${base(conversationId)}/btw`,
+    method: 'POST',
+    body,
+    signal: options.signal,
+  })
+  if (!response.ok) {
+    throw await parseApiErrorResponse(response)
+  }
+
+  const dispatchBuffer = (raw: string): string => {
+    const parts = raw.split(/\r?\n\r?\n/)
+    const remainder = parts.pop() ?? ''
+    for (const block of parts) {
+      if (!block.trim()) continue
+      const parsed = parseBtwSseBlock(block)
+      if (parsed) options.onEvent(parsed)
+    }
+    return remainder
+  }
+
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    const text = await response.text()
+    const tail = dispatchBuffer(text)
+    if (tail.trim()) {
+      const parsed = parseBtwSseBlock(tail)
+      if (parsed) options.onEvent(parsed)
+    }
+    return
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      if (value) {
+        buffer += decoder.decode(value, { stream: true })
+        buffer = dispatchBuffer(buffer)
+      }
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) {
+      const parsed = parseBtwSseBlock(buffer)
+      if (parsed) options.onEvent(parsed)
+    }
+  } finally {
+    try {
+      reader.releaseLock()
+    } catch {
+      // Reader already released.
+    }
+  }
 }

@@ -57,7 +57,12 @@ from agentos.providers.claude_cli.text_protocol import (
     extract_tool_declarations,
     resolve_native_tool_call,
 )
-from agentos.providers.models import FinishReason
+from agentos.providers.models import (
+    FinishReason,
+    ProviderError,
+    ProviderErrorCategory,
+    Retryability,
+)
 
 _LOGGER = logging.getLogger("agentos.providers.claude_cli")
 
@@ -626,6 +631,20 @@ class ClaudeCliProvider:
         _ = self._clock()
         sequence = 0
 
+        slot_wait_raw = request.get("slot_wait_timeout_seconds")
+        slot_wait_timeout = (
+            float(slot_wait_raw)
+            if isinstance(slot_wait_raw, (int, float))
+            and not isinstance(slot_wait_raw, bool)
+            and float(slot_wait_raw) > 0
+            else None
+        )
+        slot_wait_deadline = (
+            time.monotonic() + slot_wait_timeout
+            if slot_wait_timeout is not None
+            else None
+        )
+
         try:
             if effective_cancel is not None and effective_cancel():
                 return
@@ -634,6 +653,21 @@ class ClaudeCliProvider:
                 if effective_cancel is not None and effective_cancel():
                     ticket.release()
                     ticket = None
+                    return
+                if slot_wait_deadline is not None and time.monotonic() >= slot_wait_deadline:
+                    ticket.release()
+                    ticket = None
+                    sequence += 1
+                    yield NormalizedStreamItem(
+                        StreamKind.ERROR,
+                        sequence,
+                        error=ProviderError(
+                            ProviderErrorCategory.RATE_LIMITED,
+                            "BTW_SLOT_TIMEOUT",
+                            "Todos os slots de CLI estão ocupados pelo turno principal. Tente novamente em instantes.",
+                            Retryability.SAFE,
+                        ),
+                    )
                     return
                 sequence += 1
                 yield NormalizedStreamItem(
@@ -648,6 +682,21 @@ class ClaudeCliProvider:
                     if effective_cancel is not None and effective_cancel():
                         ticket.release()
                         ticket = None
+                        return
+                    if slot_wait_deadline is not None and time.monotonic() >= slot_wait_deadline:
+                        ticket.release()
+                        ticket = None
+                        sequence += 1
+                        yield NormalizedStreamItem(
+                            StreamKind.ERROR,
+                            sequence,
+                            error=ProviderError(
+                                ProviderErrorCategory.RATE_LIMITED,
+                                "BTW_SLOT_TIMEOUT",
+                                "Todos os slots de CLI estão ocupados pelo turno principal. Tente novamente em instantes.",
+                                Retryability.SAFE,
+                            ),
+                        )
                         return
                     if ticket.wait(0.05):
                         granted = True

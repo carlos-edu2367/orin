@@ -22,7 +22,7 @@ export const BUILTIN_COMMANDS: readonly BuiltinCommand[] = [
   c('add-dir', 'session', 'Adiciona uma pasta de trabalho a esta sessão', [], '<pasta>'),
   c('agents', 'session', 'Gerencia os agentes definidos em arquivos'),
   c('autocompact', 'session', 'Explica a compactação automática (sempre ligada)'),
-  c('btw', 'session', 'Pergunta paralela (ainda não existe no Orin; explica a alternativa)'),
+  c('btw', 'session', 'Pergunta paralela fora do histórico (funciona mesmo durante um turno)', [], '<pergunta>'),
   c('clear', 'session', 'Começa uma conversa nova', ['reset', 'new']),
   c('compact', 'session', 'Resume a conversa para liberar contexto', [], '[instruções]'),
   c('context', 'session', 'Mostra o uso do contexto em grade'),

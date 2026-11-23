@@ -128,45 +128,25 @@ from agentos.reading.selection import (
     VisionModel,
     choose_vision_model,
 )
+from agentos.agentic.transport_factory import (
+    CONTEXT_WINDOW_RESERVE_TOKENS,
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    MIN_MAX_CONTEXT_TOKENS,
+    OLLAMA_FALLBACK_NUM_CTX,
+    PROVIDER_BASE_URLS,
+    build_provider_transport,
+    resolve_ollama_num_ctx,
+    resolve_provider_base_url,
+)
 from agentos.reading.vision import VisionReader
 from agentos.persistence.sqlite import create_local_engine
 
 
 _LOGGER = logging.getLogger("agentos.workers.chat")
 
-PROVIDER_BASE_URLS = {
-    "anthropic": "https://api.anthropic.com/v1",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "opencode": "https://opencode.ai/zen/v1",
-    "openai": "https://api.openai.com/v1",
-    "nvidia": DEFAULT_NVIDIA_BASE_URL,
-    "omniroute": DEFAULT_OMNIROUTE_BASE_URL,
-    "ollama": DEFAULT_OLLAMA_BASE_URL,
-}
-
-# Upper bound used only when the turn's model has no known context window.
-# It is a safety value for an unrefreshed catalog, not a ceiling on a model
-# whose real window we do know: capping a 200k model at 60k is what forced
-# compaction at ~49k and made the agent forget mid-task.
-DEFAULT_MAX_CONTEXT_TOKENS = 60_000
-# AgenticLimits rejects anything below 1_000; this keeps a real margin above
-# that floor so a tiny-context model still has room for the pinned request.
-MIN_MAX_CONTEXT_TOKENS = 4_000
-# Headroom subtracted from a model's real context window before it becomes
-# the trim budget: the system prompt and tool schemas ride outside the
-# trimmed message window, and the reply itself (uncapped here, so it can use
-# the provider's own max) still has to fit in what's left. This is the floor;
-# a large window reserves a proportion instead, because 12k is not enough
-# room for thirty tool schemas plus a long reply.
-CONTEXT_WINDOW_RESERVE_TOKENS = 12_000
 CONTEXT_WINDOW_RESERVE_FRACTION = 0.10
 # A million-token window does not need to reserve a hundred thousand tokens.
 CONTEXT_WINDOW_RESERVE_CEILING = 64_000
-
-# num_ctx for an Ollama model the catalog has no window for. Deliberately not
-# DEFAULT_MAX_CONTEXT_TOKENS: asking an unknown local model for a 60k KV cache
-# is what spills into system RAM and drops inference by 20-50x.
-OLLAMA_FALLBACK_NUM_CTX = 16_384
 
 # A turn is allowed to continue until the worker's job timeout.  The old
 # five-minute deadline cut off ordinary multi-step file work mid-task.
@@ -1454,11 +1434,7 @@ class ChatWorker:
         262k local model for a 262k KV cache is what spills into system RAM
         and drops inference by 20-50x.
         """
-        context_window = self._context_window_for(turn)
-        if context_window is None:
-            return OLLAMA_FALLBACK_NUM_CTX
-        capped = max(MIN_MAX_CONTEXT_TOKENS, min(DEFAULT_MAX_CONTEXT_TOKENS, context_window - CONTEXT_WINDOW_RESERVE_TOKENS))
-        return min(context_window, capped + CONTEXT_WINDOW_RESERVE_TOKENS)
+        return resolve_ollama_num_ctx(self._context_window_for(turn))
 
     def _provider_base_url(self, provider: str, *, user_id: str | None = None) -> str:
         try:
@@ -1474,20 +1450,7 @@ class ChatWorker:
         return ""
 
     def _base_url_for(self, provider: str, credential) -> str:
-        configured = str(credential.get("base_url") or "")
-        if provider == "anthropic":
-            if configured and is_claude_cli_bridge_url(configured):
-                return normalize_anthropic_base_url(configured)
-            return PROVIDER_BASE_URLS["anthropic"]
-        if provider == "omniroute":
-            return normalize_omniroute_base_url(configured or DEFAULT_OMNIROUTE_BASE_URL)
-        if provider == "ollama":
-            return normalize_ollama_base_url(configured or DEFAULT_OLLAMA_BASE_URL)
-        if provider == "opencode":
-            return normalize_opencode_base_url(configured or (OPENCODE_CLOUD_BASE_URL if str(credential.get("api_key") or "").strip() else DEFAULT_OPENCODE_LOCAL_BASE_URL))
-        if provider == "nvidia":
-            return normalize_nvidia_base_url(configured or DEFAULT_NVIDIA_BASE_URL)
-        return PROVIDER_BASE_URLS.get(provider, PROVIDER_BASE_URLS["openrouter"])
+        return resolve_provider_base_url(provider, credential)
 
     def _transport_for(
         self,
@@ -1503,77 +1466,16 @@ class ChatWorker:
         else:
             resolved_user_id = str(user_id)
             resolved_model_id = str(model_id or "")
-        with self.store._engine.connect() as c:
-            credential = c.execute(
-                select(
-                    provider_configurations.c.base_url,
-                    provider_configurations.c.enabled,
-                    provider_configurations.c.key_cooldown_seconds,
-                    provider_configurations.c.risk_acknowledged_at,
-                ).where(
-                    provider_configurations.c.user_id == resolved_user_id,
-                    provider_configurations.c.provider == provider,
-                )
-            ).mappings().first()
-        if credential is None or not credential["enabled"]:
-            raise ValueError("provider unavailable")
-        if provider == "google-antigravity" and not credential.get("risk_acknowledged_at"):
-            raise ValueError("provider unavailable")
-        if provider in {"openai-codex", "google-antigravity"}:
-            from agentos.providers.claude_cli.provider import ClaudeCliProvider
-            from agentos.providers.cli_registry import cli_adapter_for
-
-            cli_adapter = cli_adapter_for(
-                provider,
-                str(credential.get("base_url") or "") or None,
-                risk_acknowledged_at=credential.get("risk_acknowledged_at")
-                if provider == "google-antigravity"
-                else None,
-            )
-            if cli_adapter is None:
-                raise ValueError("provider unavailable")
-            return ClaudeCliProvider(
-                base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
-                model=resolved_model_id,
-                adapter=cli_adapter,
-            )
-        keys = PostgresProviderApiKeyAdapter(
+        return build_provider_transport(
             self.store._engine,
-            cipher=ProviderSecretCipher.from_environment(required=True),
-        )
-        first_key = keys.next_available_key(resolved_user_id, provider)
-        base_url = self._base_url_for(
-            provider,
-            {"base_url": credential["base_url"], "api_key": first_key.plaintext if first_key is not None else ""},
-        )
-
-        def build(api_key: str) -> HTTPProviderStreamTransport:
-            return HTTPProviderStreamTransport(
-                provider=provider,
-                base_url=base_url,
-                api_key=api_key,
-                model=resolved_model_id,
-                num_ctx=num_ctx,
-            )
-
-        if provider == "anthropic" and is_claude_cli_bridge_url(base_url):
-            from agentos.providers.claude_cli.provider import ClaudeCliProvider
-
-            return ClaudeCliProvider(base_url=base_url, model=resolved_model_id)
-        if first_key is None:
-            if provider not in PROVIDERS_WITH_BASE_URL or (
-                provider == "anthropic" and not is_claude_cli_bridge_url(base_url)
-            ):
-                raise ValueError("provider credential is missing")
-            return build("")
-        return MultiKeyProviderStreamTransport(
-            key_pool=keys,
             user_id=resolved_user_id,
             provider=provider,
-            cooldown_seconds=int(credential.get("key_cooldown_seconds") or 60),
-            transport_factory=build,
-            model=resolved_model_id,
-            base_url=base_url,
+            model_id=resolved_model_id,
+            num_ctx=num_ctx,
+            cipher_required=True,
+            require_existing_key=True,
+            key_adapter_cls=PostgresProviderApiKeyAdapter,
+            http_transport_cls=HTTPProviderStreamTransport,
         )
 
     def _provider_transport(self, turn: dict[str, object]) -> object:
@@ -1581,65 +1483,16 @@ class ChatWorker:
         user_id = str(turn["user_id"])
         num_ctx = self._num_ctx_for(turn) if provider == "ollama" else None
         model_id = str(turn["model_id"])
-        with self.store._engine.connect() as c:
-            config = c.execute(
-                select(
-                    provider_configurations.c.base_url,
-                    provider_configurations.c.enabled,
-                    provider_configurations.c.key_cooldown_seconds,
-                    provider_configurations.c.risk_acknowledged_at,
-                )
-                .where(provider_configurations.c.user_id == user_id, provider_configurations.c.provider == provider)
-            ).mappings().first()
-        if config is None or not config["enabled"]:
-            raise ValueError("provider unavailable")
-        if provider == "google-antigravity" and not config.get("risk_acknowledged_at"):
-            raise ValueError("provider unavailable")
-        if provider in {"openai-codex", "google-antigravity"}:
-            from agentos.providers.claude_cli.provider import ClaudeCliProvider
-            from agentos.providers.cli_registry import cli_adapter_for
-
-            cli_adapter = cli_adapter_for(
-                provider,
-                str(config.get("base_url") or "") or None,
-                risk_acknowledged_at=config.get("risk_acknowledged_at")
-                if provider == "google-antigravity"
-                else None,
-            )
-            if cli_adapter is None:
-                raise ValueError("provider unavailable")
-            return ClaudeCliProvider(
-                base_url=DEFAULT_CLAUDE_CLI_BRIDGE_URL,
-                model=model_id,
-                adapter=cli_adapter,
-            )
-        keys = PostgresProviderApiKeyAdapter(self.store._engine, cipher=ProviderSecretCipher.from_environment(required=True))
-        first_key = keys.next_available_key(user_id, provider)
-        base_url = self._base_url_for(provider, {"base_url": config["base_url"], "api_key": first_key.plaintext if first_key is not None else ""})
-
-        def build(api_key: str) -> HTTPProviderStreamTransport:
-            return HTTPProviderStreamTransport(provider=provider, base_url=base_url, api_key=api_key, model=model_id, num_ctx=num_ctx)
-
-        if provider not in PROVIDERS_WITH_BASE_URL or (
-            provider == "anthropic" and not is_claude_cli_bridge_url(base_url)
-        ):
-            # configure()'s validation never lets a required-key provider stay
-            # enabled with zero keys, so there is no need to spend a query
-            # confirming one exists before wrapping -- MultiKeyProviderStreamTransport
-            # already raises its own clear error if that invariant is ever violated.
-            return MultiKeyProviderStreamTransport(
-                key_pool=keys, user_id=user_id, provider=provider,
-                cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
-            )
-        if provider == "anthropic" and is_claude_cli_bridge_url(base_url):
-            from agentos.providers.claude_cli.provider import ClaudeCliProvider
-
-            return ClaudeCliProvider(base_url=base_url, model=model_id)
-        if first_key is None:
-            return build("")
-        return MultiKeyProviderStreamTransport(
-            key_pool=keys, user_id=user_id, provider=provider,
-            cooldown_seconds=int(config["key_cooldown_seconds"]), transport_factory=build,
+        return build_provider_transport(
+            self.store._engine,
+            user_id=user_id,
+            provider=provider,
+            model_id=model_id,
+            num_ctx=num_ctx,
+            cipher_required=True,
+            require_existing_key=False,
+            key_adapter_cls=PostgresProviderApiKeyAdapter,
+            http_transport_cls=HTTPProviderStreamTransport,
         )
 
     def _allowed_child_providers(self, connection, turn: dict[str, object]) -> set[str]:

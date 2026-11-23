@@ -18,6 +18,7 @@ export type MarkdownMessageProps = {
   client?: ApiClient
   onPreview?: WorkspaceFilePreviewHandler
   onPreviewWorkspaceFile?: (path: string, label?: string) => void
+  openExternalLinksInNewTab?: boolean
 }
 
 function extractTextContent(node: ReactNode): string {
@@ -111,11 +112,13 @@ const MarkdownSegmentView = memo(function MarkdownSegmentView({
   conversationId,
   onPreview,
   onPreviewWorkspaceFile,
+  openExternalLinksInNewTab = false,
 }: {
   content: string
   conversationId?: string
   onPreview?: WorkspaceFilePreviewHandler
   onPreviewWorkspaceFile?: (path: string, label?: string) => void
+  openExternalLinksInNewTab?: boolean
 }) {
   const components = useMemo<Components>(
     () => ({
@@ -138,7 +141,12 @@ const MarkdownSegmentView = memo(function MarkdownSegmentView({
       a: ({ href, children }) => {
         const reference = href ? parseWorkspaceReference(href, conversationId ?? '') : null
         if (!reference) {
-          return <a href={href}>{children}</a>
+          const isExternalHttp = Boolean(openExternalLinksInNewTab && href && /^https?:\/\//i.test(href))
+          return isExternalHttp ? (
+            <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+          ) : (
+            <a href={href}>{children}</a>
+          )
         }
         const workspacePath = reference.path
         const labelText = extractTextContent(children).trim() || reference.name || workspacePath
@@ -163,7 +171,7 @@ const MarkdownSegmentView = memo(function MarkdownSegmentView({
         )
       },
     }),
-    [conversationId, onPreview, onPreviewWorkspaceFile],
+    [conversationId, onPreview, onPreviewWorkspaceFile, openExternalLinksInNewTab],
   )
 
   return (
@@ -183,6 +191,7 @@ export const MarkdownMessage = memo(function MarkdownMessage({
   client,
   onPreview,
   onPreviewWorkspaceFile,
+  openExternalLinksInNewTab = false,
 }: MarkdownMessageProps) {
   const hasMarkers = useMemo(() => hasResidualToolMarkers(content), [content])
   const segments = useMemo(
@@ -208,6 +217,7 @@ export const MarkdownMessage = memo(function MarkdownMessage({
           conversationId={conversationId}
           onPreview={onPreview}
           onPreviewWorkspaceFile={onPreviewWorkspaceFile}
+          openExternalLinksInNewTab={openExternalLinksInNewTab}
         />
       </div>
     )
@@ -237,6 +247,7 @@ export const MarkdownMessage = memo(function MarkdownMessage({
             conversationId={conversationId}
             onPreview={onPreview}
             onPreviewWorkspaceFile={onPreviewWorkspaceFile}
+            openExternalLinksInNewTab={openExternalLinksInNewTab}
           />
         )
       })}

@@ -48,6 +48,7 @@ class MultiKeyProviderStreamTransport:
         self._cooldown_seconds = cooldown_seconds
         self._transport_factory = transport_factory
         self._transport: object | None = None
+        self._closed = False
         self.provider = provider
         self.model = model
         self.base_url = base_url
@@ -68,18 +69,49 @@ class MultiKeyProviderStreamTransport:
             return 1
         return max(1, min(int(math.ceil(parsed)), 3600))
 
-    def stream(self, request: Mapping[str, object]) -> Iterator[NormalizedStreamItem]:
+    def stream(
+        self,
+        request: Mapping[str, object],
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> Iterator[NormalizedStreamItem]:
+        effective_cancel = cancel_check or (
+            request.get("cancel_check")
+            if isinstance(request, Mapping) and callable(request.get("cancel_check"))
+            else None
+        )
+        if self._closed or (effective_cancel is not None and effective_cancel()):
+            return
         tried: set[int] = set()
         credential = self._key_pool.next_available_key(self._user_id, self._provider, exclude=frozenset(tried))
         if credential is None:
             raise ValueError("no api key configured for provider")
         while True:
+            if self._closed or (effective_cancel is not None and effective_cancel()):
+                return
             tried.add(credential.id)
             transport = self._transport_factory(credential.plaintext)
             self._transport = transport
+            if self._closed or (effective_cancel is not None and effective_cancel()):
+                if hasattr(transport, "close"):
+                    try:
+                        transport.close()
+                    except Exception:
+                        pass
+                return
             yielded = False
             try:
-                for item in transport.stream(request):
+                stream_fn = transport.stream
+                if effective_cancel is not None:
+                    try:
+                        items = stream_fn(request, cancel_check=effective_cancel)
+                    except TypeError:
+                        items = stream_fn(request)
+                else:
+                    items = stream_fn(request)
+                for item in items:
+                    if self._closed or (effective_cancel is not None and effective_cancel()):
+                        return
                     if not yielded and item.kind == StreamKind.ERROR:
                         rejected = _classify_stream_error_item(item)
                         if rejected is not None:
@@ -87,6 +119,8 @@ class MultiKeyProviderStreamTransport:
                     if item.kind not in {StreamKind.KEEPALIVE, StreamKind.WAITING}:
                         yielded = True
                     yield item
+                if self._closed or (effective_cancel is not None and effective_cancel()):
+                    return
                 # A key that just served a full turn is proof it works now,
                 # even if a past failure had it sitting in cooldown -- without
                 # this, next_available_key's own timestamp check would still
@@ -96,6 +130,8 @@ class MultiKeyProviderStreamTransport:
                 self._key_pool.mark_active(credential.id)
                 return
             except ProviderKeyRejected as rejected:
+                if self._closed or (effective_cancel is not None and effective_cancel()):
+                    return
                 if yielded:
                     raise
                 if rejected.exhausted and hasattr(self._key_pool, "mark_exhausted"):
@@ -114,6 +150,7 @@ class MultiKeyProviderStreamTransport:
                 credential = next_credential
 
     def close(self) -> None:
+        self._closed = True
         transport = self._transport
         if transport is not None and hasattr(transport, "close"):
             transport.close()

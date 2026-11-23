@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 import json
 import re
+import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Iterator, Mapping
 
@@ -673,6 +674,8 @@ class HTTPProviderStreamTransport:
         self._risk_acknowledged_at = risk_acknowledged_at
         self._client = client or httpx.Client(timeout=60)
         self._owns_client = client is None
+        self._closed = False
+        self._active_response: httpx.Response | None = None
         self._claude_cli_provider: Any = None
         self.last_effort_adjustment: Any = None
 
@@ -905,6 +908,27 @@ class HTTPProviderStreamTransport:
     def stream(self, request: Mapping[str, object], *, cancel_check: Any = None) -> Iterator[NormalizedStreamItem]:
         from agentos.providers.cli_registry import cli_adapter_for
 
+        effective_cancel = cancel_check or (
+            request.get("cancel_check")
+            if isinstance(request, Mapping) and callable(request.get("cancel_check"))
+            else None
+        )
+        if self._closed:
+            return
+
+        idle_raw = request.get("idle_timeout_seconds") if isinstance(request, Mapping) else None
+        idle_timeout = (
+            float(idle_raw)
+            if isinstance(idle_raw, (int, float)) and not isinstance(idle_raw, bool) and float(idle_raw) > 0
+            else None
+        )
+        wall_raw = request.get("max_wall_clock_seconds") if isinstance(request, Mapping) else None
+        wall_timeout = (
+            float(wall_raw)
+            if isinstance(wall_raw, (int, float)) and not isinstance(wall_raw, bool) and float(wall_raw) > 0
+            else None
+        )
+
         request_ack = (
             request.get("risk_acknowledged_at")
             if isinstance(request, Mapping) and "risk_acknowledged_at" in request
@@ -932,11 +956,6 @@ class HTTPProviderStreamTransport:
                 stream_claude_code_bridge as _default_stream_claude_code_bridge,
             )
 
-            effective_cancel = cancel_check or (
-                request.get("cancel_check")
-                if callable(request.get("cancel_check"))
-                else None
-            )
             if self.provider == "anthropic" and is_claude_cli_bridge_url(self.base_url):
                 hook = stream_claude_code_bridge or (
                     _facade_stream_claude_code_bridge
@@ -985,6 +1004,11 @@ class HTTPProviderStreamTransport:
             from agentos.provider_catalog.opencode import is_opencode_cloud, stream_opencode_bridge
 
             if not is_opencode_cloud(self.base_url):
+                if effective_cancel is not None and effective_cancel():
+                    return
+                bridge_timeout = min(
+                    val for val in (180.0, idle_timeout, wall_timeout) if val is not None
+                )
                 yield from stream_opencode_bridge(
                     base_url=self.base_url,
                     model=self.model,
@@ -992,8 +1016,12 @@ class HTTPProviderStreamTransport:
                     tools=list(request.get("tools") or []),  # type: ignore[arg-type]
                     tool_choice=request.get("tool_choice"),
                     client=self._client,
+                    timeout=bridge_timeout,
+                    cancel_check=effective_cancel,
                 )
                 return
+        if effective_cancel is not None and effective_cancel():
+            return
         endpoint, headers, payload = self._request_for(
             list(request.get("messages") or []),
             list(request.get("tools") or []),
@@ -1008,41 +1036,98 @@ class HTTPProviderStreamTransport:
                     notify_adj(self.last_effort_adjustment, self.model)
                 except Exception:  # noqa: BLE001 - adjustment notice never stops a stream
                     pass
+        stream_kwargs: dict[str, Any] = {"headers": headers, "json": payload}
+        if idle_timeout is not None:
+            stream_kwargs["timeout"] = httpx.Timeout(
+                connect=min(15.0, idle_timeout),
+                read=idle_timeout,
+                write=min(30.0, idle_timeout),
+                pool=min(15.0, idle_timeout),
+            )
+        started = time.monotonic()
+        last_activity = started
+
+        def _is_cancelled() -> bool:
+            return self._closed or (effective_cancel is not None and bool(effective_cancel()))
+
+        def _cancellable_lines(raw_lines: Iterable[str]) -> Iterator[str]:
+            nonlocal last_activity
+            for line in raw_lines:
+                if _is_cancelled():
+                    return
+                now = time.monotonic()
+                if wall_timeout is not None and (now - started) > wall_timeout:
+                    raise TimeoutError("provider stream exceeded wall timeout")
+                if idle_timeout is not None and (now - last_activity) > idle_timeout:
+                    raise TimeoutError("provider stream exceeded idle timeout")
+                last_activity = now
+                yield line
+
         try:
-            with self._client.stream("POST", endpoint, headers=headers, json=payload) as response:
-                if response.status_code >= 400:
-                    response.read()
+            with self._client.stream("POST", endpoint, **stream_kwargs) as response:
+                self._active_response = response
                 try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as error:
-                    rejected = _classify_http_rejection(error.response)
-                    if rejected is not None:
-                        raise rejected from error
-                    raise
-                limit = project_rate_limit_headers(response.headers)
-                has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))
-                pending_limit = NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit) if has_limit else None
-                events = (
-                    normalize_ndjson(response.iter_lines()) if self.provider == "ollama"
-                    else normalize_sse(response.iter_lines(), provider=self.provider)
-                )
-                emitted_any = False
-                for item in events:
-                    if not emitted_any and item.sequence == 1 and item.kind is StreamKind.ERROR:
-                        rejected = _classify_stream_error_item(item)
+                    if _is_cancelled():
+                        return
+                    if response.status_code >= 400:
+                        response.read()
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as error:
+                        rejected = _classify_http_rejection(error.response)
                         if rejected is not None:
-                            raise rejected
-                    if pending_limit is not None:
+                            raise rejected from error
+                        raise
+                    limit = project_rate_limit_headers(response.headers)
+                    has_limit = any(value is not None for value in (limit.remaining, limit.reset_after_seconds, limit.limit))
+                    pending_limit = NormalizedStreamItem(StreamKind.RATE_LIMIT, 1, rate_limit=limit) if has_limit else None
+                    bounded_lines = _cancellable_lines(response.iter_lines())
+                    events = (
+                        normalize_ndjson(bounded_lines) if self.provider == "ollama"
+                        else normalize_sse(bounded_lines, provider=self.provider)
+                    )
+                    emitted_any = False
+                    for item in events:
+                        if _is_cancelled():
+                            return
+                        if wall_timeout is not None and (time.monotonic() - started) > wall_timeout:
+                            raise TimeoutError("provider stream exceeded wall timeout")
+                        if not emitted_any and item.sequence == 1 and item.kind is StreamKind.ERROR:
+                            rejected = _classify_stream_error_item(item)
+                            if rejected is not None:
+                                raise rejected
+                        if pending_limit is not None:
+                            yield pending_limit
+                            pending_limit = None
+                        emitted_any = True
+                        yield replace(item, sequence=item.sequence + (1 if has_limit else 0))
+                    if pending_limit is not None and not _is_cancelled():
                         yield pending_limit
-                        pending_limit = None
-                    emitted_any = True
-                    yield replace(item, sequence=item.sequence + (1 if has_limit else 0))
-                if pending_limit is not None:
-                    yield pending_limit
-        except httpx.TransportError as error:
+                finally:
+                    if self._active_response is response:
+                        self._active_response = None
+        except httpx.TimeoutException as error:
+            if _is_cancelled():
+                return
+            if idle_timeout is not None or wall_timeout is not None:
+                raise TimeoutError("provider stream timed out") from error
             raise ProviderKeyRejected(str(error)) from error
+        except (httpx.TransportError, RuntimeError) as error:
+            if _is_cancelled():
+                return
+            if isinstance(error, httpx.TransportError):
+                raise ProviderKeyRejected(str(error)) from error
+            raise
 
     def close(self) -> None:
+        self._closed = True
+        response = self._active_response
+        self._active_response = None
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
         if self._claude_cli_provider is not None:
             self._claude_cli_provider.close()
             self._claude_cli_provider = None

@@ -88,6 +88,8 @@ import { formatTurnWorkDuration } from './activitySummary'
 import type { ConversationActivityEvent, StructuredPatchHunk, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
+import { BtwCard } from './BtwCard'
+import { useBtwChatControls, useBtwSession } from './useBtwSession'
 import { useComposerAttachments } from './useComposerAttachments'
 import { conversationDraftKey, useComposerDraft } from './useComposerDraft'
 import { useEffortSelection } from './useEffortSelection'
@@ -253,6 +255,8 @@ export function ChatPage() {
   const [infoPanel, setInfoPanel] = useState<InfoPanel | null>(null)
   const [commandNotice, setCommandNotice] = useState<string | null>(null)
   const [modelPickerSignal, setModelPickerSignal] = useState(0)
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0)
+  const btw = useBtwSession(client, conversationId)
   // W7 Batch D: the message queue, and the rewind picker with the file history it shows.
   const [queue, setQueue] = useState<QueuedInput[]>([])
   const [queueBusy, setQueueBusy] = useState(false)
@@ -1576,8 +1580,9 @@ export function ChatPage() {
     client, conversationId, navigate, messages,
     title: conversation?.title ?? '', modelId: effectiveChatModelId, provider: effectiveChatProvider ?? '',
     permissionMode: codePermissionMode, mode: conversationMode, workspacePath: conversation?.workspace?.path ?? null,
+    turnBusy: running || stopping || liveTurnAwaitingAnswer,
     send: async (text) => {
-      if (running) { setCommandNotice('Espere o turno atual terminar para enviar.'); return }
+      if (running || stopping || liveTurnAwaitingAnswer) { setCommandNotice('Espere o turno atual terminar para enviar.'); return false }
       setPendingUserMessage({ message_id: pendingMessageId(), role: 'user', content: text, status: 'completed', retryable: false, attachments: [], command: null })
       try {
         await sendChatMessage(text, [])
@@ -1607,6 +1612,14 @@ export function ChatPage() {
       window.dispatchEvent(new Event('orin:conversations-updated'))
       if (prompt) await sendConversationMessage(client, fork.conversationId, prompt, [], chatSelection, 'code')
       setCommandNotice(`Cópia criada: ${fork.title}${prompt ? ' (o pedido roda lá)' : ''}`)
+    },
+    askBtw: async (question) => {
+      if (!question) return
+      setCommandNotice(null)
+      void btw.ask(question, {
+        provider: effectiveChatProvider ?? provider ?? null,
+        modelId: effectiveChatModelId || modelId || null,
+      })
     },
     notify: setCommandNotice,
     openInfo: setInfoPanel,
@@ -2117,6 +2130,18 @@ export function ChatPage() {
     }
     // W7: a built-in slash command runs here (even while a turn runs); a skill or plugin command is sent as before.
     if (!preserveComposer && text.startsWith('/') && readyUploads.length === 0 && !(stopping && !afterStop)) {
+      if (/^\/btw\s*$/i.test(text)) {
+        if (btw.state?.minimized) {
+          btw.setMinimized(false)
+          setMessage('')
+        } else {
+          setMessage('/btw ')
+          setComposerFocusSignal((n) => n + 1)
+          setCommandNotice('Digite a pergunta após /btw (ex.: /btw qual arquivo define essa rota?).')
+        }
+        setError(null)
+        return
+      }
       let outcome: Awaited<ReturnType<typeof chatCommands.run>> | { kind: 'failed' }
       try {
         outcome = await chatCommands.run(text)
@@ -2124,10 +2149,17 @@ export function ChatPage() {
         outcome = { kind: 'failed' }
       }
       if (outcome.kind === 'handled') { setMessage(''); setError(null); return }
+      if (outcome.kind === 'blocked') { setError(null); return }
       if (outcome.kind === 'excluded') { setError(`/${outcome.name} não existe no Orin.`); return }
       if (outcome.kind === 'failed') { setError('O comando não pôde ser concluído. Tente novamente.'); return }
     }
-    if ((!text && readyUploads.length === 0) || turnBusy) return
+    if (turnBusy) {
+      if (!preserveComposer && text.startsWith('/')) {
+        setCommandNotice('Espere o turno atual terminar para executar este comando/skill.')
+      }
+      return
+    }
+    if (!text && readyUploads.length === 0) return
     if (liveTurnAwaitingAnswer && !afterStop) {
       // The live turn reads only the queue, which takes text: never start a new turn behind it. Files (and text
       // too long for the queue) stay in the composer until the turn ends.
@@ -2461,22 +2493,59 @@ export function ChatPage() {
     }
   }
 
+  const [projectMenuConversationId, setProjectMenuConversationId] = useState<string | null>(null)
+  const projectMenuOpen = projectMenuConversationId === conversationId
+
+  const focusComposer = useCallback(() => setComposerFocusSignal((n) => n + 1), [])
+  const { triggerBtwComposer, insertBtwIntoComposer, continueBtwInFork } = useBtwChatControls({
+    btw,
+    client,
+    conversationId,
+    conversationTitle: conversation?.title ?? '',
+    projectId: conversation?.project_id ?? projectId ?? null,
+    escapeBlocked: Boolean(
+      oversizedInput ||
+      previewReference ||
+      pendingToolPermissions.length > 0 ||
+      liveVoiceOpen ||
+      friendSoulOpen ||
+      tasksOpen ||
+      projectMenuOpen,
+    ),
+    setMessage,
+    focusComposer,
+    notify: setCommandNotice,
+    navigate,
+  })
+
   useEffect(() => {
     if (!running || stopping) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return
+      if (btw.isOpen) return
       if (pendingToolPermissions.length > 0) return
       if (oversizedInput || previewReference) return
+      if (liveVoiceOpen || friendSoulOpen || tasksOpen || projectMenuOpen) return
       if (document.querySelector('[role="dialog"], [role="listbox"], [role="search"]')) return
       event.preventDefault()
       void stop()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [oversizedInput, pendingToolPermissions.length, previewReference, running, stop, stopping])
+  }, [
+    btw.isOpen,
+    friendSoulOpen,
+    liveVoiceOpen,
+    oversizedInput,
+    pendingToolPermissions.length,
+    previewReference,
+    projectMenuOpen,
+    running,
+    stop,
+    stopping,
+    tasksOpen,
+  ])
 
-  const [projectMenuConversationId, setProjectMenuConversationId] = useState<string | null>(null)
-  const projectMenuOpen = projectMenuConversationId === conversationId
   const [availableProjects, setAvailableProjects] = useState<Project[]>([])
   const [newProjectName, setNewProjectName] = useState('')
   const [newProjectDescription, setNewProjectDescription] = useState('')
@@ -3608,6 +3677,19 @@ export function ChatPage() {
         />
         {commandNotice && <p className="chat__command-notice" role="status">{commandNotice}</p>}
         <GoalBanner client={client} conversationId={conversationId} refreshKey={goalRefreshKey} />
+        <BtwCard
+          state={btw.state}
+          conversationId={conversationId}
+          client={client}
+          onStop={btw.stop}
+          onRetry={btw.retry}
+          onDismiss={btw.dismiss}
+          onToggleMinimized={btw.toggleMinimized}
+          onToggleExpanded={btw.toggleExpanded}
+          onInsertIntoComposer={insertBtwIntoComposer}
+          onContinueInFork={continueBtwInFork}
+          onPreview={setPreviewReference}
+        />
         <QueuePanel
           items={queue}
           busy={queueBusy}
@@ -3635,6 +3717,10 @@ export function ChatPage() {
           attachments={attachments}
           onAttach={onAttach}
           onRemoveAttachment={onRemoveAttachment}
+          focusSignal={composerFocusSignal}
+          btwOpen={btw.isOpen}
+          onDismissBtw={btw.dismiss}
+          onTriggerBtw={triggerBtwComposer}
           canSend={attachmentsReady && !stopping}
           notice={notice}
           commands={pluginCommands}

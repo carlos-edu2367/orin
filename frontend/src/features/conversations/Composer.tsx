@@ -104,6 +104,10 @@ export type ComposerProps = {
   effortControl?: EffortPickerProps
   /** 0.13 WS-E6: Subscription quota ring and popover next to the model/effort controls. */
   quotaControl?: QuotaPopoverProps
+  /** `/btw`: true while the ephemeral card is open above the composer (first Escape closes it without stopping the turn). */
+  btwOpen?: boolean
+  onDismissBtw?: () => void
+  onTriggerBtw?: () => void
 }
 
 const MAX_ROWS_HEIGHT = 260
@@ -136,6 +140,9 @@ export function Composer({
   worktreeIsolated, onWorktreeIsolatedChange, worktreeBranch = null,
   effortControl,
   quotaControl,
+  btwOpen = false,
+  onDismissBtw,
+  onTriggerBtw,
   isLiveVoiceActive = false, onToggleLiveVoice,
 }: ComposerProps) {
   const externalMode: 'chat' | 'code' =
@@ -281,15 +288,16 @@ export function Composer({
 
   function submit(event: FormEvent) {
     event.preventDefault()
-    if (running || disabled || !canSend || (!value.trim() && attachments.length === 0)) return
+    if (disabled || !canSend || (!value.trim() && attachments.length === 0)) return
+    if (running && !slashText) return
     onSubmit()
   }
 
-  /** The Enter path: while a turn runs a `!command` waits and other text is queued; otherwise it is sent. */
+  /** The Enter path: while a turn runs a `!command` or `/command` routes to submit and other text is queued; otherwise it is sent. */
   function sendTyped() {
     if (running) {
-      // W7: a `!command` is not queued; the chat says why it waits (it runs between turns, not inside one).
-      if (shellMode) onSubmit()
+      // W7: `!command` and `/command` (including `/btw <question>`) route to onSubmit instead of being dropped by the queue.
+      if (shellMode || slashText) onSubmit()
       else if (onQueue && value.trim()) onQueue()
       return
     }
@@ -354,6 +362,8 @@ export function Composer({
   }, historySearch !== null)
   // W7: `!command` in a Code conversation runs the command in the session's folder (the `!` shell mode).
   const shellMode = effectiveCodeMode === 'code' && value.startsWith('!')
+  const slashText = value.trim().startsWith('/')
+  const btwMode = /^\/btw(?:\s|$)/i.test(value.trim())
 
   function insertAtCaret(text: string) {
     const element = textareaRef.current
@@ -378,6 +388,11 @@ export function Composer({
           stepPermissionMode()
           return true
         case 'chat:cancel': {
+          // First Escape closes an open /btw card without ever cancelling a running main turn.
+          if (btwOpen && onDismissBtw) {
+            onDismissBtw()
+            return true
+          }
           if (running && onStop) { onStop(); return true }
           // Escape twice on an empty composer: the rewind picker (as in Claude Code).
           const now = Date.now()
@@ -388,6 +403,20 @@ export function Composer({
           }
           lastEscapeAt.current = now
           return false
+        }
+        case 'chat:btw': {
+          if (onTriggerBtw) {
+            onTriggerBtw()
+            return true
+          }
+          const trimmed = value.trimStart()
+          if (/^\/btw(?:\s|$)/i.test(trimmed)) {
+            onChange(trimmed.replace(/^\/btw\s*/i, ''))
+          } else {
+            onChange(trimmed ? `/btw ${trimmed}` : '/btw ')
+          }
+          requestAnimationFrame(() => textareaRef.current?.focus())
+          return true
         }
         case 'chat:submit':
           sendTyped()
@@ -450,7 +479,7 @@ export function Composer({
   const sendDisabled = Boolean(disabled || !canSend || (!value.trim() && attachments.length === 0))
 
   return (
-    <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}${shellMode ? ' composer--shell' : ''}`} onSubmit={submit} onDrop={onDrop} onDragOver={onDragOver}>
+    <form className={`composer${focused ? ' is-focused' : ''}${running ? ' is-running' : ''}${shellMode ? ' composer--shell' : ''}${btwMode ? ' composer--btw' : ''}`} onSubmit={submit} onDrop={onDrop} onDragOver={onDragOver}>
       {todos && todos.length > 0 && <TodoBar todos={todos} isTurnRunning={Boolean(running)} className="mb-2" />}
       <div className="composer__surface">
         <label className="visually-hidden" htmlFor="composer-message">Mensagem</label>
@@ -472,6 +501,13 @@ export function Composer({
             <span className="composer__shell-mark">!</span> Modo shell: Enter roda o comando na pasta da sessão, sem o modelo.
           </p>
         )}
+        {btwMode && (
+          <p className="composer__btw-badge" role="status" data-testid="composer-btw-badge">
+            <span className="composer__btw-mark">/btw</span>
+            <span>Pergunta paralela — usa o contexto atual sem entrar no histórico</span>
+            {running && <span className="composer__btw-sub">· não interrompe o agente</span>}
+          </p>
+        )}
         {pickerOpen && (
           <CommandPicker
             commands={commands}
@@ -484,6 +520,7 @@ export function Composer({
               setDismissed(true)
               if (builtin && !builtin.argumentHint && onRunCommand) { onRunCommand(`/${token}`); return }
               onChange(`/${token} `)
+              requestAnimationFrame(() => textareaRef.current?.focus())
             }}
             onDismiss={() => setDismissed(true)}
           />
@@ -718,6 +755,31 @@ export function Composer({
                 <path d="M5.8 14.5h4.4" />
               </svg>
             </button>
+            {running && btwMode && (
+              <button
+                type="submit"
+                className="composer__action composer__action--btw"
+                data-testid="composer-btw-send"
+                aria-label="Enviar pergunta paralela /btw"
+                title="Enviar pergunta paralela /btw (Enter)"
+                disabled={disabled || !canSend}
+              >
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
+                  width="15"
+                  height="15"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M14.5 1.5 7.2 8.8" />
+                  <path d="m14.5 1.5-4.6 13-2.7-5.7-5.7-2.7 13-4.6Z" />
+                </svg>
+              </button>
+            )}
             <AnimatePresence mode="wait" initial={false}>
               {running ? (
                 <motion.button

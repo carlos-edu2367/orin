@@ -31,8 +31,10 @@ export type ChatCommandDeps = {
   mode: string
   workspacePath: string | null
   navigate: (path: string) => void
-  /** Sends text as a message of this conversation. */
-  send: (text: string) => Promise<void>
+  /** Sends text as a message of this conversation. Returns false when blocked (e.g. a turn is running). */
+  send: (text: string) => Promise<boolean | void> | boolean | void
+  /** True when the conversation currently has an active turn running. */
+  turnBusy?: boolean
   reload: () => Promise<void>
   notify: (text: string) => void
   openInfo: (panel: InfoPanel) => void
@@ -52,9 +54,11 @@ export type ChatCommandDeps = {
   setAccent?: (accent: ThemeAccent) => void
   /** 0.13 WS-E4: /effort reads and sets the active model's effort level. */
   effort?: EffortCommandController
+  /** /btw: ephemeral parallel side-question over the conversation's context. */
+  askBtw?: (question: string) => Promise<void> | void
 }
 
-type Handler = (args: string) => Promise<void> | void
+type Handler = (args: string) => Promise<boolean | void> | boolean | void
 
 // Orin's own words for the prompt commands (not Claude Code's prompts).
 export const INIT_PROMPT = [
@@ -123,6 +127,7 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
     ...(deps.branch ? { branch: (args: string) => deps.branch?.(args) } : {}),
     ...(deps.fork ? { fork: (args: string) => deps.fork?.(args) } : {}),
     ...(deps.openTasks ? { tasks: () => deps.openTasks?.() } : {}),
+    ...(deps.askBtw ? { btw: (args: string) => deps.askBtw?.(args.trim()) } : {}),
   }
   return {
     ...moreCommandHandlers(deps),
@@ -153,7 +158,19 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
     clear: home,
     exit: home,
     compact: async (args) => {
-      await compactConversation(deps.client, deps.conversationId, args || undefined)
+      if (deps.turnBusy) {
+        deps.notify('Espere o turno atual terminar para compactar a conversa.')
+        return false
+      }
+      try {
+        await compactConversation(deps.client, deps.conversationId, args || undefined)
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          deps.notify('Espere o turno atual terminar para compactar a conversa.')
+          return false
+        }
+        throw error
+      }
       deps.notify('Compactando a conversa…')
       await deps.reload()
     },
@@ -171,9 +188,13 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
     },
     model: () => deps.openModelPicker(),
     plan: async (args) => {
+      if (args && deps.turnBusy) {
+        deps.notify('Espere o turno atual terminar para enviar o pedido com /plan.')
+        return false
+      }
       await deps.setPermissionMode('plan_mode')
       deps.notify('Modo Plano ativado.')
-      if (args) await deps.send(args)
+      if (args) return await deps.send(args)
     },
     config: () => deps.navigate('/settings/general'),
     // W7 Batch E: the settings editors open on this conversation's folder.
@@ -235,7 +256,11 @@ export function chatCommandHandlers(deps: ChatCommandDeps): Record<string, Handl
   }
 }
 
-export type SlashOutcome = { kind: 'handled' } | { kind: 'excluded'; name: string } | { kind: 'message' }
+export type SlashOutcome =
+  | { kind: 'handled' }
+  | { kind: 'blocked' }
+  | { kind: 'excluded'; name: string }
+  | { kind: 'message' }
 
 export function useChatCommands(deps: ChatCommandDeps) {
   const handlers = useMemo(() => chatCommandHandlers(deps), [deps])
@@ -245,8 +270,8 @@ export function useChatCommands(deps: ChatCommandDeps) {
     if (!parsed) return { kind: 'message' }
     const builtin = findBuiltin(parsed.name)
     if (builtin && handlers[builtin.name]) {
-      await handlers[builtin.name](parsed.args)
-      return { kind: 'handled' }
+      const result = await handlers[builtin.name](parsed.args)
+      return result === false ? { kind: 'blocked' } : { kind: 'handled' }
     }
     if (!builtin && isExcludedCommand(parsed.name)) return { kind: 'excluded', name: parsed.name }
     // A skill, a plugin's command or an MCP prompt: the server expands it (and a built-in not offered yet is sent too).

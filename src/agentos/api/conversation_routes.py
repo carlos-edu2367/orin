@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from agentos.redaction import redact_text
@@ -211,6 +211,31 @@ class ShellRequest(BaseModel):
     command: str = Field(min_length=1, max_length=4000)
 
 
+class BtwRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(min_length=1, max_length=8000)
+    provider: str | None = Field(default=None, max_length=64)
+    model_id: str | None = Field(default=None, max_length=512)
+
+
+def _resolve_services_engine(services: Any):
+    conv_app = getattr(services, "conversation_application", None)
+    conv_store = getattr(conv_app, "_store", None) if conv_app is not None else None
+    for candidate in (
+        conv_store,
+        conv_app,
+        getattr(services, "projects", None),
+        getattr(services, "local_workspaces", None),
+        getattr(services, "context_observations", None),
+    ):
+        engine = getattr(candidate, "_engine", None) if candidate is not None else None
+        if engine is not None:
+            return engine
+    quota_service = getattr(services, "quota_service", None)
+    qstore = getattr(quota_service, "_store", None) if quota_service is not None else None
+    return getattr(qstore, "_engine", None) if qstore is not None else None
+
+
 def fork_conversation(services, user_id: str, conversation_id: str, *, before_message_id: str | None = None,
                       title: str | None = None) -> dict[str, Any]:
     """Fork in the store, then give a chat outside a project the same folder (a project's chats share the project's)."""
@@ -259,6 +284,7 @@ def register_conversation_routes(
     services,
     principal_for: Callable[..., AuthenticatedPrincipal],
     conversation_root: Callable[[str, AuthenticatedPrincipal], Path],
+    conversation_workspace_display: Callable[[str, AuthenticatedPrincipal], str | None] | None = None,
 ) -> None:
     @app.get("/v1/conversations/{conversation_id}/tasks")
     async def list_tasks(conversation_id: str, request: Request) -> JSONResponse:
@@ -401,6 +427,143 @@ def register_conversation_routes(
             return run_statusline(conversation_id, command, root, payload)
 
         return JSONResponse(await run_in_threadpool(_statusline))
+
+    @app.post("/v1/conversations/{conversation_id}/btw")
+    async def btw(conversation_id: str, payload: BtwRequest, request: Request) -> Response:
+        """`/btw`: ephemeral parallel side-question streamed over SSE without mutating the conversation."""
+        from agentos.conversations.btw import (
+            BtwEvent,
+            async_stream_btw_events,
+            btw_concurrency_gate,
+            build_btw_context,
+            format_sse_event,
+            resolve_btw_transport,
+        )
+
+        gate = btw_concurrency_gate()
+
+        def _prepare():
+            principal = principal_for(request, mutable=True)
+            services.security.check_rate_limit(
+                principal,
+                action="conversation.send",
+                origin=request.headers.get("origin"),
+            )
+            services.security.authorize(
+                principal,
+                action="conversation.read",
+                resource_id=conversation_id,
+                purpose="conversation.btw",
+            )
+            if not payload.question.strip():
+                raise ApplicationValidationError("question must not be blank")
+            engine = _resolve_services_engine(services)
+            if engine is None:
+                raise ApplicationNotFoundError("conversation not found")
+            if not gate.try_acquire(principal.user_id, conversation_id):
+                return principal, engine, None, True
+            try:
+                workspace_path: str | None = None
+                if services.capabilities.host_folders:
+                    try:
+                        if conversation_workspace_display is not None:
+                            workspace_path = conversation_workspace_display(conversation_id, principal)
+                        elif not services.capabilities.profile_files:
+                            local_store = getattr(services, "local_workspaces", None)
+                            if local_store is not None:
+                                conv_app = getattr(services, "conversation_application", None)
+                                conv_obj = (
+                                    conv_app.get(conversation_id, principal.user_id)
+                                    if conv_app is not None
+                                    else None
+                                )
+                                ws_id = (
+                                    str(conv_obj.get("workspace_id") or f"workspace:{conversation_id}")
+                                    if isinstance(conv_obj, dict)
+                                    else f"workspace:{conversation_id}"
+                                )
+                                workspace_path = local_store.root_for(ws_id, principal.user_id)
+                    except ApplicationNotFoundError:
+                        raise
+                    except Exception:  # noqa: BLE001 - managed/missing folder never blocks /btw
+                        workspace_path = None
+                try:
+                    snapshot = build_btw_context(
+                        engine,
+                        user_id=principal.user_id,
+                        conversation_id=conversation_id,
+                        question=payload.question,
+                        provider=payload.provider,
+                        model_id=payload.model_id,
+                        workspace_path=workspace_path,
+                    )
+                except LookupError as error:
+                    raise ApplicationNotFoundError("conversation not found") from error
+                except ValueError as error:
+                    raise ApplicationValidationError(str(error)) from error
+                return principal, engine, snapshot, False
+            except BaseException:
+                gate.release(principal.user_id, conversation_id)
+                raise
+
+        principal, engine, snapshot, busy = await run_in_threadpool(_prepare)
+        if busy or snapshot is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "btw_concurrency_limit",
+                        "category": "RATE_LIMITED",
+                        "message_key": "btw_concurrency_limit",
+                        "message": "Já existem perguntas /btw em andamento nesta conversa. Aguarde concluir.",
+                        "retryable": True,
+                        "retry_after": 2,
+                    }
+                },
+                status_code=429,
+                headers={"Retry-After": "2"},
+            )
+
+        async def body():
+            try:
+                try:
+                    transport = await run_in_threadpool(
+                        resolve_btw_transport,
+                        engine,
+                        user_id=principal.user_id,
+                        snapshot=snapshot,
+                    )
+                except Exception as error:  # noqa: BLE001
+                    msg = str(error or "").strip()
+                    lowered = msg.lower()
+                    if "provider unavailable" in lowered or "credential is missing" in lowered:
+                        friendly = "O provedor selecionado não está disponível para esta conta."
+                        code = "provider_unavailable"
+                    else:
+                        friendly = "Não foi possível conectar ao provedor para responder ao /btw."
+                        code = "provider_error"
+                    yield format_sse_event(
+                        BtwEvent("error", {"code": code, "message": friendly, "retryable": False})
+                    )
+                    return
+
+                async for event in async_stream_btw_events(
+                    snapshot,
+                    transport=transport,
+                    is_disconnected=request.is_disconnected,
+                ):
+                    yield format_sse_event(event)
+            finally:
+                gate.release(principal.user_id, conversation_id)
+
+        return StreamingResponse(
+            body(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
 
 
 __all__ = ["fork_conversation", "register_conversation_routes", "shell_tasks", "stop_shell"]

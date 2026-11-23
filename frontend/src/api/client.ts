@@ -30,6 +30,8 @@ type RequestOptions<T> = {
 
 export type StreamRequestOptions = {
   path: string
+  method?: 'GET' | 'POST'
+  body?: unknown
   signal?: AbortSignal
 }
 
@@ -152,15 +154,21 @@ export class ApiClient {
   }
 
   async stream(options: StreamRequestOptions): Promise<Response> {
+    const method = options.method ?? 'GET'
     const url = this.safeStreamUrl(options.path)
     const headers = new Headers({ Accept: 'text/event-stream' })
+    if (options.body !== undefined) headers.set('Content-Type', 'application/json')
     if (this.bearerToken) headers.set('Authorization', `Bearer ${this.bearerToken}`)
+    const csrfToken = this.csrf()
+    if (csrfToken && method !== 'GET') headers.set('X-CSRF-Token', csrfToken)
     const response = await this.fetchImpl.call(globalThis, url, {
-      method: 'GET',
+      method,
       headers,
       credentials: 'same-origin',
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: options.signal,
     })
+    if (response.status === 401) this.onUnauthenticated?.()
     return response
   }
 

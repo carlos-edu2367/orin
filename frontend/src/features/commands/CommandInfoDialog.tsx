@@ -8,7 +8,7 @@ import { ContextGrid } from '../conversations/ContextGrid'
 import type { InfoPanel } from './useChatCommands'
 
 const SHORTCUTS = [
-  'chat:submit', 'chat:newline', 'chat:cancel', 'chat:cycleMode', 'chat:modelPicker', 'chat:sendNow', 'history:search',
+  'chat:submit', 'chat:newline', 'chat:cancel', 'chat:cycleMode', 'chat:modelPicker', 'chat:btw', 'chat:sendNow', 'history:search',
   'app:toggleTranscript', 'app:toggleTodos',
 ]
 

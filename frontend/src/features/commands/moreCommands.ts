@@ -24,14 +24,14 @@ export type MoreCommandDeps = {
   /** The conversation the command runs in; `/goal` needs it. */
   conversationId?: string
   navigate: (path: string) => void
-  send: (text: string) => Promise<void>
+  send: (text: string) => Promise<boolean | void> | boolean | void
   notify: (text: string) => void
   openInfo: (panel: { kind: 'text'; title: string; lines: string[] }) => void
   setAccent?: (accent: ThemeAccent) => void
   effort?: EffortCommandController
 }
 
-type Handler = (args: string) => Promise<void> | void
+type Handler = (args: string) => Promise<boolean | void> | boolean | void
 
 // Orin's own words for the prompt commands (not Claude Code's prompts).
 export const SUBTASK_PROMPT = 'Delegue a tarefa a seguir a um subagente que receba o contexto desta conversa, espere o resultado e me resuma o que ele fez:'
@@ -49,7 +49,6 @@ const ACCENTS: Record<string, ThemeAccent> = {
 /** Text answers: what Orin does instead, in one place so the wording stays honest and consistent. */
 export const NOT_IN_ORIN: Record<string, { title: string; lines: string[] }> = {
   autocompact: { title: 'Compactação automática', lines: ['No Orin a compactação automática está sempre ligada: a conversa é resumida quando o contexto enche.', 'Para compactar agora, use /compact [instruções].'] },
-  btw: { title: 'Pergunta paralela', lines: ['O Orin ainda não tem perguntas fora do histórico.', 'Para perguntar sem mexer nesta conversa, use /fork e pergunte na cópia.'] },
   cd: { title: 'Pasta de trabalho', lines: ['Para trocar a pasta desta sessão, use o seletor de pasta no topo da conversa.', 'Para acrescentar outra pasta, use /add-dir <pasta>.'] },
   fast: { title: 'Modo rápido', lines: ['O Orin não tem um modo rápido.', 'Para respostas mais rápidas, escolha um modelo menor com /model.'] },
   'reload-plugins': { title: 'Plugins', lines: ['O Orin lê os plugins de novo a cada turno: a próxima mensagem já usa o que mudou.'] },
@@ -71,13 +70,13 @@ export function moreCommandHandlers(deps: MoreCommandDeps): Record<string, Handl
     ...pipelineCommandHandlers(deps),
     subtask: async (args) => {
       if (!args) { deps.notify('Diga a tarefa: /subtask <tarefa>'); return }
-      await deps.send(`${SUBTASK_PROMPT}\n${args}`)
+      return await deps.send(`${SUBTASK_PROMPT}\n${args}`)
     },
     diff: () => deps.send(DIFF_PROMPT),
     loop: async (args) => {
       if (!args) { deps.notify('Diga o intervalo e o pedido: /loop 10m rode os testes'); return }
       const match = /^(\d+\s*[smhd])\s+([\s\S]+)$/i.exec(args.trim())
-      await deps.send(match ? `${LOOP_PROMPT} a cada ${match[1]}, este pedido: ${match[2]}` : `${LOOP_PROMPT} num intervalo que faça sentido, este pedido: ${args}`)
+      return await deps.send(match ? `${LOOP_PROMPT} a cada ${match[1]}, este pedido: ${match[2]}` : `${LOOP_PROMPT} num intervalo que faça sentido, este pedido: ${args}`)
     },
     loops: () => deps.navigate('/settings/schedules'),
     'pause-memory': () => deps.navigate('/settings/memory'),
