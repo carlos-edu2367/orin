@@ -10,9 +10,16 @@ Achado do spike passivo (2026-11-21, sem chamadas de modelo nem leitura de token
   recentes trazem `type="event_msg"`, `payload.type="token_count"` e
   `payload.rate_limits.{primary,secondary}` com `used_percent`, `resets_at` (epoch em s) e
   `window_minutes` (`300` -> `five_hour`, `10080` -> `seven_day`).
-- Antigravity CLI (`agy`): não publica percentual de cota localmente; coleta passiva se
-  restringe a erros 429/quota (`source="error"`, `status="rejected"`). Sem erro recente,
-  reporta `confidence="unknown"` e `windows=()`.
+- Antigravity CLI (`agy`): não grava percentual em arquivo local; a coleta passiva se
+  restringe a erros 429/quota (`source="error"`, `status="rejected"`).
+
+Sondas ativas (2026-11-23, `active_probe.py`; nenhuma chama modelo nem gasta cota):
+- Claude: `claude -p "/usage"` (comando local; atualiza `cachedUsageUtilization`).
+- Codex: `codex app-server`, JSON-RPC `account/rateLimits/read`.
+- Antigravity: `agy -p "/usage" --output-format json` (buckets 5 h e semanal por grupo de modelos).
+Cada sonda recusa uma resposta que não prove comando local (`num_turns` > 0, custo > 0) e se
+desliga até reiniciar. `ProbeCoordinator` impõe 60 s por usuário/assinatura e uma sonda em voo por
+assinatura; chaves `quota.activeProbe.enabled` e `quota.activeProbe.intervalMinutes`.
 Ver nota completa em `docs/agent_memory/2026-11-21-subscription-quota-sources.md`.
 """
 
