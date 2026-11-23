@@ -7,8 +7,8 @@ from decimal import Decimal
 
 import pytest
 
-from agentos.pipelines.fakes import Reply
-from agentos.pipelines.ports import QuotaAssessment
+from agentos.pipelines.fakes import FakeVerifier, Reply
+from agentos.pipelines.ports import AgentHandle, QuotaAssessment, VerifierResult
 from agentos.pipelines.resume import ResumeRefused
 
 from .engine_support import make_harness
@@ -200,6 +200,121 @@ def test_live_metering_launcher_feeds_the_budget_and_the_engine_does_not_double_
     assert outcome.state == "budget_exceeded"
     assert engine.usage_budget.tokens == 500  # not 1000: the reported tokens were not charged again
     assert h.launcher.launch_count_by_step["b"] == 0
+    assert len(h.sink.of("pipeline.budget_exceeded")) == 1  # F3/F9: the event leaves although the engine charged nothing
+
+
+def test_live_metering_overrun_is_announced_by_the_first_abort_check_not_by_the_monitor(tmp_path) -> None:
+    """F3: a launcher that feeds ``usage_budget`` itself must still make the engine announce and stop everything."""
+    h = make_harness(tmp_path, pipeline(MAP4, _header("budget: {max_tokens: 100}")))
+    h.launcher.live_metering = True
+    engine = h.engine(monitor_seconds=3600.0)  # the monitor thread never ticks during the test
+    handle = AgentHandle("agent-x", "itens", "000")
+    engine.env.inflight.add(handle)
+    engine.usage_budget.add(500, 0.0)  # what ``TurnSession.record_usage`` does
+    assert engine.env.abort_reason() == "budget_exceeded"
+    events = h.sink.of("pipeline.budget_exceeded")
+    assert len(events) == 1 and events[0].payload["limit_kind"] == "tokens"
+    assert [(agent, reason) for agent, reason in h.launcher.cancelled] == [("agent-x", "budget_exceeded")]
+    assert engine.env.abort_reason() == "budget_exceeded"
+    assert len(h.sink.of("pipeline.budget_exceeded")) == 1  # announced once
+
+
+# ------------------------------------------------------------------ review fixes: abort beats failure (F4), cost (F7)
+
+
+def test_a_child_that_fails_while_going_over_the_budget_ends_the_run_as_budget_exceeded(tmp_path) -> None:
+    for on_fail in ("", "on_fail: continue"):
+        text = pipeline(
+            f"""
+            - id: a
+              agent: general
+              prompt: faz
+              {on_fail}
+            """,
+            _header("budget: {max_tokens: 100}"),
+        )  # a last step: only the abort precedence can make the run end as ``budget_exceeded``
+        h = make_harness(tmp_path / (on_fail or "stop").replace(" ", "_").replace(":", ""), text)
+        h.launcher.script("a", Reply(status="failed", text="", error_code="AGENT_FAILED", input_tokens=500, output_tokens=0))
+        outcome = h.run()
+        assert (outcome.state, outcome.stop_reason) == ("budget_exceeded", "budget"), on_fail
+        assert len(h.sink.of("pipeline.budget_exceeded")) == 1
+
+
+def test_a_map_item_that_fails_while_going_over_the_budget_ends_the_run_as_budget_exceeded(tmp_path) -> None:
+    text = pipeline(MAP4, _header("budget: {max_tokens: 100}")).replace("max_parallel: 3}", "max_parallel: 1}")
+    h = make_harness(tmp_path, text)
+    h.launcher.script("itens", Reply(status="failed", text="", error_code="AGENT_FAILED", input_tokens=500, output_tokens=0))
+    outcome = h.run()
+    assert outcome.state == "budget_exceeded"
+
+
+def test_a_failing_gate_that_goes_over_the_budget_ends_the_run_as_budget_exceeded(tmp_path) -> None:
+    text = pipeline(
+        """
+        - id: g
+          gate:
+            all:
+              - verifier: {}
+          on_fail: continue
+        """,
+        _header("budget: {max_tokens: 100}"),
+    )
+    h = make_harness(tmp_path, text)
+    h.verifier = FakeVerifier(VerifierResult("fail", input_tokens=500, output_tokens=0, cost_usd=0.0))
+    outcome = h.run()
+    assert outcome.state == "budget_exceeded"
+
+
+UNKNOWN_COST = """
+- id: a
+  agent: general
+  prompt: faz
+- id: b
+  agent: general
+  prompt: depois
+"""
+
+
+def test_unknown_cost_stays_unknown_when_the_child_reports_no_tokens(tmp_path) -> None:
+    """F7: ``cost_usd=None`` with zero tokens is still a child whose cost nobody knows."""
+    h = make_harness(tmp_path, pipeline(UNKNOWN_COST, _header("budget: {max_tokens: 100000}")))
+    h.launcher.script("a", Reply(text="ok", input_tokens=0, output_tokens=0, cost_usd=None))
+    h.launcher.script("b", Reply(text="ok", input_tokens=0, output_tokens=0, cost_usd=0.0))
+    outcome = h.run()
+    assert outcome.state == "succeeded" and outcome.cost_known is False
+    assert h.sink.of("pipeline.finished")[0].payload["cost_known"] is False
+
+
+def test_unknown_cost_of_a_verifier_with_no_tokens_is_reported(tmp_path) -> None:
+    text = pipeline("- id: g\n  gate:\n    all:\n      - verifier: {}\n", _header("budget: {max_tokens: 100000}"))
+    h = make_harness(tmp_path, text)
+    h.verifier = FakeVerifier(VerifierResult("pass", cost_usd=None))
+    assert h.run().cost_known is False
+
+
+def test_known_cost_stays_known(tmp_path) -> None:
+    h = make_harness(tmp_path, pipeline(UNKNOWN_COST, _header("budget: {max_tokens: 100000}")))
+    h.launcher.script("a", Reply(text="ok", cost_usd=0.01))
+    assert h.run().cost_known is True
+
+
+def test_unknown_cost_survives_a_resume_that_reuses_the_steps(tmp_path) -> None:
+    from agentos.pipelines.fakes import SimulatedCrash
+
+    h = make_harness(tmp_path, pipeline(UNKNOWN_COST, _header("budget: {max_tokens: 100000}")))
+    h.launcher.script("a", Reply(text="ok", cost_usd=None))
+
+    def dies(call, control):
+        raise SimulatedCrash()
+
+    h.launcher.script("b", dies, Reply(text="ok", cost_usd=0.01))
+    with pytest.raises(SimulatedCrash):
+        h.run()
+    resumed = h.resume()
+    assert resumed.state == "succeeded"
+    assert h.launcher.launch_count_by_step["a"] == 1  # reused
+    assert resumed.cost_known is False  # but its cost is still unknown
+    assert h.sink.of("pipeline.finished")[-1].payload["cost_known"] is False
 
 
 def test_resume_of_a_budget_exceeded_run_needs_an_explicit_override(tmp_path) -> None:

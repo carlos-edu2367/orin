@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from . import schema_v1 as sv
+from .command_quoting import quoting_problem
 from .expressions import (
     ExpressionError,
     PathRef,
@@ -80,6 +81,10 @@ class _Checker:
         for part in parts:
             if isinstance(part, TemplateRef):
                 self.check_path(part.path.segments, current, scope, field, where)
+        if field == "gate.command" and any(isinstance(part, TemplateRef) for part in parts):
+            problem = quoting_problem(parts)  # the engine quotes the value itself: quotes in the template break that
+            if problem is not None:
+                self.sb.error("E_EXPR_SYNTAX", f"`gate.command`: {problem}", where)
 
     def check_when(self, text: object, current: int, scope: TaintScope, where: str) -> None:
         if not isinstance(text, str):

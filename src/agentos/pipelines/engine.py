@@ -12,6 +12,7 @@ Final run states: ``succeeded``, ``failed``, ``cancelled``, ``interrupted`` (pau
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from typing import Any
 from . import events as ev
 from .budgets import PipelineBudget
 from .context import RunContext, StepResult
-from .gates import GateEvaluator, GateResult, gate_input_hash_parts, summarize_failure
+from .gates import GateEvaluator, GateResult, allowed_gate_commands, gate_input_hash_parts, summarize_failure
 from .hashing import canonical_json, hash_text
 from .model import AgentStep, GateStep, PipelineDefinition, Step
 from .ports import (
@@ -39,6 +40,7 @@ from .ports import (
 from .render import RenderError, evaluate_when
 from .resume import DefinitionChanged, ResumePlanner, ResumeRefused, wrap_envelope
 from .retries import CAUSE_GATE_FAILED, effective_policy, is_retryable, wait_before_retry
+from .schema_v1 import MODELS_INPUT_MAX
 from .stall import LoopProgress
 from .steps import (
     ABORT_AGENT_CAP,
@@ -53,6 +55,7 @@ from .steps import (
     MapStepRunner,
     RunEnv,
     UnitResult,
+    unreadable_event,
 )
 
 logger = logging.getLogger("agentos.pipelines.engine")
@@ -121,7 +124,6 @@ class PipelineEngine:
         self.resume = resume
         self.options = options or EngineOptions(max_agents=MAX_AGENTS_PER_RUN, max_step_executions=MAX_STEP_EXECUTIONS)
         self._clock = clock or SystemClock()
-        self._quota = quota
         run = store.get_run(run_id)
         if run is None:
             raise LookupError(f"execução desconhecida: {run_id}")
@@ -134,6 +136,7 @@ class PipelineEngine:
             used_tokens=run.used_tokens if seed else 0,
             used_cost_usd=run.used_cost_usd if seed else None,
             used_seconds=float(run.used_seconds) if seed else 0.0,
+            cost_known=_cost_was_known(store, run) if seed else True,
         )
         bus = EventBus(sink)
         context = RunContext(inputs if inputs is not None else run.inputs)
@@ -150,8 +153,15 @@ class PipelineEngine:
             planner=ResumePlanner(store, run_id, enabled=resume, rerun_gates=self.options.rerun_gates),
             inflight=InFlight(launcher),
             gates=GateEvaluator(
-                gate_runner, run_id=run_id, dialect=self.options.shell_dialect, verifier=verifier, change_scope=change_scope
+                gate_runner,
+                run_id=run_id,
+                dialect=self.options.shell_dialect,
+                verifier=verifier,
+                change_scope=change_scope,
+                # F2: the commands this run may execute are known before it starts (template + quoted ``inputs``)
+                allowed_commands=allowed_gate_commands(definition.steps, context.inputs, self.options.shell_dialect),
             ),
+            quota=quota,
         )
         self._agents = AgentStepRunner(self.env)
         self._maps = MapStepRunner(self.env, self._agents)
@@ -196,7 +206,7 @@ class PipelineEngine:
         stop: _Stop
         try:
             self._announce()
-            stop = self._loop()
+            stop = self._check_inputs() or self._loop()
         except Exception as exc:  # noqa: BLE001 - a bug must not leave the run "running" forever
             logger.exception("pipeline engine failed")
             stop = _Stop("failed", "engine_error", f"erro interno do motor: {str(exc)[:200]}", "ENGINE_ERROR")
@@ -206,6 +216,22 @@ class PipelineEngine:
             monitor.join(timeout=5.0)
             env.inflight.stop_all("engine_exit")
         return self._finish(stop, started)
+
+    def _check_inputs(self) -> _Stop | None:
+        """C8: a ``models`` input that a step reads must be a list of ``{provider, model}`` texts, not ``auto`` or strings.
+
+        The API/CLI resolves ``auto`` and ``provider/model`` text before the run exists (K21). Anything else would reach
+        a ``map`` item as ``null`` and launch a child with it, so the run is refused here, before any child.
+        """
+        used = _referenced_inputs(self.definition)
+        for spec in self.definition.inputs:
+            if spec.type != "models" or spec.name not in used:
+                continue
+            problem = _models_problem(self.env.context.input_value(spec.name))
+            if problem is not None:
+                message = f"a entrada `{spec.name}` deve ser uma lista de até {MODELS_INPUT_MAX} modelos no formato {{provider, model}}: {problem}"
+                return _Stop("failed", "input_invalid", message, "INPUT_INVALID")
+        return None
 
     def _watch(self) -> None:
         env = self.env
@@ -277,6 +303,7 @@ class PipelineEngine:
                 return self._stop_for(outcome.abort, outcome)
             if outcome.ok:
                 env.count_step(True)
+                self._loop_progress.forget(step.id)
                 pc = index_of[step.next] if step.next else pc + 1
                 continue
             env.count_step(False)
@@ -285,6 +312,7 @@ class PipelineEngine:
                 return decision
             pc = index_of[decision] if decision is not None else pc + 1
         if self.budget.tripped is not None:  # R5: the last child went over in the call that finished the work
+            env.trip_budget()  # announce it when only the launcher's live metering noticed (F3)
             env.context.add_caveat("o orçamento do pipeline foi ultrapassado na última etapa; o resultado foi mantido")
         return _Stop("succeeded", None, "pipeline concluído")
 
@@ -351,45 +379,35 @@ class PipelineEngine:
         if isinstance(step, GateStep):
             return self._run_gate(step, loop_count)
         assert isinstance(step, AgentStep)
-        blocked = self._quota_check(step)
-        if blocked:
-            self.env.context.set_result(step.id, StepResult(output=None, failed=True, state="failed"))
-            return _StepOutcome(False, error_code="CHILD_QUOTA_BLOCKED", message=blocked, fingerprint="quota")
+        if "${{" not in (step.provider or ""):  # a templated provider is assessed per item, once the item is known
+            provider = step.provider or self.definition.defaults.provider or self.options.default_provider
+            blocked = self.env.quota_block(step, provider, is_map=step.map is not None)
+            if blocked:
+                return self._failed_before_launch(step, loop_count, "CHILD_QUOTA_BLOCKED", blocked, "quota")
         if step.map is None:
             unit = self._agents.run_unit(step, loop_count=loop_count)
             return self._from_unit(step, unit)
         mapped = self._maps.run(step, loop_count)
         if isinstance(mapped, UnitResult):
-            self.env.context.set_result(step.id, StepResult(output=None, failed=True, state="failed"))
-            return _StepOutcome(False, error_code=mapped.error_code, message=mapped.error or "", fingerprint=mapped.error_code or "")
+            code = mapped.error_code or "E_MAP_RANGE"
+            return self._failed_before_launch(step, loop_count, code, mapped.error or "", code)
         return self._from_map(step, mapped)
 
-    def _quota_check(self, step: AgentStep) -> str | None:
-        if self._quota is None:
-            return None
-        defaults, options = self.definition.defaults, self.options
-        provider = step.provider or defaults.provider or options.default_provider
-        if not provider or "${{" in provider:
-            return None
-        if step.map is None and provider == options.default_provider:
-            return None
-        assessment = self._quota.assess([provider])
-        if provider in assessment.blocked:
-            return f"a cota do provedor {provider} está acima do limite para etapas em segundo plano"
-        if provider in assessment.warn:
-            self.env.bus.emit(
-                ev.degraded(
-                    run_id=self.run_id, step_id=step.id, reason="quota_warn",
-                    detail=f"a cota de {provider} está perto do limite", effect="a etapa segue; o custo pode esgotar a assinatura",
-                )
-            )
-        return None
+    def _failed_before_launch(self, step: AgentStep, loop_count: int, code: str, message: str, fingerprint: str) -> _StepOutcome:
+        """The step cannot start (quota, map range or type): journal it, announce it and fail it (S1)."""
+        self._agents.record_failure(step, item_key="", loop_count=loop_count, code=code, message=message)
+        self.env.context.set_result(step.id, StepResult(output=None, failed=True, state="failed"))
+        return _StepOutcome(False, error_code=code, message=message, fingerprint=fingerprint)
 
     def _from_unit(self, step: AgentStep, unit: UnitResult) -> _StepOutcome:
         env = self.env
         if unit.state == "aborted":
             return _StepOutcome(False, abort=unit.abort or ABORT_CANCELLED, error_code=unit.error_code, message=unit.error or "")
         ok = unit.state == "succeeded"
+        if not ok:
+            stopping = env.abort_reason()  # F4: a failure never hides a cancel or an exhausted budget
+            if stopping:
+                return _StepOutcome(False, abort=stopping, error_code=unit.error_code, message=unit.error or "")
         env.context.set_result(
             step.id, StepResult(output=unit.output if ok else None, failed=not ok, findings=[], state="succeeded" if ok else "failed")
         )
@@ -402,13 +420,17 @@ class PipelineEngine:
         failures = mapped.failures()
         abort = mapped.first_abort()
         if failures:
+            abort = abort or env.abort_reason()  # F4: a cancel or an exhausted budget beats the failures of the items
+            if abort:
+                return _StepOutcome(False, abort=abort)
             env.context.set_result(step.id, StepResult(output=mapped.outputs, failed=True, state="failed"))
             first = failures[0]
             codes = sorted({unit.error_code or "AGENT_FAILED" for unit in failures})
+            detail = f": {first.error}" if first.error else ""
             return _StepOutcome(
                 False, error_code=first.error_code,
-                message=f"{len(failures)} de {len(mapped.units)} itens falharam ({', '.join(codes)})",
-                fingerprint=hash_text("map|" + "|".join(codes) + f"|{len(failures)}"),
+                message=f"{len(failures)} de {len(mapped.units)} itens falharam ({', '.join(codes)}){detail}"[:300],
+                fingerprint=hash_text("map|" + f"{len(failures)}|" + "|".join(unit.fingerprint or unit.error_code or "AGENT_FAILED" for unit in failures)),
             )
         if abort or mapped.incomplete:
             return _StepOutcome(False, abort=abort or env.should_start() or ABORT_PAUSED)
@@ -426,6 +448,8 @@ class PipelineEngine:
                 parts.append(["target", target, found.output if found else None])
         input_hash = hash_text(canonical_json(parts))
         decision = env.planner.decide_gate(step.id, loop_count, input_hash, dirty=env.dirty)
+        if decision.reason == "artifact_unreadable":
+            env.bus.emit(unreadable_event(self.run_id, step.id))
         if decision.action == "reuse":
             env.bus.emit(
                 ev.step_reused(
@@ -460,10 +484,11 @@ class PipelineEngine:
             result: GateResult = env.gates.evaluate(step, env.context, env.stop)
             cost = result.cost_usd if result.cost_known else None
             tokens = result.input_tokens + result.output_tokens
+            if tokens or cost is not None or not result.cost_known:
+                env.charge(tokens, cost)  # a verifier whose cost is unknown makes the total a lower bound, tokens or not
             if tokens or cost is not None:
-                env.charge(tokens, cost)
                 env.store.add_usage(self.run_id, tokens=tokens, cost_usd=cost)
-            aborted = env.abort_reason() if result.cancelled else None
+            aborted = env.abort_reason() if (result.cancelled or not result.passed) else None  # F4: abort beats a failure
             if result.cancelled and not aborted:
                 aborted = ABORT_CANCELLED
             state = "interrupted" if aborted else ("succeeded" if result.passed else "gate_failed")
@@ -564,6 +589,51 @@ class PipelineEngine:
             )
         )
         return outcome
+
+
+_INPUT_REF = re.compile(r"\binputs\.([A-Za-z_][A-Za-z0-9_-]*)")
+
+
+def _referenced_inputs(definition: PipelineDefinition) -> set[str]:
+    """Names of the ``inputs`` that any text of a step (or of the defaults) reads."""
+    texts: list[str] = [definition.defaults.provider or "", definition.defaults.model or "", definition.defaults.effort or ""]
+    for step in definition.steps:
+        texts.append(step.when or "")
+        if isinstance(step, AgentStep):
+            texts.extend([step.agent, step.prompt, step.provider or "", step.model or "", step.effort or ""])
+            if step.map is not None:
+                texts.append(step.map.over or "")
+        elif isinstance(step, GateStep):
+            texts.extend(getattr(item, "command", "") for item in step.gate.items)
+    return {name for text in texts for name in _INPUT_REF.findall(text)}
+
+
+def _models_problem(value: Any) -> str | None:
+    if value is None:
+        return None  # not provided: whatever reads it fails with its own message
+    if value == "auto":
+        return "o valor ainda é `auto`; escolha os modelos antes de iniciar a execução"
+    if not isinstance(value, list):
+        return "o valor não é uma lista"
+    if len(value) > MODELS_INPUT_MAX:
+        return f"a lista tem {len(value)} itens"
+    for position, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            return f"o item {position} não é um objeto com `provider` e `model`"
+        for key in ("provider", "model"):
+            if not isinstance(item.get(key), str) or not item[key].strip():
+                return f"o item {position} não tem `{key}` em texto"
+    return None
+
+
+def _cost_was_known(store: JournalStore, run: Any) -> bool:
+    """F7: ``False`` when an earlier execution of this run already spent something whose cost nobody knows."""
+    if int(getattr(run, "used_tokens", 0) or 0) > 0 and getattr(run, "used_cost_usd", None) is None:
+        return False
+    for row in store.steps_of(run.run_id):
+        if row.cost_usd is None and (row.agent_id or row.input_tokens + row.output_tokens > 0):
+            return False
+    return True
 
 
 def _ref(output: Any) -> str | None:

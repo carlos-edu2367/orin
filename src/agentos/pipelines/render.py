@@ -8,7 +8,7 @@ plan step 2). ``inputs.*`` and the ``map`` item are not wrapped when they are tr
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .expressions import (
@@ -125,21 +125,9 @@ def over_is_untrusted(over: str | None, literal: Sequence[object] | None) -> boo
     return not (isinstance(expr, PathRef) and expr.segments[0] == "inputs")
 
 
-def apply_when(step_when: str | None, view: Mapping[str, Any], on_error: Callable[[str], None] | None = None) -> bool:
-    if step_when is None:
-        return True
-    try:
-        return evaluate_when(step_when, view)
-    except RenderError as exc:
-        if on_error:
-            on_error(str(exc))
-        raise
-
-
 __all__ = [
     "DATA_NOTICE",
     "RenderError",
-    "apply_when",
     "evaluate_when",
     "over_is_untrusted",
     "render_prompt",

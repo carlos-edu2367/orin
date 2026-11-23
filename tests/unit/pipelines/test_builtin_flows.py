@@ -300,7 +300,11 @@ def test_all_reviewers_failing_fails_the_consolidation_instead_of_inventing_one(
 
 @pytest.mark.xfail(
     strict=True,
-    reason="engine gap (C6): no cross-check that `proven_by` is a subset of the reviewers of the `map` (plan WS-C8, risk b)",
+    reason=(
+        "no clean form in schema v1 (C6 review, 23/11): `output_schema` is static JSON Schema and `proven_by` must be a "
+        "subset of ids that exist only at run time (provider/model of the `map` items); a cross-check needs a new YAML "
+        "field (proposal in the plan, section 11, WS-C6 review addendum)"
+    ),
 )
 def test_proven_by_naming_an_unknown_reviewer_is_refused(tmp_path) -> None:
     h = _review_harness(tmp_path, 2)
@@ -309,15 +313,53 @@ def test_proven_by_naming_an_unknown_reviewer_is_refused(tmp_path) -> None:
     assert outcome.state == "failed" and outcome.error_code == "SCHEMA_INVALID"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="engine gap (C6): a `${{ revisor.provider }}` that does not resolve renders the text 'null' and the child is launched with it",
-)
 def test_reviewers_given_as_plain_strings_never_launch_a_child_with_provider_null(tmp_path) -> None:
     """`inputs.revisores` must reach the run as `{provider, model}` objects (C10 resolves `auto` and `provider/model` text)."""
     h = _harness(tmp_path, "revisao-multimodelo", {"alvo": "x", "revisores": ["anthropic/claude-sonnet-5-5"]})
-    h.run()
+    outcome = h.run()
     assert not [call for call in h.launcher.calls if call.step_id == "revisar" and call.provider == "null"]
+    assert h.launcher.launches == 0  # refused at the start of the run, before any child
+    assert (outcome.state, outcome.stop_reason, outcome.error_code) == ("failed", "input_invalid", "INPUT_INVALID")
+    assert "revisores" in outcome.message and "provider" in outcome.message
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        ["anthropic/claude-sonnet-5-5"],
+        [{"provider": "anthropic"}],
+        [{"provider": "anthropic", "model": ""}],
+        [{"provider": None, "model": "m"}],
+        [{"provider": 1, "model": "m"}],
+        [REVIEWERS[0], REVIEWERS[1], REVIEWERS[2], REVIEWERS[0]],
+        {"provider": "anthropic", "model": "m"},
+        5,
+    ],
+    ids=["strings", "no-model", "empty-model", "null-provider", "number-provider", "four-items", "object", "number"],
+)
+def test_a_models_input_must_be_a_list_of_provider_model_objects(tmp_path, value) -> None:
+    h = _harness(tmp_path, "revisao-multimodelo", {"alvo": "x", "revisores": value})
+    outcome = h.run()
+    assert (outcome.state, outcome.error_code) == ("failed", "INPUT_INVALID")
+    assert h.launcher.launches == 0
+    assert h.sink.types()[0] == "pipeline.started" and h.sink.types()[-1] == "pipeline.finished"
+
+
+def test_an_unresolved_auto_is_refused_at_the_start_with_a_clear_message(tmp_path) -> None:
+    """The API/CLI resolves `auto` before the run exists (K21); the engine never sees it in a working run."""
+    h = _harness(tmp_path, "revisao-multimodelo", {"alvo": "x", "revisores": "auto"})
+    outcome = h.run()
+    assert (outcome.state, outcome.error_code) == ("failed", "INPUT_INVALID")
+    assert "auto" in outcome.message and h.launcher.launches == 0
+
+
+def test_a_models_input_that_no_step_reads_is_not_checked(tmp_path) -> None:
+    from .engine_support import make_harness
+    from .helpers import pipeline
+
+    text = pipeline("- id: a\n  agent: general\n  prompt: faz\n")  # default header: `modelos: {type: models, default: auto}`
+    custom = make_harness(tmp_path / "custom", text)
+    assert custom.run().state == "succeeded"
 
 
 def test_reviewer_effort_comes_from_the_input(tmp_path) -> None:

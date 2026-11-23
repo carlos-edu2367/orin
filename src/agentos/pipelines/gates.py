@@ -10,17 +10,25 @@ every input value quoted for the shell. Two forms (G16):
 
 Nothing derived from ``steps.*`` can reach the runner, and ``cmd`` (no safe quoting) refuses any command that
 carries an input (``GATE_SHELL_UNSUPPORTED``).
+
+A reference may not sit inside quotes (or after a backslash) of the template: the quoting is the engine's job, and
+an author's quotes around it would be closed by it (``GATE_INPUT_INVALID``; the loader refuses the same templates).
+Three layers: the loader, the shape check of every rendered command (its words must be the template's words with
+the raw values in place of the references) and the set of commands computed when the run starts
+(``allowed_gate_commands``): the evaluator refuses any command outside it (``GATE_REF_UNTRUSTED``).
 """
 
 from __future__ import annotations
 
+import re
 import shlex
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from agentos.agentic.structured_output import validate_instance
 
+from .command_quoting import quoting_problem
 from .context import RunContext
 from .expressions import ExpressionError, TemplateRef, format_value, split_template
 from .model import CommandGate, GateStep, SchemaGate, VerifierGate
@@ -56,7 +64,7 @@ class GateCommandError(ValueError):
 @dataclass(frozen=True, slots=True)
 class RenderedCommand:
     text: str
-    quoted_values: tuple[str, ...]  # the raw input values that went in (each is exactly one shell word)
+    quoted_values: tuple[str, ...]  # the raw input values that went in; the shape check compares the words with them
 
 
 def render_command(template: str, inputs: Mapping[str, Any], dialect: str = "posix") -> RenderedCommand:
@@ -77,6 +85,9 @@ def render_command(template: str, inputs: Mapping[str, Any], dialect: str = "pos
         segments = ref.path.segments
         if len(segments) != 2 or segments[0] != "inputs":
             raise GateCommandError(GATE_REF_UNTRUSTED, f"`{'.'.join(segments)}` não pode entrar em um comando de gate")
+    problem = quoting_problem(parts)
+    if problem is not None:
+        raise GateCommandError(GATE_INPUT_INVALID, problem)
     meaningful = [part for part in parts if not (isinstance(part, str) and not part.strip())]
     if len(meaningful) == 1 and isinstance(meaningful[0], TemplateRef):
         name = refs[0].path.segments[1]
@@ -87,12 +98,18 @@ def render_command(template: str, inputs: Mapping[str, Any], dialect: str = "pos
             raise GateCommandError(GATE_INPUT_INVALID, f"o valor de `{name}` tem aspas sem fechar") from exc
         if not words:
             raise GateCommandError(GATE_INPUT_INVALID, f"o valor de `{name}` está vazio")
-        return RenderedCommand(" ".join(shlex.quote(word) for word in words), tuple(words))
+        text = " ".join(shlex.quote(word) for word in words)
+        if shlex.split(text, posix=True) != words:  # defense in depth: the quoted words are the words of the value
+            raise GateCommandError(GATE_INPUT_INVALID, f"o valor de `{name}` não pode ser citado com segurança")
+        return RenderedCommand(text, tuple(words))
+    marker = _marker_for(template)
     out: list[str] = []
+    marked: list[str] = []
     values: list[str] = []
     for part in parts:
         if isinstance(part, str):
             out.append(part)
+            marked.append(part)
             continue
         name = part.path.segments[1]
         value = format_value(inputs.get(name)) if name in inputs else ""
@@ -100,8 +117,36 @@ def render_command(template: str, inputs: Mapping[str, Any], dialect: str = "pos
         if shlex.split(quoted, posix=True) != [value]:  # defense in depth: a quoted value is always one word
             raise GateCommandError(GATE_INPUT_INVALID, f"o valor de `{name}` não pode ser citado com segurança")
         out.append(quoted)
+        marked.append(f"{marker}{len(values)}_")
         values.append(value)
-    return RenderedCommand("".join(out), tuple(values))
+    text = "".join(out)
+    _check_same_words(text, "".join(marked), marker, values)
+    return RenderedCommand(text, tuple(values))
+
+
+def _marker_for(template: str) -> str:
+    marker = "ORINREF"
+    while marker in template:
+        marker += "X"
+    return marker
+
+
+def _check_same_words(rendered: str, marked_template: str, marker: str, values: list[str]) -> None:
+    """The words of the final command must be the words of the template with each reference replaced by its raw value.
+
+    Last line of defence for S2: whatever the quoting did, a value that changed the shape of the command (a second
+    command, a split argument, an expansion the template did not write) makes the two lists differ.
+    """
+    pattern = re.compile(re.escape(marker) + r"(\d+)_")
+    try:
+        expected = [pattern.sub(lambda found: values[int(found.group(1))], word) for word in shlex.split(marked_template, posix=True)]
+        actual = shlex.split(rendered, posix=True)
+    except ValueError as exc:
+        raise GateCommandError(GATE_INPUT_INVALID, "o comando montado tem aspas sem fechar") from exc
+    if actual != expected:
+        raise GateCommandError(
+            GATE_INPUT_INVALID, "o comando montado não corresponde ao modelo do gate com os valores citados; recusado por segurança"
+        )
 
 
 @dataclass(slots=True)
@@ -133,6 +178,26 @@ class GateResult:
         }
 
 
+def allowed_gate_commands(steps: Iterable[Any], inputs: Mapping[str, Any], dialect: str = "posix") -> frozenset[str]:
+    """Every command text the gates of ``steps`` can run: each command template with the quoted ``inputs``.
+
+    Computed once, when the run starts. A template that cannot be rendered (open quote, ``cmd`` dialect) has no
+    entry: running it fails with its own error, never with a command.
+    """
+    allowed: set[str] = set()
+    for step in steps:
+        if not isinstance(step, GateStep):
+            continue
+        for item in step.gate.items:
+            if not isinstance(item, CommandGate):
+                continue
+            try:
+                allowed.add(render_command(item.command, inputs, dialect).text)
+            except GateCommandError:
+                continue
+    return frozenset(allowed)
+
+
 class GateEvaluator:
     def __init__(
         self,
@@ -142,12 +207,19 @@ class GateEvaluator:
         dialect: str = "posix",
         verifier: VerifierPort | None = None,
         change_scope: ChangeScopePort | None = None,
+        allowed_commands: Iterable[str] | None = None,
     ) -> None:
         self._runner = runner
         self._run_id = run_id
         self._dialect = dialect
         self._verifier = verifier
         self._change_scope = change_scope
+        self._allowed = frozenset(allowed_commands) if allowed_commands is not None else None
+
+    @property
+    def allowed_commands(self) -> frozenset[str] | None:
+        """The commands this run may execute (``None``: no set was given, nothing is checked)."""
+        return self._allowed
 
     def evaluate(self, step: GateStep, context: RunContext, cancel: CancelToken) -> GateResult:
         inputs = context.inputs
@@ -207,6 +279,12 @@ class GateEvaluator:
             result.items.append({"kind": "command", "passed": False, "error_code": exc.code, "message": exc.message})
             result.findings.append({"kind": "command_failed", "command": item.command, "exit_code": None, "output_excerpt": exc.message})
             return False, command_fingerprint(None, exc.message)
+        if self._allowed is not None and rendered.text not in self._allowed:
+            message = "o comando não faz parte dos comandos que esta execução calculou ao começar; não foi executado"
+            result.error_code = GATE_REF_UNTRUSTED
+            result.items.append({"kind": "command", "passed": False, "error_code": GATE_REF_UNTRUSTED, "message": message})
+            result.findings.append({"kind": "command_failed", "command": item.command, "exit_code": None, "output_excerpt": message})
+            return False, command_fingerprint(None, message)
         outcome: CommandResult = self._runner.run_command(rendered.text, item.timeout_seconds, cancel)
         result.exit_code = outcome.exit_code
         if outcome.cancelled or (cancel.is_set() and outcome.exit_code is None and not outcome.timed_out):
@@ -361,6 +439,7 @@ __all__ = [
     "GateResult",
     "OUTPUT_EXCERPT_CHARS",
     "RenderedCommand",
+    "allowed_gate_commands",
     "gate_input_hash_parts",
     "render_command",
     "summarize_failure",

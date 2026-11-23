@@ -28,7 +28,7 @@ inputs:
 MAP8 = """
 - id: itens
   agent: general
-  map: {over: [a, b, c, d, e, f, g, h], as: x, max_parallel: 8}
+  map: {over: [a, b, c, d, e, f, g, h], as: x, max_parallel: 8, fail_fast: false}
   prompt: faz ${{ x }}
 - id: depois
   agent: general
@@ -52,7 +52,14 @@ def test_eight_children_with_random_cancel_never_deadlock_or_leak(tmp_path, repe
     if cancel_after is None:
         h.launcher.script("itens", Reply(text="ok"))
     else:
-        h.launcher.script("itens", lambda call, control: control.hang())  # only the cancel can end them
+        # F10: a mix, so the cancel races with children that finish, fail and hang: ``finish_step`` and ``add_usage``
+        # run in the pool threads at the very moment ``cancel`` closes the others. Items 2 and 5 only end by the cancel.
+        for index in range(8):
+            behavior = (
+                Reply(text="ok") if index % 3 == 0 else Reply(status="failed", text="", error_code="BOOM")
+                if index % 3 == 1 else (lambda call, control: control.hang())
+            )
+            h.launcher.script("itens", behavior, index=index)
     engine = h.engine()
     box: dict = {}
     thread = threading.Thread(target=lambda: box.setdefault("outcome", engine.execute()), name="stress-engine")
@@ -76,4 +83,7 @@ def test_eight_children_with_random_cancel_never_deadlock_or_leak(tmp_path, repe
         assert {agent for agent, _ in h.launcher.cancelled} <= launched
         still_open = [row for row in h.rows() if row.state in {"running", "pending"}]
         assert still_open == []  # the journal has no open step after a cancel
+        assert all(row.state in {"succeeded", "failed", "interrupted"} for row in h.rows())
     assert h.state() == outcome.state
+    run = h.store.get_run(h.run_id)
+    assert run.used_tokens == sum(row.input_tokens + row.output_tokens for row in h.rows())  # no usage lost in the race

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from agentos.pipelines.fakes import Reply
 from agentos.pipelines.ports import CommandResult
 
@@ -55,6 +57,60 @@ def test_cancel_stops_every_child_and_closes_the_journal(tmp_path) -> None:
     assert {row.state for row in h.rows()} == {"interrupted"}
     assert h.state() == "cancelled"
     assert h.sink.types()[-1] == "pipeline.finished"
+
+
+@pytest.mark.parametrize("on_fail", ["", "on_fail: continue"])
+def test_cancel_wins_over_a_failed_item_of_the_same_map(tmp_path, on_fail) -> None:
+    """F4: one item failed, the user cancelled while another was still running: the run is `cancelled`, not `succeeded`."""
+    text = pipeline(
+        f"""
+        - id: itens
+          agent: general
+          map: {{over: [a, b], as: x, max_parallel: 2, fail_fast: false}}
+          prompt: faz ${{{{ x }}}}
+          {on_fail}
+        """,
+        HEADER,
+    )  # the map is the last step: nothing after it would notice the cancel by itself
+    h = make_harness(tmp_path, text)
+    h.launcher.script("itens", Reply(status="failed", text="", error_code="BOOM"), index=0)
+    h.launcher.script("itens", lambda call, control: control.hang(), index=1)
+    engine = h.engine()
+    thread, box = _in_thread(engine)
+    assert h.sink.wait_for(
+        lambda events: any(
+            e.type.value == "pipeline.step_finished" and e.payload["state"] == "failed" for e in events
+        )
+    )
+    engine.cancel()
+    thread.join(timeout=20)
+    assert not thread.is_alive()
+    outcome = box["outcome"]
+    assert (outcome.state, outcome.stop_reason) == ("cancelled", "cancelled")
+    assert h.state() == "cancelled"
+
+
+def test_cancel_wins_over_a_gate_that_fails_with_on_fail_continue(tmp_path) -> None:
+    text = pipeline(
+        """
+        - id: g
+          gate:
+            all:
+              - command: ${{ inputs.testes }}
+          on_fail: continue
+        """,
+        HEADER,
+    )
+    h = make_harness(tmp_path, text)
+    engine = h.engine()
+
+    def cancels_then_fails(command, timeout, cancel):
+        engine.cancel()
+        return CommandResult(1, "FAILED depois do cancelamento")
+
+    h.gates.script(cancels_then_fails)
+    outcome = engine.execute()
+    assert outcome.state == "cancelled"
 
 
 def test_cancel_before_start_launches_nothing(tmp_path) -> None:

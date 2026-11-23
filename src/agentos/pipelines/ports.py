@@ -29,6 +29,7 @@ NON_RETRYABLE_CODES = frozenset(
         "GATE_PERMISSION_DENIED",
         "GATE_INPUT_INVALID",
         "GATE_SHELL_UNSUPPORTED",
+        "GATE_REF_UNTRUSTED",
     }
 )
 

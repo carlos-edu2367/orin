@@ -53,6 +53,7 @@ class PipelineBudget:
         used_tokens: int = 0,
         used_cost_usd: Decimal | float | None = None,
         used_seconds: float = 0.0,
+        cost_known: bool = True,
     ) -> None:
         self.limits, self.is_default = pipeline_limits(budget)
         self.cancel = threading.Event()
@@ -62,6 +63,7 @@ class PipelineBudget:
             self.limits, agent_id=run_id, cancel=self.cancel, clock=lambda: monotonic() + offset
         )
         self.usage.tokens = int(used_tokens)
+        self.usage.cost_known = bool(cost_known)  # a resumed run keeps what its earlier steps already made unknown
         if used_cost_usd is not None:
             self.usage.cost_usd = float(used_cost_usd)
         self._clock = clock

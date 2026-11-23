@@ -59,6 +59,16 @@ def command_fingerprint(exit_code: int | None, output_tail: str) -> str:
     return hash_text(f"cmd|{exit_code}|" + "\n".join(lines[-_FINGERPRINT_LINES:]))
 
 
+def failure_fingerprint(step_id: str, code: str | None, cause: str | None, *texts: str | None) -> str:
+    """Fingerprint of an agent step failure: step, error code, cause and the last normalized lines of the texts.
+
+    The texts are the error message, the end of the child's answer and the schema errors, so two failures with the
+    same code but different messages or output are different failures (digits folded, as for commands).
+    """
+    lines = [_normalize_line(line) for text in texts for line in (text or "").splitlines() if line.strip()]
+    return hash_text(f"agent|{step_id}|{code}|{cause}|" + "\n".join(lines[-_FINGERPRINT_LINES:]))
+
+
 def findings_fingerprint(findings: Sequence[Mapping[str, Any]]) -> str:
     pairs = sorted((str(item.get("id", "")), _normalize_line(str(item.get("claim", "")))) for item in findings)
     return hash_text("find|" + "|".join(f"{key}:{claim}" for key, claim in pairs))
@@ -80,6 +90,10 @@ class LoopProgress:
         self.last[step_id] = fingerprint
         return bool(fingerprint) and previous == fingerprint
 
+    def forget(self, step_id: str) -> None:
+        """The step passed: a later failure is a new problem, not a repeat of the one before it passed."""
+        self.last.pop(step_id, None)
+
 
 __all__ = [
     "DEFAULT_STALL_MINUTES",
@@ -87,5 +101,6 @@ __all__ = [
     "StallWatch",
     "combine_fingerprints",
     "command_fingerprint",
+    "failure_fingerprint",
     "findings_fingerprint",
 ]

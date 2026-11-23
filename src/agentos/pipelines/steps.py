@@ -13,8 +13,8 @@ from agentos.agentic.structured_output import ExtractError, extract_json, valida
 
 from . import events as ev
 from .budgets import PipelineBudget
-from .context import RunContext, make_resolver
-from .expressions import render_template
+from .context import RunContext
+from .expressions import TemplateRef, format_value, resolve_path, split_template
 from .gates import GateEvaluator
 from .hashing import canonical_json, hash_text, step_input_hash
 from .model import AgentStep, Defaults, PipelineDefinition
@@ -27,6 +27,7 @@ from .ports import (
     EngineOptions,
     EventSink,
     JournalStore,
+    QuotaPort,
 )
 from .render import RenderError, over_is_untrusted, render_prompt, resolve_over
 from .resume import RESUME_CONFLICT, ResumePlanner, wrap_envelope
@@ -38,7 +39,7 @@ from .retries import (
     is_retryable,
     wait_before_retry,
 )
-from .stall import DEFAULT_STALL_MINUTES, StallWatch
+from .stall import DEFAULT_STALL_MINUTES, StallWatch, failure_fingerprint
 
 logger = logging.getLogger("agentos.pipelines.steps")
 
@@ -129,6 +130,8 @@ class RunEnv:
     agents_launched: int = 0
     steps_succeeded: int = 0
     steps_failed: int = 0
+    quota: QuotaPort | None = None
+    _quota_warned: set[tuple[str, str]] = field(default_factory=set)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -140,6 +143,7 @@ class RunEnv:
         if self.cancel_requested.is_set():
             return ABORT_CANCELLED
         if self.stop.is_set() or self.budget.tripped is not None:
+            self.trip_budget()  # a launcher with live metering trips the budget itself: announce it and stop the rest now
             return ABORT_BUDGET
         if self.budget.exceeded() is not None:
             self.trip_budget()
@@ -194,8 +198,35 @@ class RunEnv:
         elif self.budget.tripped is not None:
             self.trip_budget()
 
+    def mark_cost_unknown(self) -> None:
+        """A child or gate that spent nothing measurable but whose cost nobody knows still makes the total a lower bound."""
+        if not self.launcher_live():
+            self.budget.charge(0, None)
+
     def launcher_live(self) -> bool:
         return bool(getattr(self.launcher, "live_metering", False))
+
+    def quota_block(self, step: AgentStep, provider: str | None, *, is_map: bool) -> str | None:
+        """K22: why ``step`` may not start a child on ``provider`` (``None`` when it may); a warning is announced once."""
+        if self.quota is None or not provider or "${{" in provider:
+            return None
+        if not is_map and provider == self.options.default_provider:
+            return None
+        assessment = self.quota.assess([provider])
+        if provider in assessment.blocked:
+            return f"a cota do provedor {provider} está acima do limite para etapas em segundo plano"
+        if provider in assessment.warn:
+            with self._lock:
+                first = (step.id, provider) not in self._quota_warned
+                self._quota_warned.add((step.id, provider))
+            if first:
+                self.bus.emit(
+                    ev.degraded(
+                        run_id=self.run_id, step_id=step.id, reason="quota_warn",
+                        detail=f"a cota de {provider} está perto do limite", effect="a etapa segue; o custo pode esgotar a assinatura",
+                    )
+                )
+        return None
 
 
 @dataclass(slots=True)
@@ -224,7 +255,6 @@ class _Meter:
         self._env = env
         self.tokens = 0
         self.cost = 0.0
-        self.cost_missing = False
 
     def sync(self, tokens: int, cost: float | None) -> None:
         delta = max(0, tokens - self.tokens)
@@ -234,14 +264,15 @@ class _Meter:
         if cost is not None:
             cost_delta = max(0.0, cost - self.cost)
             self.cost = max(self.cost, cost)
-        elif delta > 0:
-            self.cost_missing = True
         self.tokens = max(self.tokens, tokens)
         if delta or cost_delta:
             self._env.charge(delta, cost_delta if cost is not None else None)
 
     def finish(self, result: AgentResult) -> None:
-        self.sync(result.tokens, result.cost_usd if result.cost_known else None)
+        cost = result.cost_usd if result.cost_known else None
+        self.sync(result.tokens, cost)
+        if cost is None:
+            self._env.mark_cost_unknown()  # also with no tokens reported: ``sync`` has nothing to charge then
 
 
 @dataclass(slots=True)
@@ -261,15 +292,56 @@ def item_key_for(index: int, item: Any) -> str:
     return f"{index:03d}-{_hash8(item)}"
 
 
+def _not_text(value: Any, *, whole: bool) -> str | None:
+    """pt-BR description of a value that cannot name an agent, provider, model or effort (``None`` when it can)."""
+    if value is None:
+        return "nulo (`null`)"
+    if isinstance(value, (list, tuple)):
+        return "uma lista"
+    if isinstance(value, dict):
+        return "um objeto"
+    if whole and not isinstance(value, str):
+        return "um booleano" if isinstance(value, bool) else "um número"
+    return None
+
+
+def unreadable_event(run_id: str, step_id: str) -> ev.PipelineEvent:
+    return ev.degraded(
+        run_id=run_id, step_id=step_id, reason="artifact_unreadable",
+        detail=f"o resultado gravado da etapa {step_id} não pôde ser lido (arquivo ausente ou corrompido)",
+        effect="a etapa roda de novo em vez de reaproveitar o resultado",
+    )
+
+
 class AgentStepRunner:
     def __init__(self, env: RunEnv) -> None:
         self.env = env
 
     # ------------------------------------------------------------- rendering
-    def _field(self, template: str | None, view: Mapping[str, Any]) -> str | None:
+    def _field(self, template: str | None, view: Mapping[str, Any], name: str = "campo") -> str | None:
+        """Render ``agent``/``provider``/``model``/``effort``. Unlike a prompt, these must come out as real text.
+
+        A reference that resolves to nothing, or to a list or an object, would otherwise become the text ``null`` or JSON
+        and a child would be launched with it (C8 gap): the step fails with ``E_RENDER`` instead.
+        """
         if template is None:
             return None
-        return render_template(template, make_resolver(view)) if "${{" in template else template
+        if "${{" not in template:
+            return template
+        parts = split_template(template)
+        whole = len([part for part in parts if not (isinstance(part, str) and not part.strip())]) == 1
+        out: list[str] = []
+        for part in parts:
+            if not isinstance(part, TemplateRef):
+                out.append(part)
+                continue
+            value = resolve_path(view, part.path.segments)
+            problem = _not_text(value, whole=whole)
+            if problem is not None:
+                dotted = ".".join(part.path.segments)
+                raise RenderError(f"`{name}` usa `${{{{ {dotted} }}}}`, que resolveu para {problem}; esperado um texto")
+            out.append(format_value(value))
+        return "".join(out)
 
     def _defaults(self) -> Defaults:
         return self.env.definition.defaults
@@ -289,12 +361,14 @@ class AgentStepRunner:
         defaults, options = self._defaults(), env.options
         try:
             prompt = render_prompt(step.prompt, view, untrusted_roots=(var,) if var and untrusted else ())
-            agent = self._field(step.agent, view) or ""
-            provider = self._field(step.provider, view) or defaults.provider or options.default_provider
-            model = self._field(step.model, view) or defaults.model or options.default_model
-            effort = self._field(step.effort, view) or defaults.effort or options.default_effort
+            agent = self._field(step.agent, view, "agent") or ""
+            provider = self._field(step.provider, view, "provider") or defaults.provider or options.default_provider
+            model = self._field(step.model, view, "model") or defaults.model or options.default_model
+            effort = self._field(step.effort, view, "effort") or defaults.effort or options.default_effort
         except (RenderError, ValueError) as exc:
-            return UnitResult("failed", error_code="E_RENDER", error=str(exc)[:200])
+            message = str(exc)[:200]
+            self.record_failure(step, item_key=item_key, loop_count=loop_count, code="E_RENDER", message=message)
+            return UnitResult("failed", error_code="E_RENDER", error=message, fingerprint="E_RENDER")
         budget_hash = (
             {"tokens": step.budget.max_tokens, "cost": step.budget.max_cost_usd, "minutes": step.budget.max_minutes}
             if step.budget
@@ -329,6 +403,13 @@ class AgentStepRunner:
                 )
             )
             return UnitResult("succeeded", output=decision.value, reused=True, worktree=decision.worktree)
+        if decision.reason == "artifact_unreadable":
+            env.bus.emit(unreadable_event(env.run_id, step.id))
+        if "${{" in (step.provider or ""):  # the provider is only known now, per item (a static one was assessed by the engine)
+            blocked = env.quota_block(step, provider, is_map=step.map is not None)
+            if blocked:
+                self.record_failure(step, item_key=item_key, loop_count=loop_count, code="CHILD_QUOTA_BLOCKED", message=blocked)
+                return UnitResult("failed", error_code="CHILD_QUOTA_BLOCKED", error=blocked, fingerprint="quota")
         if decision.discard_agent_id is not None:
             try:
                 env.launcher.discard_worktree(AgentHandle(decision.discard_agent_id, step.id, item_key))
@@ -336,6 +417,30 @@ class AgentStepRunner:
                 logger.warning("could not discard the worktree of %s", decision.discard_agent_id, exc_info=True)
         env.mark_dirty()
         return self._attempts(step, item_key, item, loop_count, prompt, agent, provider, model, effort, input_hash)
+
+    def record_failure(self, step: AgentStep, *, item_key: str, loop_count: int, code: str, message: str) -> None:
+        """Journal and announce a step (or map item) that failed before any child was launched (S1)."""
+        env = self.env
+        try:
+            row = env.store.start_step(
+                run_id=env.run_id, step_id=step.id, input_hash=hash_text(f"prelaunch|{step.id}|{code}"),
+                item_key=item_key, loop_count=loop_count,
+            )
+            env.bus.emit(
+                ev.step_started(
+                    run_id=env.run_id, step_id=step.id, item_key=item_key, attempt=row.attempt, agent=step.agent,
+                    provider=None, model=None, effort=None, loop_count=loop_count,
+                )
+            )
+            env.store.finish_step(env.run_id, step.id, item_key, row.attempt, state="failed", error=message[:500])
+            env.bus.emit(
+                ev.step_finished(
+                    run_id=env.run_id, step_id=step.id, item_key=item_key, state="failed", input_tokens=0, output_tokens=0,
+                    cost_usd=None, cost_known=True, duration_ms=0, output_ref=None, error_code=code,
+                )
+            )
+        except Exception:  # noqa: BLE001 - the journal must not hide the failure it is trying to record
+            logger.exception("could not journal the pre-launch failure of %s", step.id)
 
     # --------------------------------------------------------------- attempts
     def _attempts(
@@ -417,7 +522,10 @@ class AgentStepRunner:
             if state == "aborted":
                 return UnitResult("aborted", error_code=code, error=message, abort=abort or env.abort_reason(), attempts=attempts)
             cause = CAUSE_SCHEMA_INVALID if errors else (cause_of(_as_result(result, stalled)))
-            fingerprint = hash_text(f"agent|{step.id}|{code}|{cause}")
+            # F8: two failures are "the same" only when their message and the end of their output also match
+            fingerprint = failure_fingerprint(
+                step.id, code, cause, message, result.text if result is not None else None, *errors[:10]
+            )
             if env.abort_reason() or not is_retryable(policy, cause, code, retries_used):
                 return UnitResult(
                     "failed", error_code=code, error=message, fingerprint=fingerprint, worktree=wt, attempts=attempts
@@ -511,13 +619,13 @@ class AgentStepRunner:
         """``(state, error_code, message)`` with state in succeeded | failed | stalled | aborted."""
         if result is not None and result.status == "succeeded" and not errors:
             return "succeeded", None, None
+        aborted = env.abort_reason()
+        if aborted:  # F4: the run is being stopped; whatever the child ended with, the stop wins over its failure
+            return "aborted", aborted.upper(), aborted
         if errors:
             return "failed", SCHEMA_INVALID_CODE, ("saída fora do esquema: " + "; ".join(errors[:3]))[:500]
         if stalled:
             return "stalled", "STEP_STALLED", "o agente ficou sem atividade além do limite e foi cancelado"
-        aborted = env.abort_reason()
-        if aborted and (result is None or result.status in {"cancelled", "budget_exceeded"}):
-            return "aborted", aborted.upper(), aborted
         if result is None:
             return "failed", "NO_RESULT", "o agente não devolveu resultado depois de cancelado"
         code = result.error_code or ("SUBAGENT_BUDGET_EXCEEDED" if result.status == "budget_exceeded" else None)

@@ -6,6 +6,7 @@ import pytest
 
 from agentos.pipelines.fakes import Reply, SimulatedCrash
 from agentos.pipelines.model import PipelineDefinition
+from agentos.pipelines.ports import CommandResult
 from agentos.pipelines.resume import DefinitionChanged
 
 from .engine_support import PLAN_OUTPUT, definition_of, make_harness
@@ -226,6 +227,155 @@ def test_finished_gates_are_reused_unless_rerun_is_asked(tmp_path) -> None:
     redone = build(tmp_path / "redo")
     assert redone.resume(rerun_gates=True).state == "succeeded"
     assert len(redone.gates.commands) == 2
+
+
+# ------------------------------------------------------------------ review fixes (F5, F6)
+
+FIX_LOOP = """
+- id: verificar
+  gate:
+    all:
+      - command: ${{ inputs.testes }}
+  on_fail: {goto: corrigir, max_loops: 2}
+- id: corrigir
+  agent: general
+  when: ${{ steps.verificar.failed }}
+  prompt: corrige ${{ steps.verificar.findings }}
+  next: verificar
+"""
+
+
+def test_resuming_a_run_that_failed_on_a_gate_runs_that_gate_again(tmp_path) -> None:
+    """F5: the failure that ended the run is not a result to reuse: the user resumes it to try again."""
+    h = make_harness(tmp_path, pipeline(GATE_THEN_AGENT, HEADER))
+    h.gates.script(CommandResult(1, "quebrou"), CommandResult(0, "agora passa"))
+    first = h.run()
+    assert (first.state, first.failed_step) == ("failed", "g")
+    resumed = h.resume()
+    assert resumed.state == "succeeded", resumed
+    assert len(h.gates.commands) == 2  # the gate really ran again
+    assert [row.state for row in h.rows() if row.step_id == "g"] == ["gate_failed", "succeeded"]
+    assert h.launcher.launch_count_by_step["depois"] == 1
+
+
+def test_a_failed_gate_that_the_run_already_moved_past_is_still_reused(tmp_path) -> None:
+    """The loop `verificar -> corrigir -> verificar` crashed in `corrigir`: the first failure is history, not redone."""
+    h = make_harness(tmp_path, pipeline(FIX_LOOP, HEADER))
+
+    def dies(call, control):
+        raise SimulatedCrash()
+
+    h.launcher.script("corrigir", dies, Reply(text="corrigido"))
+    h.gates.script(CommandResult(1, "FAILED a"), CommandResult(0, "ok"))
+    with pytest.raises(SimulatedCrash):
+        h.run()
+    assert len(h.gates.commands) == 1
+    outcome = h.resume()
+    assert outcome.state == "succeeded", outcome
+    assert len(h.gates.commands) == 2  # loop 0 was reused; only loop 1 ran
+    assert h.launcher.launch_count_by_step["corrigir"] == 2
+    assert [e.payload["step_id"] for e in h.sink.of("pipeline.step_reused")] == ["verificar"]
+
+
+def test_resuming_a_failed_gate_with_continue_does_not_run_it_again(tmp_path) -> None:
+    h = make_harness(tmp_path, pipeline(
+        """
+        - id: g
+          gate:
+            all:
+              - command: ${{ inputs.testes }}
+          on_fail: continue
+        - id: depois
+          agent: general
+          prompt: fim
+        """,
+        HEADER,
+    ))
+
+    def dies(call, control):
+        raise SimulatedCrash()
+
+    h.gates.script(CommandResult(1, "quebrou"), CommandResult(0, "nao deveria rodar"))
+    h.launcher.script("depois", dies, Reply(text="ok"))
+    with pytest.raises(SimulatedCrash):
+        h.run()
+    outcome = h.resume()
+    assert outcome.state == "succeeded"
+    assert len(h.gates.commands) == 1  # the run moved on past the failed gate (on_fail: continue): nothing to redo
+
+
+BIG_THEN_USE = """
+- id: a
+  agent: general
+  prompt: gera um relatorio grande
+- id: b
+  agent: general
+  prompt: usa ${{ steps.a.output }}
+"""
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_an_unreadable_artifact_makes_the_step_run_again_with_an_event(tmp_path, damage) -> None:
+    """F6: a journaled output that cannot be read is not `null`: the step is redone and the user is told."""
+    from agentos.pipelines.store import artifact_dir
+
+    h = make_harness(tmp_path, pipeline(BIG_THEN_USE, HEADER))
+    big = "linha longa de relatorio " * 2000  # about 50 KB: it goes to an artifact file
+    h.launcher.script("a", Reply(text=big), Reply(text="relatorio refeito"))
+
+    def dies(call, control):
+        raise SimulatedCrash()
+
+    h.launcher.script("b", dies, Reply(text="ok"))
+    with pytest.raises(SimulatedCrash):
+        h.run()
+    files = list(artifact_dir(h.workspace, h.run_id).glob("a-*.json"))
+    assert len(files) == 1
+    if damage == "missing":
+        files[0].unlink()
+    else:
+        files[0].write_text("{nao e json", encoding="utf-8")
+    outcome = h.resume()
+    assert outcome.state == "succeeded", outcome
+    assert h.launcher.launch_count_by_step["a"] == 2  # redone, not reused as `null`
+    reused = {e.payload["step_id"] for e in h.sink.of("pipeline.step_reused")}
+    assert "a" not in reused
+    degraded = [e for e in h.sink.of("pipeline.degraded") if e.payload["reason"] == "artifact_unreadable"]
+    assert len(degraded) == 1 and degraded[0].payload["step_id"] == "a"
+    prompt_b = [call.prompt for call in h.launcher.calls if call.step_id == "b"][-1]
+    assert "relatorio refeito" in prompt_b and ">null<" not in prompt_b
+
+
+class _StoreWithAnUnreadableOutput:
+    """Just enough of ``JournalStore`` for the planner: one finished record whose artifact cannot be read."""
+
+    def __init__(self, state: str) -> None:
+        from types import SimpleNamespace
+
+        self.record = SimpleNamespace(
+            step_id="s", item_key="", attempt=1, input_hash="h", state=state, agent_id="a1", output={"ref": "gone.json"},
+            loop_count=0, started_at=None,
+        )
+
+    def find_reusable(self, run_id, step_id, item_key, loop_count):
+        return self.record
+
+    def load_output(self, run_id, output):
+        raise OSError("artefato ilegivel")
+
+    def steps_of(self, run_id):
+        return [self.record]
+
+
+def test_the_planner_runs_agent_and_gate_again_when_the_output_cannot_be_read() -> None:
+    from agentos.pipelines.resume import ResumePlanner
+
+    agent = ResumePlanner(_StoreWithAnUnreadableOutput("succeeded"), "run-1", enabled=True)
+    decision = agent.decide_agent("s", "", 0, "h", worktree=False)
+    assert decision.action == "run" and decision.reason == "artifact_unreadable"
+    gate = ResumePlanner(_StoreWithAnUnreadableOutput("succeeded"), "run-1", enabled=True)
+    decision = gate.decide_gate("s", 0, "h", dirty=False)
+    assert decision.action == "run" and decision.reason == "artifact_unreadable"
 
 
 def test_a_gate_is_rerun_when_an_agent_before_it_ran_again(tmp_path) -> None:

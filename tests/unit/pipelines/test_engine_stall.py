@@ -156,3 +156,121 @@ def test_same_verifier_findings_twice_is_no_progress(tmp_path) -> None:
 def test_fingerprint_folds_digits_and_spacing() -> None:
     assert command_fingerprint(1, "a  1 b\n") == command_fingerprint(1, "a 22   b")
     assert command_fingerprint(1, "a b") != command_fingerprint(2, "a b")
+
+
+# ------------------------------------------------------------------ review fixes: agent loops (F8)
+
+AGENT_LOOP = """
+- id: a
+  agent: general
+  prompt: faz
+  output_schema: {type: object, properties: {n: {type: integer}}}
+  on_fail: {goto: a, max_loops: 3}
+"""
+GOOD = Reply(text="x", structured_output={"n": 1})
+
+
+def _failing(text: str) -> Reply:
+    return Reply(status="failed", text=text, error_code="AGENT_FAILED")
+
+
+def _bad_schema(value: object) -> Reply:
+    return Reply(text="x", structured_output={"n": value})
+
+
+def test_agent_failures_with_different_texts_are_progress_and_use_the_loops(tmp_path) -> None:
+    h = make_harness(tmp_path, pipeline(AGENT_LOOP, HEADER))
+    h.launcher.script("a", _failing("erro um completamente diferente"), _failing("outro erro sem relacao nenhuma"), GOOD)
+    outcome = h.run()
+    assert outcome.state == "succeeded", outcome
+    assert outcome.loops == 2 and h.launcher.launch_count_by_step["a"] == 3
+
+
+def test_the_same_agent_failure_twice_is_still_no_progress(tmp_path) -> None:
+    h = make_harness(tmp_path, pipeline(AGENT_LOOP, HEADER))
+    h.launcher.script("a", _failing("falhou no teste 3 em 0.31s"), _failing("falhou no teste 5 em 0.45s"))
+    outcome = h.run()
+    assert (outcome.state, outcome.stop_reason) == ("failed", "no_progress")
+    assert h.launcher.launch_count_by_step["a"] == 2
+
+
+def test_agent_failures_with_different_error_messages_are_progress(tmp_path) -> None:
+    from dataclasses import replace
+
+    messages = iter(["a ferramenta travou", "a rede caiu"])
+
+    class _Launcher(FakeLauncher):
+        def wait(self, handle, timeout):
+            result = super().wait(handle, timeout)
+            if result is not None and result.status == "failed":
+                return replace(result, error_message=next(messages))
+            return result
+
+    h = make_harness(tmp_path, pipeline(AGENT_LOOP, HEADER))
+    h.launcher = _Launcher(h.clock)
+    h.launcher.script("a", _failing(""), _failing(""), GOOD)
+    assert h.run().state == "succeeded"
+
+
+def test_schema_failures_with_different_errors_are_progress_and_equal_ones_are_not(tmp_path) -> None:
+    different = make_harness(tmp_path / "different", pipeline(AGENT_LOOP, HEADER))
+    different.launcher.script("a", _bad_schema("um"), _bad_schema([]), GOOD)
+    assert different.run().state == "succeeded"
+    equal = make_harness(tmp_path / "equal", pipeline(AGENT_LOOP, HEADER))
+    equal.launcher.script("a", _bad_schema("um"), _bad_schema("um"))
+    assert equal.run().stop_reason == "no_progress"
+
+
+def test_map_failures_with_different_item_outputs_are_progress(tmp_path) -> None:
+    text = pipeline(
+        """
+        - id: itens
+          agent: general
+          map: {over: [a, b], as: x, max_parallel: 2, fail_fast: false}
+          prompt: faz ${{ x }}
+          on_fail: {goto: itens, max_loops: 3}
+        """,
+        HEADER,
+    )
+    h = make_harness(tmp_path, text)
+    h.launcher.script(
+        "itens", _failing("primeira rodada quebrou assim"), _failing("segunda rodada quebrou de outro jeito"), Reply(text="ok"), index=0
+    )
+    h.launcher.script("itens", Reply(text="ok"), index=1)
+    outcome = h.run()
+    assert outcome.state == "succeeded", outcome
+    assert outcome.loops == 2
+
+
+def test_a_step_that_passed_forgets_its_earlier_failure(tmp_path) -> None:
+    """Fail E, pass, then fail E again later is a new problem, not "the same failure twice in a row"."""
+    text = pipeline(
+        """
+        - id: a
+          agent: general
+          prompt: faz
+          on_fail: {goto: a, max_loops: 3}
+        - id: g
+          gate:
+            all:
+              - command: ${{ inputs.testes }}
+          on_fail: {goto: a, max_loops: 2}
+        """,
+        HEADER,
+    )
+    h = make_harness(tmp_path, text)
+    h.launcher.script("a", _failing("E"), Reply(text="ok"), _failing("E"), Reply(text="ok"))
+    h.gates.script(CommandResult(1, "FAILED x"), CommandResult(0, "ok"))
+    outcome = h.run()
+    assert outcome.state == "succeeded", outcome
+    assert h.launcher.launch_count_by_step["a"] == 4
+
+
+def test_loop_progress_forget_clears_one_step() -> None:
+    from agentos.pipelines.stall import LoopProgress
+
+    progress = LoopProgress()
+    assert progress.repeats("a", "x") is False
+    progress.forget("a")
+    assert progress.repeats("a", "x") is False
+    assert progress.repeats("a", "x") is True
