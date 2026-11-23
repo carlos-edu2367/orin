@@ -369,6 +369,8 @@ class AgenticTurnRuntime:
         prompt_renderer: Callable[[], str] | None = None,
         compact_request: str | None = None,
         shell_command: str | None = None,
+        pipeline_request: object | None = None,
+        pipeline_host: object | None = None,
         effort: str | None = None,
         effort_supported: Callable[[str], bool] | None = None,
         model_switched: Callable[[str], None] | None = None,
@@ -398,6 +400,7 @@ class AgenticTurnRuntime:
             self.provider_timeout_seconds = float(provider_timeout_seconds)
         self.compact_request = compact_request
         self.shell_command = shell_command
+        self.pipeline_request, self.pipeline_host = pipeline_request, pipeline_host  # `/pipeline` turn (WS-C7)
         self.effort = effort
         self._effort_supported = effort_supported
         self._model_switched = model_switched
@@ -998,6 +1001,8 @@ class AgenticTurnRuntime:
             return self._run_manual_compaction(turn)
         if self.shell_command is not None:
             return self._run_shell_command(turn)
+        if self.pipeline_request is not None:
+            return self._run_pipeline(turn)
         messages = list(self.store.history_for_turn(turn))
         action_count = 0
         self._failed_signatures: dict[str, str] = {}
@@ -1816,6 +1821,7 @@ class AgenticTurnRuntime:
             self.toolset is None
             or self.compact_request is not None
             or self.shell_command is not None
+            or self.pipeline_request is not None
         ):
             return None
         provider = self.provider
@@ -3908,6 +3914,33 @@ class AgenticTurnRuntime:
         self.store.finish(turn)
         self._settle_quality(turn, "completed")
         return AgenticRunResult("completed", 1, 1, None if result.get("status") == "succeeded" else str(result.get("error_code") or "TOOL_FAILED"))
+
+    def _run_pipeline(self, turn: dict[str, object]) -> AgenticRunResult:
+        """`/pipeline <run>`: the engine of agentos.pipelines runs the journal run through the ports the host builds;
+        this turn only answers with the summary (no model runs, so no step output enters the history)."""
+        from agentos.pipelines.session_adapter import run_pipeline_turn
+
+        from .tools.public_names import public_name
+
+        tool = public_name("run_command") if self._names is not None else "run_command"
+
+        def run_tool(calls: list[dict[str, str]]) -> list[dict[str, object]]:
+            self._failed_signatures.clear()  # the same gate command twice in a loop is not a "repeated failed call"
+            return self._run_toolset(turn, calls)
+
+        done = run_pipeline_turn(
+            self.pipeline_host, self.pipeline_request, turn, run_tool=run_tool, tool_name=tool,
+            cancelled=lambda: bool(self.cancelled(turn)), changed_paths=getattr(self.toolset, "changed_paths", None),
+        )
+        self.store.delta(turn, done.markdown)
+        if done.state == "cancelled" or self.cancelled(turn):
+            return self._cancel(turn, 0, 0)
+        if done.state == "failed":
+            return self._fail(turn, done.error_code or "PIPELINE_FAILED", 0, 0)
+        self._life(turn, "completed")
+        self.store.finish(turn)
+        self._settle_quality(turn, "completed")
+        return AgenticRunResult(done.state, 0, 0, done.error_code)
 
     def _run_manual_compaction(self, turn: dict[str, object]) -> AgenticRunResult:
         """/compact: summarize the whole conversation into a boundary, then end the turn."""

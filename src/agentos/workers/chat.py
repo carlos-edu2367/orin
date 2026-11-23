@@ -694,6 +694,7 @@ class ChatWorker:
         finally:
             self._settle_code_mode(turn, result_state, error_code=error_code, verification=getattr(result, "verification", None))
         self._promote_queued_inputs(turn, result_state)
+        self._run_after_turn(turn, result_state)
 
     def _settle_code_mode(
         self,
@@ -780,6 +781,15 @@ class ChatWorker:
             )
         except Exception:
             _LOGGER.exception("could not promote the queued input of turn %s", turn.get("turn_id"))
+
+    def _run_after_turn(self, turn: dict[str, object], result_state: str) -> None:
+        """The pipeline package's single post-turn hook (``/goal`` continuation, runs a tool asked for); never raises."""
+        try:
+            from agentos.pipelines.after_turn import run_after_turn
+
+            run_after_turn(self.store, turn, result_state)
+        except Exception:
+            _LOGGER.exception("after-turn hook failed for turn %s", turn.get("turn_id"))
 
     def _kernel_manages(self, turn: dict[str, object]) -> bool:
         with self._state_lock:
@@ -976,6 +986,13 @@ class ChatWorker:
         recovered: list[str] = []
         for turn in self.store.stale_turns(maximum_age=maximum_age):
             scope = self._journal_scope(turn)
+            if str(turn.get("turn_kind") or "") == "pipeline":
+                # S2: the effects of a pipeline turn (gate commands) are not the turn's to reconcile: the pipeline journal
+                # (``input_hash``) does, so the turn is requeued and ``PipelineDriver`` resumes the same run.
+                self._transition(turn, "QUEUED", "worker_recovered_pipeline")
+                if self.store.requeue_recovered(turn, reason="worker_recovered_pipeline"):
+                    recovered.append(str(turn["turn_id"]))
+                continue
             effects = self._journal.mark_unresolved_unknown(scope, now=datetime.now(UTC))
             if any(effect.state is ExecutionEffectState.UNKNOWN for effect in effects):
                 self._transition(turn, "PAUSED", "effect_reconciliation_required")

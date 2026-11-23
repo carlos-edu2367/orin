@@ -340,3 +340,29 @@ def test_load_output_refuses_refs_outside_the_run_directory(store: PipelineStore
         store.load_output("run-1", {"ref": "../secret.json"})
     with pytest.raises(PipelineStoreError):
         store.load_output("run-1", {"ref": "secret.json"})
+
+
+def test_set_step_agent_records_the_child_id_right_after_launch(store: PipelineStore, workspace: Path) -> None:
+    """WS-C7 risk 1: a child that dies before ``finish_step`` still leaves its id in the journal."""
+    _run(store, workspace)
+    step = store.start_step(run_id="run-1", step_id="impl", item_key="000-ab", input_hash="1" * 64)
+    assert step.agent_id is None
+    store.set_step_agent("run-1", "impl", "000-ab", step.attempt, "agent:c1:child-1")
+    assert store.find_reusable("run-1", "impl", "000-ab", 0).agent_id == "agent:c1:child-1"
+    store.interrupt_orphans("run-1")
+    row = store.steps_of("run-1")[0]
+    assert row.state == "interrupted" and row.agent_id == "agent:c1:child-1"  # what the resume needs to discard its worktree
+    with pytest.raises(PipelineStoreError):
+        store.set_step_agent("run-1", "impl", "000-ab", 99, "agent:x")
+    with pytest.raises(PipelineStoreError):
+        store.set_step_agent("run-1", "impl", "000-ab", step.attempt, "")
+
+
+def test_bind_turn_records_the_turn_without_touching_the_state(store: PipelineStore, workspace: Path) -> None:
+    _run(store, workspace)
+    store.set_run_state("run-1", "interrupted", stop_reason="paused")
+    store.bind_turn("run-1", "turn-9")
+    run = store.get_run("run-1")
+    assert run.turn_id == "turn-9" and run.state == "interrupted" and run.stop_reason == "paused"
+    with pytest.raises(PipelineStoreError):
+        store.bind_turn("missing", "turn-9")

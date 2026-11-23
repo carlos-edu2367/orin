@@ -7741,6 +7741,40 @@ class TurnSession:
         text = str(task or "").strip()
         return text[len("/compact"):].strip() if text.startswith("/compact") else ""
 
+    def _pipeline_request(self, task: str):
+        """The run a `/pipeline` turn executes (WS-C7), or None for an ordinary turn."""
+        if str(self.turn.get("turn_kind") or "") != "pipeline":
+            return None
+        from agentos.pipelines.driver import parse_pipeline_request
+
+        return parse_pipeline_request(task)
+
+    # -- pipelines (WS-C7): the public surface agentos.pipelines.session_adapter works through; no flow logic here --
+    def run_pipeline_agent(self, agent: str, prompt: str, **options: Any) -> ToolOutcome:
+        """Start one step's child in the background (options: provider, model_id, effort, isolation, output_schema,
+        budget, pipeline_run_id, description). The engine caps a run at 200 agents, so the per-turn cap is lifted."""
+        self._max_subagents_per_turn = None
+        return self._run_subagent(agent, prompt, run_in_background=True, **options)
+
+    def attach_pipeline_budget(self, budget: Any) -> Callable[[], None]:
+        """Make the run's ``UsageBudget`` the parent of every child the main agent starts (C4, 2.6); returns the detach."""
+        self._usage_budgets.register(self.main_agent_id, budget)
+        return lambda: self._usage_budgets.close(self.main_agent_id, budget)
+
+    def child_progress(self, agent_id: str) -> dict[str, object]:
+        """K11: live progress of one child (state, last_activity_at, current_tool, tool_calls, tokens, cost)."""
+        return self._progress_payload_for(str(agent_id), fallback_status="running")
+
+    def pipeline_catalog(self) -> tuple[dict[str, str], dict[str, tuple[str, ...]]]:
+        """What a step may name: ``{agent: definition digest}`` ("" for a builtin) and ``{provider: favorite models}``."""
+        defined = getattr(self, "_agent_definitions", None)
+        agents = {name: "" for name in (*_BUILTIN_SUBAGENT_SPECS, "general-purpose")}
+        agents.update({name: item.digest or "" for name, item in (defined.agents.items() if defined is not None else ())})
+        return agents, self._child_routing_catalog()[0]
+
+    def child_quota_service(self) -> object | None:
+        return self._child_quota_service()
+
     def _effort(self, task: str = "") -> str | None:
         """Resolve the main turn's effort via rules 1..9, clamping to the model and emitting events."""
         if bool(self.turn.get("live_mode")):
@@ -8372,6 +8406,7 @@ class TurnSession:
             prompt_renderer=self._render_code_prompt_again if self.turn.get("code_mode") == "code" else None,
             compact_request=self._compact_request(task),
             shell_command=self._shell_request(task),
+            pipeline_request=self._pipeline_request(task), pipeline_host=self,
             effort=self._effort(task),
             on_completed=self._after_completed_turn,
             on_verification=self._promote_agent_memories,

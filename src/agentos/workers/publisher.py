@@ -283,6 +283,12 @@ def recover_once(store, *, has_in_flight: bool = False, worker: Any = None) -> t
                 from agentos.agentic.background_agents import fail_orphaned_running_agents
 
                 fail_orphaned_running_agents(engine)
+                try:
+                    from agentos.pipelines.recovery import interrupt_orphaned_pipeline_runs
+
+                    interrupt_orphaned_pipeline_runs(engine)
+                except Exception:
+                    _LOGGER.warning("could not interrupt orphaned pipeline runs", exc_info=True)
                 auto_resume_interrupted_agents(engine, store=store, worker=worker)
                 _ORPHANS_SWEPT = True
             except Exception:

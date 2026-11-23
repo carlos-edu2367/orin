@@ -287,6 +287,13 @@ class PipelineStore:
         assert run is not None
         return run
 
+    def bind_turn(self, run_id: str, turn_id: str) -> None:
+        """Record which turn executes the run, whatever its state (recovery looks at that turn, WS-C7)."""
+        with self._engine.begin() as connection:
+            result = connection.execute(update(pipeline_runs).where(pipeline_runs.c.run_id == run_id).values(turn_id=turn_id))
+            if result.rowcount == 0:
+                raise PipelineStoreError(f"execucao desconhecida: {run_id!r}")
+
     @staticmethod
     def _run_transition_allowed(current: str, target: str) -> bool:
         if current == "succeeded":
@@ -482,6 +489,31 @@ class PipelineStore:
         done = self._get_step(run_id, step_id, item_key, attempt)
         assert done is not None
         return done
+
+    def set_step_agent(self, run_id: str, step_id: str, item_key: str, attempt: int, agent_id: str) -> None:
+        """Record the child's id on an open attempt right after the launch (WS-C7, K19).
+
+        ``finish_step`` also writes it, but a child that died before it left no id: with this call the journal
+        always knows which worktree a resumed run has to discard.
+        """
+        if not str(agent_id or "").strip() or len(agent_id) > 255:
+            raise PipelineStoreError("agent_id deve ter de 1 a 255 caracteres")
+        steps = pipeline_step_runs
+        with self._engine.begin() as connection:
+            result = connection.execute(
+                update(steps)
+                .where(
+                    and_(
+                        steps.c.run_id == run_id,
+                        steps.c.step_id == step_id,
+                        steps.c.item_key == item_key,
+                        steps.c.attempt == attempt,
+                    )
+                )
+                .values(agent_id=agent_id)
+            )
+            if result.rowcount == 0:
+                raise PipelineStoreError(f"etapa desconhecida: {run_id}/{step_id}/{item_key}#{attempt}")
 
     def find_reusable(self, run_id: str, step_id: str, item_key: str, loop_count: int) -> StepRecord | None:
         """Latest attempt of the step for this loop iteration (the caller compares ``state`` and ``input_hash``)."""

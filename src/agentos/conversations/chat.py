@@ -1264,10 +1264,10 @@ class PostgresChatStore:
     def create(self, *, user_id: str, message: str, provider: str, model_id: str, idempotency_key: str, conversation_id: str | None = None, project_id: str | None = None, workspace_id: str | None = None, attachments: Sequence[Mapping[str, object]] = (), new_conversation_id: str | None = None, scheduled_by_schedule_id: str | None = None, code_mode: str = "chat", permission_mode: str | None = None, turn_kind: str | None = None, cli_options: str | None = None, live_mode: bool = False, effort: str | None = None, boost: bool = False) -> ChatReceipt:
         message = message.strip()
         attachments = list(attachments)
-        if turn_kind not in (None, "compact", "shell"):
+        if turn_kind not in (None, "compact", "shell", "pipeline"):
             raise ValueError("turn_kind is invalid")
-        # /compact and a `!` shell command are Orin's own; a plugin command of the same name never expands them.
-        expansion = None if turn_kind in {"compact", "shell"} else _expand_command(self._command_library, self._skill_library, user_id, message)
+        # /compact, a `!` shell command and `/pipeline <run>` are Orin's own; a plugin command of the same name never expands them.
+        expansion = None if turn_kind in {"compact", "shell", "pipeline"} else _expand_command(self._command_library, self._skill_library, user_id, message)
         if len(message) > 16000: raise ValueError("message must be a bounded non-blank string")
         if not message and not attachments: raise ValueError("message must be a bounded non-blank string")
         title_source = message or str(attachments[0].get("original_name") or "Arquivo enviado")
@@ -4219,6 +4219,15 @@ class ChatApplication:
         if str(conversation.get("mode") or "chat") != "code":
             raise ValueError("the shell mode exists only in Code conversations")
         return self.send(user_id, conversation_id, f"!{text}", idempotency_key, code_mode="code", turn_kind="shell")
+    def send_pipeline(self, user_id: str, conversation_id: str, run_id: str, *, resume: bool = False, rerun_gates: bool = False, budget_override: bool = False, attempt: int = 1):
+        """`/pipeline <run>` (WS-C7): a turn that executes (or resumes) a journal run in this conversation, without a model."""
+        from agentos.pipelines.driver import parse_pipeline_request, pipeline_task
+
+        text = pipeline_task(run_id, resume=resume, rerun_gates=rerun_gates, budget_override=budget_override)
+        if parse_pipeline_request(text) is None:
+            raise ValueError("run_id is invalid")
+        conversation = self.store.get(conversation_id, user_id)
+        return self.send(user_id, conversation_id, text, f"pipeline:{run_id}:{int(attempt)}", code_mode=str(conversation.get("mode") or "chat"), turn_kind="pipeline")
     def set_project(self, conversation_id: str, user_id: str, project_id: str | None, *, managed_root: Path | None = None):
         return self.store.set_project(conversation_id, user_id, project_id, managed_root=managed_root)
     def read_project_conversation(
