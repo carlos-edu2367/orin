@@ -59,6 +59,7 @@ from agentos.providers.cli_adapter import (
 
 _LOGGER = logging.getLogger(__name__)
 _OVERFLOW_DIAGNOSTIC_MAX_RESULT_BYTES = 2048
+from agentos.agentic.tool_text_rules import ONLY_ORIN_TOOLS_RULE
 from agentos.providers.cli_queue import CliSlotTicket, acquire_cli_slot
 from agentos.providers.cli_tools_mcp import (
     BackgroundTurnToolServer,
@@ -144,6 +145,9 @@ def isolated_cli_note(
         if root:
             lines.append(f"- Workspace (where the `{srv}` tools act): {root}")
         base_note = "\n".join(lines)
+    # One fixed paragraph for the three CLIs (Claude, Codex, Antigravity): the same text on every turn keeps the
+    # prompt cache stable. `builtin_tool_reminder` only speaks after a CLI tool was called; this speaks before.
+    base_note = f"{base_note}\n\n{ONLY_ORIN_TOOLS_RULE}"
 
     adapter_slug = str(adapter_name or "").strip().lower()
     if adapter_slug == "codex":

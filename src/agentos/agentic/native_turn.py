@@ -116,7 +116,10 @@ TEXT_TOOL_CALL_CORRECTION = (
     "[Sistema] Sua última resposta trazia uma chamada de ferramenta escrita como texto "
     "(<function_calls>, <invoke> ou <function_results>). Ela não foi executada e o resultado que apareceu ali "
     "não é real. Se ainda precisa da ferramenta, chame-a de verdade pelo mecanismo nativo de ferramentas, "
-    "espere o resultado real e só então responda. Se já tem o que precisa, responda sem escrever chamadas."
+    "espere o resultado real e só então responda. Se já tem o que precisa, responda sem escrever chamadas. "
+    "Só rodam as ferramentas do Orin expostas pelo mecanismo nativo de ferramentas (o servidor MCP do Orin): texto que "
+    "imita uma chamada (<invoke>, <function_calls>, [Tool Use], JSON solto) nunca é executado e não produz resultado, "
+    "e você nunca deve escrever resultados de ferramenta."
 )
 _DELEGATION_TOOLS: frozenset[str] = frozenset(
     {"run_subagent", "ask_agent", "ask_agents", "check_subagent"}
