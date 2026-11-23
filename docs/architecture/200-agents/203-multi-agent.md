@@ -174,6 +174,12 @@ DelegationResult {
 
 Somente `COMPLETED` possui resultado de sucesso. Falha e cancelamento usam referências sanitizadas e permanecem distinguíveis.
 
+#### Saída estruturada no runtime 0.13 (Pacote C, C-RF3)
+
+No runtime real, o contrato de saída de um subagente é o parâmetro `output_schema` da ferramenta `Agent` (JSON Schema de até 16 KB, sem `$ref` remoto), e não um valor `StructuredHandoff` materializado. A resposta é validada; se não encaixa, volta ao **mesmo** `agent_id` com a nota de correção (a retomada reconstrói o histórico no nível da sessão, então vale para Claude, Codex e Antigravity) até 5 vezes, e então falha com `SCHEMA_INVALID`. Pipelines usam o mesmo mecanismo: a saída validada da etapa é o que `${{ steps.<id>.output }}` lê, e a correção roda sem worktree.
+
+Achados de revisão seguem o formato do Pacote A (`severity`, prova objetiva por `failing_test`, `command` ou `code_ref`); nos pipelines, `steps.<id>.findings` reúne as falhas de comando e os achados provados `blocker` e `major` (achado `unproven` fica de fora).
+
 ## Contratos públicos
 
 ```text
@@ -442,6 +448,9 @@ Events usam passado, envelope da RFC 103, `execution_id` aplicável, `correlatio
 - **segurança de worktrees e integração (Pacote B):**
   - **`mergeCheckCommand` sob permissões e Workspace Trust:** `orchestration.worktree.mergeCheckCommand` passa obrigatoriamente pelo motor de permissões de shell do usuário (`PermissionEngine`) antes de executar e é ignorado automaticamente em repositórios não confiáveis (`trusted = false`);
   - **limpeza segura de junções no Windows/POSIX:** todas as junções e links simbólicos criados a partir de `orchestration.worktree.linkDirs` são desvinculados (removendo apenas a entrada da junção, nunca o conteúdo do diretório alvo) antes de invocar `git worktree remove`, impedindo remoção acidental de `node_modules` ou `.venv` do workspace principal;
+- **segurança de pipelines (Pacote C):**
+  - **comandos de gate sob permissões e aprovação por hash:** o gate `command` roda pela ferramenta `Bash`, sob as regras de permissão da conversa; o YAML de projeto só é lido de pasta confiável e só roda depois que a pessoa aprova o hash exato do arquivo (mudar um byte pede de novo). Quando um agente inicia o pipeline (`RunPipeline`), só o embutido dispensa aprovação;
+  - **origem dos dados:** `inputs` são confiáveis; saída de subagente não. Só `inputs` entram em comando, já citados (`shlex.quote`), e saída de modelo nunca escolhe comando, agente, provedor, modelo ou esforço;
 - segredo e credencial nunca entram em mensagem, handoff, Event ou Context;
 - cross-workspace é negado por padrão;
 - o lançamento single-user preserva `user_id` para futura separação entre usuários.
@@ -468,7 +477,7 @@ Conteúdo privado não é label. Auditoria registra ator, finalidade, destinatá
 - falha e cancelamento permanecem explícitos e auditáveis;
 - cancelamento não apaga Agent, Execution, Event ou resultado confirmado;
 - nenhum coordenador multi-agent chama LLM ou conhece adapter concreto;
-- nenhuma funcionalidade que gasta tokens liga sozinha;
+- nenhuma funcionalidade que gasta tokens liga sozinha (no Pacote C: pipeline e `/goal` só rodam por comando da pessoa, e `RunPipeline` só existe com `pipelines.agentMayStart` ligada pelo usuário);
 - nenhum nível de esforço muda sem evento.
 
 ## Extensibilidade

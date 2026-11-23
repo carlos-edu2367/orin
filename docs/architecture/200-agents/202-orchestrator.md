@@ -88,6 +88,16 @@ Intenção autorizada
 
 Na implementação atual do Orin 0.13, `AgentSession` + `AgenticTurnRuntime`/`NativeTurnRunner` atuam como fronteira prática de orquestração por conversa, executando subagentes em threads isoladas sob controle da sessão, resolvendo janela efetiva de contexto, esforço de raciocínio e política de cota entre turnos. A materialização de cada execução filha como `Execution` independente permanece prevista em [Futuro](#futuro).
 
+### Pipelines: turno `pipeline` e motor com portas (Pacote C)
+
+Na 0.13.2 o orquestrador real ganha o motor de pipelines (`src/agentos/pipelines/`, guia em [docs/PIPELINES.md](../../PIPELINES.md)). Ele roda no worker, não no processo da API:
+
+- **Turno `pipeline`:** um run nasce com um turno de conversa de `turn_kind = "pipeline"` (precedente de `compact` e `shell`). O ramo `_run_pipeline` do `AgenticTurnRuntime` chama o `PipelineDriver`, que executa o motor na thread do turno. O turno mantém o modo de permissão da conversa (nunca elevado) e `plan_mode` o recusa.
+- **Motor com portas:** `PipelineEngine` é puro. Fala com o mundo por portas (`AgentLauncher`, `GateRunner`, `EventSink`, `Clock`, diário `PipelineStore`). O adaptador `session_adapter` traduz as portas para `TurnSession._run_subagent` em segundo plano, o que mantém herança de permissões, profundidade e limites. O motor decide ordem, `map` com semáforo, gates, retries, laços e orçamento; um modelo nunca decide fluxo.
+- **Diário durável:** `pipeline_runs` e `pipeline_step_runs` (migração `0067`), com `input_hash` por etapa. A retomada refaz o mesmo fluxo de controle e o `ResumePlanner` reaproveita o que está `succeeded` com o mesmo hash.
+- **Orçamento:** o contador do run é o `UsageBudget` do filho para cima (inclui netos e verificador); estouro cancela os filhos em voo e termina o run em `budget_exceeded`.
+- **Eventos:** `pipeline.*` e `goal.*` (tabela em [Eventos](#eventos)).
+
 ## Entidades e dados conceituais
 
 Planos descrevem intenção e dependência; não são trabalho em execução. Um nó só se torna tentativa concreta quando uma `Execution` é criada.
@@ -155,6 +165,8 @@ No runtime real da 0.13 (SQLite/PostgreSQL), o plano de controle de subagentes e
 - **`agent_worktrees`:** metadados da worktree Git isolada vinculada a um subagente (`agent_id`, `workspace_root`, `worktree_path`, `branch` no padrão `orin/agent-<slug>`, `base_commit`, `merge_state` em `pending | applied | conflict | check_failed | discarded | empty`, `conflict_detail`).
 - **`task_board_items`:** quadro de tarefas compartilhado por conversa (`task_id`, `conversation_id`, `title`, `description`, `status`, `depends_on`, `claimed_by_agent_id`, `lease_expires_at`, `result_ref`), substituindo o Blackboard conceitual por reivindicação atômica com lease.
 - **`verification_reviews` / `verification_findings`:** registro persistente das rodadas do verificador independente (`verdict`, par autor → revisor, achados provados/sem prova e métricas por par).
+- **`pipeline_runs`:** uma execução de pipeline ou de `/goal` (`pipeline_id = "goal"`): `run_id`, `user_id`, `conversation_id`, `workspace_root`, `pipeline_id`, `definition_hash`, `definition_snapshot` (até 256 KB, para retomar com a definição original), `source` (`builtin | user | project`), `inputs`, `turn_id`, `state` (`running | succeeded | failed | cancelled | interrupted | budget_exceeded`), `stop_reason`, `used_tokens`, `used_cost_usd`, `used_seconds`. Execuções terminadas são podadas em 90 dias.
+- **`pipeline_step_runs`:** uma tentativa de etapa (ou de item de `map`): chave `(run_id, step_id, item_key, attempt)`, `input_hash`, `state` (`pending | running | succeeded | failed | stalled | skipped | interrupted | gate_failed`), `agent_id` (liga com `agent_runs`), `output` (ou referência a artefato em `<workspace>/.orin/pipeline-runs/<run_id>/`), `error`, `loop_count`, tokens de entrada e saída e `cost_usd`.
 
 ## Contratos públicos
 
@@ -258,6 +270,8 @@ Supervisão observa; não altera storage. Recuperação e cancelamento passam po
 - **`Agent(provider, model_id, effort, isolation)`:** delega trabalho a um subagente podendo escolher provedor, modelo, nível de esforço e modo de isolamento (`none` ou `worktree`; `worktree` só produz efeito quando `orchestration.worktree.enabled = true`, emitindo `isolation.unavailable` e executando no workspace principal quando o repositório não suporta worktree).
 - **`CheckSubagent` (com progresso e detecção de travamento):** retorna estado atual, progresso incremental (`elapsed_seconds`, `last_activity_at`, `current_tool`, `tool_calls`, `input_tokens`, `output_tokens`, `cost_usd`), estado da integração de worktree (`merge_state`) e sinalização explícita de travamento (`stalled: true`).
 - **`TaskClaim`:** reivindica atomicamente uma tarefa pronta (com todas as dependências satisfeitas) em `task_board_items` sob lease renovável; em concorrência entre dois subagentes para o mesmo item, exatamente um obtém a posse.
+- **`Agent(output_schema, budget)` (Pacote C):** `output_schema` valida a resposta do subagente contra um JSON Schema (até 16 KB); resposta inválida volta ao mesmo agente com o erro, até 5 correções, e depois falha com `SCHEMA_INVALID`. `budget` (`max_tokens`, `max_seconds`, `max_cost_usd`) limita o subagente e a sua subárvore; o teto do usuário `orchestration.budget.subagent.*` limita também o orçamento pedido pelo modelo, e o projeto só pode reduzi-lo.
+- **`RunPipeline(pipeline_id, inputs)` (Pacote C):** publicada só ao agente principal, e só com `pipelines.agentMayStart = true` (chave de usuário, desligada por padrão). Inicia apenas pipelines aprovados para agente (embutidos, ou de usuário e de projeto com o hash aprovado). Não executa dentro do turno: registra um início pendente (até 3 por turno) que o gancho pós-turno inicia se o turno terminou bem. Entrada usada como comando inteiro de gate não aceita valor do agente.
 
 ## Criação de Agent
 
@@ -329,6 +343,13 @@ Na recuperação, o Orchestrator observa versão e checkpoint, confirma perda do
 - **Retomada manual e automática:** o usuário pode retomar qualquer subagente `interrupted` pela interface ("Retomar" -> `POST /v1/conversations/{id}/agents/{agent_id}/resume`), que restaura o último snapshot válido, move a linha para `queued` e despacha a continuação. A retomada automática no reinício só ocorre quando `orchestration.background.autoResume = true` (desligada por padrão) e respeita as políticas de cota.
 - **Detecção de travamento (`stalled`):** um subagente em execução cuja `last_activity_at` ultrapassa `orchestration.stall.minutes` (padrão `10` minutos) é marcado como `stalled`, emite `agent.stalled` e aparece com selo `travado` na árvore de agentes e em `CheckSubagent`. O cancelamento automático só ocorre quando `orchestration.stall.autoCancel = true` (desligado por padrão).
 
+### Retomada de pipelines pelo diário (Pacote C)
+
+- **Estado `interrupted`:** um run `running` cujo turno terminou ou sumiu (queda do worker, reinício) é movido para `interrupted`, com as etapas abertas, no `recover_once` do boot (run sem turno só depois de 10 minutos). O turno `pipeline` é isento da marcação de efeitos como `UNKNOWN` em `recover_stale`: é reenfileirado (`worker_recovered_pipeline`) e o driver retoma sozinho o run pelo diário. Os demais turnos continuam pausando por reconciliação.
+- **Reaproveitamento:** etapa `succeeded` com o mesmo `input_hash` e volta de laço não roda de novo; gates só são reaproveitados enquanto nenhuma etapa de agente tiver rodado antes deles nesta execução, ou se `rerun_gates` for falso. Definição alterada pede escolha (`original` ou `new_run`); run `budget_exceeded` só retoma com `budget_override`.
+- **Pausar** drena e deixa o run `interrupted` com `stop_reason = "paused"`; não há estado `paused`.
+- **Travamento (`stalled`):** a etapa de agente sem atividade por `stall_minutes` tem o filho cancelado; a nova tentativa só ocorre se `retries.on` incluir `stalled`, e leva uma nota de replanejamento. Laço cuja falha repete a mesma impressão digital para com `no_progress`.
+
 ## Cancelamento e propagação
 
 ```text
@@ -370,6 +391,10 @@ Quando um turno encontra erro de estouro de janela de contexto (por exemplo `"Pr
 - se ocorrer um segundo estouro consecutivo no mesmo turno, a tentativa NÃO entra em loop de retry e termina em falha terminal explícita com código `CONTEXT_LENGTH_EXCEEDED`.
 
 A troca de assinatura por política de cota (`quota.fallback.enabled`) só ocorre entre turnos (nunca no meio de um turno com efeitos de ferramenta pendentes) e emite `quota.fallback_applied`.
+
+### Retries de pipeline (Pacote C)
+
+O retry de etapa é política declarada no YAML (`retries.max` de 0 a 3, `retries.on` entre `failed`, `stalled`, `schema_invalid` e `gate_failed`), com espera exponencial de 5 s a 60 s. Cancelamento, estouro de orçamento e erros de gate de política (`GATE_PERMISSION_DENIED`, `GATE_INPUT_INVALID`, `GATE_SHELL_UNSUPPORTED`, `GATE_REF_UNTRUSTED`) nunca são repetidos. Cada tentativa é uma linha nova de `pipeline_step_runs` (`attempt` monotônico). Laços (`on_fail.goto`) exigem `max_loops` de 1 a 5, e o motor limita cada run a 200 agentes e 500 execuções de etapa.
 
 ### Verificação independente e contratos de subagentes (Pacote A)
 
@@ -448,6 +473,18 @@ Na 0.13, a delegação de subagentes e o gate de verificação de entrega passam
 | `merge.applied` | fila serializada (`MergeQueue`) aplicou o patch da worktree no workspace do pai via `git apply --3way` sem criar commit automático |
 | `merge.conflict` | integração da worktree encontrou conflito; nada foi aplicado ao workspace do pai e a worktree permanece disponível para inspeção, descarte ou resolução assistida |
 | `merge.check_failed` | `orchestration.worktree.mergeCheckCommand` falhou após a aplicação; alterações foram revertidas na árvore do pai e a worktree foi preservada |
+| `pipeline.started` | run de pipeline foi iniciado (`run_id`, `pipeline_id`, `source`, `definition_hash`, orçamento efetivo, nomes das entradas, nunca os valores) |
+| `pipeline.step_started` / `pipeline.step_finished` | etapa (ou item de `map`) começou ou terminou, com estado, tentativa, tokens e custo; a saída viaja como `output_ref` |
+| `pipeline.step_reused` | retomada reaproveitou uma etapa `succeeded` sem rodar de novo (nenhuma linha nova no diário) |
+| `pipeline.step_retrying` | etapa será repetida por causa declarada em `retries.on`, com a espera aplicada |
+| `pipeline.gate_evaluated` | gate avaliado (`command`, `schema` ou `verifier`) com resultado e achados |
+| `pipeline.loop` | `on_fail.goto` voltou para uma etapa (volta atual e `max_loops`) |
+| `pipeline.stalled` | etapa travada por `stall_minutes`, ou laço parado sem progresso (`action = "no_progress"`) |
+| `pipeline.degraded` | execução segue com garantia reduzida (`ask_permissions`, `models_auto_partial`, `artifact_unreadable`) |
+| `pipeline.budget_exceeded` | teto do pipeline estourado; filhos em voo cancelados |
+| `pipeline.finished` | run terminou em estado final ou `interrupted` (`stop_reason`) |
+| `pipeline.resumed` | run foi retomado do diário |
+| `goal.started` / `goal.evaluated` / `goal.continued` / `goal.finished` | ciclo do `/goal`: objetivo iniciado, avaliação `{done, reason}`, continuação enviada e fim |
 
 Events pertencentes à máquina de estados, como `ExecutionStarted`, `ExecutionFinished`, `ExecutionFailed` e `ExecutionCancelled`, continuam sob ownership do Kernel. Os Events desta RFC carregam `execution_id` quando vinculados a uma tentativa e sempre preservam owner, Workspace, correlação, causalidade e classificação.
 
@@ -460,7 +497,8 @@ Events pertencentes à máquina de estados, como `ExecutionStarted`, `ExecutionF
 - dispatch inclui apenas identidade operacional mínima;
 - triggers e Events não são comandos nem prova de autorização;
 - limites de paralelismo, custo e Resource são aplicados por owner e Workspace;
-- o lançamento single-user mantém `user_id` e isolamento estrutural.
+- o lançamento single-user mantém `user_id` e isolamento estrutural;
+- **segurança de pipelines (Pacote C):** YAML não executa código; o único ponto que executa algo é o gate `command`, que passa pelas permissões da conversa e só é lido de pasta confiável, com aprovação por hash do arquivo. Só `inputs` entram em comando, citados; saída de modelo nunca vira comando, agente, provedor, modelo ou esforço (regra de taint). Eventos não carregam prompt nem saída de modelo.
 
 ## Observabilidade
 
