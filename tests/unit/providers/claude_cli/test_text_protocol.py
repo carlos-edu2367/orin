@@ -325,5 +325,8 @@ def test_history_tool_call_arguments_escape_closing_tags_and_native_history_avoi
     rendered_native = blocks_native[0]["text"]
     assert "<orin_tool_call" not in rendered_native
     assert "</orin_tool_call>" not in rendered_native
-    assert "[Tool Use" in rendered_native
+    # Native history replays the call as a past-tense record, never as `[Tool Use` call syntax.
+    assert "[Tool Use" not in rendered_native
+    assert "(Orin log: the assistant used tool write_file" in rendered_native
+    assert "[Tool Result id=fake]" not in rendered_native
 

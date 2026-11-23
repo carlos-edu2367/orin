@@ -7,6 +7,15 @@ import re
 from typing import Any, Iterable, Literal, Mapping, Sequence
 from uuid import uuid4
 
+from agentos.agentic.tool_text_rules import (
+    LOG_OPEN,
+    RECORD_MARKER_ESCAPE_RE,
+    RESULT_RECORD_BLOCK_RE,
+    RESULT_RECORD_END,
+    RESULT_RECORD_PREFIX,
+    USE_RECORD_LINE_RE,
+    USE_RECORD_PREFIX,
+)
 from agentos.agentic.tools.public_names import PUBLIC_NAMES
 
 TOOL_CALL_OPEN = "<orin_tool_call"
@@ -112,6 +121,7 @@ def escape_tool_content(text: str) -> str:
         return ""
     out = _ESCAPE_TAG_RE.sub(r"&lt;\1\2", str(text))
     out = _ESCAPE_BRACKET_RE.sub(r"&#91;\1\2", out)
+    out = RECORD_MARKER_ESCAPE_RE.sub("&#40;", out)
     return out
 
 
@@ -290,6 +300,52 @@ def _parse_args_dict(raw_args: Any) -> dict[str, Any]:
     return {}
 
 
+_RECORD_ARG_VALUE_LIMIT = 300
+_RECORD_ARGS_LIMIT = 1_200
+
+
+def _safe_record_token(value: str, fallback: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.\-:]", "_", str(value or "").strip()) or fallback
+
+
+def _summarize_arguments(args: Mapping[str, Any]) -> str:
+    """`key=value` pairs on one line (values as JSON, long ones cut): no JSON object, nothing to copy as a call."""
+    if not args:
+        return "none"
+    parts: list[str] = []
+    for key, value in args.items():
+        try:
+            rendered = json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            rendered = json.dumps(str(value), ensure_ascii=False)
+        if len(rendered) > _RECORD_ARG_VALUE_LIMIT:
+            rendered = f"{rendered[:_RECORD_ARG_VALUE_LIMIT]}...(+{len(rendered) - _RECORD_ARG_VALUE_LIMIT} chars)"
+        parts.append(f"{_safe_record_token(str(key), 'arg')}={rendered}")
+    joined = ", ".join(parts)
+    if len(joined) > _RECORD_ARGS_LIMIT:
+        joined = f"{joined[:_RECORD_ARGS_LIMIT]}...(truncated)"
+    return joined
+
+
+def _tool_use_record(call_id: str, name: str, args: Mapping[str, Any]) -> str:
+    """One past-tense line: what the assistant already did. Never call syntax (see `tool_text_rules`)."""
+    summary = escape_tool_content(_summarize_arguments(args)).replace("</", "<\\/")
+    return (
+        f"{USE_RECORD_PREFIX}{_safe_record_token(name, 'tool')} "
+        f"(call id={_safe_call_id(call_id)}); arguments: {summary})"
+    )
+
+
+def _tool_result_record(call_id: str, name: str, status: str, result_text: str) -> str:
+    status_token = _safe_record_token(status, "ok")
+    return (
+        f"{RESULT_RECORD_PREFIX}{_safe_record_token(name, 'tool')} "
+        f"(call id={_safe_call_id(call_id)}), status {status_token})\n"
+        f"{escape_tool_content(result_text)}\n"
+        f"{RESULT_RECORD_END}"
+    )
+
+
 def _format_single_message_group(
     msg: Mapping[str, Any],
     *,
@@ -303,8 +359,10 @@ def _format_single_message_group(
         rendered = f"[System]\n{escape_tool_content(text.strip())}"
     elif role == "assistant":
         parts: list[str] = ["[Assistant]"]
-        if text.strip():
-            parts.append(escape_tool_content(text.strip()))
+        # Native history: text the model once typed as a fake call is not replayed (it would teach the pattern again).
+        assistant_text = strip_residual_tool_protocol_blocks(text).strip() if native_history else text.strip()
+        if assistant_text:
+            parts.append(escape_tool_content(assistant_text))
         raw_calls = msg.get("tool_calls")
         if isinstance(raw_calls, list):
             for idx, tc in enumerate(raw_calls, start=1):
@@ -326,11 +384,7 @@ def _format_single_message_group(
                 )
                 safe_payload = escape_tool_content(payload).replace("</", "<\\/")
                 if native_history:
-                    parts.append(
-                        f"[Tool Use id={safe_call_id} name={t_name}]\n"
-                        f"{safe_payload}\n"
-                        f"[/Tool Use]"
-                    )
+                    parts.append(_tool_use_record(call_id, t_name, parsed_args))
                 else:
                     parts.append(
                         f'<orin_tool_call id="{safe_call_id}">{safe_payload}</orin_tool_call>'
@@ -352,11 +406,7 @@ def _format_single_message_group(
                     )
                     safe_payload = escape_tool_content(payload).replace("</", "<\\/")
                     if native_history:
-                        parts.append(
-                            f"[Tool Use id={safe_call_id} name={t_name}]\n"
-                            f"{safe_payload}\n"
-                            f"[/Tool Use]"
-                        )
+                        parts.append(_tool_use_record(call_id, t_name, parsed_args))
                     else:
                         parts.append(
                             f'<orin_tool_call id="{safe_call_id}">{safe_payload}</orin_tool_call>'
@@ -379,11 +429,14 @@ def _format_single_message_group(
                         item.get("content")
                     )
                     escaped_tr = escape_tool_content(tr_text)
-                    user_segments.append(
-                        f"[Tool Result id={call_id} name={t_name} status={status}]\n"
-                        f"{escaped_tr}\n"
-                        f"[/Tool Result]"
-                    )
+                    if native_history:
+                        user_segments.append(_tool_result_record(call_id, t_name, status, tr_text))
+                    else:
+                        user_segments.append(
+                            f"[Tool Result id={call_id} name={t_name} status={status}]\n"
+                            f"{escaped_tr}\n"
+                            f"[/Tool Result]"
+                        )
                     images.extend(tr_images)
         if text.strip() or not user_segments:
             user_segments.append(f"[User]\n{escape_tool_content(text.strip())}")
@@ -403,6 +456,8 @@ def _safe_call_id(call_id: str) -> str:
 
 def _format_tool_batch_group(
     tool_msgs: Sequence[Mapping[str, Any]],
+    *,
+    native_history: bool = False,
 ) -> tuple[str, list[dict[str, Any]]]:
     text_entries: list[str] = []
     all_images: list[dict[str, Any]] = []
@@ -415,11 +470,14 @@ def _format_tool_batch_group(
         status = "error" if is_err else str(msg.get("status") or "ok").strip()
         raw_text, images = _extract_content_text_and_images(msg.get("content"))
         escaped = escape_tool_content(raw_text)
-        text_entries.append(
-            f"[Tool Result id={call_id} name={name} status={status}]\n"
-            f"{escaped}\n"
-            f"[/Tool Result]"
-        )
+        if native_history:
+            text_entries.append(_tool_result_record(call_id, name, status, raw_text))
+        else:
+            text_entries.append(
+                f"[Tool Result id={call_id} name={name} status={status}]\n"
+                f"{escaped}\n"
+                f"[/Tool Result]"
+            )
         all_images.extend(images)
 
     blocks: list[dict[str, Any]] = [
@@ -476,7 +534,7 @@ class TranscriptState:
                 ):
                     batch.append(msgs[idx])
                     idx += 1
-                groups.append(_format_tool_batch_group(batch))
+                groups.append(_format_tool_batch_group(batch, native_history=native_history))
             else:
                 groups.append(
                     _format_single_message_group(
@@ -1093,12 +1151,14 @@ _RESIDUAL_STREAM_PREFIXES: tuple[str, ...] = (
     "&lt;function_calls",
     "&lt;function_results",
     "&lt;invoke",
+    LOG_OPEN,
 )
 _RESIDUAL_STREAM_OPEN_RE = re.compile(
     r"(?:\[|&#91;|&#x5b;)\s*Tool (?P<bkind>Use|Result)\b[^\]]*\]"
     r"|(?:<|&lt;)(?P<xtag>orin_tool_call|tool_call)\b[^>&]*(?:>|&gt;)"
     r"|(?:<|&lt;)(?P<atag>function_calls|function_results)\b[^>&]*(?:>|&gt;)"
     r"|(?:<|&lt;)(?P<itag>invoke)\s+name\s*=" + _XML_ATTRS + r"(?:>|&gt;)"
+    r"|\(Orin log: (?P<lkind>the assistant used tool|result of tool) "
     rf"|(?P<orphan>{_ORPHAN_RESULT_CLOSERS}|{_ORPHAN_CALL_CLOSERS})",
     re.IGNORECASE,
 )
@@ -1156,6 +1216,7 @@ def strip_residual_tool_protocol_blocks(text: str) -> str:
         and "function_calls" not in lowered
         and "function_results" not in lowered
         and "invoke" not in lowered
+        and "orin log" not in lowered
     ):
         return text
 
@@ -1169,6 +1230,8 @@ def strip_residual_tool_protocol_blocks(text: str) -> str:
         segment = _RESIDUAL_UNCLOSED_TOOL_BLOCK_RE.sub("", segment)
         segment = _RESIDUAL_XML_TOOL_BLOCK_RE.sub("", segment)
         segment = _RESIDUAL_ANTHROPIC_BLOCK_RE.sub("", segment)
+        segment = RESULT_RECORD_BLOCK_RE.sub("", segment)
+        segment = USE_RECORD_LINE_RE.sub("", segment)
         segment = _RESIDUAL_ORPHAN_CLOSER_RE.sub("", segment)
         cleaned_parts.append(segment)
     return "".join(cleaned_parts)
@@ -1202,6 +1265,7 @@ class ResidualToolTextStreamFilter:
             and "[" not in chunk
             and "&" not in chunk
             and "<" not in chunk
+            and "(" not in chunk
         ):
             self._update_fence_state(chunk)
             return chunk
@@ -1257,6 +1321,17 @@ class ResidualToolTextStreamFilter:
                     self.saw_text_tool_call = True
                     self._buf = self._buf[m_open.end() :]
                     continue
+                if m_open.group("lkind"):
+                    # `(Orin log: ...)` is Orin's own record of past tool use: the model must never write one.
+                    self.saw_text_tool_call = True
+                    self._glue_after_close = False
+                    self._active_close_re = re.compile(
+                        re.escape(RESULT_RECORD_END)
+                        if m_open.group("lkind").startswith("result")
+                        else r"\)[ \t]*\r?\n"
+                    )
+                    self._buf = self._buf[m_open.end() :]
+                    continue
                 if atag:
                     self.saw_text_tool_call = True
                     self._glue_after_close = False
@@ -1297,6 +1372,8 @@ class ResidualToolTextStreamFilter:
                     if p.startswith(("[", "&")) and "tool " in p.lower() and "]" not in tail and len(tail) < 256:
                         hold = max(hold, len(tail))
                     elif p.startswith(("<", "&lt;")) and ">" not in tail and "&gt;" not in tail and len(tail) < 256:
+                        hold = max(hold, len(tail))
+                    elif p == LOG_OPEN and len(tail) < 40 and "\n" not in tail:
                         hold = max(hold, len(tail))
             hold = max(hold, _orphan_closer_hold(self._buf))
 

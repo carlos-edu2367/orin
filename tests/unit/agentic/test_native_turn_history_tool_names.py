@@ -28,8 +28,8 @@ from tests.unit.agentic.test_native_turn import (
     _make_toolset,
 )
 
-_TOOL_USE_NAME = re.compile(r"\[Tool Use[^\]]*\bname=([A-Za-z0-9_.:-]+)\]")
-_TOOL_RESULT_NAME = re.compile(r"\[Tool Result[^\]]*\bname=([A-Za-z0-9_.:-]+)")
+_TOOL_USE_NAME = re.compile(r"the assistant used tool ([A-Za-z0-9_.:-]+) \(call id=")
+_TOOL_RESULT_NAME = re.compile(r"result of tool ([A-Za-z0-9_.:-]+) \(call id=")
 
 
 def _history() -> list[dict[str, object]]:

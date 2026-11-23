@@ -44,6 +44,12 @@ from agentos.providers.claude_cli.text_protocol import (
     strip_residual_tool_protocol_blocks,
 )
 from agentos.agentic.tool_media import save_tool_images, tool_media_note
+from agentos.agentic.tool_text_rules import (
+    HISTORY_HEADER,
+    has_tool_use_record,
+    is_tool_result_block,
+    strip_tool_use_records,
+)
 from agentos.agentic.tools.public_names import (
     internal_name as _internal_tool_name,
     public_name as _public_tool_name,
@@ -2752,10 +2758,6 @@ class NativeTurnRunner:
                         _pending_reminders=pending_reminders,
                     )
             if total_prior_chars > prior_char_budget:
-                tool_use_span_re = re.compile(
-                    r"\n?(?:\[|&#91;)\s*Tool Use(?::|\b)[^\]]*\]\n.*?\n(?:\[|&#91;)\s*/Tool Use\s*\]",
-                    re.DOTALL | re.IGNORECASE,
-                )
                 kept_prior_blocks: list[dict[str, Any]] = []
                 omitted_tool_blocks = 0
                 omitted_msg_blocks = 0
@@ -2764,16 +2766,13 @@ class NativeTurnRunner:
                     b = prior_blocks[idx_p]
                     b_text = str(b.get("text") or "")
                     if total_prior_chars > prior_char_budget:
-                        if b_text.startswith(("[Tool Result", "&#91;Tool Result")):
+                        if is_tool_result_block(b_text):
                             total_prior_chars -= len(b_text)
                             omitted_tool_blocks += 1
                             idx_p += 1
                             continue
-                        if (
-                            ("[Tool Use" in b_text or "&#91;Tool Use" in b_text)
-                            and ("[/Tool Use]" in b_text or "&#91;/Tool Use]" in b_text)
-                        ):
-                            stripped = tool_use_span_re.sub("", b_text).strip()
+                        if has_tool_use_record(b_text):
+                            stripped = strip_tool_use_records(b_text).strip()
                             removed_chars = len(b_text) - len(stripped)
                             total_prior_chars -= removed_chars
                             omitted_tool_blocks += 1
@@ -2784,9 +2783,7 @@ class NativeTurnRunner:
                             # Always evict immediately following [Tool Result] blocks paired with this tool use
                             while (
                                 idx_p + 1 < len(prior_blocks)
-                                and str(prior_blocks[idx_p + 1].get("text") or "").startswith(
-                                    ("[Tool Result", "&#91;Tool Result")
-                                )
+                                and is_tool_result_block(str(prior_blocks[idx_p + 1].get("text") or ""))
                             ):
                                 idx_p += 1
                                 tr_text = str(prior_blocks[idx_p].get("text") or "")
@@ -2842,6 +2839,8 @@ class NativeTurnRunner:
                         },
                     )
                 prior_blocks = kept_prior_blocks
+            if prior_blocks:
+                blocks.append({"type": "text", "text": HISTORY_HEADER})
             blocks.extend(prior_blocks)
 
         if volatile_text:

@@ -21,7 +21,9 @@ def _render(native_history: bool) -> str:
 def test_tool_call_and_tool_result_ids_stay_paired_after_sanitizing() -> None:
     for native in (False, True):
         text = _render(native)
-        call_ids = re.findall(r'(?:orin_tool_call id="|\[Tool Use id=)([^"\s\]]+)', text)
-        result_ids = re.findall(r"\[Tool Result id=(.+?) name=", text)
+        # Text protocol (native=False) keeps `<orin_tool_call id=..>` / `[Tool Result id=..`; native history
+        # replays past-tense records `(call id=..)` instead.
+        call_ids = re.findall(r'(?:orin_tool_call id="|used tool \S+ \(call id=)([^"\s)]+)', text)
+        result_ids = re.findall(r"(?:\[Tool Result id=|result of tool \S+ \(call id=)([^\s)]+)", text)
         assert call_ids and result_ids, text
         assert call_ids[0] == result_ids[0], (native, call_ids, result_ids)
