@@ -435,8 +435,9 @@ def test_real_shell_sees_exactly_the_value_for_every_accepted_shape() -> None:
     values = ["a; echo INJECTED", "$(echo INJECTED)", "`echo INJECTED`", "x' ; echo INJECTED ; '", 'q"; echo INJECTED; "', "a b\nc"]
     for template in ("printf '<%s>' ${{ inputs.v }}", "printf '<%s>' --opt=${{ inputs.v }}", "printf '<%s>' pre${{ inputs.v }}post"):
         for value in values:
-            argv = shell_argv(render_command(template, {"v": value}).text, shell)
-            assert argv is not None
+            text = render_command(template, {"v": value}).text
+            # Git Bash has an explicit argv; off Windows the host shell is /bin/sh, run the same way.
+            argv = shell_argv(text, shell) or [shell.executable, "-c", text]
             done = subprocess.run(argv, capture_output=True, text=True, timeout=30, check=False)
             expected = template.split("'")[1].replace("%s", "{}")  # "<{}>"
             piece = template.split("' ", 1)[1].replace("${{ inputs.v }}", value)
