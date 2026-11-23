@@ -91,6 +91,24 @@ class AgentActivityEventType(StrEnum):
     MERGE_APPLIED = "merge.applied"
     MERGE_CONFLICT = "merge.conflict"
     MERGE_CHECK_FAILED = "merge.check_failed"
+    # Pacote C: pipelines declarativos, /goal e orcamento por subagente.
+    PIPELINE_STARTED = "pipeline.started"
+    PIPELINE_STEP_STARTED = "pipeline.step_started"
+    PIPELINE_STEP_FINISHED = "pipeline.step_finished"
+    PIPELINE_STEP_REUSED = "pipeline.step_reused"
+    PIPELINE_STEP_RETRYING = "pipeline.step_retrying"
+    PIPELINE_GATE_EVALUATED = "pipeline.gate_evaluated"
+    PIPELINE_LOOP = "pipeline.loop"
+    PIPELINE_STALLED = "pipeline.stalled"
+    PIPELINE_DEGRADED = "pipeline.degraded"
+    PIPELINE_BUDGET_EXCEEDED = "pipeline.budget_exceeded"
+    PIPELINE_FINISHED = "pipeline.finished"
+    PIPELINE_RESUMED = "pipeline.resumed"
+    GOAL_STARTED = "goal.started"
+    GOAL_EVALUATED = "goal.evaluated"
+    GOAL_CONTINUED = "goal.continued"
+    GOAL_FINISHED = "goal.finished"
+    SUBAGENT_BUDGET_EXCEEDED = "subagent.budget_exceeded"
 
 
 class ActivityVisibility(StrEnum):

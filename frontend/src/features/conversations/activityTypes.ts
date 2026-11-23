@@ -186,6 +186,23 @@ export type AgentActivityEventType =
   | 'merge.applied'
   | 'merge.conflict'
   | 'merge.check_failed'
+  | 'pipeline.started'
+  | 'pipeline.step_started'
+  | 'pipeline.step_finished'
+  | 'pipeline.step_reused'
+  | 'pipeline.step_retrying'
+  | 'pipeline.gate_evaluated'
+  | 'pipeline.loop'
+  | 'pipeline.stalled'
+  | 'pipeline.degraded'
+  | 'pipeline.budget_exceeded'
+  | 'pipeline.finished'
+  | 'pipeline.resumed'
+  | 'goal.started'
+  | 'goal.evaluated'
+  | 'goal.continued'
+  | 'goal.finished'
+  | 'subagent.budget_exceeded'
   | (string & {})
 
 export type ConversationActivityEvent = {
