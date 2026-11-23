@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ApiClient } from '../../api/client'
 import { getOrchestrationSettings } from '../../api/orchestrationSettings'
 import {
   getQuota,
   normalizeSubscriptionProvider,
+  QUOTA_PROBE_FOLLOW_UP_MS,
   streamQuotaUpdates,
   type ProviderQuota,
 } from '../../api/quota'
@@ -35,6 +36,8 @@ export function useSubscriptionQuota({
   const [displayEnabled, setDisplayEnabled] = useState(true)
   const [subscriptions, setSubscriptions] = useState<ProviderQuota[]>([])
   const [loading, setLoading] = useState(false)
+  const [probing, setProbing] = useState(false)
+  const followUpTimer = useRef<number | null>(null)
   const normalizedProvider = normalizeSubscriptionProvider(provider)
 
   const loadQuota = useCallback(
@@ -124,14 +127,32 @@ export function useSubscriptionQuota({
     }
   }, [client, displayEnabled, loadQuota, normalizedProvider, subscribeStream])
 
+  useEffect(
+    () => () => {
+      if (followUpTimer.current !== null) window.clearTimeout(followUpTimer.current)
+    },
+    [],
+  )
+
+  /**
+   * Asks the server to probe the CLIs. The response carries what is stored now; the probes' results arrive
+   * through SSE `quota.updated`. A single follow-up read covers a stream that is down or an event that was missed.
+   */
   const refresh = useCallback(() => {
     void loadQuota(true)
+    setProbing(true)
+    if (followUpTimer.current !== null) window.clearTimeout(followUpTimer.current)
+    followUpTimer.current = window.setTimeout(() => {
+      followUpTimer.current = null
+      setProbing(false)
+      void loadQuota(false)
+    }, QUOTA_PROBE_FOLLOW_UP_MS)
   }, [loadQuota])
 
   return {
     subscriptions,
     displayEnabled,
-    loading,
+    loading: loading || probing,
     refresh,
     provider: normalizedProvider,
   }

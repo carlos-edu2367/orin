@@ -113,7 +113,7 @@ describe('QuotaRing', () => {
     expect(trigger.textContent).not.toMatch(/%/)
   })
 
-  it('renders "?" without inventing percent for unknown Antigravity quota and includes clear hint', () => {
+  it('renders "?" without inventing percent when Antigravity has no reading yet, without claiming it never reports', () => {
     const quota = makeQuota({
       provider: 'google-antigravity',
       confidence: 'unknown',
@@ -129,7 +129,46 @@ describe('QuotaRing', () => {
     expect(trigger).toHaveAttribute('data-confidence', 'unknown')
     expect(trigger).toHaveTextContent('?')
     expect(trigger.textContent).not.toMatch(/\d+%/)
-    expect(trigger.getAttribute('title') ?? '').toContain('O Antigravity não informa a cota')
+    const title = trigger.getAttribute('title') ?? ''
+    expect(title).toContain('Percentual de cota indisponível no momento')
+    expect(title).not.toContain('não informa')
+    expect(trigger.getAttribute('aria-label')).toBe('Cota Antigravity: indisponível')
+  })
+
+  it('shows the measured Antigravity groups with scoped labels and the highest percent', () => {
+    const quota = makeQuota({
+      provider: 'google-antigravity',
+      source: 'agy_usage_command',
+      windows: [
+        { kind: 'seven_day', used_percent: 9, resets_at: '2026-11-25T18:03:09Z', status: 'allowed', scope_model: 'Claude e GPT' },
+        { kind: 'five_hour', used_percent: 0, resets_at: '2026-11-21T17:21:19Z', status: 'allowed', scope_model: 'Claude e GPT' },
+        { kind: 'five_hour', used_percent: 17, resets_at: '2026-11-21T17:20:26Z', status: 'allowed', scope_model: 'Gemini' },
+        { kind: 'seven_day', used_percent: 1, resets_at: '2026-11-30T12:20:26Z', status: 'allowed', scope_model: 'Gemini' },
+      ],
+    })
+    render(<QuotaRing quota={quota} provider="google-antigravity" nowMs={nowMs} />)
+
+    const trigger = screen.getByTestId('quota-ring-trigger')
+    expect(trigger).toHaveTextContent('17%')
+    expect(trigger).toHaveAttribute('aria-label', 'Cota Antigravity: 17%')
+    const lines = (trigger.getAttribute('title') ?? '').split('\n')
+    expect(lines.some((line) => /^5 h · Claude e GPT: 0% \(libera .+\)$/.test(line))).toBe(true)
+    expect(lines.some((line) => line.startsWith('Semanal · Gemini: 1%'))).toBe(true)
+    expect(lines.some((line) => line.startsWith('5 h · Gemini: 17%'))).toBe(true)
+  })
+
+  it('does not show a stale percent for a renewed window', () => {
+    const quota = makeQuota({
+      windows: [
+        { kind: 'seven_day', used_percent: null, resets_at: null, status: 'renewed', scope_model: null },
+      ],
+      confidence: 'partial',
+    })
+    render(<QuotaRing quota={quota} provider="anthropic-cli" nowMs={nowMs} />)
+
+    const trigger = screen.getByTestId('quota-ring-trigger')
+    expect(trigger).toHaveTextContent('?')
+    expect(trigger.getAttribute('title') ?? '').toContain('Semanal: Renovada')
   })
 
   it('renders nothing when quota.display.enabled is false', () => {

@@ -12,8 +12,14 @@ export const SUBSCRIPTION_PROVIDERS: readonly SubscriptionProviderId[] = [
   'google-antigravity',
 ] as const
 
+/**
+ * `GET /v1/quota?refresh=true` returns at once and the server probes the CLIs in the background (Claude takes
+ * ~6 s); clients read once more after this delay in case the SSE event was missed.
+ */
+export const QUOTA_PROBE_FOLLOW_UP_MS = 9000
+
 export type QuotaConfidence = 'measured' | 'partial' | 'estimated' | 'unknown'
-export type QuotaWindowStatus = 'allowed' | 'allowed_warning' | 'rejected' | 'unknown'
+export type QuotaWindowStatus = 'allowed' | 'allowed_warning' | 'rejected' | 'renewed' | 'unknown'
 
 export type QuotaWindow = {
   kind: string
@@ -21,6 +27,8 @@ export type QuotaWindow = {
   resets_at: string | null
   status: QuotaWindowStatus
   scope_model: string | null
+  /** Models covered by a scoped window (an Antigravity model group); empty when unknown. */
+  scope_models?: string[]
 }
 
 export type OrinUsageWindow = {
@@ -54,7 +62,13 @@ export type QuotaUpdatedEvent = {
 }
 
 const CONFIDENCES: readonly QuotaConfidence[] = ['measured', 'partial', 'estimated', 'unknown']
-const STATUSES: readonly QuotaWindowStatus[] = ['allowed', 'allowed_warning', 'rejected', 'unknown']
+const STATUSES: readonly QuotaWindowStatus[] = [
+  'allowed',
+  'allowed_warning',
+  'rejected',
+  'renewed',
+  'unknown',
+]
 
 function optFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
@@ -76,6 +90,7 @@ function parseQuotaWindow(raw: unknown): QuotaWindow | null {
     resets_at: optStr(data.resets_at),
     status,
     scope_model: optStr(data.scope_model),
+    scope_models: list(data.scope_models, (item) => (typeof item === 'string' && item.trim() ? item.trim() : null)),
   }
 }
 
@@ -167,6 +182,12 @@ export function quotaSourceLabel(source: string | null): string {
       return 'Rollout do Codex'
     case 'claude_usage_cache':
       return 'Cache local do Claude'
+    case 'claude_usage_command':
+      return 'Consulta ao Claude (/usage)'
+    case 'codex_app_server':
+      return 'Consulta ao Codex (app-server)'
+    case 'agy_usage_command':
+      return 'Consulta ao Antigravity (/usage)'
     case 'error':
       return 'Erro recente'
     case 'orin_usage':
@@ -198,20 +219,49 @@ export function quotaStatusLabel(status: QuotaWindowStatus): string {
       return 'Atenção'
     case 'rejected':
       return 'Esgotada'
+    case 'renewed':
+      return 'Renovada'
     case 'unknown':
     default:
       return 'Desconhecido'
   }
 }
 
+/** "5 h", "Semanal", "Semanal · Fable", "5 h · Gemini", "Semanal · Claude e GPT". */
 export function quotaWindowLabel(win: QuotaWindow): string {
-  if (win.kind === 'five_hour') return '5 h'
-  if (win.kind === 'seven_day' || win.kind === 'weekly') return 'Semanal'
-  if (win.kind === 'weekly_scoped') {
-    return win.scope_model ? `Semanal (${win.scope_model})` : 'Semanal'
-  }
-  if (win.scope_model) return `${win.kind} (${win.scope_model})`
-  return win.kind === 'unknown' ? 'Assinatura' : win.kind
+  let base: string
+  if (win.kind === 'five_hour') base = '5 h'
+  else if (win.kind === 'seven_day' || win.kind === 'weekly' || win.kind === 'weekly_scoped') base = 'Semanal'
+  else base = win.kind === 'unknown' ? 'Assinatura' : win.kind
+  return win.scope_model ? `${base} · ${win.scope_model}` : base
+}
+
+const WINDOW_KIND_ORDER: Record<string, number> = {
+  five_hour: 0,
+  seven_day: 1,
+  weekly: 2,
+  weekly_scoped: 3,
+}
+
+/** Windows grouped by scope (unscoped first), and 5 h before weekly inside each scope. */
+export function sortQuotaWindows(windows: readonly QuotaWindow[]): QuotaWindow[] {
+  return [...windows].sort((a, b) => {
+    if ((a.scope_model === null) !== (b.scope_model === null)) return a.scope_model === null ? -1 : 1
+    const scope = (a.scope_model ?? '').localeCompare(b.scope_model ?? '', 'pt-BR')
+    if (scope !== 0) return scope
+    return (WINDOW_KIND_ORDER[a.kind] ?? 9) - (WINDOW_KIND_ORDER[b.kind] ?? 9)
+  })
+}
+
+/** "libera 14:59" for today, "libera 24/11 14:59" otherwise; null without a reset time. */
+export function formatQuotaRelease(resetsAt: string | null, nowMs?: number): string | null {
+  const when = formatResetTime(resetsAt, nowMs)
+  if (!when) return null
+  return `libera ${when.replace(',', '')}`
+}
+
+export function isQuotaWindowRenewed(win: QuotaWindow): boolean {
+  return win.status === 'renewed'
 }
 
 export function highestKnownPercent(quota: ProviderQuota | null): number | null {

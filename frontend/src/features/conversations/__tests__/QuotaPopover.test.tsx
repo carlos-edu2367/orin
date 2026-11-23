@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ApiClient } from '../../../api/client'
@@ -101,8 +101,9 @@ describe('QuotaPopover', () => {
     const claudeCard = within(dialog).getByTestId('quota-card-anthropic-cli')
     expect(claudeCard).toHaveTextContent('Claude CLI')
     expect(claudeCard).toHaveTextContent('45%')
-    expect(claudeCard).toHaveTextContent('Fable')
+    expect(claudeCard).toHaveTextContent('Semanal · Fable')
     expect(claudeCard).toHaveTextContent('77%')
+    expect(claudeCard).toHaveTextContent('Cache local do Claude')
     expect(claudeCard).toHaveTextContent('visto há 6 min')
     expect(claudeCard).toHaveTextContent(/42\.500/)
     expect(claudeCard).toHaveTextContent(/7 chamadas/)
@@ -116,7 +117,8 @@ describe('QuotaPopover', () => {
 
     const agyCard = within(dialog).getByTestId('quota-card-google-antigravity')
     expect(agyCard).toHaveTextContent('Antigravity')
-    expect(agyCard).toHaveTextContent('O Antigravity não informa a cota')
+    expect(agyCard).toHaveTextContent('Sem leitura do Antigravity ainda')
+    expect(agyCard).not.toHaveTextContent('não informa')
     expect(agyCard).toHaveTextContent(/5\.000/)
     expect(agyCard).toHaveTextContent(/22\.000/)
   })
@@ -176,8 +178,136 @@ describe('QuotaPopover', () => {
       />,
     )
     await user.click(screen.getByTestId('quota-ring-trigger'))
-    await user.click(screen.getByRole('button', { name: /atualizar/i }))
+    // Opening the panel already asks for fresh data (server-side CLI probe).
     expect(onRefresh).toHaveBeenCalledTimes(1)
+    await user.click(screen.getByRole('button', { name: /atualizar/i }))
+    expect(onRefresh).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not refresh while closed and refreshes once per opening', async () => {
+    const user = userEvent.setup()
+    const onRefresh = vi.fn()
+    render(
+      <QuotaPopover
+        provider="anthropic-cli"
+        subscriptions={SAMPLE_SUBSCRIPTIONS}
+        onRefresh={onRefresh}
+        nowMs={nowMs}
+      />,
+    )
+    expect(onRefresh).not.toHaveBeenCalled()
+    await user.click(screen.getByTestId('quota-ring-trigger'))
+    await user.click(screen.getByRole('button', { name: /fechar painel/i }))
+    await user.click(screen.getByTestId('quota-ring-trigger'))
+    expect(onRefresh).toHaveBeenCalledTimes(2)
+  })
+
+  it('renders a compact vertical list on its own surface, not on the shared picker panel', async () => {
+    const user = userEvent.setup()
+    render(
+      <QuotaPopover provider="anthropic-cli" subscriptions={SAMPLE_SUBSCRIPTIONS} nowMs={nowMs} />,
+    )
+    await user.click(screen.getByTestId('quota-ring-trigger'))
+
+    const panel = screen.getByTestId('quota-popover-panel')
+    expect(panel).toHaveClass('quota-popover__panel')
+    expect(panel).not.toHaveClass('picker-panel')
+    expect(screen.getByTestId('quota-subscriptions-grid')).toHaveClass('quota-cards--popover')
+
+    const cards = within(panel).getAllByTestId(/^quota-card-/)
+    expect(cards.map((card) => card.getAttribute('data-testid'))).toEqual([
+      'quota-card-anthropic-cli',
+      'quota-card-openai-codex',
+      'quota-card-google-antigravity',
+    ])
+    expect(within(cards[0]).getByText('Atual')).toBeInTheDocument()
+    expect(within(cards[1]).queryByText('Atual')).not.toBeInTheDocument()
+
+    // One row per window with label, percent, bar and release time; usage by Orin is collapsed.
+    const windows = within(cards[0]).getAllByRole('listitem')
+    expect(windows).toHaveLength(2)
+    expect(windows[0]).toHaveTextContent('5 h')
+    expect(windows[0]).toHaveTextContent('45%')
+    expect(windows[0]).toHaveTextContent(/libera /)
+    expect(cards[0].querySelector('details.quota-card__orin-usage')).not.toHaveAttribute('open')
+  })
+
+  it('shows the measured Antigravity groups as scoped windows and the new source labels', async () => {
+    const user = userEvent.setup()
+    const agy: ProviderQuota = {
+      ...SAMPLE_SUBSCRIPTIONS[2],
+      confidence: 'measured',
+      source: 'agy_usage_command',
+      observed_at: '2026-11-21T12:59:00Z',
+      age_seconds: 60,
+      windows: [
+        { kind: 'seven_day', used_percent: 9, resets_at: '2026-11-25T18:03:09Z', status: 'allowed', scope_model: 'Claude e GPT', scope_models: ['Claude Opus 5.5', 'GPT-OSS 120B'] },
+        { kind: 'five_hour', used_percent: 0, resets_at: '2026-11-21T17:21:19Z', status: 'allowed', scope_model: 'Claude e GPT' },
+        { kind: 'seven_day', used_percent: 1, resets_at: '2026-11-30T12:20:26Z', status: 'allowed', scope_model: 'Gemini' },
+        { kind: 'five_hour', used_percent: 17, resets_at: '2026-11-21T17:20:26Z', status: 'allowed', scope_model: 'Gemini' },
+      ],
+    }
+    const codex: ProviderQuota = { ...SAMPLE_SUBSCRIPTIONS[1], source: 'codex_app_server' }
+    const claude: ProviderQuota = { ...SAMPLE_SUBSCRIPTIONS[0], source: 'claude_usage_command' }
+    render(
+      <QuotaPopover provider="google-antigravity" subscriptions={[claude, codex, agy]} nowMs={nowMs} />,
+    )
+    await user.click(screen.getByTestId('quota-ring-trigger'))
+
+    const agyCard = screen.getByTestId('quota-card-google-antigravity')
+    const labels = within(agyCard)
+      .getAllByRole('listitem')
+      .map((item) => item.querySelector('.quota-card__window-label')?.textContent)
+    expect(labels).toEqual(['5 h · Claude e GPT', 'Semanal · Claude e GPT', '5 h · Gemini', 'Semanal · Gemini'])
+    expect(agyCard).toHaveTextContent('Consulta ao Antigravity (/usage)')
+    expect(agyCard).toHaveTextContent('Medido')
+    expect(within(agyCard).getByText('Semanal · Claude e GPT')).toHaveAttribute(
+      'title',
+      expect.stringContaining('Modelos: Claude Opus 5.5, GPT-OSS 120B'),
+    )
+    expect(screen.getByTestId('quota-card-anthropic-cli')).toHaveTextContent('Consulta ao Claude (/usage)')
+    expect(screen.getByTestId('quota-card-openai-codex')).toHaveTextContent('Consulta ao Codex (app-server)')
+  })
+
+  it('shows a renewed window as renewed instead of the old percent', async () => {
+    const user = userEvent.setup()
+    const renewed: ProviderQuota = {
+      ...SAMPLE_SUBSCRIPTIONS[0],
+      confidence: 'partial',
+      windows: [
+        { kind: 'seven_day', used_percent: null, resets_at: null, status: 'renewed', scope_model: null },
+      ],
+    }
+    render(<QuotaPopover provider="anthropic-cli" subscriptions={[renewed]} nowMs={nowMs} />)
+    await user.click(screen.getByTestId('quota-ring-trigger'))
+
+    const card = screen.getByTestId('quota-card-anthropic-cli')
+    expect(card).toHaveTextContent('Semanal')
+    expect(card).toHaveTextContent('Renovada')
+    expect(card).toHaveTextContent('aguardando leitura')
+    expect(card).not.toHaveTextContent('77%')
+  })
+
+  it('advances the age on its own every 30 seconds while mounted', () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(Date.parse('2026-11-21T13:00:00Z'))
+      const quota: ProviderQuota = { ...SAMPLE_SUBSCRIPTIONS[0], observed_at: '2026-11-21T12:56:00Z', age_seconds: 240 }
+      render(<QuotaPopover provider="anthropic-cli" subscriptions={[quota]} />)
+      const trigger = screen.getByTestId('quota-ring-trigger')
+      expect(trigger.getAttribute('title')).toContain('visto há 4 min')
+
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
+      expect(trigger.getAttribute('title')).toContain('visto há 4 min')
+      act(() => {
+        vi.advanceTimersByTime(30_000)
+      })
+      expect(trigger.getAttribute('title')).toContain('visto há 5 min')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refreshes displayed quota automatically when SSE quota.updated arrives', async () => {
