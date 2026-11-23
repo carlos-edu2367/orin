@@ -21,7 +21,7 @@
 [![License: MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-64748b?style=for-the-badge)](LICENSE)
 
 [**Download**](#download-e-instalação) ·
-[**Novidades da v0.12**](#novidades-da-v012) ·
+[**Novidades da v0.13**](#novidades-da-v013) ·
 [**Agentes especialistas**](#agentes-especialistas) ·
 [**Tour visual**](#tour-visual) ·
 [**Orin Code & CLI**](#orin-code-web-desktop-e-terminal) ·
@@ -81,10 +81,25 @@
 
 ---
 
-## Novidades da `v0.12`
+## Novidades da `v0.13`
 
 > [!TIP]
-> A série `0.12` transforma o Orin num **orquestrador de assinaturas**: Claude, Codex e Antigravity trabalham juntos na mesma tarefa, cada agente no modelo certo, sem pagar API por token.
+> A série `0.13` é sobre **orquestração**: o Orin passa a montar fluxos multiagente repetíveis, revisar o trabalho com um modelo de outra família e mostrar quanto de cada assinatura ainda resta, e nada que gaste tokens por conta própria vem ligado por padrão.
+
+| Área | O que mudou |
+| :--- | :--- |
+| 🔁 **Pipelines** (`0.13.2`) | Fluxos declarativos em YAML (`.orin/pipelines/`, pasta do usuário ou prontos) com etapas, `map` em paralelo, *gates* de comando, esquema e verificador, laços de correção com teto, orçamento duro de tokens, custo e tempo, e **retomada pelo diário** repetindo só o que falhou. Quatro prontos: `implementar-verificar`, `revisao-multimodelo`, `corrigir-bug` e `pesquisa`. Veja [`docs/PIPELINES.md`](docs/PIPELINES.md). |
+| 🎯 **`/goal`** (`0.13.2`) | Defina um objetivo e o Orin continua os turnos sozinho até um avaliador barato confirmar que terminou, com teto de tokens, de voltas e parada por falta de progresso. |
+| 📊 **Cota das assinaturas em tempo real** (`0.13.2`) | Limites de 5 h e semanal de **Claude, Codex e Antigravity** consultados direto nos CLIs (sem chamar modelo), ao abrir o painel, ao fim de cada turno e a cada 5 min. O Antigravity mostra os grupos *Gemini* e *Claude e GPT*. |
+| 🔍 **Verificação independente** | Um revisor de **outra família de modelo** confere a entrega e só aceita achado com prova (`arquivo:linha` ou comando). Cartão na conversa e métricas por par autor × revisor. |
+| 🌳 **Worktrees e fila de merge** | Subagentes podem escrever em paralelo cada um no seu `git worktree`, com merge serializado, comando de validação e cartão de conflito. Quadro de tarefas compartilhado com *claim* atômico. |
+| 💬 **Mensagens vivas** | Mande mensagem a um subagente que está rodando, e o Orin Friend entrega a sua no turno em andamento, sem esperar o fim. |
+| 🧠 **Memória por agente** | Cada agente especialista tem memória própria, com detecção de conflito, histórico, quarentena de conteúdo externo e aba **Memória › Revisão**. |
+| ⚡ **Esforço por modelo** | Seletor de esforço no composer e `/effort`, herança para subagentes e aviso quando o nível pedido é ajustado. |
+| 🩹 **Contexto** | "Prompt is too long" vira compactação e nova tentativa, com janela efetiva aprendida por modelo. |
+
+<details>
+<summary><b>Série <code>0.12</code>: o orquestrador de assinaturas</b></summary>
 
 | Área | O que mudou |
 | :--- | :--- |
@@ -102,6 +117,9 @@
 | 🩹 **Correções do multiagente** | Cada delegação cria uma instância nova de subagente; o contador de *"subagentes em paralelo"* conta só subagentes reais; a edição não é mais recusada por leituras de rodadas anteriores (`READ_IN_SAME_BATCH`); `project_map`/`search_code` não travam mais o turno esperando o índice; `run_command` respeita o timeout (mata a árvore inteira de processos); uma chamada abandonada pelo CLI não prende mais o turno; e o `use_skill` resolve skills sem o namespace quando o nome é único. |
 | 👁️ **Antigravity com visão** | Os modelos Gemini e Claude do Antigravity agora enxergam imagens anexadas. |
 | ⬆️ **Atualização em um reinício** | A atualização roda fora do launcher, reconcilia tentativas interrompidas e sempre reabre o Orin; no Linux, o atalho do menu é criado automaticamente. |
+| 🤖 **Bot do Discord** | Controle remoto das sessões Chat e Code pelo Orin Friend no Discord, com cartão vivo de progresso, botões para perguntas e aprovações, e áudio e imagem nos anexos. |
+
+</details>
 
 ---
 
@@ -242,6 +260,8 @@ O Orin é agnóstico de provedor: combine modelos locais gratuitos com modelos d
 
 Nos três, as ferramentas do Orin chegam ao modelo por um servidor MCP local com token próprio; as ferramentas nativas de cada CLI ficam desligadas, e qualquer tentativa de usá-las encerra o turno.
 
+O anel ao lado do seletor de modelo mostra o maior uso conhecido da assinatura atual; um clique abre os limites de 5 h e semanal das três, com o horário em que cada janela libera.
+
 ### APIs e modelos locais
 
 | Provedor | Destaque |
@@ -295,6 +315,7 @@ orin restart | stop          # Reinicia ou encerra os serviços locais
 orin autostart on|off|status # Início automático ao fazer login
 orin update                  # Atualiza (--check, --to, --rollback)
 orin code [prompt]           # Sessão Orin Code no repositório atual
+orin pipeline list|status|resume|cancel  # Pipelines pela API local
 orin serve                   # Modo servidor multiperfil (requer ORIN_PUBLIC_URL)
 orin --uninstall             # Remove a instalação do usuário
 ```
@@ -355,6 +376,8 @@ flowchart LR
     P --> R["Sessão & Runtime agêntico"]
     L <--> R
     R --> T["Árvore de agentes<br/>(profundidade, posse, vagas)"]
+    R --> PL["Motor de pipelines<br/>(diário, gates, orçamento)"]
+    PL --> T
     T --> M["Catálogo de modelos + roteamento por agente"]
     M --> API["APIs: OpenAI / OpenRouter / Ollama / NVIDIA / OpenCode / OmniRoute"]
     M --> CLI["Assinaturas: Claude / Codex / Antigravity"]
@@ -371,11 +394,14 @@ flowchart LR
 ```text
 src/agentos/
 ├── api/                 # Gateway FastAPI, REST, SSE, WebSocket de voz, /v1/custom-agents e controles de subagente da Cena
-├── agentic/             # Sessão, runtime, ferramentas, árvore de subagentes e definições de agentes
+├── agentic/             # Sessão, runtime, ferramentas, árvore de subagentes, esforço, verificação e orçamento
+├── pipelines/           # Esquema v1, validador, motor com portas, diário durável, prontos e /goal
+├── quota/               # Cota das assinaturas: leitura passiva, sondas dos CLIs e política
 ├── providers/           # Adaptadores de CLI (Claude, Codex, Antigravity), fila de vagas e servidor MCP de ferramentas
 ├── provider_catalog/    # Catálogo de modelos, preços e bridges
 ├── live/                # Pipeline de voz: VAD, wake word, Whisper, Chatterbox, Kokoro e barge-in
 ├── friend/              # Orin Friend: SOUL.md, vínculo e memória afetiva
+├── discord/             # Bot do Discord: ponte com o Orin Friend e cartões vivos
 ├── cli_code/            # `orin code` / `orin-code` e protocolo `claude-agent-sdk`
 ├── permissions/         # Modos de permissão, parser AST de shell e Workspace Trust
 ├── hooks/  settings/    # 33 eventos de hooks e settings em 5 camadas (.orin e .claude)
@@ -441,6 +467,8 @@ npm --prefix frontend run test:e2e           # Playwright
 | [`VISAO_GERAL.md`](VISAO_GERAL.md) | Visão completa do produto |
 | [`DESIGN.md`](DESIGN.md) | Sistema de design e direção visual |
 | [`docs/ORIN_CODE.md`](docs/ORIN_CODE.md) | Orin Code, CLI, permissões, hooks, agentes e settings |
+| [`docs/PIPELINES.md`](docs/PIPELINES.md) | Pipelines, esquema v1, gates, orçamento, retomada, `/goal` e `RunPipeline` |
+| [`docs/releases/`](docs/releases/) | Notas de cada versão |
 | [`docs/LAUNCHER.md`](docs/LAUNCHER.md) | Launcher, Desktop, bandeja e auto-update |
 | [`docs/MCP.md`](docs/MCP.md) | Conectores MCP, lazy loading, OAuth e `mcp serve` |
 | [`docs/PLUGINS.md`](docs/PLUGINS.md) | Plugins, hooks, LSP e marketplaces |
