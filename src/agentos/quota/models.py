@@ -22,6 +22,8 @@ class QuotaWindow:
     resets_at: datetime | None
     status: str
     scope_model: str | None = None
+    # Models covered by a scoped window (e.g. an Antigravity model group); empty when unknown.
+    scope_models: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -30,6 +32,7 @@ class QuotaWindow:
             "resets_at": self.resets_at.astimezone(UTC).isoformat() if self.resets_at else None,
             "status": self.status,
             "scope_model": self.scope_model,
+            "scope_models": list(self.scope_models),
         }
 
 

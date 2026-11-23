@@ -39,6 +39,8 @@ def test_package_e_keys_registered_with_spec_defaults_and_scopes() -> None:
         "effort.maxForSubagents": (None, Scope.PROJECT_LOWER_ONLY),
         "effort.escalateOnFailure": (False, Scope.USER_ONLY),
         "quota.display.enabled": (True, Scope.USER_ONLY),
+        "quota.activeProbe.enabled": (True, Scope.USER_ONLY),
+        "quota.activeProbe.intervalMinutes": (5, Scope.USER_ONLY),
         "quota.policy.enabled": (False, Scope.USER_ONLY),
         "quota.policy.warnPercent": (80, Scope.USER_ONLY),
         "quota.policy.blockBackgroundPercent": (90, Scope.USER_ONLY),

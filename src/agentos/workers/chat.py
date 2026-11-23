@@ -2363,9 +2363,26 @@ class ChatWorker:
 
             qservice = getattr(self, "_quota_service", None)
             if qservice is None:
-                qstore = QuotaSnapshotStore(engine)
-                qservice = QuotaService(qstore)
+                # One service per engine for the worker's lifetime: its probe throttle (60 s per subscription)
+                # and in-flight lock live in the service, so a fresh one per turn would defeat them.
+                cached = getattr(self, "_quota_service_cache", None)
+                if cached is not None and cached[0] is engine:
+                    qservice = cached[1]
+                else:
+                    from agentos.quota.active_probe import default_active_probes
+
+                    qservice = QuotaService(QuotaSnapshotStore(engine), active_probes=default_active_probes())
+                    self._quota_service_cache = (engine, qservice)
             user_id = str(turn.get("user_id") or "")
+            turn_provider = str(turn.get("provider") or "")
+
+            def _quota_after_turn() -> None:
+                # End of a completed turn: reread the files and probe only the subscription this turn used.
+                after_turn = getattr(qservice, "after_turn", None)
+                if callable(after_turn):
+                    after_turn(user_id, turn_provider or None)
+                else:
+                    qservice.refresh_from_files(user_id)
 
             def _quota_sink(provider_name: str, state) -> None:
                 qservice.record_rate_limit_state(user_id, provider_name, state)
@@ -2389,7 +2406,7 @@ class ChatWorker:
                 "quota_gate": QuotaPolicy(qservice),
                 "quota_sink": _quota_sink,
                 "quota_error_sink": _quota_error_sink,
-                "quota_after_turn": lambda: qservice.refresh_from_files(user_id),
+                "quota_after_turn": _quota_after_turn,
             }
         except Exception:
             _LOGGER.debug("quota wiring unavailable for turn %s", turn.get("turn_id"), exc_info=True)
