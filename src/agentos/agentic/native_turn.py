@@ -105,6 +105,13 @@ MAX_NATIVE_PRIOR_HISTORY_CHARS: int = 120_000
 # How many times one turn resumes after the CLI called a harmless built-in tool (agy's manage_task, list_dir...)
 # before it fails as it did before: a model that keeps calling it would otherwise restart the CLI forever.
 MAX_BUILTIN_TOOL_DETOURS: int = 2
+MAX_TEXT_TOOL_CALL_CORRECTIONS: int = 1
+TEXT_TOOL_CALL_CORRECTION = (
+    "[Sistema] Sua última resposta trazia uma chamada de ferramenta escrita como texto "
+    "(<function_calls>, <invoke> ou <function_results>). Ela não foi executada e o resultado que apareceu ali "
+    "não é real. Se ainda precisa da ferramenta, chame-a de verdade pelo mecanismo nativo de ferramentas, "
+    "espere o resultado real e só então responda. Se já tem o que precisa, responda sem escrever chamadas."
+)
 _DELEGATION_TOOLS: frozenset[str] = frozenset(
     {"run_subagent", "ask_agent", "ask_agents", "check_subagent"}
 )
@@ -1950,6 +1957,8 @@ class _RunnerSink:
         )
         self.speak_state = _SpeakState()
         self._residual_tool_filter = ResidualToolTextStreamFilter()
+        # The model typed a tool call as plain text since the last real tool batch (it never ran).
+        self._text_tool_call_seen = False
         self._speak_parser: SpeakStreamParser | None = (
             SpeakStreamParser(live_voice_enabled=self._live_fallback_enabled)
             if self._is_live_or_friend
@@ -2064,6 +2073,18 @@ class _RunnerSink:
         if chunk_text:
             self._emit_visual_delta(chunk_text)
 
+    def _absorb_text_tool_call_flag(self) -> None:
+        if self._residual_tool_filter.saw_text_tool_call:
+            self._text_tool_call_seen = True
+
+    def consume_text_tool_call(self) -> bool:
+        """True once per fake text tool call at the end of the turn; clears the flag."""
+        self._flush_residual_tool_filter()
+        self._absorb_text_tool_call_flag()
+        seen = self._text_tool_call_seen
+        self._text_tool_call_seen = False
+        return seen
+
     def settled_assistant_text(self) -> str:
         self._flush_residual_tool_filter()
         return strip_residual_tool_protocol_blocks("".join(self.text_parts)).strip()
@@ -2104,6 +2125,8 @@ class _RunnerSink:
 
     def _on_tool_batch_finished(self, results: list[dict[str, object]]) -> None:
         self._flush_residual_tool_filter()
+        # A real tool ran after the fake text: the model already recovered, nothing to correct.
+        self._text_tool_call_seen = False
         self._residual_tool_filter = ResidualToolTextStreamFilter()
         if self._speak_parser is not None:
             fin_res = self._speak_parser.finish(live_voice_enabled=False)
@@ -2156,6 +2179,7 @@ class _RunnerSink:
     def reset_for_new_message(self) -> None:
         self._message_wrote_text = False
         self._current_sink_message_id = None
+        self._absorb_text_tool_call_flag()
         self._residual_tool_filter = ResidualToolTextStreamFilter()
         self._reset_model_heartbeat()
         if self._is_live_or_friend:
@@ -3100,6 +3124,7 @@ class NativeTurnRunner:
         provider_retries = 0
         process_count = 0
         verify_gate_attempts = 0
+        text_tool_corrections = 0
         closing_sent = False
         resume_session_id: str | None = None
         initial_user_images_pending = bool(initial_user_image_paths)
@@ -3373,6 +3398,38 @@ class NativeTurnRunner:
                         self.runtime.limits.max_turns is not None
                         and sink.model_calls >= self.runtime.limits.max_turns
                     )
+
+                    if (
+                        sink.consume_text_tool_call()
+                        and text_tool_corrections < MAX_TEXT_TOOL_CALL_CORRECTIONS
+                        and not closing_sent
+                        and not turns_used
+                    ):
+                        # The model wrote a tool call as text: it never ran. Say so once and let it use the real tool.
+                        text_tool_corrections += 1
+                        if persistent_stdin:
+                            handle.send_user([{"type": "text", "text": TEXT_TOOL_CALL_CORRECTION}])
+                            sink.reset_for_new_message()
+                            self.runtime._life(self.turn, "running")
+                            continue
+                        self.runtime._effect_finished(
+                            self.turn,
+                            provider_effect_id,
+                            state="APPLIED",
+                            private_result={"outcome": "text_tool_call_correction"},
+                        )
+                        if supports_session_resume and resume_session_id:
+                            user_content = [{"type": "text", "text": TEXT_TOOL_CALL_CORRECTION}]
+                        else:
+                            assistant_text = sink.settled_assistant_text()
+                            if assistant_text:
+                                self.messages.append({"role": "assistant", "content": assistant_text})
+                            self.messages.append({"role": "user", "content": TEXT_TOOL_CALL_CORRECTION})
+                            user_content = self._build_initial_user_content(tool_schemas)
+                        sink.reset_for_new_message()
+                        self.runtime._life(self.turn, "running")
+                        next_process = True
+                        break
 
                     gate_action = self.runtime._get_verification_gate().evaluate_turn_end(
                         self.turn,

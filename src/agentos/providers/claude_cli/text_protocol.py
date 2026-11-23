@@ -21,6 +21,11 @@ _HALLUCINATED_RESULT_MARKERS: tuple[str, ...] = (
     "[/Tool Result]",
     "&#91;/Tool Result]",
     "&#x5b;/Tool Result]",
+    # Anthropic-native made-up result block (`<function_results><result><output>...`).
+    "<function_results",
+    "&lt;function_results",
+    "</function_results>",
+    "&lt;/function_results&gt;",
 )
 _BRACKET_TOOL_USE_PREFIXES: tuple[str, ...] = (
     "[Tool Use",
@@ -1051,6 +1056,26 @@ _RESIDUAL_XML_TOOL_BLOCK_RE = re.compile(
     r"(?:(?:<|&lt;)/(?:orin_tool_call|tool_call)\s*(?:>|&gt;)|\Z)",
     re.IGNORECASE,
 )
+_XML_ATTRS = r"(?:[^>&]|&(?!gt;))*"
+# Anthropic-native tool syntax a model sometimes types as plain text instead of calling the tool:
+# `<function_calls><invoke name="X"><parameter name="p">v</parameter></invoke></function_calls>` and the
+# made-up `<function_results><result><output>...</output></result></function_results>` that follows it.
+_RESIDUAL_ANTHROPIC_BLOCK_RE = re.compile(
+    r"(?:<|&lt;)(?P<tag>function_calls|function_results)\b[^>&]*(?:>|&gt;)[\s\S]*?"
+    r"(?:(?:<|&lt;)/(?P=tag)\s*(?:>|&gt;)|\Z)"
+    r"|(?:<|&lt;)invoke\s+name\s*=" + _XML_ATTRS + r"(?:>|&gt;)[\s\S]*?"
+    r"(?:(?:<|&lt;)/invoke\s*(?:>|&gt;)|\Z)",
+    re.IGNORECASE,
+)
+# Closers left over when the opening half was already filtered/streamed away. `</output>`/`</result>` only count
+# glued to a `</function_results>`: on their own they are ordinary text.
+_ORPHAN_RESULT_CLOSERS = (
+    r"(?:(?:<|&lt;)/(?:output|result)\s*(?:>|&gt;)\s*)*(?:<|&lt;)/function_results\s*(?:>|&gt;)"
+)
+_ORPHAN_CALL_CLOSERS = r"(?:<|&lt;)/(?:function_calls|invoke)\s*(?:>|&gt;)"
+_RESIDUAL_ORPHAN_CLOSER_RE = re.compile(
+    rf"{_ORPHAN_RESULT_CLOSERS}|{_ORPHAN_CALL_CLOSERS}", re.IGNORECASE
+)
 _RESIDUAL_STREAM_PREFIXES: tuple[str, ...] = (
     "[Tool Use",
     "[Tool Result",
@@ -1062,19 +1087,63 @@ _RESIDUAL_STREAM_PREFIXES: tuple[str, ...] = (
     "<tool_call",
     "&lt;orin_tool_call",
     "&lt;tool_call",
+    "<function_calls",
+    "<function_results",
+    "<invoke",
+    "&lt;function_calls",
+    "&lt;function_results",
+    "&lt;invoke",
 )
 _RESIDUAL_STREAM_OPEN_RE = re.compile(
     r"(?:\[|&#91;|&#x5b;)\s*Tool (?P<bkind>Use|Result)\b[^\]]*\]"
-    r"|(?:<|&lt;)(?P<xtag>orin_tool_call|tool_call)\b[^>&]*(?:>|&gt;)",
+    r"|(?:<|&lt;)(?P<xtag>orin_tool_call|tool_call)\b[^>&]*(?:>|&gt;)"
+    r"|(?:<|&lt;)(?P<atag>function_calls|function_results)\b[^>&]*(?:>|&gt;)"
+    r"|(?:<|&lt;)(?P<itag>invoke)\s+name\s*=" + _XML_ATTRS + r"(?:>|&gt;)"
+    rf"|(?P<orphan>{_ORPHAN_RESULT_CLOSERS}|{_ORPHAN_CALL_CLOSERS})",
     re.IGNORECASE,
 )
+_ORPHAN_PENDING_CLOSERS = ("</output>", "</result>")
+_ORPHAN_PENDING_TARGETS = ("</output>", "</result>", "</function_results>", "</function_calls>", "</invoke>")
+_ORPHAN_PENDING_WINDOW = 160
+_PARTIAL_ENTITY_TAIL_RE = re.compile(r"&(?:l|lt|g|gt)?\Z", re.IGNORECASE)
+
+
+def _orphan_closer_pending(rest: str) -> bool:
+    """True when `rest` (starting at `<` or `&lt;`) could still grow into an orphan closer sequence."""
+    norm = re.sub(r"&lt;", "<", rest, flags=re.IGNORECASE)
+    norm = re.sub(r"&gt;", ">", norm, flags=re.IGNORECASE)
+    norm = _PARTIAL_ENTITY_TAIL_RE.sub("", norm)
+    pos = 0
+    while True:
+        while pos < len(norm) and norm[pos].isspace():
+            pos += 1
+        tail = norm[pos:].lower()
+        if not tail:
+            return True
+        for closer in _ORPHAN_PENDING_CLOSERS:
+            if tail.startswith(closer):
+                pos += len(closer)
+                break
+        else:
+            return any(target.startswith(tail) for target in _ORPHAN_PENDING_TARGETS)
+
+
+def _orphan_closer_hold(buf: str) -> int:
+    """Length of the buffer tail that may still turn into an orphan closer, or 0."""
+    start = max(0, len(buf) - _ORPHAN_PENDING_WINDOW)
+    for idx in range(start, len(buf)):
+        ch = buf[idx]
+        if ch == "<" or (ch == "&" and "&lt;".startswith(buf[idx : idx + 4].lower())):
+            if _orphan_closer_pending(buf[idx:]):
+                return len(buf) - idx
+    return 0
 _GLUED_ASSISTANT_PREFIX_RE = re.compile(
     r"^(?:\s*(?:\[|&#91;|&#x5b;)\s*Assistant\s*\]\s*|Assistant(?=\s|[A-ZÀ-Ú0-9*_`\"'\[\(\n]|$)\s*:?\s*)",
 )
 
 
 def strip_residual_tool_protocol_blocks(text: str) -> str:
-    """Strip leaked `[Tool Use ...][/Tool Use]`, `[Tool Result ...][/Tool Result]`, `&#91;...]` and `<orin_tool_call>` blocks outside code fences."""
+    """Strip leaked `[Tool Use ...][/Tool Use]`, `[Tool Result ...][/Tool Result]`, `&#91;...]`, `<orin_tool_call>` and Anthropic `<function_calls>`/`<invoke>`/`<function_results>` blocks outside code fences."""
     if not isinstance(text, str) or not text:
         return ""
     lowered = text.lower()
@@ -1084,6 +1153,9 @@ def strip_residual_tool_protocol_blocks(text: str) -> str:
         and "orin_tool_call" not in lowered
         and "<tool_call" not in lowered
         and "&lt;tool_call" not in lowered
+        and "function_calls" not in lowered
+        and "function_results" not in lowered
+        and "invoke" not in lowered
     ):
         return text
 
@@ -1096,6 +1168,8 @@ def strip_residual_tool_protocol_blocks(text: str) -> str:
         segment = _RESIDUAL_CLOSED_TOOL_BLOCK_RE.sub("", part)
         segment = _RESIDUAL_UNCLOSED_TOOL_BLOCK_RE.sub("", segment)
         segment = _RESIDUAL_XML_TOOL_BLOCK_RE.sub("", segment)
+        segment = _RESIDUAL_ANTHROPIC_BLOCK_RE.sub("", segment)
+        segment = _RESIDUAL_ORPHAN_CLOSER_RE.sub("", segment)
         cleaned_parts.append(segment)
     return "".join(cleaned_parts)
 
@@ -1107,7 +1181,11 @@ class ResidualToolTextStreamFilter:
         self._buf: str = ""
         self._active_close_re: re.Pattern[str] | None = None
         self._consume_glued_assistant: bool = False
+        self._glue_after_close: bool = True
         self._in_code_fence: bool = False
+        # True once the model wrote an Anthropic-style tool call/result as text (`<invoke>`, `<function_calls>`,
+        # `<function_results>`, orphan closers). That call never ran: native turns use it to tell the model so.
+        self.saw_text_tool_call: bool = False
 
     def _update_fence_state(self, emitted: str) -> None:
         count = emitted.count("```")
@@ -1154,7 +1232,7 @@ class ResidualToolTextStreamFilter:
                     break
                 after = self._buf[m_close.end() :]
                 self._active_close_re = None
-                self._consume_glued_assistant = True
+                self._consume_glued_assistant = self._glue_after_close
                 self._buf = after
                 continue
 
@@ -1173,6 +1251,20 @@ class ResidualToolTextStreamFilter:
                         continue
                 bkind = m_open.group("bkind")
                 xtag = m_open.group("xtag")
+                atag = m_open.group("atag") or m_open.group("itag")
+                self._glue_after_close = True
+                if m_open.group("orphan"):
+                    self.saw_text_tool_call = True
+                    self._buf = self._buf[m_open.end() :]
+                    continue
+                if atag:
+                    self.saw_text_tool_call = True
+                    self._glue_after_close = False
+                    self._active_close_re = re.compile(
+                        rf"(?:<|&lt;)/{re.escape(atag.lower())}\s*(?:>|&gt;)", re.IGNORECASE
+                    )
+                    self._buf = self._buf[m_open.end() :]
+                    continue
                 if bkind:
                     self._active_close_re = re.compile(
                         rf"(?:\[|&#91;|&#x5b;)\s*/Tool {re.escape(bkind)}\s*\]",
@@ -1206,6 +1298,7 @@ class ResidualToolTextStreamFilter:
                         hold = max(hold, len(tail))
                     elif p.startswith(("<", "&lt;")) and ">" not in tail and "&gt;" not in tail and len(tail) < 256:
                         hold = max(hold, len(tail))
+            hold = max(hold, _orphan_closer_hold(self._buf))
 
             if hold > 0:
                 emit_part = self._buf[:-hold]

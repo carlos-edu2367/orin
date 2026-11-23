@@ -6,7 +6,16 @@ export type MessageContentSegment =
   | { kind: 'activity'; group: ActivityGroup }
 
 const FAST_RESIDUAL_MARKER_RE =
-  /Tool\s+(?:Use|Result)|orin_tool_call|(?:<|&lt;)\s*\/?\s*tool_call\b|(?:<|&lt;)\s*\/?\s*tool_result\b|(?:<|&lt;)\s*\/?\s*speak\b/i
+  /Tool\s+(?:Use|Result)|orin_tool_call|(?:<|&lt;)\s*\/?\s*tool_call\b|(?:<|&lt;)\s*\/?\s*tool_result\b|(?:<|&lt;)\s*\/?\s*speak\b|(?:<|&lt;)\s*\/?\s*(?:function_calls|function_results|invoke)\b/i
+
+/**
+ * Anthropic-native tool syntax the model typed as plain text (it never ran, so there is no real tool card):
+ * `<function_calls>`, `<invoke name=...>`, `<function_results>` blocks (closed, or open until the end) and the
+ * orphan closers left behind (`</output></result></function_results>`). `<result>`/`<output>` only count inside a
+ * `function_results` block or glued to a `</function_results>`; on their own they are ordinary text.
+ */
+const ANTHROPIC_XML_TEXT_RE =
+  /(?:(?:<|&lt;)\/(?:output|result)\s*(?:>|&gt;)\s*)*(?:<|&lt;)\/function_results\s*(?:>|&gt;)|(?:<|&lt;)\/(?:function_calls|invoke)\s*(?:>|&gt;)|(?:<|&lt;)(?:(function_calls|function_results)\b|invoke\s+name\s*=)/gi
 
 const SPEAK_TAG_RE = /(?:<|&lt;)\s*\/?\s*speak\b(?:[^>&]|&(?!gt;))*?(?:>|&gt;)/gi
 
@@ -597,12 +606,34 @@ export function parseResidualToolBlocks(content: string): MessageContentSegment[
     TOOL_BLOCK_START_RE.lastIndex = pos
     const toolMatch = TOOL_BLOCK_START_RE.exec(content)
 
-    if (fenceMatch && (!toolMatch || fenceMatch.index < toolMatch.index)) {
+    ANTHROPIC_XML_TEXT_RE.lastIndex = pos
+    const anthropicMatch = ANTHROPIC_XML_TEXT_RE.exec(content)
+
+    const nextMarkerIndex = Math.min(
+      toolMatch ? toolMatch.index : Number.POSITIVE_INFINITY,
+      anthropicMatch ? anthropicMatch.index : Number.POSITIVE_INFINITY,
+    )
+
+    if (fenceMatch && fenceMatch.index < nextMarkerIndex) {
       markdownBuffer += stripSpeakTags(content.slice(pos, fenceMatch.index))
       const fenceOpenEnd = fenceMatch.index + fenceMatch[0].length
       const fenceEnd = findFenceEnd(content, fenceOpenEnd, fenceMatch[1])
       markdownBuffer += content.slice(fenceMatch.index, fenceEnd)
       pos = fenceEnd
+      continue
+    }
+
+    if (anthropicMatch && (!toolMatch || anthropicMatch.index < toolMatch.index)) {
+      markdownBuffer += stripSpeakTags(content.slice(pos, anthropicMatch.index))
+      const openedTag = anthropicMatch[1] ?? (/^(?:<|&lt;)invoke/i.test(anthropicMatch[0]) ? 'invoke' : undefined)
+      let dropEnd = anthropicMatch.index + anthropicMatch[0].length
+      if (openedTag) {
+        const closeRe = new RegExp(String.raw`(?:<|&lt;)\/${openedTag}\s*(?:>|&gt;)`, 'gi')
+        closeRe.lastIndex = dropEnd
+        const closeMatch = closeRe.exec(content)
+        dropEnd = closeMatch ? closeMatch.index + closeMatch[0].length : content.length
+      }
+      pos = dropEnd
       continue
     }
 
