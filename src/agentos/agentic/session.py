@@ -63,6 +63,8 @@ from .read_state import copy_read_state, prepare_carried_state
 from .reminders import ReminderQueue, render_memory_prompt_lines, system_reminder
 from .tools.interaction.notify import NotificationBudget
 from .phases import PhaseController
+from .usage_budget import EXCEEDED_ERROR_CODE, BudgetLimits, BudgetRegistry, default_subagent_budget, effective_budget, parse_budget
+from .structured_output import SCHEMA_INVALID, StructuredRun, output_instruction, run_with_output_schema, validate_output_schema
 from .runtime import CODE_MODE_CORE_TOOLS, AgenticLimits, AgenticTurnRuntime
 from .git_exclude import ensure_orin_excluded
 from .workspace import resolve_workspace
@@ -1696,6 +1698,7 @@ class TurnSession:
         self._window_rule_index = window_rule_index
         self._cli_model_arg = cli_model_arg
         self._agent_efforts: dict[str, tuple[str | None, str | None]] = {}
+        self._usage_budgets = BudgetRegistry()  # agent_id -> UsageBudget (WS-C4), fed by record_usage
         self._learned_window_tokens = learned_window_tokens
         self._context_observation_sink = context_observation_sink
         self._context_observation_invalidator = context_observation_invalidator
@@ -1999,6 +2002,9 @@ class TurnSession:
             self.agents_store.record_usage(
                 target_agent_id, str(turn.get("provider") or ""), str(turn.get("model_id") or ""), **kwargs,
             )
+        budgets = getattr(self, "_usage_budgets", None)
+        if budgets is not None and budgets.get(target_agent_id) is not None:
+            self._charge_usage_budget(turn, target_agent_id, input_tokens, output_tokens, total_tokens)
 
     def emit_lifecycle(
         self,
@@ -3136,6 +3142,8 @@ class TurnSession:
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
         pipeline_run_id: str | None = None,
+        output_schema: Mapping[str, Any] | None = None,
+        budget: Mapping[str, Any] | BudgetLimits | None = None,
     ) -> ToolOutcome:
         if teammate_name and caller is not None and not caller.is_main:
             return ToolOutcome(
@@ -3147,7 +3155,7 @@ class TurnSession:
             return self._start_subagent(
                 subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, isolation=isolation, agent_id=agent_id,
                 run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
-                pipeline_run_id=pipeline_run_id,
+                pipeline_run_id=pipeline_run_id, output_schema=output_schema, budget=budget,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
         if refusal is not None:
@@ -3157,7 +3165,7 @@ class TurnSession:
             outcome = self._start_subagent(
                 subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, isolation=isolation, agent_id=agent_id,
                 run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
-                pipeline_run_id=pipeline_run_id,
+                pipeline_run_id=pipeline_run_id, output_schema=output_schema, budget=budget,
             )
         except BaseException:
             self._release_teammate(clean_name)  # a start that raised never began
@@ -3184,7 +3192,14 @@ class TurnSession:
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
         pipeline_run_id: str | None = None,
+        output_schema: Mapping[str, Any] | None = None,
+        budget: Mapping[str, Any] | BudgetLimits | None = None,
     ) -> ToolOutcome:
+        try:
+            clean_schema = validate_output_schema(output_schema) if output_schema is not None else None
+            clean_budget = parse_budget(budget)
+        except ValueError as exc:
+            return ToolOutcome("failed", "Argumentos inválidos", str(exc), {"tool_kind": "agent"}, "INVALID_ARGUMENTS")
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
         if clean_type == "general-purpose":
@@ -3222,6 +3237,8 @@ class TurnSession:
             character_name=character_name,
             caller=caller,
             pipeline_run_id=pipeline_run_id,
+            output_schema=clean_schema,
+            budget=clean_budget,
         )
 
     def _ask_agent(
@@ -3242,6 +3259,8 @@ class TurnSession:
         character_name: str | None = None,
         caller: SubagentCaller | None = None,
         pipeline_run_id: str | None = None,
+        output_schema: Mapping[str, Any] | None = None,
+        budget: BudgetLimits | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         max_depth = self._subagent_max_depth()
@@ -3567,6 +3586,10 @@ class TurnSession:
             routing["requested_isolation"] = requested_isolation
         if pipeline_run_id is not None:
             routing["pipeline_run_id"] = str(pipeline_run_id)
+        if output_schema is not None:
+            routing["output_schema"] = output_schema
+        if budget is not None and not budget.is_empty:
+            routing["budget"] = budget
         with self._subagent_lock:
             if self._max_subagents_per_turn is not None and self._subagent_runs >= self._max_subagents_per_turn:
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
@@ -3904,7 +3927,9 @@ class TurnSession:
                 if is_promoted:
                     if outcome is not None:
                         self._save_agent_report(output_file, outcome)
-                    if cancel.is_set() or (outcome is not None and outcome.error_code == "TURN_CANCELLED"):
+                    if outcome is not None and outcome.error_code == EXCEEDED_ERROR_CODE:
+                        bg_status = "failed"
+                    elif cancel.is_set() or (outcome is not None and outcome.error_code == "TURN_CANCELLED"):
                         bg_status = "stopped"
                     elif outcome is not None and outcome.status == "succeeded":
                         bg_status = "completed"
@@ -3996,6 +4021,7 @@ class TurnSession:
 
     def _execute_subagent_run(self, **kwargs: Any) -> ToolOutcome:
         bus = self.lifecycle
+        output_schema, call_budget = kwargs.pop("output_schema", None), kwargs.pop("budget", None)
         agent_id = str(kwargs.get("agent_id") or "")
         # Public (Claude Code) type name, so hooks can match Explore/Plan/general-purpose.
         agent_type = public_subagent_type(str(kwargs.get("builtin_key") or kwargs.get("clean") or ""))
@@ -4015,7 +4041,7 @@ class TurnSession:
             remove_hooks = self._scoped_hooks(definition.hooks, source=f"agent:{definition.name}", agent_id=agent_id, origin=definition.origin)
         status = "failed"  # a crash inside the subagent still closes the start/stop pair
         try:
-            outcome = self._execute_subagent_run_inner(**kwargs)
+            outcome = self._run_guarded(kwargs, output_schema, call_budget)
             status = str(getattr(outcome, "status", "") or "failed")
             return outcome
         finally:
@@ -4030,6 +4056,100 @@ class TurnSession:
                 )
             if remove_hooks is not None:
                 remove_hooks()
+
+    def _run_guarded(
+        self, kwargs: dict[str, Any], output_schema: Mapping[str, Any] | None, call_budget: BudgetLimits | None,
+    ) -> ToolOutcome:
+        """One subagent run under its usage budget and, with an output schema, its JSON correction rounds (WS-C4)."""
+        agent_id = str(kwargs.get("agent_id") or "")
+        caller = kwargs.get("caller") or self._main_caller()
+        limits = effective_budget(call_budget or BudgetLimits(), default_subagent_budget(self.effective_settings))
+        cancel = kwargs.get("hook_cancel")
+        if cancel is None:
+            cancel = kwargs["hook_cancel"] = threading.Event()
+        budget = self._usage_budgets.open(agent_id, limits, caller_id=caller.agent_id, parent_of=self._parent_of, cancel=cancel)
+        timer = None
+        if budget is not None and limits.max_seconds:
+            timer = threading.Timer(limits.max_seconds, lambda: self._announce_budget_exceeded(budget.trip_if_over()))
+            timer.daemon = True
+            timer.start()
+        try:
+            if output_schema is None:
+                outcome = self._execute_subagent_run_inner(**kwargs)
+            else:
+                kwargs["task_text"] = f"{kwargs['task_text']}\n\n{output_instruction(output_schema)}"
+                outcome = self._structured_outcome(run_with_output_schema(
+                    lambda: self._execute_subagent_run_inner(**kwargs),
+                    # The same agent again, with its history: the first answer and this note are in front of it.
+                    lambda note: self._execute_subagent_run_inner(
+                        **{**kwargs, "task_text": note, "resumed_agent_id": agent_id, "requested_isolation": None}
+                    ),
+                    output_schema,
+                    answer_of=lambda _outcome: self._last_subagent_answer(agent_id),
+                    succeeded=lambda result: result.status == "succeeded",
+                ))
+        finally:
+            if timer is not None:
+                timer.cancel()
+            self._usage_budgets.close(agent_id, budget)
+        hit = budget.over if budget is not None else None
+        if hit is None:
+            return outcome
+        payload = {**outcome.payload, "budget_exceeded": {"kind": hit.kind, "limit": hit.limit, "used": hit.used, "agent_id": hit.agent_id}}
+        if outcome.status == "succeeded":  # it finished within one call of the limit: keep the result, flag the overrun
+            return replace(outcome, payload=payload)
+        name = str(kwargs.get("clean") or agent_id)
+        return replace(
+            outcome, status="failed", summary=f"{name} excedeu o orçamento", payload=payload, error_code=EXCEEDED_ERROR_CODE,
+            content=f"Subagent '{name}' was stopped: {hit.message}.\n{outcome.content}",
+        )
+
+    def _structured_outcome(self, run: StructuredRun) -> ToolOutcome:
+        outcome = run.outcome
+        if run.ok:
+            payload = {**outcome.payload, "structured_output": run.value, "structured_output_attempts": run.attempts}
+            return replace(outcome, content=run.canonical, payload=payload)
+        if run.error_code is None:  # the child itself failed or was stopped: its own outcome says why
+            return outcome
+        name = str(outcome.payload.get("agent_name") or "subagent")
+        listed = "\n".join(f"- {line}" for line in run.errors)
+        return replace(
+            outcome, status="failed", summary=f"{name}: saída fora do esquema", error_code=SCHEMA_INVALID,
+            content=f"Subagent '{name}' did not return JSON matching output_schema after {run.attempts} attempts. "
+                    f"Last errors:\n{listed}\n\nLast answer:\n{run.last_text}",
+            payload={**outcome.payload, "schema_errors": list(run.errors), "structured_output_attempts": run.attempts},
+        )
+
+    def _last_subagent_answer(self, agent_id: str) -> str:
+        with self._subagent_lock:
+            history = self._subagent_histories.get(agent_id) or []
+        last = history[-1] if history else {}
+        return str(last.get("content") or "") if last.get("role") == "assistant" else ""
+
+    def _charge_usage_budget(
+        self, turn: dict[str, object], agent_id: str, input_tokens: int | None, output_tokens: int | None, total_tokens: int | None,
+    ) -> None:
+        """Count one model call in the agent's budget (and its ancestors'); whoever goes over is stopped."""
+        tokens = total_tokens if isinstance(total_tokens, int) and not isinstance(total_tokens, bool) else int(input_tokens or 0) + int(output_tokens or 0)
+        try:
+            price = self._subagent_accounting(
+                str(turn.get("model_id") or ""), code_mode=True, provider=str(turn.get("provider") or ""),
+            )["cost_estimator"](input_tokens, output_tokens)
+            cost = float(price) if price is not None else None
+        except Exception:  # noqa: BLE001 - a model without a price counts tokens and time only
+            cost = None
+        for hit in self._usage_budgets.add(agent_id, tokens, cost):
+            self._announce_budget_exceeded(hit)
+
+    def _announce_budget_exceeded(self, hit: Any) -> None:
+        if hit is None:
+            return
+        name = str((self._subagent_records.get(hit.agent_id) or {}).get("name") or hit.agent_id)
+        self._record(
+            AgentActivityEventType.SUBAGENT_BUDGET_EXCEEDED, f"{name} excedeu o orçamento ({hit.kind})",
+            {"agent_name": name, "error_code": EXCEEDED_ERROR_CODE, "budget_kind": hit.kind, "limit": hit.limit, "used": hit.used},
+            agent_id=hit.agent_id, parent_agent_id=self._parent_of(hit.agent_id),
+        )
 
     def _execute_subagent_run_inner(
         self,
@@ -4908,7 +5028,9 @@ class TurnSession:
             raise
         finally:
             if agent_id:
-                if (cancel is not None and cancel.is_set()) or (
+                if outcome is not None and outcome.error_code == EXCEEDED_ERROR_CODE:
+                    bg_status = "failed"
+                elif (cancel is not None and cancel.is_set()) or (
                     outcome is not None and outcome.error_code == "TURN_CANCELLED"
                 ):
                     bg_status = "stopped"

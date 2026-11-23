@@ -8,10 +8,23 @@ from typing import Any, Mapping, Literal
 
 from pydantic import Field
 
+from agentos.agentic.structured_output import validate_output_schema
 from agentos.agentic.tools._shared import AgentToolError, ToolOutcome, _TEXT, _schema
 from agentos.agentic.tools.spec import ToolSpec, ToolInput
+from agentos.agentic.usage_budget import parse_budget
 
 
+OUTPUT_SCHEMA_DESCRIPTION = (
+    "Optional JSON Schema (an object, up to 16 KB; it may only point to itself, as in #/$defs/name) that the subagent's final answer must satisfy. "
+    "The subagent is asked to end with one JSON value; an invalid answer is sent back to the same subagent for up to "
+    "5 corrections. On success the result is that JSON (also in the structured_output field); otherwise the call fails "
+    "with SCHEMA_INVALID."
+)
+BUDGET_DESCRIPTION = (
+    "Optional spending ceiling for this subagent and the agents it starts: any of max_tokens (integer), max_seconds and "
+    "max_cost_usd (numbers, all positive). Past a ceiling the subagent is stopped and the call fails with "
+    "SUBAGENT_BUDGET_EXCEEDED, keeping its partial report. The user's own ceiling (settings) always wins over a larger value."
+)
 CHARACTER_NAME_MAX_LEN = 32
 CHARACTER_NAME_DESCRIPTION = "Optional character name shown for this subagent in the Cena, e.g. a fun short name"
 _SUBAGENT_CHARACTER_NAMES: dict[tuple[str, str], str] = {}
@@ -194,6 +207,8 @@ class AgentTools:
         teammate_name: str | None = None,
         team_name: str | None = None,
         character_name: str | None = None,
+        output_schema: Mapping[str, Any] | None = None,
+        budget: Mapping[str, Any] | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -222,6 +237,11 @@ class AgentTools:
         clean_isolation = str(isolation).strip().lower() if isolation is not None and str(isolation).strip() else None
         if clean_isolation is not None and clean_isolation not in {"none", "worktree"}:
             raise AgentToolError("isolation must be 'none' or 'worktree'.")
+        try:  # WS-C4: structured output and a spending ceiling for this subagent
+            clean_schema = validate_output_schema(output_schema) if output_schema is not None else None
+            clean_budget = parse_budget(budget).as_dict() if budget is not None else None
+        except ValueError as exc:
+            raise AgentToolError(str(exc)) from exc
         if self._run_subagent is not None:
             # W5: a named teammate of an agent team (only passed when asked, so older callables keep working).
             extra: dict[str, Any] = (
@@ -237,6 +257,10 @@ class AgentTools:
                 extra["effort"] = clean_effort
             if clean_isolation is not None:
                 extra["isolation"] = clean_isolation
+            if clean_schema is not None:
+                extra["output_schema"] = clean_schema
+            if clean_budget:
+                extra["budget"] = clean_budget
             try:
                 return self._run_subagent(
                     clean_type,
@@ -248,6 +272,8 @@ class AgentTools:
                     **extra,
                 )
             except TypeError:
+                if clean_schema is not None or clean_budget:
+                    raise  # never run without the schema or the ceiling that was asked for
                 return self._run_subagent(
                     clean_type,
                     task.strip(),
@@ -337,6 +363,8 @@ class AgentInput(ToolInput):
         None,
         description="Optional isolation mode: 'worktree' runs the subagent in an isolated Git worktree when enabled in settings.",
     )
+    output_schema: dict[str, Any] | None = Field(None, description=OUTPUT_SCHEMA_DESCRIPTION)
+    budget: dict[str, float] | None = Field(None, description=BUDGET_DESCRIPTION)
     run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
     resume: str | None = Field(None, description="Id of a previous subagent to continue.")
     name: str | None = Field(None, description="Name a teammate of an agent team, so the team can message it with SendMessage.")
@@ -407,6 +435,17 @@ SPECS: tuple[ToolSpec, ...] = (
             "model_id": {**_TEXT, "description": "Optional. Relative to `provider` when `provider` is set; for an agent that lists its own models, one of them (required when it lists several); otherwise a favorite model ID of the current provider."},
             "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Optional reasoning effort level for this subagent call."},
             "isolation": {"type": "string", "enum": ["none", "worktree"], "description": "Optional isolation mode ('none' or 'worktree')."},
+            "output_schema": {"type": "object", "description": OUTPUT_SCHEMA_DESCRIPTION},
+            "budget": {
+                "type": "object",
+                "description": BUDGET_DESCRIPTION,
+                "properties": {
+                    "max_tokens": {"type": "integer", "minimum": 1},
+                    "max_seconds": {"type": "number", "minimum": 0},
+                    "max_cost_usd": {"type": "number", "minimum": 0},
+                },
+                "additionalProperties": False,
+            },
             "agent_id": {**_TEXT, "description": "Optional agent_id from a previous run_subagent call to resume that subagent with its full prior context preserved."},
             "run_in_background": {"type": "boolean", "description": "When true, launch the subagent asynchronously in the background and return its agent_id immediately. Use check_subagent (or check_subagent(agent_ids=[...]) for several) to inspect or await its output."},
             "teammate_name": {**_TEXT, "description": "Optional name of a teammate (agent teams); a teammate always runs in the background and can be messaged with send_message."},
