@@ -119,3 +119,66 @@ def test_the_worker_does_not_call_the_hook_for_a_failed_turn() -> None:
 
 def test_a_hook_that_raises_never_breaks_the_worker() -> None:
     assert _worker_turn("completed", raises=True) == ["promote", "hook:completed:True:True"]
+
+
+# ----------------------------------------------------------------------------------- WS-C9 extensions
+def test_a_handler_registered_for_all_states_also_hears_a_turn_that_did_not_complete() -> None:
+    seen: list[str] = []
+    after_turn.register(lambda store, turn, state: seen.append(state), states=after_turn.ALL_STATES)
+    for state in ("failed", "cancelled", "waiting_user", "reconciliation_required", "completed"):
+        assert after_turn.run_after_turn("store", TURN, state) == 1
+    assert seen == ["failed", "cancelled", "waiting_user", "reconciliation_required", "completed"]
+
+
+def test_a_handler_with_context_receives_it_and_gets_an_empty_one_when_there_is_none() -> None:
+    seen: list[object] = []
+    after_turn.register(lambda store, turn, state, context: seen.append(context), with_context=True)
+    context = after_turn.AfterTurnContext(provider_transport=lambda turn: None)
+    after_turn.run_after_turn("store", TURN, "completed", context=context)
+    after_turn.run_after_turn("store", TURN, "completed")
+    assert seen[0] is context and seen[1] == after_turn.AfterTurnContext()
+
+
+def test_the_goal_controller_is_installed_for_every_state_and_is_idempotent() -> None:
+    after_turn.install_default_handlers()
+    after_turn.install_default_handlers()
+    from agentos.pipelines.goal import after_turn_handler
+
+    entries = [entry for entry in after_turn._HANDLERS if entry.handler is after_turn_handler]
+    assert len(entries) == 1
+    assert entries[0].states == after_turn.ALL_STATES and entries[0].with_context is True
+
+
+def test_the_goal_handler_ignores_a_store_that_has_no_engine() -> None:
+    from agentos.pipelines.goal import after_turn_handler
+
+    after_turn_handler(object(), TURN, "completed", after_turn.AfterTurnContext())  # nothing to look at, nothing raised
+
+
+def test_the_worker_hands_its_model_services_to_the_hook() -> None:
+    from sqlalchemy import create_engine
+
+    from agentos.agentic.runtime import AgenticRunResult
+    from agentos.conversations.chat import PostgresChatStore
+    from agentos.persistence.postgres.schema import metadata
+    from agentos.workers.chat import ChatWorker
+
+    engine = create_engine("sqlite://", future=True)
+    metadata.create_all(engine)
+    store = PostgresChatStore(engine)
+    receipt = store.create(user_id="user-1", message="oi", provider="openrouter", model_id="model-1", idempotency_key="k-ctx")
+
+    class Runtime:
+        def run(self, turn_id):  # noqa: ANN001, ANN201
+            return AgenticRunResult("completed")
+
+        def close(self):  # noqa: ANN201
+            return None
+
+    worker = ChatWorker(store)
+    worker._runtime_for = lambda turn: Runtime()  # type: ignore[method-assign]
+    got: list[after_turn.AfterTurnContext] = []
+    after_turn.register(lambda s, t, state, context: got.append(context), with_context=True)
+    worker.run(receipt.turn_id)
+    assert got[0].provider_transport == worker._provider_transport
+    assert got[0].favorite_models is not None

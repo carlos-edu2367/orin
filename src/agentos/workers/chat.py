@@ -785,9 +785,15 @@ class ChatWorker:
     def _run_after_turn(self, turn: dict[str, object], result_state: str) -> None:
         """The pipeline package's single post-turn hook (``/goal`` continuation, runs a tool asked for); never raises."""
         try:
-            from agentos.pipelines.after_turn import run_after_turn
+            from agentos.pipelines.after_turn import AfterTurnContext, run_after_turn
 
-            run_after_turn(self.store, turn, result_state)
+            run_after_turn(
+                self.store, turn, result_state,
+                context=AfterTurnContext(
+                    provider_transport=self._provider_transport,
+                    favorite_models=lambda item: self._child_routing_catalog(item)[0],
+                ),
+            )
         except Exception:
             _LOGGER.exception("after-turn hook failed for turn %s", turn.get("turn_id"))
 
