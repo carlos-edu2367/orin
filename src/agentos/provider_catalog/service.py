@@ -370,7 +370,7 @@ class ProviderModelCatalogService:
                 if len(current) >= 5:
                     return True
             elif normalized_provider == "google-antigravity":
-                if current and not _antigravity_modalities_are_stale(current):
+                if current and not _antigravity_catalog_is_stale(current):
                     return True
             elif normalized_provider == "openai-codex":
                 if current and not _codex_modalities_are_stale(current):
@@ -383,7 +383,7 @@ class ProviderModelCatalogService:
                 refreshed = self._repository.list(context, normalized_provider, False)
                 if (
                     normalized_provider == "google-antigravity"
-                    and (not refreshed or _antigravity_modalities_are_stale(refreshed))
+                    and (not refreshed or _antigravity_catalog_is_stale(refreshed))
                 ) or (
                     normalized_provider == "openai-codex"
                     and (not refreshed or _codex_modalities_are_stale(refreshed))
@@ -406,13 +406,12 @@ class ProviderModelCatalogService:
             if isinstance(credential, Mapping) and credential.get("enabled") is True and is_claude_cli_bridge_url(str(credential.get("base_url") or "")):
                 if self._try_auto_refresh(context, normalized_provider):
                     items = self._repository.list(context, normalized_provider, favorites_only)
-        if normalized_provider == "google-antigravity" and items and _antigravity_modalities_are_stale(items):
-            # A catalog stored before Orin knew these models see images keeps
-            # saying "text"; the composer and view_file would keep routing
-            # pictures to another model. The catalog is static, so refresh it.
+        if normalized_provider == "google-antigravity" and items and _antigravity_catalog_is_stale(items):
+            # A catalog stored before Orin knew these models' modalities or real
+            # agy context windows (e.g. 1M -> 256k/128k) must be refreshed in place.
             if self._try_auto_refresh(context, normalized_provider):
                 items = self._repository.list(context, normalized_provider, favorites_only)
-                if items and _antigravity_modalities_are_stale(items):
+                if items and _antigravity_catalog_is_stale(items):
                     self._auto_refresh_backoff[(context.user_id, normalized_provider)] = (
                         time.monotonic() + AUTO_REFRESH_BACKOFF_SECONDS
                     )
@@ -521,6 +520,19 @@ def _antigravity_modalities_are_stale(items: Sequence[ProviderModelRecord]) -> b
     # it would ask for a refresh on every listing.
     return any(
         set(antigravity_input_modalities(item.model_id)) - set(item.input_modalities)
+        for item in items
+        if not item.is_custom and "text" in item.output_modalities
+    )
+
+
+def _antigravity_catalog_is_stale(items: Sequence[ProviderModelRecord]) -> bool:
+    """True when stored Antigravity rows lag current modalities or measured context windows."""
+    if _antigravity_modalities_are_stale(items):
+        return True
+    from agentos.providers.antigravity_cli.catalog import context_window_for
+
+    return any(
+        item.context_window != context_window_for(item.model_id)
         for item in items
         if not item.is_custom and "text" in item.output_modalities
     )

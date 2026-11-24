@@ -1226,6 +1226,13 @@ class ChatWorker:
                     ew = _dc_replace(ew, tokens=budget)
             return ew
 
+        if provider == "google-antigravity" and model_id and not row.get("is_custom"):
+            from agentos.providers.antigravity_cli.catalog import (
+                context_window_for as _antigravity_context_window_for,
+            )
+
+            row_window = _antigravity_context_window_for(model_id)
+
         if overrides or project_overrides or managed_overrides or learned_limit is not None or row_window is not None:
             ew = effective_window_for(
                 provider,

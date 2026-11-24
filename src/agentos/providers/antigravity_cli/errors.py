@@ -62,6 +62,7 @@ _CONTEXT_OVERFLOW_TERMS: tuple[str, ...] = (
     "too long",
     "token limit",
     "max_tokens",
+    "maxmessagetokens",
 )
 
 _TRANSIENT_TERMS: tuple[str, ...] = (

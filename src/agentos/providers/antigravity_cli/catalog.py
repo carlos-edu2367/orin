@@ -13,7 +13,11 @@ from agentos.providers.antigravity_cli.command import (
 )
 from agentos.providers.cli_adapter import CliModelInfo
 
-DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW: int = 1_000_000
+# Measured against agy v1.5.16 on 2026-11-24 via binary search on .agents/agents/orin.md:
+# - gemini-4-{neon,carbon,argon,hydrogen}-* and gemini-pro-orchestrator*: ~257k tokens pass,
+#   ~264k fail with "maxMessageTokens must be positive, got 0" -> 256k effective window.
+# - gemini-3.8-flash-*: ~128k tokens pass, ~132k fail -> 128k effective window.
+DEFAULT_ANTIGRAVITY_CONTEXT_WINDOW: int = 256_000
 ANTIGRAVITY_MODELS_CACHE_TTL_SECONDS: float = 30 * 60.0
 _ANTIGRAVITY_LABEL_SUFFIX = "(Assinatura Antigravity)"
 
@@ -92,19 +96,26 @@ def _model(slug: str, label: str, context_window: int) -> CliModelInfo:
 
 
 FALLBACK_ANTIGRAVITY_MODELS: tuple[CliModelInfo, ...] = (
-    _model("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", 1_000_000),
-    _model("gemini-4-carbon-high", "Gemini 4 Carbon (High)", 1_000_000),
-    _model("gemini-4-carbon-low", "Gemini 4 Carbon (Low)", 1_000_000),
-    _model("gemini-4-argon-medium", "Gemini 4 Argon (Medium)", 1_000_000),
-    _model("gemini-4-argon-high", "Gemini 4 Argon (High)", 1_000_000),
-    _model("gemini-4-argon-low", "Gemini 4 Argon (Low)", 1_000_000),
-    _model("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)", 1_000_000),
-    _model("gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen (XHigh)", 1_000_000),
-    _model("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)", 1_000_000),
-    _model("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)", 1_000_000),
-    _model("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", 1_000_000),
-    _model("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", 1_000_000),
-    _model("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)", 1_000_000),
+    _model("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", 256_000),
+    _model("gemini-4-carbon-high", "Gemini 4 Carbon (High)", 256_000),
+    _model("gemini-4-carbon-low", "Gemini 4 Carbon (Low)", 256_000),
+    _model("gemini-4-argon-medium", "Gemini 4 Argon (Medium)", 256_000),
+    _model("gemini-4-argon-high", "Gemini 4 Argon (High)", 256_000),
+    _model("gemini-4-argon-low", "Gemini 4 Argon (Low)", 256_000),
+    _model("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)", 256_000),
+    _model("gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen (XHigh)", 256_000),
+    _model("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)", 256_000),
+    _model("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)", 256_000),
+    _model("gemini-4-neon-high", "Gemini 4 Neon (High)", 256_000),
+    _model("gemini-4-neon-xhigh", "Gemini 4 Neon (XHigh)", 256_000),
+    _model("gemini-4-neon-medium", "Gemini 4 Neon (Medium)", 256_000),
+    _model("gemini-4-neon-low", "Gemini 4 Neon (Low)", 256_000),
+    _model("gemini-pro-orchestrator-neon", "Orchestrator (Neon)", 256_000),
+    _model("gemini-pro-orchestrator", "Orchestrator (Carbon)", 256_000),
+    _model("gemini-pro-orchestrator-argon", "Orchestrator (Argon)", 256_000),
+    _model("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)", 128_000),
+    _model("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", 128_000),
+    _model("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)", 128_000),
     _model("claude-opus-5-5-low", "Claude Opus 5.5 (Low)", 200_000),
     _model("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)", 200_000),
     _model("claude-opus-5-5-high", "Claude Opus 5.5 (High)", 200_000),
@@ -170,6 +181,10 @@ def _infer_context_window(slug: str) -> int:
     if known is not None:
         return known.context_window
     lower = slug.lower()
+    if lower.startswith("gemini-") and "flash" in lower:
+        return 128_000
+    if lower.startswith("gemini-"):
+        return 256_000
     if lower.startswith("claude-"):
         return 200_000
     if lower.startswith("gpt-"):

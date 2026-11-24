@@ -76,6 +76,9 @@ class AntigravityCliAdapter:
         max_tool_call_seconds=180,
         # agy 1.5.x cuts a longer USER_INPUT at the end (re-checked on 1.5.4: 300 KB lost the question).
         max_user_message_bytes=190_791,
+        # The agent file `.agents/agents/orin.md` (the system prompt) has no such cap: 1.4 MB of history were
+        # read whole on gemini-4-neon-high (2026-11-24), so earlier turns go there and only the window bounds them.
+        history_in_system_prompt=True,
         # agy reads `.agents/mcp_config.json` from its working folder: a shared one crossed tool calls
         # between turns started seconds apart (real agy 1.5.5: 5 of 6).
         per_process_cwd=True,

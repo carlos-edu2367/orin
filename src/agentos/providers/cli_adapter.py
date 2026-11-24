@@ -319,8 +319,12 @@ class CliCapabilities:
     idle_timeout_seconds: int | None = None
     max_tool_call_seconds: int | None = None
     # Largest stdin user message the CLI reads whole (None: bounded only by the window).
-    # A turn's history travels in that first message, so it must fit there.
+    # A turn's history travels in that first message, so it must fit there (unless history_in_system_prompt).
     max_user_message_bytes: int | None = None
+    # Earlier turns travel at the end of the system prompt instead of in the first stdin message, which then
+    # carries only the current request and the turn's reminders. For a CLI whose stdin message is capped
+    # (agy cuts it at ~190 KB) while its system prompt is not (agy read 1.4 MB from the agent file, 2026-11-24).
+    history_in_system_prompt: bool = False
     # The CLI reads its tool-server wiring from its working folder: every process gets its own folder.
     per_process_cwd: bool = False
     # Built-in tools of the CLI that still stop the process (they must stay unused) but neither change

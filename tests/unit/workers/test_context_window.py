@@ -74,3 +74,36 @@ def test_context_window_for_respects_manual_override_over_catalog_and_credits(
     assert ew.source == "override"
     assert ew.rule_index == 1
     assert worker._context_window_for(turn) == 320_000
+
+
+def test_antigravity_context_window_ignores_stale_1m_catalog_row_and_respects_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = ChatWorker.__new__(ChatWorker)
+    monkeypatch.setattr(
+        worker,
+        "_catalog_row_for",
+        lambda _turn: {"context_window": 1_000_000, "is_custom": False},
+    )
+    monkeypatch.setattr(worker, "_context_window_settings", lambda _turn: ({}, False))
+
+    neon_turn = {
+        "user_id": "u1",
+        "provider": "google-antigravity",
+        "model_id": "gemini-4-neon-high",
+    }
+    flash_turn = {
+        "user_id": "u1",
+        "provider": "google-antigravity",
+        "model_id": "gemini-3.8-flash-high",
+    }
+    assert worker._context_window_for(neon_turn) == 256_000
+    assert worker._context_window_for(flash_turn) == 128_000
+
+    monkeypatch.setattr(
+        worker,
+        "_context_window_settings",
+        lambda _turn: ({"google-antigravity/gemini-4-neon-high": 180_000}, False),
+    )
+    assert worker._context_window_for(neon_turn) == 180_000
+

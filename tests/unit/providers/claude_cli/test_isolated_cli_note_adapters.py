@@ -249,3 +249,69 @@ def test_start_native_turn_for_provider_passes_adapter_name_to_system_prompt(
             assert token not in prompt_text
     finally:
         handle.close()
+
+
+def test_prior_history_goes_at_the_end_of_the_system_prompt_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """agy reads the system prompt from its agent file, which has no stdin cap: earlier turns travel there."""
+    captured_prompt: list[str] = []
+
+    class _FakeProc:
+        stdin = None
+        stdout = None
+        stderr = None
+
+        def poll(self) -> int | None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    class _RecordingAdapter(AntigravityCliAdapter):
+        capabilities = replace(AntigravityCliAdapter.capabilities, per_process_cwd=False)
+
+        def build_command(self, req: Any) -> list[str]:
+            captured_prompt.append(Path(req.system_prompt_file).read_text(encoding="utf-8"))
+            return [FAKE_CLAUDE_SCRIPT]
+
+        def write_tool_server_wiring(self, handle: Any, temp_dir: Path, **_kw: Any) -> Any:
+            from agentos.providers.cli_adapter import ToolServerWiring
+
+            cfg = temp_dir / "cfg_antigravity.json"
+            cfg.write_text("{}", encoding="utf-8")
+            return ToolServerWiring(argv=("--mcp-config", str(cfg)), env={}, files=(cfg,))
+
+        def environment(self, base_env: Mapping[str, str] | None, **_kw: Any) -> dict[str, str]:
+            return dict(base_env or {})
+
+    monkeypatch.setattr("agentos.providers.claude_cli.native_loop.ensure_isolated_cwd", lambda _p: None)
+    assert AntigravityCliAdapter.capabilities.history_in_system_prompt is True
+
+    provider = ClaudeCliProvider(
+        binary=FAKE_CLAUDE_SCRIPT,
+        adapter=_RecordingAdapter(),
+        popen_factory=lambda *args, **kwargs: _FakeProc(),
+    )
+    req = NativeTurnRequest(
+        model="test-model",
+        system_prompt="You are Orin.",
+        user_content=[{"type": "text", "text": "hello"}],
+        executor=_NoopExecutor(),
+        cancel_check=lambda: False,
+        deadline_monotonic=10**12,
+        max_turns=5,
+        cwd=tmp_path,
+        prior_history="# Earlier turns\n[User]\nPEDIDO-ANTIGO-42",
+    )
+    handle = start_native_turn_for_provider(provider, req)
+    try:
+        prompt_text = captured_prompt[0]
+        assert prompt_text.startswith("You are Orin.")
+        assert prompt_text.rstrip().endswith("PEDIDO-ANTIGO-42")
+        assert prompt_text.index(isolated_cli_note("orin", adapter_name="antigravity")[:60]) < prompt_text.index(
+            "PEDIDO-ANTIGO-42"
+        )
+    finally:
+        handle.close()

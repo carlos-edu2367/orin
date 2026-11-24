@@ -20,6 +20,8 @@ _OVERFLOW_TEXT_NEEDLES = (
     "context window exceeded",
     "request too large",
     "input is too long",
+    # agy (1.5.x): the system prompt plus the earlier turns left no room for the conversation.
+    "maxmessagetokens must be positive",
 )
 
 _LONG_CONTEXT_CREDITS_NEEDLES = (
@@ -77,7 +79,10 @@ def is_context_overflow_error(
         if callable(checker) and checker(exc):
             return True
     lowered = str(exc or "").lower()
-    return any(needle in lowered for needle in _OVERFLOW_TEXT_NEEDLES)
+    if any(needle in lowered for needle in _OVERFLOW_TEXT_NEEDLES):
+        return True
+    tail = str(getattr(exc, "output_tail", "") or "").lower()
+    return bool(tail) and any(needle in tail for needle in _OVERFLOW_TEXT_NEEDLES)
 
 
 def is_zero_usage(usage: Any) -> bool:

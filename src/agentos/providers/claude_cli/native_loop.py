@@ -386,6 +386,8 @@ class NativeTurnRequest:
     permission_mode: str | None = None
     user_image_paths: tuple[str | Path, ...] = ()
     on_effort_adjusted: Callable[..., None] | None = None
+    # Earlier turns rendered as text, appended to the system prompt (adapters with `history_in_system_prompt`).
+    prior_history: str = ""
 
 
 class NativeTurnSink(Protocol):
@@ -1557,15 +1559,19 @@ def start_native_turn_for_provider(
         temp_files.extend(wiring.files)
         mcp_config_path = wiring.files[0] if wiring.files else None
 
+        system_text = with_isolated_cli_note(
+            request.system_prompt or "You are a helpful assistant.",
+            request.server_name,
+            permission_mode=effective_permission_mode,
+            workspace_root=workspace_root,
+            read_only=effective_read_only,
+            adapter_name=str(getattr(adapter, "name", "") or ""),
+        )
+        prior_history = str(request.prior_history or "").strip()
+        if prior_history:
+            system_text = f"{system_text}\n\n{prior_history}"
         prompt_path = write_owner_only_temp(
-            with_isolated_cli_note(
-                request.system_prompt or "You are a helpful assistant.",
-                request.server_name,
-                permission_mode=effective_permission_mode,
-                workspace_root=workspace_root,
-                read_only=effective_read_only,
-                adapter_name=str(getattr(adapter, "name", "") or ""),
-            ),
+            system_text,
             prefix="orin-claude-sys-",
             suffix=".txt",
         )

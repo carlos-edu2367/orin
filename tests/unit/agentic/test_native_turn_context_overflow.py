@@ -929,3 +929,143 @@ def test_long_context_1m_credits_error_falls_back_to_200k_without_1m_suffix(tmp_
     ctx_updates = [p for s, p in store.states if s == "context_updated"]
     assert any(p.get("limit_tokens") == 200_000 and p.get("window_source") == "account_credits" for p in ctx_updates)
 
+
+def test_agy_max_message_tokens_error_triggers_reactive_compaction_on_system_history(
+    tmp_path: Path,
+) -> None:
+    """agy 1.5.x reports 'maxMessageTokens must be positive, got 0' when the system prompt
+    (with prior history) fills the model window. Reactive compaction must shrink prior_history
+    and retry successfully.
+    """
+    def _agy_overflow_handler(
+        _req: NativeTurnRequest,
+        _sink: NativeTurnSink,
+        _handle: _ScriptedHandle,
+    ) -> NativeTurnOutcome:
+        raise ProviderTransportError(
+            "agent executor error: generating and executing: serializing trajectory: maxMessageTokens must be positive, got 0",
+            status_code=None,
+            end_reason="error_result",
+            error_kind=CliErrorKind.FATAL,
+        )
+
+    store = _OverflowStore(_large_history(), model_id="gemini-4-neon-high")
+    store.turn["provider"] = "google-antigravity"
+    provider = _FakeCliProvider([_agy_overflow_handler, _normal_reply_handler("Recuperado apos compactacao agy.")])
+    provider.adapter = SimpleNamespace(
+        name="antigravity",
+        capabilities=CliCapabilities(
+            native_tool_loop=True,
+            tool_list_changed=True,
+            persistent_stdin=True,
+            max_user_message_bytes=190_791,
+            history_in_system_prompt=True,
+        ),
+    )
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=AgentToolset(ConversationWorkspace(tmp_path, "c_agy_ovf")),
+        sleep=lambda _s: None,
+        autocompact=True,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=1,
+            max_context_tokens=256_000,
+            context_window_tokens=256_000,
+        ),
+    )
+    res = runtime.run("t_ovf")
+    assert res.state == "completed"
+    assert runtime._compaction_count == 1
+    assert len(provider.requests) == 2
+    assert len(provider.requests[1].prior_history) < len(provider.requests[0].prior_history)
+    assert not any(state == "stream_resuming" for state, _ in store.states)
+
+
+def test_agy_max_message_tokens_overflow_with_small_estimate_does_not_poison_learned_limit(
+    tmp_path: Path,
+) -> None:
+    """M2: 'maxMessageTokens must be positive, got 0' has no explicit token limit. When the estimated
+    first_n is far below the catalog window (e.g. ~25k vs 256k), reactive compaction must still recover
+    the turn without persisting a poisoned low learned_limit or shrinking the runtime window.
+    """
+    def _agy_overflow_handler(
+        _req: NativeTurnRequest,
+        _sink: NativeTurnSink,
+        _handle: _ScriptedHandle,
+    ) -> NativeTurnOutcome:
+        raise ProviderTransportError(
+            "agent executor error: generating and executing: serializing trajectory: maxMessageTokens must be positive, got 0",
+            status_code=400,
+            end_reason="error_result",
+            error_kind=CliErrorKind.CONTEXT_OVERFLOW,
+        )
+
+    store = _OverflowStore(_large_history(), model_id="gemini-4-neon-high")
+    store.turn["provider"] = "google-antigravity"
+    provider = _FakeCliProvider([_agy_overflow_handler, _normal_reply_handler("Recuperado sem envenenar janela.")])
+    provider.adapter = SimpleNamespace(
+        name="antigravity",
+        capabilities=CliCapabilities(
+            native_tool_loop=True,
+            tool_list_changed=True,
+            persistent_stdin=True,
+            max_user_message_bytes=190_791,
+            history_in_system_prompt=True,
+        ),
+    )
+    learned_calls: list[tuple[Any, ...]] = []
+
+    def _obs_sink(prov: str, mdl: str, lim: int, src: str, first_message_tokens: int | None = None) -> None:
+        learned_calls.append((prov, mdl, lim, src, first_message_tokens))
+
+    runtime = AgenticTurnRuntime(
+        store=store,
+        provider=provider,
+        toolset=AgentToolset(ConversationWorkspace(tmp_path, "c_agy_m2")),
+        sleep=lambda _s: None,
+        autocompact=True,
+        limits=AgenticLimits(
+            max_iterations=10,
+            max_actions=10,
+            max_provider_retries=1,
+            max_context_tokens=256_000,
+            context_window_tokens=256_000,
+        ),
+        context_observation_sink=_obs_sink,
+    )
+    res = runtime.run("t_ovf")
+    assert res.state == "completed"
+    assert runtime._compaction_count == 1
+    assert len(provider.requests) == 2
+    assert learned_calls == []
+    assert runtime.limits.context_window_tokens == 256_000
+    assert runtime.learned_window_tokens is None
+    assert not any(
+        state == AgentActivityEventType.CONTEXT_WINDOW_LEARNED.value
+        for state, _ in store.states
+    )
+
+
+def test_is_context_overflow_error_detects_max_message_tokens_in_output_tail() -> None:
+    """M4: When agy prints the error only to stderr and exits without a result event,
+    is_context_overflow_error must still detect it via exc.output_tail.
+    """
+    from agentos.agentic.context_overflow import is_context_overflow_error
+
+    exc = ProviderTransportError(
+        "CLI encerrou sem evento result",
+        status_code=502,
+        end_reason="eof_without_result",
+        error_kind=CliErrorKind.FATAL,
+        output_tail=(
+            "stderr: agent executor error: generating and executing: "
+            "serializing trajectory: maxMessageTokens must be positive, got 0"
+        ),
+    )
+    assert is_context_overflow_error(exc) is True
+
+
+

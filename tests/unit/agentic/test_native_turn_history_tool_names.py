@@ -58,7 +58,7 @@ def _history() -> list[dict[str, object]]:
     ]
 
 
-def _run(tmp_path: Path, *, code_mode: bool) -> tuple[str, set[str]]:
+def _run(tmp_path: Path, *, code_mode: bool) -> tuple[str, str, set[str]]:
     store = FakeStore(model_id="gemini-3.8-flash-low")
     store.turn["provider"] = "google-antigravity"
     if not code_mode:
@@ -68,7 +68,8 @@ def _run(tmp_path: Path, *, code_mode: bool) -> tuple[str, set[str]]:
     captured: dict[str, Any] = {}
 
     def _round(req: NativeTurnRequest, sink: NativeTurnSink, h: ScriptedHandle) -> NativeTurnOutcome:
-        captured["text"] = "\n".join(str(b.get("text") or "") for b in req.user_content)
+        captured["user_text"] = "\n".join(str(b.get("text") or "") for b in req.user_content)
+        captured["prior_history"] = str(req.prior_history or "")
         captured["announced"] = {spec.name for spec in req.executor.list_tools()}
         init = _make_init(req.model)
         sink.on_init(init)
@@ -92,17 +93,22 @@ def _run(tmp_path: Path, *, code_mode: bool) -> tuple[str, set[str]]:
         limits=AgenticLimits(max_iterations=5, max_actions=5, context_window_tokens=1_000_000),
     )
     assert runtime.run("t1", turn=store.turn).state == "completed"
-    return captured["text"], captured["announced"]
+    return captured["user_text"], captured["prior_history"], captured["announced"]
 
 
 @pytest.mark.parametrize(("code_mode", "shell", "reader"), [(True, "Bash", "Read"), (False, "run_command", "read_file")])
 def test_history_names_every_tool_as_the_agy_tool_list_announces_it(
     tmp_path: Path, code_mode: bool, shell: str, reader: str
 ) -> None:
-    text, announced = _run(tmp_path, code_mode=code_mode)
-    used = set(_TOOL_USE_NAME.findall(text)) | set(_TOOL_RESULT_NAME.findall(text))
+    user_text, prior_history, announced = _run(tmp_path, code_mode=code_mode)
+    # agy carries earlier turns in req.prior_history (history_in_system_prompt=True), keeping stdin for the active request.
+    assert prior_history.strip(), "expected prior tool history in req.prior_history for agy"
+    history_used = set(_TOOL_USE_NAME.findall(prior_history)) | set(_TOOL_RESULT_NAME.findall(prior_history))
+    assert {shell, reader} <= history_used, prior_history
 
-    assert {shell, reader} <= used, text
+    combined = f"{prior_history}\n{user_text}"
+    used = set(_TOOL_USE_NAME.findall(combined)) | set(_TOOL_RESULT_NAME.findall(combined))
+    assert {shell, reader} <= used, combined
     # agy calls an Orin tool as mcp_orin_<announced name>: every name the history uses must be one of them.
     assert used <= announced, (used - announced, sorted(announced))
     other = "run_command" if code_mode else "Bash"

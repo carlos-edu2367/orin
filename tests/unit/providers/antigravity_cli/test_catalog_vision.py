@@ -149,7 +149,7 @@ def test_fallback_includes_gemini_4_carbon_at_top_with_readable_labels() -> None
         "Gemini 4 Carbon (High) (Assinatura Antigravity)",
         "Gemini 4 Carbon (Low) (Assinatura Antigravity)",
     ]
-    assert all(m.context_window == 1_000_000 for m in top_three)
+    assert all(m.context_window == 256_000 for m in top_three)
     assert all(
         m.input_modalities == ("text", "image", "audio", "video")
         for m in top_three
@@ -182,13 +182,13 @@ def test_discover_parses_agy_labels_and_falls_back_to_slug_when_label_empty(
         (
             "gemini-4-carbon-high",
             "Gemini 4 Carbon (High) (Assinatura Antigravity)",
-            1_000_000,
+            256_000,
             ("high",),
         ),
         (
             "gemini-5-experimental-low",
             "gemini-5-experimental-low (Assinatura Antigravity)",
-            1_000_000,
+            256_000,
             ("low",),
         ),
         (
@@ -341,14 +341,14 @@ def test_service_refresh_uses_adapter_refresh_models(
     live_model = CliModelInfo(
         id="gemini-4-carbon-high",
         display_name="Gemini 4 Carbon (High) (Assinatura Antigravity)",
-        context_window=1_000_000,
+        context_window=256_000,
         supported_efforts=("high",),
         input_modalities=("text", "image", "audio", "video"),
     )
     brand_new_model = CliModelInfo(
         id="gemini-4-xenon-medium",
         display_name="Gemini 4 Xenon (Medium) (Assinatura Antigravity)",
-        context_window=1_000_000,
+        context_window=256_000,
         supported_efforts=("medium",),
         input_modalities=("text", "image", "audio", "video"),
     )
@@ -432,4 +432,46 @@ def test_build_command_infers_supported_efforts_from_suffix_for_unknown_model(
     assert req_non_std.effort_adjustment.requested == "xhigh"
     assert req_non_std.effort_adjustment.applied == "high"
     assert req_non_std.effort_adjustment.reason == "unsupported_level"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_window"),
+    [
+        ("gemini-4-neon-high", 256_000),
+        ("gemini-4-carbon-high", 256_000),
+        ("gemini-4-argon-high", 256_000),
+        ("gemini-4-hydrogen-high", 256_000),
+        ("gemini-pro-orchestrator", 256_000),
+        ("gemini-pro-orchestrator-neon", 256_000),
+        ("gemini-3.8-flash-high", 128_000),
+        ("gemini-3.8-flash-low", 128_000),
+        ("google-antigravity/gemini-3.8-flash-medium", 128_000),
+        ("claude-sonnet-5-5-high", 200_000),
+        ("claude-opus-5-5-medium", 200_000),
+        ("gpt-oss-120b-medium", 128_000),
+    ],
+)
+def test_context_window_for_matches_measured_agy_limits(
+    model_id: str,
+    expected_window: int,
+) -> None:
+    assert antigravity_catalog.context_window_for(model_id) == expected_window
+
+
+def test_list_refreshes_stale_1m_context_window_and_keeps_favorites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, service, ctx = _service(monkeypatch)
+    service.refresh(ctx, "google-antigravity")
+    service.favorite(ctx, "google-antigravity", "gemini-4-neon-high", True)
+    # Simulate a catalog persisted before measured agy windows replaced 1M.
+    with engine.begin() as connection:
+        connection.execute(update(provider_model_catalog).values(context_window=1_000_000))
+
+    models = {item.model_id: item for item in service.list(ctx, "google-antigravity")}
+
+    assert models["gemini-4-neon-high"].context_window == 256_000
+    assert models["gemini-3.8-flash-high"].context_window == 128_000
+    assert models["gemini-4-neon-high"].is_favorite is True
+
 

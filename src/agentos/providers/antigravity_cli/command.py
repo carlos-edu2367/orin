@@ -534,6 +534,39 @@ def _media_note_from_gate_config(
     )
 
 
+_SYSTEM_HISTORY_MARKERS: tuple[str, ...] = (
+    "# Earlier turns of this conversation\n",
+    "<orin_conversation_history>",
+    "# Full current user request\n",
+    "<orin_user_request>",
+)
+
+
+def _inject_media_note_before_history(instructions_body: str, media_note: str) -> str:
+    """Insert ``media_note`` alongside system instructions, before any appended history section.
+
+    Only inspects the base instructions before the history marker so a historical turn quoting
+    the note cannot suppress injection, and keeps the note alongside system instructions instead
+    of trailing hundreds of KB of conversation history.
+    """
+    split_idx: int | None = None
+    for marker in _SYSTEM_HISTORY_MARKERS:
+        idx = instructions_body.find(marker)
+        if idx != -1 and (split_idx is None or idx < split_idx):
+            split_idx = idx
+    if split_idx is None:
+        if media_note in instructions_body:
+            return instructions_body
+        return f"{instructions_body}\n\n{media_note}" if instructions_body else media_note
+    base = instructions_body[:split_idx].rstrip()
+    history_part = instructions_body[split_idx:]
+    if media_note in base:
+        return instructions_body
+    if base:
+        return f"{base}\n\n{media_note}\n\n{history_part}"
+    return f"{media_note}\n\n{history_part}"
+
+
 def _render_orin_agent_md(
     *,
     server_name: str,
@@ -563,12 +596,7 @@ def _render_orin_agent_md(
     if allow_native_media_read and workspace_root is not None:
         if media_note is None:
             media_note = antigravity_media_prompt_note(workspace_root)
-        if media_note not in instructions_body:
-            instructions_body = (
-                f"{instructions_body}\n\n{media_note}"
-                if instructions_body
-                else media_note
-            )
+        instructions_body = _inject_media_note_before_history(instructions_body, media_note)
     return (
         "---\n"
         "name: orin\n"
@@ -623,12 +651,7 @@ def _update_agent_md_instructions(
         if media_note is None and workspace_root is not None:
             media_note = antigravity_media_prompt_note(workspace_root)
         if media_note is not None:
-            if media_note not in instructions_body:
-                instructions_body = (
-                    f"{instructions_body}\n\n{media_note}"
-                    if instructions_body
-                    else media_note
-                )
+            instructions_body = _inject_media_note_before_history(instructions_body, media_note)
 
     if marker in existing:
         if (

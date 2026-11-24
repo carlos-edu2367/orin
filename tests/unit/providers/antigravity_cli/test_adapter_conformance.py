@@ -1319,4 +1319,84 @@ def test_redteam_native_loop_aborts_on_done_builtin_tool_nested_packet_and_unkno
         handle.close()
 
 
+def test_classify_antigravity_error_max_message_tokens_is_context_overflow() -> None:
+    """M4: agy's maxMessageTokens overflow must classify as CONTEXT_OVERFLOW, not FATAL."""
+    raw = (
+        "agent executor error: generating and executing: "
+        "serializing trajectory: maxMessageTokens must be positive, got 0"
+    )
+    info = classify_antigravity_error(_make_error_result(raw))
+    assert info.kind == CliErrorKind.CONTEXT_OVERFLOW
+    assert info.status_code == 400
+    assert info.retryable is False
+    assert info.exception.error_kind == CliErrorKind.CONTEXT_OVERFLOW
+
+
+def test_antigravity_media_note_is_inserted_before_system_history_even_when_quoted_in_history(
+    tmp_path: Path,
+) -> None:
+    """L2: media_note check must inspect only base instructions before history, and insert
+    media_note before the history block while preserving YAML frontmatter and history intact.
+    """
+    from agentos.providers.antigravity_cli.command import (
+        _render_orin_agent_md,
+        _update_agent_md_instructions,
+        antigravity_media_prompt_note,
+    )
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    media_note = antigravity_media_prompt_note(ws)
+    history_block = (
+        "# Earlier turns of this conversation\n"
+        "The person's current request arrives as the user message.\n\n"
+        "<orin_conversation_history>\n"
+        f"[User]\nEarlier I pasted this note: {media_note}\n"
+        "</orin_conversation_history>"
+    )
+    prompt_with_history = f"You are a helpful coding assistant.\n\n{history_block}"
+
+    rendered = _render_orin_agent_md(
+        server_name="orin",
+        url="http://127.0.0.1:9999/mcp",
+        token="tok_secret_123",
+        system_prompt=prompt_with_history,
+        allow_native_media_read=True,
+        workspace_root=ws,
+    )
+    assert rendered.startswith("---\nname: orin\n")
+    assert "tools: [read_file]\n" in rendered
+    instructions_part = rendered.split("# Instructions\n\n", 1)[1]
+    history_pos = instructions_part.index("# Earlier turns of this conversation\n")
+    base_part = instructions_part[:history_pos]
+    after_part = instructions_part[history_pos:]
+    assert media_note in base_part
+    assert after_part.rstrip("\n") == history_block
+
+    # Also verify _update_agent_md_instructions preserves frontmatter, injects before history,
+    # and does not duplicate if media_note is already in the base instructions.
+    agents_dir = tmp_path / "workdir" / ".agents" / "agents"
+    agents_dir.mkdir(parents=True)
+    agent_md = agents_dir / "orin.md"
+    agent_md.write_text(rendered, encoding="utf-8")
+
+    _update_agent_md_instructions(agent_md, prompt_with_history, workspace_root=ws)
+    updated = agent_md.read_text(encoding="utf-8")
+    assert updated.startswith("---\nname: orin\n")
+    assert "tools: [read_file]\n" in updated
+    upd_instructions = updated.split("# Instructions\n\n", 1)[1]
+    upd_history_pos = upd_instructions.index("# Earlier turns of this conversation\n")
+    assert media_note in upd_instructions[:upd_history_pos]
+    assert upd_instructions[upd_history_pos:].rstrip("\n") == history_block
+    assert upd_instructions[:upd_history_pos].count(media_note) == 1
+
+    # Calling again when base already has media_note must not duplicate it.
+    already_has_note = f"You are a helpful coding assistant.\n\n{media_note}\n\n{history_block}"
+    _update_agent_md_instructions(agent_md, already_has_note, workspace_root=ws)
+    deduped = agent_md.read_text(encoding="utf-8").split("# Instructions\n\n", 1)[1]
+    dedup_history_pos = deduped.index("# Earlier turns of this conversation\n")
+    assert deduped[:dedup_history_pos].count(media_note) == 1
+
+
+
 
