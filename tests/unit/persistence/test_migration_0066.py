@@ -109,7 +109,8 @@ def test_migration_0066_upgrades_creates_tables_isolation_column_and_preserves_0
     assert {c["name"] for c in inspector.get_columns("agent_runs")} == set(agent_runs.c.keys())
     assert {c["name"] for c in inspector.get_columns("agent_worktrees")} == set(agent_worktrees.c.keys())
     assert {c["name"] for c in inspector.get_columns("task_board_items")} == set(task_board_items.c.keys())
-    assert {c["name"] for c in inspector.get_columns("user_agents")} == set(user_agents.c.keys())
+    # user_agents.access_mode is added later, in 0068.
+    assert {c["name"] for c in inspector.get_columns("user_agents")} == set(user_agents.c.keys()) - {"access_mode"}
 
     isolation_col = next(c for c in inspector.get_columns("user_agents") if c["name"] == "isolation")
     assert isolation_col["nullable"] is True

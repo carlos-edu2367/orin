@@ -516,6 +516,8 @@ function SubagentTaskContainer({
   failedCount = 0,
   failed = false,
   running = false,
+  accessMode,
+  attachmentCount = 0,
   children,
 }: {
   agentId?: string
@@ -524,9 +526,17 @@ function SubagentTaskContainer({
   failedCount?: number
   failed?: boolean
   running?: boolean
+  accessMode?: 'prompt_only' | 'read_only' | null
+  attachmentCount?: number
   children: ReactNode
 }) {
   const [expanded, setExpanded] = useState(running)
+  const accessModeLabel =
+    accessMode === 'prompt_only'
+      ? 'Somente pergunta'
+      : accessMode === 'read_only'
+        ? 'Somente leitura'
+        : null
   const status = failed ? 'failed' : running ? 'running' : 'completed'
   const statusLabel = failed ? 'Falhou' : running ? 'Em execução' : 'Concluído'
   const statusBadgeClass = failed
@@ -569,6 +579,22 @@ function SubagentTaskContainer({
           <span className="ml-1 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">
             {count} {count === 1 ? 'ação' : 'ações'}
           </span>
+          {accessModeLabel && (
+            <span
+              className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)]"
+              data-testid="subagent-access-mode-badge"
+            >
+              {accessModeLabel}
+            </span>
+          )}
+          {attachmentCount > 0 && (
+            <span
+              className="rounded border border-white/10 bg-white/5 px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)]"
+              data-testid="subagent-attachments-badge"
+            >
+              {attachmentCount} {attachmentCount === 1 ? 'anexo' : 'anexos'}
+            </span>
+          )}
           {failedCount > 0 && (
             <span
               className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] text-rose-300"
@@ -1002,6 +1028,24 @@ export const TurnTimeline = memo(function TurnTimeline({
       !turnCompleted &&
       !group.failed &&
       group.events.some((ev) => resolveVisualStatus(ev) === 'running')
+    const relatedEvents = [
+      ...group.events,
+      ...(events ?? []).filter(
+        (ev) =>
+          ev.type === 'agent.message_sent' &&
+          typeof ev.payload?.to_agent_id === 'string' &&
+          ev.payload.to_agent_id === group.agentId,
+      ),
+    ]
+    const rawAccessMode = relatedEvents
+      .map((ev) => (typeof ev.payload?.access_mode === 'string' ? ev.payload.access_mode.trim().toLowerCase() : ''))
+      .find((val) => val === 'prompt_only' || val === 'read_only')
+    const subagentAccessMode: 'prompt_only' | 'read_only' | null =
+      rawAccessMode === 'prompt_only' || rawAccessMode === 'read_only' ? rawAccessMode : null
+    const subagentAttachmentCount = relatedEvents.reduce((acc, ev) => {
+      const raw = ev.payload?.attachment_count
+      return typeof raw === 'number' && Number.isFinite(raw) && raw > acc ? raw : acc
+    }, 0)
 
     return (
       <SubagentTaskContainer
@@ -1011,6 +1055,8 @@ export const TurnTimeline = memo(function TurnTimeline({
         failedCount={failedToolCount}
         failed={group.failed}
         running={isSubagentRunning}
+        accessMode={subagentAccessMode}
+        attachmentCount={subagentAttachmentCount}
       >
         {content}
         {group.agentId && agentProgress?.[group.agentId] && (

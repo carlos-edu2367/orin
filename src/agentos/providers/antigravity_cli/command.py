@@ -1069,6 +1069,169 @@ def wire_antigravity_media_reader(
     )
 
 
+def wire_antigravity_attached_media_only(
+    directory: Path,
+    *,
+    allowed_files: Sequence[Path | str],
+    model: str,
+    system_prompt_file: Path | None = None,
+    instructions: str | None = None,
+) -> ToolServerWiring:
+    """Wire an isolated agy process with zero MCP tools and native `read_file` locked to exact ``allowed_files``.
+
+    Used for ``access_mode='prompt_only'`` subagents that receive attached image/audio/video files:
+    ``.agents/hooks.json`` and ``orin_media_gate.json`` enforce exact-file allowlisting (blocking any
+    other file in the workspace or machine), while ``inheritMcp: false`` disables all MCP tools.
+    """
+    _validate_path_arg(directory, "directory")
+    if not allowed_files:
+        raise ValueError("wire_antigravity_attached_media_only requires at least one allowed file.")
+
+    extensions = antigravity_native_media_extensions(model) & (
+        ALLOWED_IMAGE_EXTENSIONS | ALLOWED_AUDIO_EXTENSIONS | ALLOWED_VIDEO_EXTENSIONS
+    )
+    if not extensions:
+        raise ValueError(
+            f"Model {model!r} does not accept images, audio, or video through the native read_file."
+        )
+
+    resolved_files: list[Path] = []
+    seen_keys: set[str] = set()
+    for raw_file in allowed_files:
+        _validate_path_arg(raw_file, "allowed_file")
+        cand = Path(raw_file)
+        if _is_symlink_or_junction(cand):
+            raise ValueError(f"Refusing symlinked media attachment: {cand}")
+        resolved = cand.resolve(strict=True)
+        if _is_symlink_or_junction(resolved) or not resolved.is_file():
+            raise ValueError(f"Invalid media attachment file: {resolved}")
+        if resolved.suffix.lower() not in extensions:
+            raise ValueError(
+                f"Attachment {resolved.name!r} has extension {resolved.suffix!r} not supported by model {model!r}."
+            )
+        dedupe_key = os.path.normcase(str(resolved))
+        if dedupe_key not in seen_keys:
+            seen_keys.add(dedupe_key)
+            resolved_files.append(resolved)
+    if not resolved_files:
+        raise ValueError("No valid media files provided for wire_antigravity_attached_media_only.")
+
+    workdir = Path(directory)
+    if _is_symlink_or_junction(workdir):
+        raise ValueError(f"Refusing symlinked working directory: {workdir}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    git_dir = workdir / ".git"
+    if _is_symlink_or_junction(git_dir):
+        raise ValueError(f"Refusing symlinked .git directory: {git_dir}")
+    git_dir.mkdir(exist_ok=True)
+
+    sys_prompt = (instructions or "").strip() or "You are a helpful assistant."
+    if system_prompt_file is not None:
+        sys_file_path = Path(system_prompt_file)
+        if _is_symlink_or_junction(sys_file_path):
+            raise ValueError(f"Refusing symlinked system_prompt_file: {sys_file_path}")
+        if sys_file_path.is_file():
+            try:
+                read_sys = sys_file_path.read_text(encoding="utf-8").strip()
+                if read_sys:
+                    sys_prompt = read_sys
+            except Exception:
+                pass
+
+    agents_dir = workdir / ".agents"
+    agents_subdir = agents_dir / "agents"
+    for candidate in (agents_dir, agents_subdir):
+        if _is_symlink_or_junction(candidate):
+            raise ValueError(f"Refusing symlinked directory: {candidate}")
+
+    agent_md_path = agents_subdir / "orin.md"
+    settings_file = agents_dir / "orin_settings.json"
+    hooks_file = agents_dir / "hooks.json"
+    gate_config_file = agents_dir / MEDIA_GATE_CONFIG_FILENAME
+    wiring_files = (agent_md_path, settings_file, hooks_file, gate_config_file)
+    try:
+        for fpath in wiring_files:
+            if _is_symlink_or_junction(fpath):
+                raise ValueError(f"Refusing to write to symlink: {fpath}")
+        _write_owner_only_file(
+            agent_md_path,
+            "---\n"
+            "name: orin\n"
+            "description: Orin attached-media-only prompt subagent\n"
+            "mainAgent: true\n"
+            "excludeDefaultComponents: true\n"
+            "inheritMcp: false\n"
+            "tools: [read_file]\n"
+            "---\n\n"
+            "# Instructions\n\n"
+            f"{sys_prompt}\n",
+        )
+        try:
+            resolved_workdir = str(workdir.resolve())
+        except OSError:
+            resolved_workdir = str(workdir.absolute())
+        settings_payload = {
+            "trustedWorkspaces": [resolved_workdir],
+            "allowNonWorkspaceAccess": False,
+            "enableTerminalSandbox": True,
+            "disableSlashCommands": True,
+            "permissions": {
+                "allow": [f"read_file({p.as_posix()})" for p in resolved_files],
+                "deny": [
+                    "command(*)",
+                    "write_file(*)",
+                    "read_url(*)",
+                    "execute_url(*)",
+                    "unsandboxed(*)",
+                ],
+            },
+        }
+        _write_owner_only_file(
+            settings_file, json.dumps(settings_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+        hooks_payload = {
+            "orin-media-gate": {
+                "PreToolUse": [
+                    {
+                        "matcher": "read_file",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": build_media_gate_hook_command(),
+                                "timeout": 10,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        _write_owner_only_file(
+            hooks_file, json.dumps(hooks_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+        gate_payload = {
+            "allowed_files": [str(p) for p in resolved_files],
+            "unrestricted": False,
+            "allowed_extensions": sorted(extensions),
+            "max_bytes": DEFAULT_MAX_MEDIA_BYTES,
+        }
+        _write_owner_only_file(
+            gate_config_file, json.dumps(gate_payload, ensure_ascii=True, indent=2) + "\n"
+        )
+    except Exception:
+        for fpath in wiring_files:
+            try:
+                if not _is_symlink_or_junction(fpath):
+                    fpath.unlink(missing_ok=True)
+            except Exception:
+                pass
+        raise
+    return ToolServerWiring(
+        argv=("--agent", "orin", "--settings", str(settings_file)),
+        env={},
+        files=wiring_files,
+    )
+
+
 def wire_antigravity_no_tools(
     directory: Path,
     *,
@@ -1456,21 +1619,33 @@ def encode_antigravity_user_turn(
     content: list[dict[str, Any]] | str,
     *,
     workspace_root: Path | str | None = None,
+    allowed_files: Sequence[Path | str] | None = None,
 ) -> bytes:
     """Encode a user turn for `agy --input-format stream-json`: text only.
 
     agy 1.5.x rejects any non-text block in a user message (`only "text"`); it sees an
-    image only as an MCP tool result (view_file). A media block here is history replayed
-    after a restart (the image a view_file call returned, kept as a user message) or the
-    text-protocol fallback: it becomes a short text note, never bytes and never an error.
-    When an image/audio/video block points to a file on disk in the workspace, the note includes
-    its absolute path and instructs the model to call its native `read_file` tool.
+    image only as an MCP tool result (view_file) or via native `read_file`. A media block here
+    is history replayed after a restart or inline attachments: it becomes a short text note,
+    never bytes and never an error. When an image/audio/video block points to a file on disk in
+    the workspace (or in ``allowed_files``), the note includes its absolute path and instructs the
+    model to call its native `read_file` tool.
     """
+    resolved_allowed_files: tuple[Path, ...] = ()
+    if allowed_files:
+        tmp_files: list[Path] = []
+        for raw_f in allowed_files:
+            try:
+                tmp_files.append(Path(raw_f).resolve(strict=True))
+            except OSError:
+                continue
+        resolved_allowed_files = tuple(tmp_files)
+
     text_blocks: list[dict[str, str]] = []
     if isinstance(content, str):
         text_blocks.append({"type": "text", "text": content})
     elif isinstance(content, Sequence):
         omitted_pending = False
+        emitted_allowed_notes: set[str] = set()
         for block in content:
             if isinstance(block, str):
                 text_blocks.append({"type": "text", "text": block})
@@ -1484,6 +1659,10 @@ def encode_antigravity_user_turn(
                 or btype not in ("text", "input_text")
                 or any(media_key in block for media_key in _MEDIA_KEYS)
             ):
+                if resolved_allowed_files:
+                    # In attached-media-only mode, raw image blocks are delivered via exact native `read_file` paths
+                    # (listed below) without ever emitting the MCP `view_file` fallback note.
+                    continue
                 media_path = _extract_workspace_media_path(block, workspace_root)
                 if media_path is not None:
                     if omitted_pending:
@@ -1514,6 +1693,21 @@ def encode_antigravity_user_turn(
             )
         if omitted_pending:
             text_blocks.append({"type": "text", "text": ANTIGRAVITY_OMITTED_MEDIA_NOTE})
+        if resolved_allowed_files:
+            existing_text = "\n".join(b.get("text", "") for b in text_blocks)
+            for af in resolved_allowed_files:
+                posix = af.as_posix()
+                if posix not in existing_text and posix not in emitted_allowed_notes:
+                    emitted_allowed_notes.add(posix)
+                    text_blocks.append(
+                        {
+                            "type": "text",
+                            "text": (
+                                f'[Attached media file: "{posix}" — '
+                                f'open it using your native read_file tool with the exact absolute path "{posix}".]'
+                            ),
+                        }
+                    )
     else:
         raise ValueError(
             "O Antigravity CLI (agy) aceita apenas blocos de texto no modo stream-json; "
@@ -1610,6 +1804,8 @@ __all__ = [
     "resolve_antigravity_binary",
     "resolve_antigravity_home",
     "resolve_media_roots",
+    "wire_antigravity_attached_media_only",
     "wire_antigravity_media_reader",
+    "wire_antigravity_no_tools",
     "wire_antigravity_tool_server",
 ]

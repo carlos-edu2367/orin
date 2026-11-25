@@ -1026,6 +1026,7 @@ user_agents = Table(
     Column("max_turns", Integer, nullable=True),
     Column("memory", String(16), nullable=True),
     Column("isolation", String(16), nullable=True),
+    Column("access_mode", String(32), nullable=True),
     Column("enabled", Boolean, nullable=False, server_default="true"),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),

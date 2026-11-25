@@ -2079,7 +2079,7 @@ class PostgresChatStore:
         user_id: str,
         *,
         message_limit: int | None = None,
-        activity_limit: int = 300,
+        activity_limit: int = 600,
     ) -> dict[str, object]:
         return _query_conversation_snapshot_impl(
             self._engine,
@@ -4305,8 +4305,8 @@ class ChatApplication:
     def quality_summary(self, user_id: str, *, days: int = 30): return {"items": self.store.quality_summary(user_id, days=days), "window_days": days}
     def get_header(self, conversation_id: str, user_id: str):
         return self.store.get_header(conversation_id, user_id)
-    def get(self, conversation_id: str, user_id: str, *, message_limit: int | None = None, activity_limit: int = 300):
-        if message_limit is None and activity_limit == 300:
+    def get(self, conversation_id: str, user_id: str, *, message_limit: int | None = None, activity_limit: int = 600):
+        if message_limit is None and activity_limit == 600:
             return self.store.get(conversation_id, user_id)
         return self.store.get(conversation_id, user_id, message_limit=message_limit, activity_limit=activity_limit)
     def list_older_messages(self, conversation_id: str, user_id: str, *, before_sequence: int, limit: int = 50):
@@ -4374,6 +4374,69 @@ class ChatApplication:
                 conversation_turns.c.user_id == user_id,
                 conversation_turns.c.state.in_(("queued", "starting", "running", "cancelling")),
             )).first() is not None
+
+    # Root events a turn waiting inside ask_user may still write without having read an answer.
+    _QUESTION_WAIT_NOISE: tuple[str, ...] = (
+        AgentActivityEventType.TURN_STARTED.value,
+        AgentActivityEventType.CONTEXT_UPDATED.value,
+        "agent.progress",
+    )
+
+    def live_question_turn(self, conversation_id: str, user_id: str) -> dict[str, object] | None:
+        """The running turn stopped inside ask_user waiting for the person's answer, if there is one.
+
+        A native turn reads that answer only from the input queue. A message sent as a normal follow-up
+        would become a new turn queued behind it, and the asking turn would wait until its deadline while
+        the session looks busy. The caller delivers such a message to the queue instead.
+        """
+        with self.store._engine.connect() as connection:
+            turn = connection.execute(
+                select(
+                    conversation_turns.c.turn_id,
+                    conversation_turns.c.assistant_message_id,
+                    conversation_turns.c.state,
+                ).where(
+                    conversation_turns.c.conversation_id == conversation_id,
+                    conversation_turns.c.user_id == user_id,
+                    conversation_turns.c.state == "running",
+                ).order_by(conversation_turns.c.created_at.desc()).limit(1)
+            ).mappings().first()
+            if turn is None:
+                return None
+            last = connection.execute(
+                select(conversation_activity_events.c.event_type, conversation_activity_events.c.payload).where(
+                    conversation_activity_events.c.conversation_id == conversation_id,
+                    conversation_activity_events.c.user_id == user_id,
+                    conversation_activity_events.c.turn_id == str(turn["turn_id"]),
+                    conversation_activity_events.c.parent_agent_id.is_(None),
+                    conversation_activity_events.c.event_type.not_in(self._QUESTION_WAIT_NOISE),
+                ).order_by(conversation_activity_events.c.id.desc()).limit(1)
+            ).mappings().first()
+            if last is None or str(last["event_type"]) != AgentActivityEventType.TURN_WAITING_USER.value:
+                return None
+            payload = last["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except ValueError:
+                    payload = {}
+            if not isinstance(payload, Mapping) or payload.get("in_turn") is not True:
+                return None
+            conversation = connection.execute(
+                select(conversations.c.title, conversations.c.mode, conversations.c.permission_mode).where(
+                    conversations.c.conversation_id == conversation_id,
+                    conversations.c.user_id == user_id,
+                )
+            ).mappings().first()
+        return {
+            "conversation_id": conversation_id,
+            "title": str((conversation or {}).get("title") or ""),
+            "turn_id": str(turn["turn_id"]),
+            "message_id": str(turn["assistant_message_id"] or ""),
+            "state": str(turn["state"]),
+            "mode": str((conversation or {}).get("mode") or "chat"),
+            "permission_mode": str((conversation or {}).get("permission_mode") or "ask_permissions"),
+        }
 
     def enqueue(
         self,

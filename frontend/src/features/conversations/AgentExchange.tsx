@@ -23,6 +23,19 @@ export function AgentExchange({ event }: AgentExchangeProps) {
   const from = outbound ? 'Main' : name
   const to = outbound ? name : 'Main'
   const preview = (event.content ?? '').trim()
+  const rawAccessMode =
+    typeof event.payload?.access_mode === 'string' ? event.payload.access_mode.trim().toLowerCase() : ''
+  const accessModeLabel =
+    rawAccessMode === 'prompt_only'
+      ? 'Somente pergunta'
+      : rawAccessMode === 'read_only'
+        ? 'Somente leitura'
+        : null
+  const rawAttachmentCount = event.payload?.attachment_count
+  const attachmentCount =
+    typeof rawAttachmentCount === 'number' && Number.isFinite(rawAttachmentCount) && rawAttachmentCount > 0
+      ? rawAttachmentCount
+      : 0
 
   return (
     <motion.article
@@ -55,6 +68,16 @@ export function AgentExchange({ event }: AgentExchangeProps) {
             <strong>{from}</strong>
             <span aria-hidden="true">→</span>
             <strong>{to}</strong>
+            {accessModeLabel && (
+              <span className="activity-card__count" data-testid="agent-exchange-access-mode-badge">
+                {accessModeLabel}
+              </span>
+            )}
+            {attachmentCount > 0 && (
+              <span className="activity-card__count" data-testid="agent-exchange-attachments-badge">
+                {attachmentCount} {attachmentCount === 1 ? 'anexo' : 'anexos'}
+              </span>
+            )}
           </span>
           {preview && <span className="agent-exchange__preview">{preview.slice(0, 130)}{preview.length > 130 ? '…' : ''}</span>}
         </button>

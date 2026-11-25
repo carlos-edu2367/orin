@@ -108,6 +108,8 @@ def isolated_cli_note(
     workspace_root: Path | str | None = None,
     read_only: bool = False,
     adapter_name: str | None = None,
+    access_mode: str = "full",
+    allowed_media_files: Sequence[str | Path] = (),
 ) -> str:
     """Tells the model that the CLI's own sandbox/cwd notes do not limit it, and what Orin's tools may do.
 
@@ -118,6 +120,27 @@ def isolated_cli_note(
     workspace go here, in the system prompt (the developer channel): the CLI's own notice arrives after it, and
     without them it would be the only statement about what the model may do.
     """
+    eff_access_mode = str(access_mode or "full").strip().lower()
+    adapter_slug = str(adapter_name or "").strip().lower()
+    if eff_access_mode == "prompt_only":
+        if adapter_slug == "antigravity" and allowed_media_files:
+            file_lines = "\n".join(
+                f'- "{Path(p).resolve().as_posix()}"' for p in allowed_media_files
+            )
+            return (
+                "# Prompt-only mode (attached media)\n"
+                "You are running in isolated prompt-only mode with zero workspace, shell, web, or MCP tools.\n"
+                "Your ONLY enabled tool is your native `read_file`, strictly limited to the exact attached media file(s) below:\n"
+                f"{file_lines}\n"
+                "Call `read_file` with those exact absolute paths to inspect the attached media, then answer "
+                "exclusively from the prompt and those attached files. Never attempt to read any other file."
+            )
+        return (
+            "# Prompt-only mode\n"
+            "You are running in isolated prompt-only mode with zero tools enabled. "
+            "Do not attempt to invoke any tools or inspect any workspace files. "
+            "Answer exclusively from the prompt and any inline attachments provided in the user message."
+        )
     srv = str(server_name or "orin").strip() or "orin"
     note = (
         "# Where you work\n"
@@ -131,11 +154,12 @@ def isolated_cli_note(
     )
     label = _public_permission_label(permission_mode)
     root = str(workspace_root).strip() if workspace_root is not None else ""
-    if label is None and not root and not read_only:
+    effective_ro = bool(read_only or eff_access_mode == "read_only")
+    if label is None and not root and not effective_ro:
         base_note = note
     else:
         lines = [note, "", "## Orin session"]
-        if read_only:
+        if effective_ro:
             lines.append(
                 "- Orin permission mode: read-only agent. Inspect and report; never change files or run commands that "
                 "change state."
@@ -149,7 +173,6 @@ def isolated_cli_note(
     # prompt cache stable. `builtin_tool_reminder` only speaks after a CLI tool was called; this speaks before.
     base_note = f"{base_note}\n\n{ONLY_ORIN_TOOLS_RULE}"
 
-    adapter_slug = str(adapter_name or "").strip().lower()
     if adapter_slug == "codex":
         adapter_section = (
             "## Codex functions.exec\n"
@@ -182,6 +205,8 @@ def with_isolated_cli_note(
     workspace_root: Path | str | None = None,
     read_only: bool = False,
     adapter_name: str | None = None,
+    access_mode: str = "full",
+    allowed_media_files: Sequence[str | Path] = (),
 ) -> str:
     note = isolated_cli_note(
         server_name,
@@ -189,6 +214,8 @@ def with_isolated_cli_note(
         workspace_root=workspace_root,
         read_only=read_only,
         adapter_name=adapter_name,
+        access_mode=access_mode,
+        allowed_media_files=allowed_media_files,
     )
     base = str(system_prompt or "").rstrip()
     if note in base:
@@ -388,6 +415,9 @@ class NativeTurnRequest:
     on_effort_adjusted: Callable[..., None] | None = None
     # Earlier turns rendered as text, appended to the system prompt (adapters with `history_in_system_prompt`).
     prior_history: str = ""
+    # Subagent access mode ('prompt_only' | 'read_only' | 'full') and exact media files allowed for prompt_only agy.
+    access_mode: str = "full"
+    allowed_media_files: tuple[str | Path, ...] = ()
 
 
 class NativeTurnSink(Protocol):
@@ -466,7 +496,7 @@ class NativeTurnHandle:
         cmd: list[str],
         requested_model: str,
         server_name: str,
-        bg_server: BackgroundTurnToolServer,
+        bg_server: BackgroundTurnToolServer | None,
         temp_files: Sequence[Path],
         slots: Any,
         cancel_check: Callable[[], bool],
@@ -542,7 +572,7 @@ class NativeTurnHandle:
 
     @property
     def mcp_url(self) -> str:
-        return self._bg_server.handle.url
+        return self._bg_server.handle.url if self._bg_server is not None else ""
 
     @property
     def process_cwd(self) -> Path | None:
@@ -601,7 +631,8 @@ class NativeTurnHandle:
     def in_flight(self) -> int:
         with self._slot_lock:
             active = self._active_tool_calls + (1 if self._reacquiring_slot else 0)
-        return max(active, self._bg_server.handle.in_flight)
+        bg_in_flight = self._bg_server.handle.in_flight if self._bg_server is not None else 0
+        return max(active, bg_in_flight)
 
     def is_process_alive(self) -> bool:
         return self._proc.poll() is None
@@ -674,7 +705,8 @@ class NativeTurnHandle:
                         break
 
     def refuse_tools(self, reason: str) -> None:
-        self._bg_server.handle.refuse_calls(reason)
+        if self._bg_server is not None:
+            self._bg_server.handle.refuse_calls(reason)
 
     def send_user(self, content: list[dict[str, Any]]) -> None:
         if not (PERSISTENT_STDIN_OK and self._adapter.capabilities.persistent_stdin):
@@ -685,7 +717,8 @@ class NativeTurnHandle:
             stdin = getattr(self._proc, "stdin", None)
             if stdin is None or getattr(stdin, "closed", False):
                 raise RuntimeError("Claude CLI stdin is closed")
-            self._bg_server.handle.allow_calls()
+            if self._bg_server is not None:
+                self._bg_server.handle.allow_calls()
             encode_fn = getattr(self._adapter, "encode_user_turn", None)
             if callable(encode_fn):
                 if self._allowed_media_root is not None:
@@ -1204,10 +1237,11 @@ class NativeTurnHandle:
                 self._holds_slot = False
                 self._slot_cond.notify_all()
 
-            try:
-                self._bg_server.handle.refuse_calls("turn closed")
-            except Exception:
-                pass
+            if self._bg_server is not None:
+                try:
+                    self._bg_server.handle.refuse_calls("turn closed")
+                except Exception:
+                    pass
 
             try:
                 stdin = getattr(self._proc, "stdin", None)
@@ -1258,10 +1292,11 @@ class NativeTurnHandle:
             except Exception:
                 pass
 
-            try:
-                self._bg_server.close(timeout=2.0)
-            except Exception:
-                pass
+            if self._bg_server is not None:
+                try:
+                    self._bg_server.close(timeout=2.0)
+                except Exception:
+                    pass
 
             for tmp in self._temp_files:
                 try:
@@ -1459,44 +1494,69 @@ def start_native_turn_for_provider(
                 effective_permission_mode = raw_mode
 
     effective_model = request.model or provider.model
+    eff_access_mode = str(request.access_mode or "full").strip().lower() or "full"
+    is_prompt_only = eff_access_mode == "prompt_only"
+    if eff_access_mode == "read_only":
+        effective_read_only = True
+    resolved_allowed_media_files: tuple[Path, ...] = tuple(
+        Path(p).resolve()
+        for p in (request.allowed_media_files or ())
+        if isinstance(p, (str, Path)) and str(p).strip()
+    )
+
     allowed_media_root: Path | None = None
     media_policy: Any | None = None
     media_additional_roots: tuple[Path, ...] = ()
     media_unrestricted = False
-    if getattr(adapter, "name", "") == "antigravity" and workspace_root is not None:
-        from agentos.providers.antigravity_cli.command import (
-            antigravity_native_media_policy,
-        )
+    if getattr(adapter, "name", "") == "antigravity":
+        if is_prompt_only:
+            if resolved_allowed_media_files:
+                from agentos.providers.antigravity_cli.command import (
+                    antigravity_native_media_extensions,
+                )
+                from agentos.providers.antigravity_cli.media_gate import MediaReadPolicy
 
-        # The folders the person added (`/add-dir`) and the unrestricted mode (`full_autonomy`) live on the
-        # tool set's workspace; the native read_file of the agy process follows the same reach, for media only.
-        for target_ts in (
-            getattr(request.executor, "toolset", None),
-            getattr(getattr(request.executor, "runtime", None), "toolset", None),
-            request.executor,
-        ):
-            ws_obj = getattr(target_ts, "workspace", None) if target_ts is not None else None
-            if ws_obj is None:
-                continue
-            raw_extra = getattr(ws_obj, "additional_roots", ())
-            media_additional_roots = tuple(
-                Path(item)
-                for item in (raw_extra if isinstance(raw_extra, (list, tuple)) else ())
-                if isinstance(item, (str, Path))
+                native_exts = antigravity_native_media_extensions(effective_model)
+                if native_exts:
+                    media_policy = MediaReadPolicy(
+                        allowed_files=tuple(str(p) for p in resolved_allowed_media_files),
+                        unrestricted=False,
+                        extensions=native_exts,
+                    )
+        elif workspace_root is not None:
+            from agentos.providers.antigravity_cli.command import (
+                antigravity_native_media_policy,
             )
-            media_unrestricted = getattr(ws_obj, "unrestricted", False) is True
-            break
-        media_policy = antigravity_native_media_policy(
-            effective_model,
-            workspace_root,
-            additional_roots=media_additional_roots,
-            unrestricted=media_unrestricted,
-        )
-        if media_policy is not None:
-            try:
-                allowed_media_root = workspace_root.resolve()
-            except OSError:
-                allowed_media_root = workspace_root.absolute()
+
+            # The folders the person added (`/add-dir`) and the unrestricted mode (`full_autonomy`) live on the
+            # tool set's workspace; the native read_file of the agy process follows the same reach, for media only.
+            for target_ts in (
+                getattr(request.executor, "toolset", None),
+                getattr(getattr(request.executor, "runtime", None), "toolset", None),
+                request.executor,
+            ):
+                ws_obj = getattr(target_ts, "workspace", None) if target_ts is not None else None
+                if ws_obj is None:
+                    continue
+                raw_extra = getattr(ws_obj, "additional_roots", ())
+                media_additional_roots = tuple(
+                    Path(item)
+                    for item in (raw_extra if isinstance(raw_extra, (list, tuple)) else ())
+                    if isinstance(item, (str, Path))
+                )
+                media_unrestricted = getattr(ws_obj, "unrestricted", False) is True
+                break
+            media_policy = antigravity_native_media_policy(
+                effective_model,
+                workspace_root,
+                additional_roots=media_additional_roots,
+                unrestricted=media_unrestricted,
+            )
+            if media_policy is not None:
+                try:
+                    allowed_media_root = workspace_root.resolve()
+                except OSError:
+                    allowed_media_root = workspace_root.absolute()
 
     bg_server: BackgroundTurnToolServer | None = None
     temp_files: list[Path] = []
@@ -1505,9 +1565,26 @@ def start_native_turn_for_provider(
     win_job: Any | None = None
 
     try:
-        bg_server = BackgroundTurnToolServer.start(
-            TurnToolServer(wrapped_executor, server_name=request.server_name)
+        system_text = with_isolated_cli_note(
+            request.system_prompt or "You are a helpful assistant.",
+            request.server_name,
+            permission_mode=effective_permission_mode,
+            workspace_root=None if is_prompt_only else workspace_root,
+            read_only=effective_read_only,
+            adapter_name=str(getattr(adapter, "name", "") or ""),
+            access_mode=eff_access_mode,
+            allowed_media_files=resolved_allowed_media_files,
         )
+        prior_history = str(request.prior_history or "").strip()
+        if prior_history:
+            system_text = f"{system_text}\n\n{prior_history}"
+        prompt_path = write_owner_only_temp(
+            system_text,
+            prefix="orin-claude-sys-",
+            suffix=".txt",
+        )
+        temp_files.append(prompt_path)
+
         ensure_isolated_cwd(request.cwd)
         # agy reads `.agents/mcp_config.json` (this turn's tool-server URL and token) from its working folder
         # when it starts. In a shared folder a process started a moment later overwrote it, and the first
@@ -1519,63 +1596,68 @@ def start_native_turn_for_provider(
         if uses_cwd_wiring:
             process_cwd = create_process_cwd(request.cwd)
         run_cwd = process_cwd if process_cwd is not None else request.cwd
-        wire_fn = getattr(adapter, "wire_tool_server", None)
-        if callable(wire_fn):
+
+        if is_prompt_only and getattr(adapter, "name", "") == "antigravity":
             wiring_dir = run_cwd if uses_cwd_wiring else Path(tempfile.gettempdir())
-            if workspace_root is not None:
-                wire_kwargs: dict[str, Any] = {
-                    "model": effective_model,
-                    "workspace_root": workspace_root,
-                }
-                if media_policy is not None:
-                    wire_kwargs["additional_roots"] = media_additional_roots
-                    wire_kwargs["unrestricted"] = media_unrestricted
-                try:
-                    wiring = wire_fn(
-                        bg_server.handle,
-                        wiring_dir,
-                        **wire_kwargs,
-                    )
-                except TypeError:
+            if resolved_allowed_media_files and callable(
+                getattr(adapter, "wire_attached_media_only", None)
+            ):
+                wiring = adapter.wire_attached_media_only(
+                    wiring_dir,
+                    allowed_files=resolved_allowed_media_files,
+                    model=effective_model,
+                    system_prompt_file=prompt_path,
+                )
+            elif callable(getattr(adapter, "wire_no_tools", None)):
+                wiring = adapter.wire_no_tools(
+                    wiring_dir,
+                    system_prompt_file=prompt_path,
+                )
+            else:
+                wiring = ToolServerWiring(argv=(), env={}, files=())
+        else:
+            bg_server = BackgroundTurnToolServer.start(
+                TurnToolServer(wrapped_executor, server_name=request.server_name)
+            )
+            wire_fn = getattr(adapter, "wire_tool_server", None)
+            if callable(wire_fn):
+                wiring_dir = run_cwd if uses_cwd_wiring else Path(tempfile.gettempdir())
+                if workspace_root is not None:
+                    wire_kwargs: dict[str, Any] = {
+                        "model": effective_model,
+                        "workspace_root": workspace_root,
+                    }
+                    if media_policy is not None:
+                        wire_kwargs["additional_roots"] = media_additional_roots
+                        wire_kwargs["unrestricted"] = media_unrestricted
+                    try:
+                        wiring = wire_fn(
+                            bg_server.handle,
+                            wiring_dir,
+                            **wire_kwargs,
+                        )
+                    except TypeError:
+                        wiring = wire_fn(
+                            bg_server.handle,
+                            wiring_dir,
+                        )
+                else:
                     wiring = wire_fn(
                         bg_server.handle,
                         wiring_dir,
                     )
             else:
-                wiring = wire_fn(
+                mcp_cfg = adapter.write_tool_server_config(
                     bg_server.handle,
-                    wiring_dir,
+                    Path(tempfile.gettempdir()),
                 )
-        else:
-            mcp_cfg = adapter.write_tool_server_config(
-                bg_server.handle,
-                Path(tempfile.gettempdir()),
-            )
-            wiring = ToolServerWiring(
-                argv=("--mcp-config", str(mcp_cfg)),
-                env={},
-                files=(mcp_cfg,),
-            )
+                wiring = ToolServerWiring(
+                    argv=("--mcp-config", str(mcp_cfg)),
+                    env={},
+                    files=(mcp_cfg,),
+                )
         temp_files.extend(wiring.files)
         mcp_config_path = wiring.files[0] if wiring.files else None
-
-        system_text = with_isolated_cli_note(
-            request.system_prompt or "You are a helpful assistant.",
-            request.server_name,
-            permission_mode=effective_permission_mode,
-            workspace_root=workspace_root,
-            read_only=effective_read_only,
-            adapter_name=str(getattr(adapter, "name", "") or ""),
-        )
-        prior_history = str(request.prior_history or "").strip()
-        if prior_history:
-            system_text = f"{system_text}\n\n{prior_history}"
-        prompt_path = write_owner_only_temp(
-            system_text,
-            prefix="orin-claude-sys-",
-            suffix=".txt",
-        )
-        temp_files.append(prompt_path)
 
         now = provider._clock()
         remaining_s = max(1.0, request.deadline_monotonic - now)
@@ -1674,7 +1756,16 @@ def start_native_turn_for_provider(
         )
         encode_fn = getattr(adapter, "encode_user_turn", None)
         if callable(encode_fn):
-            if allowed_media_root is not None:
+            if is_prompt_only and resolved_allowed_media_files:
+                try:
+                    initial_payload = encode_fn(
+                        request.user_content,
+                        workspace_root=allowed_media_root,
+                        allowed_files=resolved_allowed_media_files,
+                    ).decode("utf-8")
+                except TypeError:
+                    initial_payload = encode_fn(request.user_content).decode("utf-8")
+            elif allowed_media_root is not None:
                 try:
                     initial_payload = encode_fn(
                         request.user_content, workspace_root=allowed_media_root

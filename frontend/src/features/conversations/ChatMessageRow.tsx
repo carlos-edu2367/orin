@@ -51,6 +51,8 @@ export type ChatMessageRowProps = {
   defaultModelId?: string
   models?: Partial<Record<ProviderName, ProviderModel[]>>
   isTurnFinished: boolean
+  /** A queued turn behind a live turn that still waits for the answer to its question. */
+  queuedBehindQuestion?: boolean
   turnStartedAt: string | null
   turnFinishedAt: string | null
   turnWorkDurationLabel: string | null
@@ -98,6 +100,7 @@ export const ChatMessageRow = memo(function ChatMessageRow({
   defaultModelId,
   models,
   isTurnFinished,
+  queuedBehindQuestion = false,
   turnStartedAt,
   turnFinishedAt,
   turnWorkDurationLabel,
@@ -220,7 +223,9 @@ export const ChatMessageRow = memo(function ChatMessageRow({
       <div className="assistant-live-placeholder" data-testid="assistant-live-placeholder">
         <span className="agent-pulse__dot" aria-hidden="true" />
         <span className="agent-pulse__label--shimmer">
-          {item.status === 'queued' ? 'Na fila…' : 'Pensando…'}
+          {item.status === 'queued'
+            ? (queuedBehindQuestion ? 'Na fila: o agente ainda espera a resposta da pergunta acima' : 'Na fila…')
+            : 'Pensando…'}
         </span>
       </div>
     )

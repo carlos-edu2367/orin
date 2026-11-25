@@ -3542,6 +3542,14 @@ class NativeTurnRunner:
                     if initial_user_images_pending
                     else ()
                 ),
+                access_mode=str(
+                    getattr(self.runtime.toolset, "_access_mode", None)
+                    or self.turn.get("access_mode")
+                    or "full"
+                ),
+                allowed_media_files=tuple(
+                    getattr(self.runtime.store, "allowed_media_files", ()) or ()
+                ),
             )
 
             handle: NativeTurnHandle | Any | None = None

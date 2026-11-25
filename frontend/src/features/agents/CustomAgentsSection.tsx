@@ -6,6 +6,7 @@ import {
   deleteCustomAgent,
   listCustomAgents,
   updateCustomAgent,
+  type AgentAccessMode,
   type AgentIsolationMode,
   type AgentMemoryMode,
   type CustomAgent,
@@ -27,6 +28,16 @@ const AGENT_ISOLATION_MODES: ReadonlyArray<{ id: AgentIsolationMode; label: stri
   { id: 'none', label: 'Nenhum (none)' },
   { id: 'worktree', label: 'Worktree isolada (worktree)' },
 ]
+const AGENT_ACCESS_MODES: ReadonlyArray<{ id: AgentAccessMode; label: string }> = [
+  { id: 'full', label: 'Acesso completo (padrão)' },
+  { id: 'read_only', label: 'Somente leitura (arquivos)' },
+  { id: 'prompt_only', label: 'Somente pergunta com anexos' },
+]
+function accessModeBadgeLabel(mode: AgentAccessMode | null | undefined): string | null {
+  if (mode === 'prompt_only') return 'Somente pergunta'
+  if (mode === 'read_only') return 'Somente leitura'
+  return null
+}
 const RESERVED = new Set(['explore', 'plan', 'general-purpose', 'general', 'fork', 'verifier'])
 const TOOL_NAME = /^[A-Za-z_][\w.:*-]*$/
 const PERMISSION_MODES: ReadonlyArray<{ id: string; label: string }> = [
@@ -95,12 +106,13 @@ export type AgentForm = {
   maxTurns: string
   memory?: AgentMemoryMode
   isolation?: AgentIsolationMode
+  accessMode?: AgentAccessMode
   enabled: boolean
 }
 
 const EMPTY: AgentForm = {
   name: '', description: '', prompt: '', provider: '', models: [], tools: '', disallowed: '', effort: '',
-  permissionMode: '', maxTurns: '', memory: 'project', isolation: 'none', enabled: true,
+  permissionMode: '', maxTurns: '', memory: 'project', isolation: 'none', accessMode: 'full', enabled: true,
 }
 
 /** Starting points for a new agent: they fill what to do and which tools, never a provider (that is the person's). */
@@ -142,6 +154,20 @@ export const AGENT_TEMPLATES: ReadonlyArray<{ id: string; title: string; summary
         + 'com a saída relevante e a causa provável de cada falha. Não corrija nada.',
       tools: 'Bash, Read, Grep, Glob',
       disallowed: 'Write, Edit',
+    },
+  },
+  {
+    id: 'validador-visual',
+    title: 'Validador visual (juiz)',
+    summary: 'Compara imagem de referência e resultado sem acesso ao repositório.',
+    form: {
+      name: 'validador-visual',
+      description: 'Compara imagens anexadas (referência vs tela gerada) e devolve parecer objetivo de fidelidade visual, sem acessar o repositório.',
+      prompt: 'Você é um validador visual independente. Compare cuidadosamente as imagens anexadas (referência versus resultado) '
+        + 'e responda de forma objetiva com: (1) veredito (aprovado/reprovado), (2) divergências visuais reais '
+        + '(layout, tipografia, cores, alinhamento, cortes) e (3) ajustes concretos necessários. '
+        + 'Responda exclusivamente com base no prompt e nos anexos fornecidos.',
+      accessMode: 'prompt_only',
     },
   },
 ]
@@ -186,8 +212,10 @@ export function customAgentFieldProblems(form: AgentForm, { creating }: { creati
   if (form.maxTurns && !(Number.isInteger(Number(form.maxTurns)) && Number(form.maxTurns) >= 1 && Number(form.maxTurns) <= 500)) {
     problems.push({ field: 'maxTurns', message: 'Máximo de turnos: de 1 a 500.' })
   }
-  const badTool = [...names(form.tools), ...names(form.disallowed)].find((tool) => !TOOL_NAME.test(tool))
-  if (badTool) problems.push({ field: 'tools', message: `"${badTool}" não é um nome de ferramenta.` })
+  if (form.accessMode !== 'prompt_only') {
+    const badTool = [...names(form.tools), ...names(form.disallowed)].find((tool) => !TOOL_NAME.test(tool))
+    if (badTool) problems.push({ field: 'tools', message: `"${badTool}" não é um nome de ferramenta.` })
+  }
   return problems
 }
 
@@ -196,19 +224,22 @@ export function customAgentProblems(form: AgentForm, options: { creating: boolea
 }
 
 export function draftOf(form: AgentForm): CustomAgentDraft {
-  const tools = names(form.tools)
+  const isPromptOnly = form.accessMode === 'prompt_only'
+  const isReadOnly = form.accessMode === 'read_only'
+  const tools = isPromptOnly ? [] : names(form.tools)
   return {
     description: form.description.trim(),
     prompt: form.prompt.trim(),
     provider: form.provider || null,
     models: form.provider ? form.models : [],
-    tools: tools.length > 0 ? tools : null,
-    disallowedTools: names(form.disallowed),
+    tools: isPromptOnly ? null : (tools.length > 0 ? tools : null),
+    disallowedTools: isPromptOnly ? [] : names(form.disallowed),
     effort: form.effort || null,
-    permissionMode: form.permissionMode || null,
+    permissionMode: isPromptOnly ? null : (form.permissionMode || null),
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null,
     memory: form.memory || 'project',
-    isolation: form.isolation === 'worktree' ? 'worktree' : null,
+    isolation: (isPromptOnly || isReadOnly) ? null : (form.isolation === 'worktree' ? 'worktree' : null),
+    accessMode: form.accessMode && form.accessMode !== 'full' ? form.accessMode : null,
     enabled: form.enabled,
   }
 }
@@ -220,6 +251,7 @@ function formOf(agent: CustomAgent): AgentForm {
     effort: agent.effort ?? '', permissionMode: agent.permissionMode ?? '', maxTurns: agent.maxTurns ? String(agent.maxTurns) : '',
     memory: agent.memory ?? 'project',
     isolation: agent.isolation ?? 'none',
+    accessMode: agent.accessMode ?? 'full',
     enabled: agent.enabled,
   }
 }
@@ -539,7 +571,12 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                     </button>
                   </div>
                   <p className="agents-studio__card-description">{agent.description}</p>
-                  <div className="agents-studio__chips"><ModelSummary agent={agent} /></div>
+                  <div className="agents-studio__chips">
+                    <ModelSummary agent={agent} />
+                    {accessModeBadgeLabel(agent.accessMode) && (
+                      <span className="agents-studio__chip">{accessModeBadgeLabel(agent.accessMode)}</span>
+                    )}
+                  </div>
                   <div className="agents-studio__card-actions">
                     {confirming === agent.name ? (
                       <>
@@ -681,14 +718,52 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                 </summary>
                 <div className="agents-studio__grid-2">
                   <label className="agents-studio__field">
+                    <span className="agents-studio__label">Modo de acesso</span>
+                    <select
+                      value={form.accessMode ?? 'full'}
+                      aria-label="Modo de acesso"
+                      aria-describedby="agent-access-mode-hint"
+                      onChange={(event) => {
+                        const nextMode = event.target.value as AgentAccessMode
+                        set({
+                          accessMode: nextMode,
+                          ...(nextMode === 'prompt_only'
+                            ? { tools: '', disallowed: '', permissionMode: '', isolation: 'none' }
+                            : nextMode === 'read_only'
+                              ? { isolation: 'none' }
+                              : {}),
+                        })
+                      }}
+                    >
+                      {AGENT_ACCESS_MODES.map((mode) => (
+                        <option key={mode.id} value={mode.id}>
+                          {mode.label}
+                        </option>
+                      ))}
+                    </select>
+                    <FieldHint id="agent-access-mode-hint">
+                      {form.accessMode === 'prompt_only'
+                        ? 'Sem ferramentas de workspace, shell ou MCP: responde apenas ao prompt e aos anexos enviados.'
+                        : form.accessMode === 'read_only'
+                          ? 'Apenas leitura e busca de arquivos no workspace; sem escrita, shell, web ou MCP.'
+                          : 'Herda as ferramentas e permissões de quem chamar.'}
+                    </FieldHint>
+                  </label>
+                  <label className="agents-studio__field">
                     <span className="agents-studio__label">Ferramentas permitidas</span>
                     <input value={form.tools} placeholder="Vazio: todas as de quem chama" aria-label="Ferramentas permitidas"
+                      disabled={form.accessMode === 'prompt_only'}
                       onChange={(event) => set({ tools: event.target.value })} />
-                    <FieldHint id="agent-tools-hint" error={problemOf('tools')}>Separadas por vírgula, ex.: Read, Grep, Glob</FieldHint>
+                    <FieldHint id="agent-tools-hint" error={problemOf('tools')}>
+                      {form.accessMode === 'prompt_only'
+                        ? 'Desabilitado no modo somente pergunta com anexos.'
+                        : 'Separadas por vírgula, ex.: Read, Grep, Glob'}
+                    </FieldHint>
                   </label>
                   <label className="agents-studio__field">
                     <span className="agents-studio__label">Ferramentas proibidas</span>
                     <input value={form.disallowed} placeholder="Write, Edit" aria-label="Ferramentas proibidas"
+                      disabled={form.accessMode === 'prompt_only'}
                       onChange={(event) => set({ disallowed: event.target.value })} />
                   </label>
                   <label className="agents-studio__field">
@@ -708,11 +783,20 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                   </label>
                   <label className="agents-studio__field">
                     <span className="agents-studio__label">Permissão</span>
-                    <select value={form.permissionMode} aria-label="Permissão" onChange={(event) => set({ permissionMode: event.target.value })}>
+                    <select
+                      value={form.permissionMode}
+                      aria-label="Permissão"
+                      disabled={form.accessMode === 'prompt_only'}
+                      onChange={(event) => set({ permissionMode: event.target.value })}
+                    >
                       <option value="">A de quem chama</option>
                       {PERMISSION_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
                     </select>
-                    <FieldHint id="agent-permission-hint">Nunca fica maior que a de quem chama.</FieldHint>
+                    <FieldHint id="agent-permission-hint">
+                      {form.accessMode === 'prompt_only'
+                        ? 'Desabilitado no modo somente pergunta com anexos.'
+                        : 'Nunca fica maior que a de quem chama.'}
+                    </FieldHint>
                   </label>
                   <label className="agents-studio__field">
                     <span className="agents-studio__label">Máximo de turnos</span>
@@ -744,6 +828,7 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                       value={form.isolation ?? 'none'}
                       aria-label="Isolamento"
                       aria-describedby="agent-isolation-hint"
+                      disabled={form.accessMode === 'prompt_only' || form.accessMode === 'read_only'}
                       onChange={(event) => set({ isolation: event.target.value as AgentIsolationMode })}
                     >
                       {AGENT_ISOLATION_MODES.map((mode) => (
@@ -753,8 +838,14 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                       ))}
                     </select>
                     <FieldHint id="agent-isolation-hint">
-                      Tem efeito só com a chave global &ldquo;Worktree por subagente&rdquo; ligada em{' '}
-                      <Link to="/settings/orchestration">Configurações › Orquestração</Link>.
+                      {form.accessMode === 'prompt_only' || form.accessMode === 'read_only'
+                        ? 'Indisponível em modos sem escrita (somente pergunta / somente leitura).'
+                        : (
+                          <>
+                            Tem efeito só com a chave global &ldquo;Worktree por subagente&rdquo; ligada em{' '}
+                            <Link to="/settings/orchestration">Configurações › Orquestração</Link>.
+                          </>
+                        )}
                     </FieldHint>
                   </label>
                 </div>
@@ -783,7 +874,12 @@ export function CustomAgentsSection({ client }: { client?: ApiClient }) {
                   </div>
                 </div>
                 <p className="agents-studio__card-description">{form.description || 'Quando usar este agente…'}</p>
-                <div className="agents-studio__chips"><ModelSummary agent={{ provider: form.provider || null, models: form.models }} /></div>
+                <div className="agents-studio__chips">
+                  <ModelSummary agent={{ provider: form.provider || null, models: form.models }} />
+                  {accessModeBadgeLabel(form.accessMode) && (
+                    <span className="agents-studio__chip">{accessModeBadgeLabel(form.accessMode)}</span>
+                  )}
+                </div>
               </div>
               <p className="agents-studio__preview-label">Numa mensagem</p>
               <div className="agents-studio__bubble">

@@ -387,6 +387,7 @@ class AgentRunRecorder:
         pipeline_run_id: str | None = None,
         result_ref: str | None = None,
         initial_history: Sequence[Mapping[str, Any]] | None = None,
+        extra_metadata: Mapping[str, Any] | None = None,
     ) -> AgentRunRecord:
         """Create or update the ``agent_runs`` row and initialize its history file."""
         clean_task = str(task or "")
@@ -404,6 +405,10 @@ class AgentRunRecorder:
             meta["task"] = clean_task[:4000]
         if pipeline_run_id:
             meta["pipeline_run_id"] = str(pipeline_run_id)
+        if extra_metadata:
+            for k, v in extra_metadata.items():
+                if v is not None:
+                    meta[str(k)] = v
 
         if initial_history is not None:
             self.save_history(agent_id, initial_history, metadata=meta)

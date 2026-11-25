@@ -27,6 +27,10 @@ BUDGET_DESCRIPTION = (
 )
 CHARACTER_NAME_MAX_LEN = 32
 CHARACTER_NAME_DESCRIPTION = "Optional character name shown for this subagent in the Cena, e.g. a fun short name"
+ACCESS_MODES = ("prompt_only", "read_only", "full")
+MAX_SUBAGENT_ATTACHMENTS = 12
+ACCESS_MODE_DESCRIPTION = "Optional mode: 'full' (default), 'read_only' (file read/search only), or 'prompt_only' (no tools; prompt + attachments only)."
+ATTACHMENTS_DESCRIPTION = "Optional list (max 12) of workspace file paths (images, text, PDF, media) attached to the subagent."
 _SUBAGENT_CHARACTER_NAMES: dict[tuple[str, str], str] = {}
 _CHARACTER_NAMES_LOCK = threading.Lock()
 
@@ -209,6 +213,8 @@ class AgentTools:
         character_name: str | None = None,
         output_schema: Mapping[str, Any] | None = None,
         budget: Mapping[str, Any] | None = None,
+        access_mode: str | None = None,
+        attachments: list[str] | None = None,
     ) -> ToolOutcome:
         raw_type = str(subagent_type or "").strip()
         clean_type = raw_type.lower()
@@ -237,6 +243,26 @@ class AgentTools:
         clean_isolation = str(isolation).strip().lower() if isolation is not None and str(isolation).strip() else None
         if clean_isolation is not None and clean_isolation not in {"none", "worktree"}:
             raise AgentToolError("isolation must be 'none' or 'worktree'.")
+        clean_access_mode: str | None = None
+        if access_mode is not None:
+            if not isinstance(access_mode, str) or not access_mode.strip():
+                raise AgentToolError("access_mode must be one of 'prompt_only', 'read_only', or 'full'.")
+            clean_access_mode = access_mode.strip().lower()
+            if clean_access_mode not in ACCESS_MODES:
+                raise AgentToolError("access_mode must be one of 'prompt_only', 'read_only', or 'full'.")
+        clean_attachments: list[str] | None = None
+        if attachments is not None:
+            if isinstance(attachments, (str, bytes)) or not isinstance(attachments, Sequence):
+                raise AgentToolError("attachments must be a list of non-blank file paths.")
+            if len(attachments) > MAX_SUBAGENT_ATTACHMENTS:
+                raise AgentToolError(f"attachments accepts at most {MAX_SUBAGENT_ATTACHMENTS} items.")
+            parsed_attachments: list[str] = []
+            for item in attachments:
+                if not isinstance(item, str) or not item.strip():
+                    raise AgentToolError("Each entry in attachments must be a non-blank file path string.")
+                parsed_attachments.append(item.strip())
+            if parsed_attachments:
+                clean_attachments = parsed_attachments
         try:  # WS-C4: structured output and a spending ceiling for this subagent
             clean_schema = validate_output_schema(output_schema) if output_schema is not None else None
             clean_budget = parse_budget(budget).as_dict() if budget is not None else None
@@ -261,6 +287,10 @@ class AgentTools:
                 extra["output_schema"] = clean_schema
             if clean_budget:
                 extra["budget"] = clean_budget
+            if clean_access_mode is not None:
+                extra["access_mode"] = clean_access_mode
+            if clean_attachments is not None:
+                extra["attachments"] = clean_attachments
             try:
                 return self._run_subagent(
                     clean_type,
@@ -272,8 +302,13 @@ class AgentTools:
                     **extra,
                 )
             except TypeError:
-                if clean_schema is not None or clean_budget:
-                    raise  # never run without the schema or the ceiling that was asked for
+                if (
+                    clean_schema is not None
+                    or clean_budget
+                    or clean_access_mode is not None
+                    or clean_attachments is not None
+                ):
+                    raise  # never run without the schema, ceiling, access_mode, or attachments that were asked for
                 return self._run_subagent(
                     clean_type,
                     task.strip(),
@@ -363,6 +398,14 @@ class AgentInput(ToolInput):
         None,
         description="Optional isolation mode: 'worktree' runs the subagent in an isolated Git worktree when enabled in settings.",
     )
+    access_mode: Literal["prompt_only", "read_only", "full"] | None = Field(
+        None,
+        description=ACCESS_MODE_DESCRIPTION,
+    )
+    attachments: list[str] | None = Field(
+        None,
+        description=ATTACHMENTS_DESCRIPTION,
+    )
     output_schema: dict[str, Any] | None = Field(None, description=OUTPUT_SCHEMA_DESCRIPTION)
     budget: dict[str, float] | None = Field(None, description=BUDGET_DESCRIPTION)
     run_in_background: bool | None = Field(None, description="Return immediately and notify on completion.")
@@ -417,7 +460,14 @@ SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         key="run_subagent",
-        description="Launch or resume a specialized builtin subagent ('explore' for read-only codebase search, 'plan' for read-only architecture planning, 'general' for multi-step implementation/research, or 'fork' to inherit the full conversation context) and return its report or background handle.",
+        description=(
+            "Launch or resume a specialized builtin subagent ('explore' for read-only codebase search, 'plan' for "
+            "read-only architecture planning, 'general' for multi-step implementation/research, or 'fork' to inherit "
+            "the full conversation context) and return its report or background handle. Supports access_mode "
+            "('full', 'read_only', or 'prompt_only' with zero tools) and attachments (up to 12 workspace files: "
+            "images, text/code, PDF, Office, audio/video — e.g. passing reference and rendered screenshots to a "
+            "prompt_only visual validator)."
+        ),
         legacy_schema=_schema({
             "subagent_type": {
                 "type": "string",
@@ -435,6 +485,17 @@ SPECS: tuple[ToolSpec, ...] = (
             "model_id": {**_TEXT, "description": "Optional. Relative to `provider` when `provider` is set; for an agent that lists its own models, one of them (required when it lists several); otherwise a favorite model ID of the current provider."},
             "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"], "description": "Optional reasoning effort level for this subagent call."},
             "isolation": {"type": "string", "enum": ["none", "worktree"], "description": "Optional isolation mode ('none' or 'worktree')."},
+            "access_mode": {
+                "type": "string",
+                "enum": ["prompt_only", "read_only", "full"],
+                "description": ACCESS_MODE_DESCRIPTION,
+            },
+            "attachments": {
+                "type": "array",
+                "items": _TEXT,
+                "maxItems": MAX_SUBAGENT_ATTACHMENTS,
+                "description": ATTACHMENTS_DESCRIPTION,
+            },
             "output_schema": {"type": "object", "description": OUTPUT_SCHEMA_DESCRIPTION},
             "budget": {
                 "type": "object",
@@ -456,10 +517,9 @@ SPECS: tuple[ToolSpec, ...] = (
         kind="agent",
         input_model=AgentInput,
         public_description=(
-            "Delegate a self-contained task to a subagent. Types: 'Explore' (fast read-only search), 'Plan' "
-            "(read-only design), 'general-purpose' (full toolset), 'fork' (inherits this conversation). "
-            "You can choose another configured provider/CLI per call with 'provider' ('anthropic', 'openai-codex', "
-            "'google-antigravity', or a configured API provider); 'model' is relative to the chosen 'provider'."
+            "Delegate a self-contained task to a subagent. Types: 'Explore' (read-only search), 'Plan' "
+            "(read-only design), 'general-purpose' (full toolset), 'fork' (inherits conversation). "
+            "Supports 'provider'/'model', 'access_mode' ('full'|'read_only'|'prompt_only') and 'attachments' (up to 12 files)."
         ),
         policy_tags=("mutates",),
         concurrency_safe=True,

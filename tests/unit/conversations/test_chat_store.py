@@ -420,10 +420,10 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
     turn = store.claim(receipt.turn_id)
     assert turn is not None
 
-    # Emit 180 distinct tool events plus multi-token delta segments, then finish the turn
+    # Emit 630 distinct tool events plus multi-token delta segments, then finish the turn
     for tok in ("Iniciando ", "varredura ", "de arquivos."):
         store.delta(turn, tok)
-    for idx in range(330):
+    for idx in range(630):
         store.record(
             turn,
             AgentActivityEventType.FILESYSTEM_READ,
@@ -435,7 +435,7 @@ def test_snapshot_paginates_recent_activities_and_loads_older_pages() -> None:
     store.finish(turn)
 
     snapshot = store.get(receipt.conversation_id, "user-1")
-    assert len(snapshot["activities"]) <= 300
+    assert len(snapshot["activities"]) <= 600
     assert snapshot["has_older_activities"] is True
     assert isinstance(snapshot["oldest_activity_id"], int)
     # Settled turns compact consecutive assistant.delta tokens into a single segment event

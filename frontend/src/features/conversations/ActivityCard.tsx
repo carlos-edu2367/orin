@@ -100,6 +100,19 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
     isSubagentGroup && conversationId && (running || (subagentLiveMessages && subagentLiveMessages.length > 0)),
   )
   const isFriendInjected = Boolean(latestEvent && isFriendQueuedInputEvent(latestEvent))
+  const accessModeRaw = group.events
+    .map((ev) => (typeof ev.payload?.access_mode === 'string' ? ev.payload.access_mode.trim().toLowerCase() : ''))
+    .find((val) => val === 'prompt_only' || val === 'read_only')
+  const accessModeBadge =
+    accessModeRaw === 'prompt_only'
+      ? 'Somente pergunta'
+      : accessModeRaw === 'read_only'
+        ? 'Somente leitura'
+        : null
+  const attachmentCount = group.events.reduce((acc, ev) => {
+    const raw = ev.payload?.attachment_count
+    return typeof raw === 'number' && Number.isFinite(raw) && raw > acc ? raw : acc
+  }, 0)
 
   return (
     <motion.article
@@ -129,6 +142,16 @@ export function ActivityCard({ group, conversationId, onPreview, client, onResum
         {!isTool && group.count > 1 && <span className="activity-card__count">{formatActivityCount(group.count)}</span>}
         {failedCalls > 0 && <span className="activity-card__failure">{formatFailureCount(failedCalls)}</span>}
         {isFriendInjected && <span className="via-friend-badge" data-testid="via-friend-badge">via Friend</span>}
+        {accessModeBadge && (
+          <span className="activity-card__count" data-testid="activity-card-access-mode-badge">
+            {accessModeBadge}
+          </span>
+        )}
+        {attachmentCount > 0 && (
+          <span className="activity-card__count" data-testid="activity-card-attachments-badge">
+            {attachmentCount} {attachmentCount === 1 ? 'anexo' : 'anexos'}
+          </span>
+        )}
         {agentProgress?.stalled && <span className="agent-progress-row__badge agent-progress-row__badge--stalled" data-testid="activity-card-stalled-badge">travado</span>}
         {group.agentName && <span className="activity-card__agent">{group.agentName}</span>}
         {isTool && running && elapsed !== null && <span className="activity-card__elapsed">{formatElapsed(elapsed)}</span>}

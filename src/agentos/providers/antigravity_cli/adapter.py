@@ -25,6 +25,7 @@ from agentos.providers.antigravity_cli.command import (
     is_antigravity_version_supported,
     redact_antigravity_argv,
     resolve_antigravity_binary,
+    wire_antigravity_attached_media_only,
     wire_antigravity_no_tools,
     wire_antigravity_tool_server,
 )
@@ -164,6 +165,23 @@ class AntigravityCliAdapter:
             directory, system_prompt_file=system_prompt_file
         )
 
+    def wire_attached_media_only(
+        self,
+        directory: Path,
+        *,
+        allowed_files: Sequence[Path | str],
+        model: str,
+        system_prompt_file: Path | None = None,
+        instructions: str | None = None,
+    ) -> ToolServerWiring:
+        return wire_antigravity_attached_media_only(
+            directory,
+            allowed_files=allowed_files,
+            model=model,
+            system_prompt_file=system_prompt_file,
+            instructions=instructions,
+        )
+
     def build_command(
         self,
         request: CliTurnRequest,
@@ -191,9 +209,10 @@ class AntigravityCliAdapter:
         content: list[dict[str, Any]],
         *,
         workspace_root: Path | str | None = None,
+        allowed_files: Sequence[Path | str] | None = None,
     ) -> bytes:
         return encode_antigravity_user_turn(
-            content, workspace_root=workspace_root
+            content, workspace_root=workspace_root, allowed_files=allowed_files
         )
 
     def loggable_command(self, argv: Sequence[str]) -> list[str]:

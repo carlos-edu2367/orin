@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react
 import { Link } from 'react-router-dom'
 import type { ApiClient } from '../../api/client'
 import { EFFORT_LEVELS, listProviderModels, PROVIDER_NAMES, type EffortLevel, type ProviderModel } from '../../api/providers'
-import { deleteAgent, getAgents, saveAgent, type AgentDefinition, type AgentDraft, type AgentIsolationMode, type AgentMemoryMode } from '../../api/settings'
+import { deleteAgent, getAgents, saveAgent, type AgentAccessMode, type AgentDefinition, type AgentDraft, type AgentIsolationMode, type AgentMemoryMode } from '../../api/settings'
 import { SettingsSection } from '../settings/SettingsSection'
 import { Card, describeError, ErrorNote, FolderBanner, useFolderConversation, useLoaded, useSettingsClient } from './shared'
 
@@ -17,6 +17,11 @@ const MEMORY_MODES: ReadonlyArray<{ id: AgentMemoryMode; label: string }> = [
 const ISOLATION_MODES: ReadonlyArray<{ id: AgentIsolationMode; label: string }> = [
   { id: 'none', label: 'Nenhum (none)' },
   { id: 'worktree', label: 'Worktree isolada (worktree)' },
+]
+const ACCESS_MODES: ReadonlyArray<{ id: AgentAccessMode; label: string }> = [
+  { id: 'full', label: 'Acesso completo (padrão)' },
+  { id: 'read_only', label: 'Somente leitura (arquivos)' },
+  { id: 'prompt_only', label: 'Somente pergunta com anexos' },
 ]
 const ORIGIN: Record<string, string> = { user: 'usuário', project: 'projeto', plugin: 'plugin', builtin: 'do Orin', cli: 'linha de comando', orin: 'Biblioteca' }
 
@@ -44,9 +49,9 @@ export function acceptedEffortsForModelInput(modelInput: string, catalogModels: 
   return allDeclared ? [] : EFFORT_LEVELS
 }
 
-type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string; memory?: AgentMemoryMode; isolation?: AgentIsolationMode }
+type Form = { name: string; scope: 'user' | 'project'; description: string; prompt: string; tools: string; disallowed: string; model: string; permissionMode: string; maxTurns: string; effort: string; memory?: AgentMemoryMode; isolation?: AgentIsolationMode; accessMode?: AgentAccessMode }
 
-const EMPTY: Form = { name: '', scope: 'user', description: '', prompt: '', tools: '', disallowed: '', model: '', permissionMode: '', maxTurns: '', effort: '', memory: 'project', isolation: 'none' }
+const EMPTY: Form = { name: '', scope: 'user', description: '', prompt: '', tools: '', disallowed: '', model: '', permissionMode: '', maxTurns: '', effort: '', memory: 'project', isolation: 'none', accessMode: 'full' }
 
 function names(text: string): string[] {
   return text.split(/[,\n]/).map((item) => item.trim()).filter(Boolean)
@@ -59,19 +64,24 @@ export function agentFormProblems(form: Form): string[] {
   if (!form.description.trim()) problems.push('Diga quando usar o agente (descrição).')
   if (!form.prompt.trim()) problems.push('Escreva as instruções do agente.')
   if (form.maxTurns && !(Number.isInteger(Number(form.maxTurns)) && Number(form.maxTurns) >= 1 && Number(form.maxTurns) <= 500)) problems.push('Máximo de turnos: de 1 a 500.')
-  const badTool = [...names(form.tools), ...names(form.disallowed)].find((tool) => !/^[A-Za-z_][\w.:-]*$/.test(tool))
-  if (badTool) problems.push(`"${badTool}" não é um nome de ferramenta (use só nomes, sem regras entre parênteses).`)
+  if (form.accessMode !== 'prompt_only') {
+    const badTool = [...names(form.tools), ...names(form.disallowed)].find((tool) => !/^[A-Za-z_][\w.:-]*$/.test(tool))
+    if (badTool) problems.push(`"${badTool}" não é um nome de ferramenta (use só nomes, sem regras entre parênteses).`)
+  }
   return problems
 }
 
 export function draftOf(form: Form): AgentDraft {
-  const tools = names(form.tools)
+  const isPromptOnly = form.accessMode === 'prompt_only'
+  const isReadOnly = form.accessMode === 'read_only'
+  const tools = isPromptOnly ? [] : names(form.tools)
   return {
-    scope: form.scope, description: form.description.trim(), prompt: form.prompt, tools: tools.length > 0 ? tools : null,
-    disallowedTools: names(form.disallowed), model: form.model.trim() || null, permissionMode: form.permissionMode || null,
+    scope: form.scope, description: form.description.trim(), prompt: form.prompt, tools: isPromptOnly ? null : (tools.length > 0 ? tools : null),
+    disallowedTools: isPromptOnly ? [] : names(form.disallowed), model: form.model.trim() || null, permissionMode: isPromptOnly ? null : (form.permissionMode || null),
     maxTurns: form.maxTurns ? Number(form.maxTurns) : null, effort: form.effort || null,
     ...(form.memory ? { memory: form.memory } : {}),
-    isolation: form.isolation === 'worktree' ? 'worktree' : null,
+    isolation: (isPromptOnly || isReadOnly) ? null : (form.isolation === 'worktree' ? 'worktree' : null),
+    accessMode: form.accessMode && form.accessMode !== 'full' ? form.accessMode : null,
   }
 }
 
@@ -82,6 +92,7 @@ function formOf(agent: AgentDefinition): Form {
     permissionMode: agent.permissionMode ?? '', maxTurns: agent.maxTurns ? String(agent.maxTurns) : '', effort: agent.effort ?? '',
     memory: agent.memory ?? 'project',
     isolation: agent.isolation ?? 'none',
+    accessMode: agent.accessMode ?? 'full',
   }
 }
 
@@ -229,17 +240,43 @@ export function AgentsSection({ client: clientProp }: { client?: ApiClient } = {
             <label className="code-settings__wide">Instruções
               <textarea className="code-settings__code" rows={8} value={form.prompt} onChange={(event) => set({ prompt: event.target.value })} />
             </label>
+            <label>Modo de acesso
+              <select
+                value={form.accessMode ?? 'full'}
+                aria-label="Modo de acesso"
+                onChange={(event) => {
+                  const nextMode = event.target.value as AgentAccessMode
+                  set({
+                    accessMode: nextMode,
+                    ...(nextMode === 'prompt_only'
+                      ? { tools: '', disallowed: '', permissionMode: '', isolation: 'none' }
+                      : nextMode === 'read_only'
+                        ? { isolation: 'none' }
+                        : {}),
+                  })
+                }}
+              >
+                {ACCESS_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+              </select>
+              <span className="code-settings__muted">
+                {form.accessMode === 'prompt_only'
+                  ? 'Sem ferramentas de workspace, shell ou MCP: responde apenas ao prompt e aos anexos.'
+                  : form.accessMode === 'read_only'
+                    ? 'Apenas leitura e busca de arquivos no workspace.'
+                    : 'Herda as ferramentas e permissões de quem chamar.'}
+              </span>
+            </label>
             <label>Ferramentas (vazio: todas)
-              <input value={form.tools} onChange={(event) => set({ tools: event.target.value })} placeholder="Read, Grep, Glob" />
+              <input value={form.tools} disabled={form.accessMode === 'prompt_only'} onChange={(event) => set({ tools: event.target.value })} placeholder="Read, Grep, Glob" />
             </label>
             <label>Ferramentas proibidas
-              <input value={form.disallowed} onChange={(event) => set({ disallowed: event.target.value })} placeholder="Write, Edit" />
+              <input value={form.disallowed} disabled={form.accessMode === 'prompt_only'} onChange={(event) => set({ disallowed: event.target.value })} placeholder="Write, Edit" />
             </label>
             <label>Modelo (vazio: o da conversa)
               <input value={form.model} maxLength={120} onChange={(event) => set({ model: event.target.value })} />
             </label>
             <label>Modo de permissão
-              <select value={form.permissionMode} onChange={(event) => set({ permissionMode: event.target.value })}>
+              <select value={form.permissionMode} disabled={form.accessMode === 'prompt_only'} onChange={(event) => set({ permissionMode: event.target.value })}>
                 <option value="">O da conversa</option>
                 {PERMISSION_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
               </select>
@@ -273,13 +310,20 @@ export function AgentsSection({ client: clientProp }: { client?: ApiClient } = {
               <select
                 value={form.isolation ?? 'none'}
                 aria-label="Isolamento"
+                disabled={form.accessMode === 'prompt_only' || form.accessMode === 'read_only'}
                 onChange={(event) => set({ isolation: event.target.value as AgentIsolationMode })}
               >
                 {ISOLATION_MODES.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
               </select>
               <span className="code-settings__muted">
-                Tem efeito só com a chave global &ldquo;Worktree por subagente&rdquo; ligada em{' '}
-                <Link to="/settings/orchestration">Configurações › Orquestração</Link>.
+                {form.accessMode === 'prompt_only' || form.accessMode === 'read_only'
+                  ? 'Indisponível em modos sem escrita (somente pergunta / somente leitura).'
+                  : (
+                    <>
+                      Tem efeito só com a chave global &ldquo;Worktree por subagente&rdquo; ligada em{' '}
+                      <Link to="/settings/orchestration">Configurações › Orquestração</Link>.
+                    </>
+                  )}
               </span>
             </label>
             {tried && problems.length > 0 && (

@@ -727,11 +727,39 @@ function reconcileSnapshotEvents(
   return mergedEvents
 }
 
+const STRUCTURAL_RESUME_SUMMARY_PREFIX = 'Conexão com o modelo caiu; retomando'
+
+function isStructuralTurnStarted(event: ConversationActivityEvent): boolean {
+  if (event.payload?.stream_resuming === true) return true
+  const origin = typeof event.payload?.origin === 'string' ? event.payload.origin.trim().toLowerCase() : ''
+  if (origin === 'friend') return true
+  if (event.payload?.from_model || event.payload?.to_model) return true
+  if (event.payload?.queue_id) return true
+  if (typeof event.summary === 'string' && event.summary.startsWith(STRUCTURAL_RESUME_SUMMARY_PREFIX)) {
+    return true
+  }
+  return false
+}
+
+function isTurnStartedEvent(event: ConversationActivityEvent): boolean {
+  return event.type === 'turn.started' || event.type === 'TURN_STARTED'
+}
+
+function isAgentProgressEvent(event: ConversationActivityEvent): boolean {
+  return event.type === 'agent.progress' || event.type === 'AGENT_PROGRESS'
+}
+
+function isToolRequestedEvent(event: ConversationActivityEvent): boolean {
+  return event.type === 'tool.requested' || event.type === 'TOOL_REQUESTED'
+}
+
 /**
  * Retains structural tool/artifact/lifecycle/prepend_older events unconditionally
- * while compacting and trimming old `assistant.delta` / `agent.thought_delta` /
- * stale `context.updated` events so delta floods never evict structural history
- * or delete consolidated paragraphs before tool calls.
+ * while dropping non-renderable noise (`tool.requested`, superseded heartbeat
+ * `turn.started`, superseded `agent.progress`, stale `context.updated`) and
+ * compacting adjacent `assistant.delta` / `agent.thought_delta` chunks so live
+ * subagent floods never evict structural history or delete consolidated
+ * paragraphs before tool calls.
  */
 export function trimActivityEvents(
   events: ConversationActivityEvent[],
@@ -739,19 +767,61 @@ export function trimActivityEvents(
 ): ConversationActivityEvent[] {
   if (events.length <= limit) return events
 
-  const working = [...events]
   const latestContextIdByTurn = new Map<string, string>()
-  for (const event of working) {
+  const latestTurnStartedIdxByStream = new Map<string, number>()
+  const latestAgentProgressIdxByStream = new Map<string, number>()
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]!
+    const turnKey = event.turnId ?? '__default__'
+    const streamKey = `${turnKey}:${event.agentId ?? ''}`
     if (event.type === 'context.updated' || event.type === 'CONTEXT_UPDATED') {
-      latestContextIdByTurn.set(event.turnId ?? '__default__', event.eventId)
+      latestContextIdByTurn.set(turnKey, event.eventId)
+    } else if (isAgentProgressEvent(event)) {
+      latestAgentProgressIdxByStream.set(streamKey, i)
+    } else if (isTurnStartedEvent(event) && !isStructuralTurnStarted(event)) {
+      latestTurnStartedIdxByStream.set(streamKey, i)
     }
   }
 
+  // Pass 1: drop non-renderable and superseded noise first (`tool.requested`,
+  // superseded heartbeat `turn.started`, superseded `agent.progress`, stale `context.updated`).
+  const afterNoiseTrim: ConversationActivityEvent[] = []
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i]!
+    const turnKey = event.turnId ?? '__default__'
+    const streamKey = `${turnKey}:${event.agentId ?? ''}`
+    if (isToolRequestedEvent(event)) {
+      continue
+    }
+    if (isAgentProgressEvent(event) && latestAgentProgressIdxByStream.get(streamKey) !== i) {
+      continue
+    }
+    if (
+      isTurnStartedEvent(event) &&
+      !isStructuralTurnStarted(event) &&
+      latestTurnStartedIdxByStream.get(streamKey) !== i
+    ) {
+      continue
+    }
+    if (
+      (event.type === 'context.updated' || event.type === 'CONTEXT_UPDATED') &&
+      latestContextIdByTurn.get(turnKey) !== event.eventId
+    ) {
+      continue
+    }
+    afterNoiseTrim.push(event)
+  }
+
+  if (afterNoiseTrim.length <= limit) return afterNoiseTrim
+
+  // Pass 2: compact adjacent streaming delta chunks without ever dropping standalone paragraphs.
+  const working = [...afterNoiseTrim]
   const dropNeeded = working.length - limit
   let dropped = 0
   const filtered: ConversationActivityEvent[] = []
   for (let i = 0; i < working.length; i += 1) {
-    const event = working[i]
+    const event = working[i]!
     if (dropped < dropNeeded && isEphemeralDeltaOrContext(event, latestContextIdByTurn)) {
       if (isStreamingDeltaEvent(event)) {
         const next = working[i + 1]

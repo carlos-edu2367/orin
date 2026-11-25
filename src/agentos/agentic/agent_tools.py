@@ -130,6 +130,19 @@ from agentos.agentic.tools._shared import (  # noqa: F401 - re-exported for call
 # The most any single tool result may return when its handler asks for more (Read with allow_large).
 LARGE_RESULT_CHARS = 100_000
 MAX_HOOK_FIELD_CHARS = 50_000
+READ_ONLY_FILE_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "view_file",
+        "transcribe_pdf",
+        "list_files",
+        "glob_files",
+        "search_files",
+        "search_code",
+        "project_map",
+    }
+)
+VALID_ACCESS_MODES: frozenset[str] = frozenset({"prompt_only", "read_only", "full"})
 
 
 def _bounded_value(value: Any, depth: int = 0) -> Any:
@@ -220,6 +233,7 @@ class AgentToolset(
         task_board: object | None = None, task_board_enabled: bool = False, task_board_agent_id: str | None = None,
         background_shells: dict[str, dict[str, Any]] | None = None,
         read_only_mode: bool = False, host_folders: bool = False,
+        access_mode: Literal["prompt_only", "read_only", "full"] = "full",
         default_provider: str | None = None,
         default_model_id: str | None = None,
         default_workspace_path: str | None = None,
@@ -296,38 +310,43 @@ class AgentToolset(
         self._visual_reader = visual_reader
         self.cli_native_media, self.native_media_hears = bool(cli_native_media), bool(native_media_hears)  # see files/read.py
         self._media_transcriber_factory = media_transcriber_factory
-        self._delegate = delegate
-        self._delegate_batch = delegate_batch
-        self._create_agent = create_agent
-        self._run_subagent = run_subagent
-        self._check_subagent = check_subagent
+        clean_access_mode = str(access_mode or "full").strip().lower()
+        if clean_access_mode not in VALID_ACCESS_MODES:
+            raise ValueError(f"Invalid access_mode: {access_mode!r}")
+        self._access_mode: str = clean_access_mode
+        restricted_access = clean_access_mode in {"prompt_only", "read_only"}
+        self._delegate = None if restricted_access else delegate
+        self._delegate_batch = None if restricted_access else delegate_batch
+        self._create_agent = None if restricted_access else create_agent
+        self._run_subagent = None if restricted_access else run_subagent
+        self._check_subagent = None if restricted_access else check_subagent
         self._on_close = on_close
         self._on_tool_progress = on_tool_progress
-        self._http_client = http_client
-        self._search_client = search_client
-        self._retrieval = retrieval
-        self._retrieval_reindex = retrieval_reindex
-        self._browser = browser
+        self._http_client = None if restricted_access else http_client
+        self._search_client = None if restricted_access else search_client
+        self._retrieval = None if clean_access_mode == "prompt_only" else retrieval
+        self._retrieval_reindex = None if restricted_access else retrieval_reindex
+        self._browser = None if restricted_access else browser
         self.browser_capability = browser_capability
         self._last_browser_navigation_url: str | None = None
         self._last_browser_navigation_outcome: ToolOutcome | None = None
-        self._enable_terminal = enable_terminal and not bool(read_only_mode)
-        self._read_only_mode: bool = bool(read_only_mode)
+        self._enable_terminal = enable_terminal and not bool(read_only_mode) and not restricted_access
+        self._read_only_mode: bool = bool(read_only_mode or clean_access_mode == "read_only")
         self._host_folders: bool = bool(host_folders)  # full_autonomy opens the host only where the instance has host folders
-        self.skills = skills
+        self.skills = None if restricted_access else skills
         # The registry is intentionally read-only.  Publishing must go through
         # the application service, with the user identity bound by the trusted
         # turn rather than supplied by a model tool argument.
-        self._skill_library = skill_library
+        self._skill_library = None if restricted_access else skill_library
         self._skill_user_id = skill_user_id
         self._skill_agent_id = skill_agent_id
         self._skill_load_recorder = skill_load_recorder
         self._policy = policy
         self._loaded_skills: set[tuple[str, str]] = set()
-        self._mcp_provider = mcp_provider
-        self._mcp_service = mcp_service
+        self._mcp_provider = None if restricted_access else mcp_provider
+        self._mcp_service = None if restricted_access else mcp_service
         self._mcp_user_id = mcp_user_id
-        self._plugin_service = plugin_service
+        self._plugin_service = None if restricted_access else plugin_service
         self._plugin_user_id = plugin_user_id
         self._code_mode_active = bool(code_mode_active)
         self._code_mode_permits_push = bool(code_mode_permits_push)
@@ -553,18 +572,23 @@ class AgentToolset(
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """The tool set is fixed for the lifetime of a turn, so build it once."""
         if self._definitions is None:
-            built = self._build_definitions()
-            if self._read_only_mode:
-                built = tuple(
-                    item for item in built
-                    if item.read_only and item.name not in {
-                        "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "stop_process",
-                        "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
-                        "generate_image", "generate_audio", "generate_video",
-                    }
-                )
-            if self._policy is not None:
-                built = tuple(item for item in built if self._policy.allows(item.name, item.policy_tags))
+            if self._access_mode == "prompt_only":
+                built: tuple[ToolDefinition, ...] = ()
+            else:
+                built = self._build_definitions()
+                if self._access_mode == "read_only":
+                    built = tuple(item for item in built if item.name in READ_ONLY_FILE_TOOLS)
+                elif self._read_only_mode:
+                    built = tuple(
+                        item for item in built
+                        if item.read_only and item.name not in {
+                            "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "stop_process",
+                            "verify_project", "create_agent", "ask_agent", "ask_agents", "run_subagent", "check_subagent",
+                            "generate_image", "generate_audio", "generate_video",
+                        }
+                    )
+                if self._policy is not None:
+                    built = tuple(item for item in built if self._policy.allows(item.name, item.policy_tags))
             self._definitions = built
             self._by_name = {item.name: item for item in self._definitions}
             # Canonical names and aliases, exact and lower-case, resolve to the stable key in every mode.
@@ -919,6 +943,22 @@ class AgentToolset(
             return ToolOutcome("failed", "Argumentos inválidos"[:240], f"Invalid arguments for {requested_name}.", {}, "INVALID_ARGUMENTS")
         # A model can hallucinate a tool name, so an unknown tool is a result the
         # model reads and corrects, never an exception that kills the turn.
+        if self._access_mode == "prompt_only":
+            return ToolOutcome(
+                "failed",
+                "Bloqueado em modo somente pergunta",
+                f"Tool '{name}' is not allowed in prompt_only subagent mode.",
+                {"tool_kind": "agent"},
+                "PROMPT_ONLY_SUBAGENT",
+            )
+        if self._access_mode == "read_only" and name not in READ_ONLY_FILE_TOOLS:
+            return ToolOutcome(
+                "failed",
+                "Bloqueado em subagente somente-leitura",
+                f"Tool '{name}' is not allowed in read-only subagent mode.",
+                {"tool_kind": "filesystem"},
+                "READ_ONLY_SUBAGENT",
+            )
         if self._read_only_mode and name in {
             "write_file", "edit_file", "notebook_edit", "run_command", "powershell", "monitor", "stop_process", "verify_project",
             "generate_image", "generate_audio", "generate_video",

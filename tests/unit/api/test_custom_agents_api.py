@@ -219,3 +219,55 @@ def test_custom_agent_persists_and_validates_memory_scope(env) -> None:
 
     bad = client.put("/v1/custom-agents/revisor", json={**body, "memory": "invalid_scope"}, headers=AUTH)
     assert bad.status_code == 422
+
+
+def test_custom_agent_persists_and_validates_access_mode(env) -> None:
+    client, engine = env
+    created = client.post(
+        "/v1/custom-agents",
+        json={**REVISOR, "name": "juiz-visual", "access_mode": "prompt_only", "tools": None},
+        headers=AUTH,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["agent"]["access_mode"] == "prompt_only"
+
+    listed = client.get("/v1/custom-agents", headers=AUTH).json()["agents"]
+    assert listed[0]["access_mode"] == "prompt_only"
+
+    store = UserAgentStore(engine)
+    assert store.definitions("user-1")[0].access_mode == "prompt_only"
+
+    body = {key: value for key, value in REVISOR.items() if key != "name"}
+    updated = client.put(
+        "/v1/custom-agents/juiz-visual",
+        json={**body, "access_mode": "read_only"},
+        headers=AUTH,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["agent"]["access_mode"] == "read_only"
+
+    # Default 'full' normalizes to None (absent == full)
+    reset_full = client.put(
+        "/v1/custom-agents/juiz-visual",
+        json={**body, "access_mode": "full"},
+        headers=AUTH,
+    )
+    assert reset_full.status_code == 200, reset_full.text
+    assert reset_full.json()["agent"]["access_mode"] is None
+
+    # Incompatible worktree + prompt_only or read_only rejected with 422
+    for restricted in ("prompt_only", "read_only"):
+        bad_wt = client.put(
+            "/v1/custom-agents/juiz-visual",
+            json={**body, "access_mode": restricted, "isolation": "worktree"},
+            headers=AUTH,
+        )
+        assert bad_wt.status_code == 422
+        assert any("worktree" in p for p in _problems(bad_wt))
+
+    bad_mode = client.put(
+        "/v1/custom-agents/juiz-visual",
+        json={**body, "access_mode": "super_admin"},
+        headers=AUTH,
+    )
+    assert bad_mode.status_code == 422

@@ -546,6 +546,34 @@ class ApiServices:
         return self.file_history_root if self.file_history_root is not None else orin_paths().data / "file-history"
 
 
+def deliver_to_waiting_question(
+    app_port: object, user_id: str, conversation_id: str, payload: Any, idempotency_key: str,
+) -> dict[str, object] | None:
+    """A plain message for a turn stopped inside ask_user is its answer: it goes to the queue that turn reads.
+
+    Sent as a normal follow-up it would become a new turn queued behind the asking one, which would then wait
+    for its answer until the deadline while the session looked busy (chat_7dcd6dde, 25/11/2026). Commands,
+    attachments and CLI options keep the normal path. The result keeps the message receipt fields.
+    """
+    if getattr(payload, "attachments", None) or getattr(payload, "cli", None) is not None:
+        return None
+    text = str(getattr(payload, "message", "") or "").strip()
+    if not text or text.startswith(("/", "!")):
+        return None
+    finder = getattr(app_port, "live_question_turn", None)
+    enqueue = getattr(app_port, "enqueue", None)
+    if not callable(finder) or not callable(enqueue):
+        return None
+    live = finder(conversation_id, user_id)
+    if not live:
+        return None
+    queued = enqueue(user_id, conversation_id, str(payload.message), idempotency_key)
+    if not queued.get("queued"):
+        # The turn ended in between and enqueue already sent the text as a new turn: report that turn.
+        return {**live, "turn_id": queued.get("turn_id"), "message_id": queued.get("message_id"), "state": queued.get("state"), "queued": False}
+    return {**live, "queued": True, "queue_id": queued.get("queue_id")}
+
+
 def create_app(services: ApiServices) -> FastAPI:
     app = FastAPI(title="AgentOS API", version="1.0")
 
@@ -1607,6 +1635,13 @@ def create_app(services: ApiServices) -> FastAPI:
 
         return await run_in_threadpool(_sync)
 
+    def _deliver_to_waiting_question(
+        user_id: str, conversation_id: str, payload: SendConversationMessageRequest, request: Request,
+    ) -> dict[str, object] | None:
+        return deliver_to_waiting_question(
+            require_port(services.conversation_application), user_id, conversation_id, payload, _idempotency(request),
+        )
+
     @app.post("/v1/conversations/{conversation_id}/messages", status_code=201)
     async def send_conversation_message(conversation_id: str, payload: SendConversationMessageRequest, request: Request) -> JSONResponse:
         def _sync() -> JSONResponse:
@@ -1620,6 +1655,9 @@ def create_app(services: ApiServices) -> FastAPI:
                 if bound:
                     _trust_workspace(principal.user_id, Path(bound))
             require_content(payload.message, payload.attachments)
+            redirected = _deliver_to_waiting_question(principal.user_id, conversation_id, payload, request)
+            if redirected is not None:
+                return JSONResponse(_jsonable(redirected), status_code=201)
             provider = ""
             model_id = ""
             if payload.selection is not None:

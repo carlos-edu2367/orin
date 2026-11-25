@@ -26,7 +26,7 @@ MAX_USER_AGENTS = 100
 ORIGIN = "orin"
 FIELDS = (
     "description", "prompt", "provider", "models", "tools", "disallowed_tools", "effort", "permission_mode",
-    "max_turns", "memory", "isolation", "enabled",
+    "max_turns", "memory", "isolation", "access_mode", "enabled",
 )
 
 
@@ -87,6 +87,7 @@ def public(row: Mapping[str, Any]) -> dict[str, object]:
         "max_turns": row["max_turns"],
         "memory": row.get("memory") or None,
         "isolation": row.get("isolation") or None,
+        "access_mode": row.get("access_mode") or None,
         "enabled": bool(row["enabled"]),
         "created_at": _iso(row["created_at"]),
         "updated_at": _iso(row["updated_at"]),
@@ -114,6 +115,7 @@ def definition_of(agent: Mapping[str, Any]) -> AgentDefinition:
         max_turns=agent.get("max_turns"),
         effort=agent.get("effort") or None,
         isolation=agent.get("isolation") or None,
+        access_mode=agent.get("access_mode") or None,
         memory=resolve_agent_memory_mode(str(agent["name"]), agent.get("memory"), is_builtin=False),
         digest=digest,
     )

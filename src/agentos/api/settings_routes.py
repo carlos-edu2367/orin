@@ -75,6 +75,7 @@ class AgentFile(BaseModel):
     effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] | None = None
     memory: Literal["project", "user", "local", "none"] | None = None
     isolation: Literal["none", "worktree"] | None = None
+    access_mode: Literal["prompt_only", "read_only", "full"] | None = None
     create: bool = False  # W7-R6: a new agent; refuses (409) to replace an existing file
 
 
@@ -294,7 +295,7 @@ def agents_report(root: Path | None, trusted: bool) -> dict[str, Any]:
             "tools": list(definition.tools) if definition.tools is not None else None,
             "disallowed_tools": list(definition.disallowed_tools), "model": definition.model,
             "permission_mode": definition.permission_mode, "max_turns": definition.max_turns, "effort": definition.effort,
-            "memory": definition.memory, "isolation": definition.isolation,
+            "memory": definition.memory, "isolation": definition.isolation, "access_mode": definition.access_mode,
         })
     return {
         "agents": sorted(agents, key=lambda item: (item["origin"] == "builtin", item["name"])),
@@ -307,7 +308,7 @@ def _scalar(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-_FORM_FRONTMATTER_KEYS = frozenset({"name", "description", "tools", "disallowedTools", "model", "permissionMode", "effort", "maxTurns", "memory", "isolation"})
+_FORM_FRONTMATTER_KEYS = frozenset({"name", "description", "tools", "disallowedTools", "model", "permissionMode", "effort", "maxTurns", "memory", "isolation", "accessMode", "access_mode"})
 _FRONTMATTER_KEY = re.compile(r"^([A-Za-z_][\w-]*):")
 
 
@@ -338,6 +339,8 @@ def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
     if not _AGENT_NAME.fullmatch(clean) or clean in RESERVED_NAMES:
         raise SettingsRejected("invalid_agent_name", ["a name of lowercase letters, digits, '-' and '_' that is not a builtin agent"])
     problems = [f"'{tool[:80]}' is not a tool name" for tool in [*(body.tools or []), *body.disallowed_tools] if not _TOOL_NAME.fullmatch(tool.strip())]
+    if body.isolation == "worktree" and body.access_mode in {"prompt_only", "read_only"}:
+        problems.append("isolation 'worktree' cannot be combined with access_mode 'prompt_only' or 'read_only'")
     if problems:
         raise SettingsRejected("invalid_agent", problems)
     lines = ["---", f"name: {clean}", f"description: {_scalar(' '.join(body.description.split()))}"]
@@ -351,6 +354,9 @@ def write_agent(root: Path | None, name: str, body: AgentFile) -> Path:
     # RT-B-14: omit default isolation ('none') from frontmatter (spec: absent == none).
     if body.isolation and body.isolation.strip().lower() not in {"", "none"}:
         lines.append(f"isolation: {_scalar(body.isolation.strip())}")
+    # Omit default accessMode ('full') from frontmatter (absent == full).
+    if body.access_mode and body.access_mode.strip().lower() not in {"", "full"}:
+        lines.append(f"accessMode: {_scalar(body.access_mode.strip())}")
     if body.max_turns is not None:
         lines.append(f"maxTurns: {body.max_turns}")
     folder = _agent_dir(body.scope, root)

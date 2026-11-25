@@ -162,3 +162,32 @@ def test_a_preloaded_skill_is_wrapped_and_cannot_close_its_wrapper(session_and_b
     prompt = prompts[-1]
     section = prompt[prompt.index("## Preloaded skill: sneaky"):]
     assert section.count("</agentos-skill-instructions>") == 1 and "<agentos-skill-instructions" in section
+
+
+def test_agent_file_access_mode_frontmatter_and_session_enforcement(session_and_builds) -> None:
+    session, builds, prompts, limits = session_and_builds
+    _agent(
+        "---\n"
+        "name: visual-judge\n"
+        "description: Compares visual screenshots\n"
+        "accessMode: prompt_only\n"
+        "---\n"
+        "Judge the attached screenshots objectively.\n",
+        file="visual-judge.md",
+    )
+    catalog = load_agent_definitions(workspace_root=None, trusted=False)
+    defn = catalog.get("visual-judge")
+    assert defn is not None and defn.access_mode == "prompt_only"
+
+    session._agent_definitions = catalog
+    outcome = session._run_subagent(subagent_type="visual-judge", task="Compare A and B")
+    assert outcome.status == "succeeded", outcome.content
+    child = [b for b in builds if b.get("browser_agent_key")][-1]
+    assert child["access_mode"] == "prompt_only"
+    assert child["toolset"].definitions() == ()
+    assert limits[-1]["max_actions"] == 0
+    assert "Judge the attached screenshots objectively." in prompts[-1]
+
+    # Attempting to escalate visual-judge to full is denied.
+    escalated = session._run_subagent(subagent_type="visual-judge", task="Edit repo", access_mode="full")
+    assert escalated.status == "failed" and escalated.error_code == "ACCESS_MODE_ESCALATION_DENIED"

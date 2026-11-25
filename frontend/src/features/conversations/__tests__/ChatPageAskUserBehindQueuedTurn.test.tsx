@@ -214,4 +214,54 @@ describe('ChatPage: a live turn asking behind a queued turn, and a subagent plan
     expect(queuedText(queuePosts(posted)[0].body)).toBe('??')
     expect(messagePosts(posted)).toHaveLength(0)
   })
+
+  // Regression (chat_7dcd6dde, 25/11/2026): the leader itself called exit_plan_mode in full autonomy (the plan needs no
+  // approval, the turn keeps going) and then ask_user. The plan event made the page treat the turn as ended, so each
+  // answer became a new turn queued behind the one still waiting for it, and the session looked stuck forever.
+  const ROOT_PLAN = { ...SUBAGENT_PLAN, agent_name: undefined, permission_mode: 'full_autonomy' }
+
+  it("the leader's own exit_plan_mode followed by ask_user: the card answer goes to the queue, not to a new turn", async () => {
+    const scenario: Scenario = {
+      queuedTurnBehind: false,
+      activities: [
+        activity(1, 'tool.started', 'Executando exit_plan_mode', { tool_name: 'exit_plan_mode', invocation_id: 'mcp_plan' }),
+        activity(2, 'tool.finished', 'Plano pronto', ROOT_PLAN),
+        activity(3, 'assistant.delta', 'Resposta em andamento', { content: 'Quer aprovar o plano?' }),
+        activity(4, 'tool.started', 'Executando ask_user', { tool_name: 'ask_user', invocation_id: 'mcp_ask' }),
+        activity(5, 'tool.finished', 'Aguardando resposta para 1 pergunta', QUESTION),
+        activity(6, 'turn.waiting_user', 'Aguardando sua resposta', { state: 'waiting_user_in_turn', in_turn: true }),
+      ],
+    }
+    const posted = installFetch(scenario)
+    renderChat()
+
+    fireEvent.click(await screen.findByLabelText(/Bugs primeiro/))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar respostas' }))
+
+    await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
+    expect(queuedText(queuePosts(posted)[0].body)).toContain('Seleção: Bugs primeiro')
+    expect(messagePosts(posted)).toHaveLength(0)
+  })
+
+  it("the leader's own exit_plan_mode followed by ask_user, with a turn queued behind: still the queue", async () => {
+    const scenario: Scenario = {
+      queuedTurnBehind: true,
+      activities: [
+        activity(1, 'tool.finished', 'Plano pronto', ROOT_PLAN),
+        activity(2, 'tool.started', 'Executando ask_user', { tool_name: 'ask_user', invocation_id: 'mcp_ask' }),
+        activity(3, 'tool.finished', 'Aguardando resposta para 1 pergunta', QUESTION),
+        activity(4, 'turn.waiting_user', 'Aguardando sua resposta', { state: 'waiting_user_in_turn', in_turn: true }),
+      ],
+    }
+    const posted = installFetch(scenario)
+    renderChat()
+
+    // The turn queued behind says why it does not start, instead of a bare "Na fila…" that looks stuck.
+    expect(await screen.findByText('Na fila: o agente ainda espera a resposta da pergunta acima')).toBeInTheDocument()
+    fireEvent.click(await screen.findByLabelText(/Bugs primeiro/))
+    fireEvent.click(screen.getByRole('button', { name: 'Enviar respostas' }))
+
+    await waitFor(() => expect(queuePosts(posted)).toHaveLength(1))
+    expect(messagePosts(posted)).toHaveLength(0)
+  })
 })

@@ -44,6 +44,7 @@ class CustomAgentFields(BaseModel):
     max_turns: int | None = Field(default=None, ge=1, le=500)
     memory: Literal["project", "user", "local", "none"] | None = None
     isolation: Literal["none", "worktree"] | None = None
+    access_mode: Literal["prompt_only", "read_only", "full"] | None = None
     enabled: bool = True
 
 
@@ -96,6 +97,11 @@ def validate(store: UserAgentStore, user_id: str, name: str, body: CustomAgentFi
         problems.append("the description says when to use the agent; it cannot be blank")
     if not body.prompt.strip():
         problems.append("the instructions cannot be blank")
+    normalized_access_mode = (
+        None if body.access_mode in (None, "full") else body.access_mode
+    )
+    if body.isolation == "worktree" and normalized_access_mode in {"prompt_only", "read_only"}:
+        problems.append("isolation 'worktree' cannot be combined with access_mode 'prompt_only' or 'read_only'")
     provider: str | None = None
     models: tuple[str, ...] = ()
     try:
@@ -126,6 +132,7 @@ def validate(store: UserAgentStore, user_id: str, name: str, body: CustomAgentFi
         "max_turns": body.max_turns,
         "memory": body.memory,
         "isolation": body.isolation,
+        "access_mode": normalized_access_mode,
         "enabled": body.enabled,
     }
     return values, problems

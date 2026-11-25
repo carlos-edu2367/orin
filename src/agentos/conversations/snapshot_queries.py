@@ -30,9 +30,16 @@ _CONTEXT_USAGE_COMPONENTS = (
 
 _SETTLED_TURN_STATES = ("completed", "failed", "cancelled")
 
+_ALWAYS_SKIP_EVENTS = (
+    "tool.requested",
+)
+
+_ALWAYS_SKIP_EVENTS_SET = frozenset(_ALWAYS_SKIP_EVENTS)
+
 _SETTLED_SKIP_EVENTS = (
     "tool.requested",
     "tool.progressed",
+    "agent.progress",
     "code_mode.validation_started",
     "code_mode.validation_finished",
     "code_mode.stage_changed",
@@ -49,6 +56,7 @@ _SETTLED_SKIP_EVENTS_SET = frozenset(_SETTLED_SKIP_EVENTS)
 _NON_BREAKING_DELTA_EVENTS = frozenset({
     "context.updated",
     "context.compacted",
+    "agent.progress",
     "code_mode.validation_started",
     "code_mode.validation_finished",
     "code_mode.stage_changed",
@@ -65,6 +73,48 @@ _TOOL_COMPLETION_EVENTS = frozenset({
     "tool.completed",
     "tool.failed",
 })
+
+_SUBAGENT_COMPLETION_EVENTS = frozenset({
+    "agent.message_received",
+    "delegation.completed",
+    "delegation.failed",
+    "subagent.budget_exceeded",
+    "turn.completed",
+    "turn.failed",
+    "turn.cancelled",
+})
+
+_SUBAGENT_TIER2_EVENT_TYPES = frozenset({
+    "tool.finished",
+    "tool.completed",
+    "tool.failed",
+    "tool.started",
+    "tool.progressed",
+    "filesystem.read",
+    "filesystem.write",
+    "terminal.started",
+    "terminal.output_summary",
+    "process.exited",
+    "browser.started",
+    "browser.navigated",
+    "browser.artifact",
+})
+
+_PROTECTED_TOOL_NAMES = frozenset({
+    "ask_user",
+    "ask_user_question",
+    "request_user_input",
+    "tool_permission",
+    "plan_approval",
+    "exit_plan_mode",
+    "mcp_approval",
+    "plugin_approval",
+})
+
+_STRUCTURAL_RESUME_SUMMARY_PREFIX = "Conexão com o modelo caiu; retomando"
+
+MAX_INITIAL_SCAN_ROWS = 15_000
+_ACTIVE_TIER2_BUDGET_SHARE = 0.6
 
 _TOOL_ENRICH_KEYS = (
     "path",
@@ -180,6 +230,188 @@ def _prepare_activity_batch(desc_batch: Sequence[Mapping[str, object]]) -> list[
     return prepared
 
 
+def _is_structural_turn_started(summary: str, payload: Mapping[str, object]) -> bool:
+    """Return True for turn.started events that carry UI-significant milestones rather than heartbeats."""
+    if payload.get("stream_resuming") is True:
+        return True
+    if str(payload.get("origin") or "").strip().lower() == "friend":
+        return True
+    if payload.get("from_model") or payload.get("to_model"):
+        return True
+    if payload.get("queue_id"):
+        return True
+    if summary.startswith(_STRUCTURAL_RESUME_SUMMARY_PREFIX):
+        return True
+    return False
+
+
+def _is_tier2_activity(item: Mapping[str, object]) -> bool:
+    """Classify subagent internal tool execution events as Tier 2; keep main agent and subagent milestones in Tier 1."""
+    if not item.get("parent_agent_id"):
+        return False
+    ev_type = str(item.get("event_type") or "")
+    if ev_type not in _SUBAGENT_TIER2_EVENT_TYPES:
+        return False
+    payload = item.get("payload")
+    if isinstance(payload, Mapping):
+        tool_name = str(payload.get("tool_name") or "").strip().lower()
+        if tool_name in _PROTECTED_TOOL_NAMES:
+            return False
+        if payload.get("approval_id") or payload.get("question_id") or payload.get("requires_approval"):
+            return False
+    return True
+
+
+def _pop_matching_open_tool_idx(
+    open_list: list[int],
+    compacted: Sequence[Mapping[str, object]],
+    inv_id: str,
+    t_name: str,
+) -> int | None:
+    """Find and pop the matching open tool.started/tool.progressed index from open_list."""
+    matched_pos: int | None = None
+    if inv_id:
+        for pos, idx in enumerate(open_list):
+            sp = compacted[idx].get("payload")
+            if isinstance(sp, dict) and str(sp.get("invocation_id") or sp.get("call_id") or "") == inv_id:
+                matched_pos = pos
+                break
+    if matched_pos is None and t_name:
+        for pos, idx in enumerate(open_list):
+            sp = compacted[idx].get("payload")
+            if not isinstance(sp, dict):
+                continue
+            sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "")
+            sp_t_name = str(sp.get("tool_name") or "")
+            if inv_id and sp_inv_id and inv_id != sp_inv_id:
+                continue
+            if sp_t_name == t_name:
+                matched_pos = pos
+                break
+    if matched_pos is None and not inv_id and not t_name:
+        for pos, idx in enumerate(open_list):
+            sp = compacted[idx].get("payload")
+            sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "") if isinstance(sp, dict) else ""
+            sp_t_name = str(sp.get("tool_name") or "") if isinstance(sp, dict) else ""
+            if not sp_inv_id and not sp_t_name:
+                matched_pos = pos
+                break
+    if matched_pos is None:
+        return None
+    return open_list.pop(matched_pos)
+
+
+def _min_window_db_id(window: Sequence[Mapping[str, object]]) -> int:
+    """Compute the earliest database id represented in window, including absorbed started/progressed ids."""
+    boundary_ids = [int(window[0]["_db_id"])]
+    for item in window:
+        raw_db_id = item.get("_db_id")
+        if isinstance(raw_db_id, int):
+            boundary_ids.append(raw_db_id)
+        absorbed = item.get("_absorbed_started_db_id")
+        if isinstance(absorbed, int):
+            boundary_ids.append(absorbed)
+    return min(boundary_ids)
+
+
+def _select_two_tier_window(
+    compacted: Sequence[dict[str, object]],
+    *,
+    limit: int,
+    settled_turns: set[str],
+) -> tuple[list[dict[str, object]], bool]:
+    """Protect Tier 1 backbone events and allocate remaining capacity fairly across subagent Tier 2 events."""
+    if len(compacted) <= limit:
+        return list(compacted), False
+
+    tier1: list[dict[str, object]] = []
+    tier2: list[dict[str, object]] = []
+    for item in compacted:
+        if _is_tier2_activity(item):
+            tier2.append(item)
+        else:
+            tier1.append(item)
+
+    if len(tier1) >= limit:
+        window = tier1[-limit:]
+    else:
+        remaining = limit - len(tier1)
+        completed_subagents: set[tuple[str, str]] = set()
+        for item in compacted:
+            t_id = str(item.get("turn_id") or "")
+            ev_type = str(item.get("event_type") or "")
+            if ev_type in _SUBAGENT_COMPLETION_EVENTS:
+                agent_id = str(item.get("agent_id") or "")
+                if item.get("parent_agent_id") and agent_id:
+                    completed_subagents.add((t_id, agent_id))
+                payload = item.get("payload")
+                if isinstance(payload, Mapping):
+                    for key in ("from_agent_id", "agent_id", "child_agent_id"):
+                        val = payload.get(key)
+                        if isinstance(val, str) and val.strip():
+                            completed_subagents.add((t_id, val.strip()))
+
+        by_subagent: dict[tuple[str, str], list[dict[str, object]]] = {}
+        for item in tier2:
+            sub_key = (str(item.get("turn_id") or ""), str(item.get("agent_id") or ""))
+            by_subagent.setdefault(sub_key, []).append(item)
+
+        active_keys: list[tuple[str, str]] = []
+        settled_keys: list[tuple[str, str]] = []
+        for sub_key in by_subagent:
+            t_id = sub_key[0]
+            if t_id not in settled_turns and sub_key not in completed_subagents:
+                active_keys.append(sub_key)
+            else:
+                settled_keys.append(sub_key)
+
+        active_keys.sort(key=lambda k: int(by_subagent[k][-1]["_cursor_id"]), reverse=True)
+        settled_keys.sort(key=lambda k: int(by_subagent[k][-1]["_cursor_id"]), reverse=True)
+
+        taken_counts: dict[tuple[str, str], int] = {}
+
+        def _pick_round_robin(keys: list[tuple[str, str]], budget: int) -> list[dict[str, object]]:
+            picked: list[dict[str, object]] = []
+            if budget <= 0 or not keys:
+                return picked
+            while len(picked) < budget:
+                progressed = False
+                for k in keys:
+                    if len(picked) >= budget:
+                        break
+                    items = by_subagent[k]
+                    already = taken_counts.get(k, 0)
+                    if already < len(items):
+                        picked.append(items[len(items) - 1 - already])
+                        taken_counts[k] = already + 1
+                        progressed = True
+                if not progressed:
+                    break
+            return picked
+
+        selected_tier2: list[dict[str, object]] = []
+        if active_keys and settled_keys:
+            active_budget = min(remaining, max(len(active_keys), int(remaining * _ACTIVE_TIER2_BUDGET_SHARE)))
+            selected_tier2.extend(_pick_round_robin(active_keys, active_budget))
+            selected_tier2.extend(_pick_round_robin(settled_keys, remaining - len(selected_tier2)))
+            if len(selected_tier2) < remaining:
+                selected_tier2.extend(_pick_round_robin(active_keys, remaining - len(selected_tier2)))
+        else:
+            selected_tier2.extend(_pick_round_robin(active_keys or settled_keys, remaining))
+
+        window = tier1 + selected_tier2
+        window.sort(key=lambda item: (int(item["_cursor_id"]), int(item.get("_db_id", item["_cursor_id"]))))
+
+    selected_ids = {id(item) for item in window}
+    min_db_id = _min_window_db_id(window)
+    dropped_before_min = any(
+        int(item["_db_id"]) < min_db_id
+        for item in compacted
+        if id(item) not in selected_ids and isinstance(item.get("_db_id"), int)
+    )
+    return window, dropped_before_min
+
+
 def compact_snapshot_activities(
     rows: Sequence[Mapping[str, object]],
     turns: Sequence[Mapping[str, object]],
@@ -196,7 +428,9 @@ def compact_snapshot_activities(
     last_context_id_by_turn: dict[str, int] = {}
     context_count_by_turn: dict[str, int] = {}
     last_validation_id_by_turn: dict[str, int] = {}
-    for row in rows:
+    last_turn_started_idx: dict[tuple[str, str], int] = {}
+    last_agent_progress_idx: dict[tuple[str, str], int] = {}
+    for idx, row in enumerate(rows):
         ev_type = str(row["event_type"])
         t_id = str(row["turn_id"])
         r_id = int(row["id"])
@@ -205,27 +439,54 @@ def compact_snapshot_activities(
             context_count_by_turn[t_id] = context_count_by_turn.get(t_id, 0) + 1
         elif ev_type == AgentActivityEventType.CODE_MODE_VALIDATION_STARTED.value:
             last_validation_id_by_turn[t_id] = r_id
+        elif ev_type == AgentActivityEventType.AGENT_PROGRESS.value and t_id not in settled_turns:
+            last_agent_progress_idx[(t_id, str(row["agent_id"]))] = idx
+        elif ev_type == AgentActivityEventType.TURN_STARTED.value and t_id not in settled_turns:
+            raw_payload = row.get("payload")
+            payload_map = raw_payload if isinstance(raw_payload, Mapping) else {}
+            if not _is_structural_turn_started(str(row.get("summary") or ""), payload_map):
+                last_turn_started_idx[(t_id, str(row["agent_id"]))] = idx
 
     compacted: list[dict[str, object]] = []
     last_assistant_delta_idx: dict[tuple[str, str], int] = {}
     last_thought_delta_idx: dict[tuple[str, str], int] = {}
     open_tool_started_by_turn: dict[tuple[str, str], list[int]] = {}
+    open_tool_progressed_by_turn: dict[tuple[str, str], list[int]] = {}
     seen_artifacts_by_turn: dict[str, set[str]] = {}
     artifact_count_by_turn: dict[str, int] = {}
 
-    for row in rows:
+    for idx, row in enumerate(rows):
         ev_type = str(row["event_type"])
         t_id = str(row["turn_id"])
         r_id = int(row["id"])
         cursor_id = int(row.get("_cursor_id", r_id))
+
+        if ev_type in _ALWAYS_SKIP_EVENTS_SET:
+            continue
+        if t_id in settled_turns and ev_type in _SETTLED_SKIP_EVENTS_SET:
+            continue
+
+        agent_id = str(row["agent_id"])
+        stream_key = (t_id, agent_id)
+        summary_str = str(row["summary"])
+
+        if ev_type == AgentActivityEventType.AGENT_PROGRESS.value:
+            if t_id in settled_turns or idx != last_agent_progress_idx.get(stream_key):
+                continue
+
         raw_payload = row["payload"]
         if "_cursor_id" in row and isinstance(raw_payload, dict):
             payload: dict[str, object] = dict(raw_payload)
         else:
             payload = dict(plain_payload(raw_payload)) if isinstance(raw_payload, Mapping) else {}
 
-        if t_id in settled_turns and ev_type in _SETTLED_SKIP_EVENTS_SET:
-            continue
+        is_structural_turn_started = False
+        if ev_type == AgentActivityEventType.TURN_STARTED.value:
+            is_structural_turn_started = _is_structural_turn_started(summary_str, payload)
+            if not is_structural_turn_started:
+                if t_id in settled_turns or idx != last_turn_started_idx.get(stream_key):
+                    continue
+
         if ev_type == AgentActivityEventType.ARTIFACT_CREATED.value:
             raw_art_path = str(payload.get("path") or payload.get("file_path") or "").replace("\\", "/").strip()
             if raw_art_path.startswith(".orin/") or "/.orin/" in raw_art_path:
@@ -261,8 +522,6 @@ def compact_snapshot_activities(
             if "occurred_at" in row
             else _format_occurred_at(row["created_at"])
         )
-        agent_id = str(row["agent_id"])
-        stream_key = (t_id, agent_id)
         seq = int(row["sequence"])
 
         if ev_type == AgentActivityEventType.ASSISTANT_DELTA.value:
@@ -307,61 +566,79 @@ def compact_snapshot_activities(
                     prev_entry["occurred_at"] = occurred_at
                     continue
 
-        elif ev_type not in _NON_BREAKING_DELTA_EVENTS:
+        elif ev_type not in _NON_BREAKING_DELTA_EVENTS and not (
+            ev_type == AgentActivityEventType.TURN_STARTED.value and not is_structural_turn_started
+        ):
             last_assistant_delta_idx.pop(stream_key, None)
             last_thought_delta_idx.pop(stream_key, None)
 
         absorbed_started_db_id: int | None = None
-        if t_id in settled_turns and ev_type in _TOOL_COMPLETION_EVENTS:
-            open_list = open_tool_started_by_turn.get(stream_key)
-            if open_list:
+        if ev_type == AgentActivityEventType.TOOL_PROGRESSED.value:
+            open_prog_list = open_tool_progressed_by_turn.get(stream_key)
+            if open_prog_list:
                 inv_id = str(payload.get("invocation_id") or payload.get("call_id") or "")
                 t_name = str(payload.get("tool_name") or "")
-                matched_pos = None
-                if inv_id:
-                    for pos, idx in enumerate(open_list):
-                        sp = compacted[idx].get("payload")
-                        if isinstance(sp, dict) and str(sp.get("invocation_id") or sp.get("call_id") or "") == inv_id:
-                            matched_pos = pos
-                            break
-                if matched_pos is None and t_name:
-                    for pos, idx in enumerate(open_list):
-                        sp = compacted[idx].get("payload")
-                        if not isinstance(sp, dict):
-                            continue
-                        sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "")
-                        sp_t_name = str(sp.get("tool_name") or "")
-                        if inv_id and sp_inv_id and inv_id != sp_inv_id:
-                            continue
-                        if sp_t_name == t_name:
-                            matched_pos = pos
-                            break
-                if matched_pos is None and not inv_id and not t_name:
-                    for pos, idx in enumerate(open_list):
-                        sp = compacted[idx].get("payload")
-                        sp_inv_id = str(sp.get("invocation_id") or sp.get("call_id") or "") if isinstance(sp, dict) else ""
-                        sp_t_name = str(sp.get("tool_name") or "") if isinstance(sp, dict) else ""
-                        if not sp_inv_id and not sp_t_name:
-                            matched_pos = pos
-                            break
-                if matched_pos is not None:
-                    matched_idx = open_list.pop(matched_pos)
+                matched_idx = _pop_matching_open_tool_idx(open_prog_list, compacted, inv_id, t_name)
+                if matched_idx is not None:
+                    prev_prog = compacted[matched_idx]
+                    prev_prog_payload = prev_prog.get("payload")
+                    if isinstance(prev_prog_payload, dict):
+                        for k in _TOOL_ENRICH_KEYS:
+                            if not payload.get(k) and prev_prog_payload.get(k):
+                                payload[k] = prev_prog_payload[k]
+                    prev_prog["_drop_absorbed"] = True
+                    for candidate_key in ("_db_id", "_absorbed_started_db_id"):
+                        raw_id = prev_prog.get(candidate_key)
+                        if isinstance(raw_id, int):
+                            absorbed_started_db_id = (
+                                raw_id if absorbed_started_db_id is None else min(absorbed_started_db_id, raw_id)
+                            )
+        elif ev_type in _TOOL_COMPLETION_EVENTS:
+            inv_id = str(payload.get("invocation_id") or payload.get("call_id") or "")
+            t_name = str(payload.get("tool_name") or "")
+            open_list = open_tool_started_by_turn.get(stream_key)
+            if open_list:
+                matched_idx = _pop_matching_open_tool_idx(open_list, compacted, inv_id, t_name)
+                if matched_idx is not None:
                     started_entry = compacted[matched_idx]
                     started_payload = started_entry.get("payload")
                     if isinstance(started_payload, dict):
                         for k in _TOOL_ENRICH_KEYS:
                             if not payload.get(k) and started_payload.get(k):
                                 payload[k] = started_payload[k]
-                    started_entry["_drop_settled_started"] = True
+                    started_entry["_drop_absorbed"] = True
                     raw_started_db_id = started_entry.get("_db_id")
                     if isinstance(raw_started_db_id, int):
-                        absorbed_started_db_id = raw_started_db_id
+                        absorbed_started_db_id = (
+                            raw_started_db_id
+                            if absorbed_started_db_id is None
+                            else min(absorbed_started_db_id, raw_started_db_id)
+                        )
+            open_prog_list = open_tool_progressed_by_turn.get(stream_key)
+            if open_prog_list:
+                while True:
+                    matched_prog_idx = _pop_matching_open_tool_idx(open_prog_list, compacted, inv_id, t_name)
+                    if matched_prog_idx is None:
+                        break
+                    prog_entry = compacted[matched_prog_idx]
+                    prog_payload = prog_entry.get("payload")
+                    if isinstance(prog_payload, dict):
+                        for k in _TOOL_ENRICH_KEYS:
+                            if not payload.get(k) and prog_payload.get(k):
+                                payload[k] = prog_payload[k]
+                    prog_entry["_drop_absorbed"] = True
+                    for candidate_key in ("_db_id", "_absorbed_started_db_id"):
+                        raw_id = prog_entry.get(candidate_key)
+                        if isinstance(raw_id, int):
+                            absorbed_started_db_id = (
+                                raw_id if absorbed_started_db_id is None else min(absorbed_started_db_id, raw_id)
+                            )
 
         entry: dict[str, object] = {
             "event_id": str(row["event_id"]),
             "event_type": ev_type,
             "sequence": seq,
-            "summary": str(row["summary"]),
+            "summary": summary_str,
             "payload": payload,
             "occurred_at": occurred_at,
             "turn_id": t_id,
@@ -381,12 +658,14 @@ def compact_snapshot_activities(
             last_assistant_delta_idx[stream_key] = new_idx
         elif ev_type == AgentActivityEventType.AGENT_THOUGHT_DELTA.value:
             last_thought_delta_idx[stream_key] = new_idx
-        elif t_id in settled_turns and ev_type == AgentActivityEventType.TOOL_STARTED.value:
+        elif ev_type == AgentActivityEventType.TOOL_STARTED.value:
             open_tool_started_by_turn.setdefault(stream_key, []).append(new_idx)
+        elif ev_type == AgentActivityEventType.TOOL_PROGRESSED.value:
+            open_tool_progressed_by_turn.setdefault(stream_key, []).append(new_idx)
 
     survivors: list[dict[str, object]] = []
     for item in compacted:
-        if item.pop("_drop_settled_started", False):
+        if item.pop("_drop_absorbed", False):
             continue
         delta_chunks = item.pop("_delta_chunks", None)
         if isinstance(delta_chunks, list):
@@ -415,12 +694,16 @@ def query_activity_window(
     encode_cursor: Callable[[int], str] | None = None,
     allowed_turn_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, object]], bool, int | None]:
-    has_settled_turns = any(
-        str(t.get("state") or "") in _SETTLED_TURN_STATES for t in turns
-    )
+    settled_turns = {
+        str(t["turn_id"])
+        for t in turns
+        if str(t.get("state") or "") in _SETTLED_TURN_STATES
+    }
+    has_settled_turns = bool(settled_turns)
     stmt = select(conversation_activity_events).where(
         conversation_activity_events.c.user_id == user_id,
         conversation_activity_events.c.conversation_id == conversation_id,
+        conversation_activity_events.c.event_type.notin_(_ALWAYS_SKIP_EVENTS),
     )
     if has_settled_turns:
         settled_turns_subq = select(conversation_turns.c.turn_id).where(
@@ -434,23 +717,45 @@ def query_activity_window(
             )
         )
 
+    is_initial_window = before_id is None
     fetch_limit = max(limit * 4, 400)
     batches_reversed: list[list[dict[str, object]]] = []
     cursor_before = before_id
     reached_start = False
     stopped_at_turn_boundary = False
+    total_rows_scanned = 0
     compacted: list[dict[str, object]] = []
 
     while True:
+        if is_initial_window:
+            remaining_scan = MAX_INITIAL_SCAN_ROWS - total_rows_scanned
+            if remaining_scan <= 0:
+                break
+            effective_fetch = min(fetch_limit, remaining_scan)
+            sql_limit = effective_fetch + 1
+        else:
+            effective_fetch = fetch_limit
+            sql_limit = effective_fetch
+
         batch_stmt = stmt
         if cursor_before is not None:
             batch_stmt = batch_stmt.where(conversation_activity_events.c.id < cursor_before)
         desc_batch = c.execute(
-            batch_stmt.order_by(conversation_activity_events.c.id.desc()).limit(fetch_limit)
+            batch_stmt.order_by(conversation_activity_events.c.id.desc()).limit(sql_limit)
         ).mappings().all()
         if not desc_batch:
             reached_start = True
             break
+        if is_initial_window:
+            if len(desc_batch) > effective_fetch:
+                desc_batch = desc_batch[:effective_fetch]
+            else:
+                reached_start = True
+        else:
+            if len(desc_batch) < effective_fetch:
+                reached_start = True
+        total_rows_scanned += len(desc_batch)
+
         if allowed_turn_ids is not None:
             filtered_desc: list[Mapping[str, object]] = []
             for idx_row, row in enumerate(desc_batch):
@@ -472,8 +777,6 @@ def query_activity_window(
         else:
             batches_reversed.append(_prepare_activity_batch(desc_batch))
         cursor_before = int(desc_batch[-1]["id"])
-        if len(desc_batch) < fetch_limit:
-            reached_start = True
         collected_rows = [
             row
             for batch in reversed(batches_reversed)
@@ -486,23 +789,33 @@ def query_activity_window(
             encode_cursor=encode_cursor,
             defer_cursor_encoding=True,
         )
-        if len(compacted) > limit or reached_start or stopped_at_turn_boundary:
-            break
+        if is_initial_window:
+            tier1_count = sum(1 for item in compacted if not _is_tier2_activity(item))
+            if (
+                tier1_count >= limit
+                or reached_start
+                or stopped_at_turn_boundary
+                or total_rows_scanned >= MAX_INITIAL_SCAN_ROWS
+            ):
+                break
+        else:
+            if len(compacted) > limit or reached_start or stopped_at_turn_boundary:
+                break
         fetch_limit = min(fetch_limit * 3, 6000)
 
     if not compacted:
         return [], False, None
-    has_older = (len(compacted) > limit) or stopped_at_turn_boundary
-    window = compacted[-limit:]
-    if has_older:
-        boundary_ids = [int(window[0]["_db_id"])]
-        for item in window:
-            absorbed = item.get("_absorbed_started_db_id")
-            if isinstance(absorbed, int):
-                boundary_ids.append(absorbed)
-        oldest_id: int | None = min(boundary_ids)
+    if is_initial_window:
+        window, dropped_before_min = _select_two_tier_window(
+            compacted,
+            limit=limit,
+            settled_turns=settled_turns,
+        )
+        has_older = dropped_before_min or stopped_at_turn_boundary or (not reached_start)
     else:
-        oldest_id = None
+        window = compacted[-limit:]
+        has_older = (len(compacted) > limit) or stopped_at_turn_boundary or (not reached_start)
+    oldest_id: int | None = _min_window_db_id(window) if has_older else None
     for item in window:
         item.pop("_db_id", None)
         item.pop("_absorbed_started_db_id", None)
@@ -598,7 +911,7 @@ def query_conversation_snapshot(
     user_id: str,
     *,
     message_limit: int | None = None,
-    activity_limit: int = 300,
+    activity_limit: int = 600,
     public_activity_fn: Callable[..., dict[str, object]],
 ) -> dict[str, object]:
     bounded_msg_limit = (
@@ -606,7 +919,7 @@ def query_conversation_snapshot(
         if message_limit is not None and int(message_limit) > 0
         else None
     )
-    bounded_act_limit = min(max(int(activity_limit), 1), 500)
+    bounded_act_limit = min(max(int(activity_limit), 1), 1000)
     has_older_messages = False
     oldest_message_sequence: int | None = None
 

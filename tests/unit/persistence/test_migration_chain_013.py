@@ -30,6 +30,7 @@ EXPECTED_013_CHAIN = [
     "0065_verification_reviews",
     "0066_agent_runs_and_task_board",
     "0067_pipeline_runs",
+    "0068_user_agent_access_mode",
 ]
 
 

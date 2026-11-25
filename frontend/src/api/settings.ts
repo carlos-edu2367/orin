@@ -138,6 +138,8 @@ export function saveHooks(client: ApiClient, layer: WritableLayer, hooks: Record
 export type AgentMemoryMode = 'project' | 'user' | 'local' | 'none'
 export type AgentIsolationMode = 'none' | 'worktree'
 
+export type AgentAccessMode = 'prompt_only' | 'read_only' | 'full'
+
 export type AgentDefinition = {
   name: string
   description: string
@@ -153,6 +155,7 @@ export type AgentDefinition = {
   effort: string | null
   memory?: AgentMemoryMode | null
   isolation?: AgentIsolationMode | null
+  accessMode?: AgentAccessMode | null
 }
 export type AgentsReport = {
   agents: AgentDefinition[]
@@ -180,6 +183,10 @@ export function parseAgentsReport(value: unknown): AgentsReport {
           agent.isolation === 'worktree' || agent.isolation === 'none'
             ? agent.isolation
             : null,
+        accessMode:
+          agent.access_mode === 'prompt_only' || agent.access_mode === 'read_only' || agent.access_mode === 'full'
+            ? agent.access_mode
+            : null,
       }
     }, 200),
     errors: list(data.errors, (item) => { const error = rec(item); return { file: str(error.file), message: str(error.message) } }),
@@ -203,6 +210,7 @@ export type AgentDraft = {
   effort: string | null
   memory?: AgentMemoryMode | null
   isolation?: AgentIsolationMode | null
+  accessMode?: AgentAccessMode | null
 }
 
 export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, conversationId?: string | null, create = false): Promise<AgentsReport> {
@@ -216,6 +224,7 @@ export function saveAgent(client: ApiClient, name: string, draft: AgentDraft, co
       ...(draft.maxTurns ? { max_turns: draft.maxTurns } : {}), ...(draft.effort ? { effort: draft.effort } : {}),
       ...(draft.memory ? { memory: draft.memory } : {}),
       ...(draft.isolation ? { isolation: draft.isolation } : {}),
+      ...(draft.accessMode ? { access_mode: draft.accessMode } : {}),
       ...(create ? { create: true } : {}),
       ...(conversationId ? { conversation_id: conversationId } : {}),
     },

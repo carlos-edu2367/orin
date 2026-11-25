@@ -3,6 +3,7 @@ import { bool, list, optStr, rec, str, strings } from './parse'
 
 export type AgentMemoryMode = 'project' | 'user' | 'local' | 'none'
 export type AgentIsolationMode = 'none' | 'worktree'
+export type AgentAccessMode = 'prompt_only' | 'read_only' | 'full'
 
 /** A subagent the person made in the interface (`/v1/custom-agents`), stored for their Orin user. */
 export type CustomAgent = {
@@ -21,6 +22,7 @@ export type CustomAgent = {
   maxTurns: number | null
   memory?: AgentMemoryMode | null
   isolation?: AgentIsolationMode | null
+  accessMode?: AgentAccessMode | null
   enabled: boolean
   updatedAt: string | null
 }
@@ -49,6 +51,10 @@ export function parseCustomAgent(value: unknown): CustomAgent | null {
       agent.isolation === 'worktree' || agent.isolation === 'none'
         ? agent.isolation
         : null,
+    accessMode:
+      agent.access_mode === 'prompt_only' || agent.access_mode === 'read_only' || agent.access_mode === 'full'
+        ? agent.access_mode
+        : null,
     enabled: agent.enabled === undefined ? true : bool(agent.enabled),
     updatedAt: optStr(agent.updated_at),
   }
@@ -73,6 +79,7 @@ function body(draft: CustomAgentDraft): Record<string, unknown> {
     max_turns: draft.maxTurns,
     ...(draft.memory !== undefined ? { memory: draft.memory } : {}),
     ...(draft.isolation !== undefined ? { isolation: draft.isolation } : {}),
+    ...(draft.accessMode !== undefined ? { access_mode: draft.accessMode } : {}),
     enabled: draft.enabled,
   }
 }

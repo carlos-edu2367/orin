@@ -277,17 +277,87 @@ def collect_media_roots(
     return roots
 
 
+def _resolve_in_allowed_files(
+    cleaned_raw: str, candidate: Path, allowed_files: Sequence[str]
+) -> tuple[Path | None, str]:
+    """Resolve ``candidate`` only when it matches one exact canonical file in ``allowed_files``."""
+    lexical = Path(_strip_extended_prefix(os.path.abspath(cleaned_raw)))
+    if _in_forbidden_store(lexical):
+        return None, "agy's conversation store is not readable."
+    if _is_reparse_or_symlink(lexical):
+        return None, "Symlinks and junctions are not allowed."
+
+    # Walk parents of lexical path to catch symlink/junction directories before resolving.
+    cur = lexical
+    for _ in range(len(lexical.parts)):
+        if _is_reparse_or_symlink(cur):
+            return None, "Symlinks and junctions are not allowed."
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+    try:
+        target = Path(_strip_extended_prefix(str(candidate.resolve(strict=True))))
+    except FileNotFoundError:
+        return None, "File does not exist."
+    except OSError:
+        return None, "Unable to resolve file path."
+
+    if os.path.normcase(str(target)) != os.path.normcase(str(lexical)):
+        return None, "Symlinks and junctions are not allowed."
+    if _in_forbidden_store(target):
+        return None, "agy's conversation store is not readable."
+
+    target_key = os.path.normcase(str(target))
+    for raw_allowed in allowed_files:
+        allowed_str = str(raw_allowed).strip()
+        if not allowed_str or allowed_str.startswith(("\\\\", "//")):
+            continue
+        allowed_path = Path(allowed_str)
+        if not allowed_path.is_absolute() or _is_reparse_or_symlink(allowed_path):
+            continue
+        try:
+            resolved_allowed = Path(
+                _strip_extended_prefix(str(allowed_path.resolve(strict=True)))
+            )
+        except OSError:
+            continue
+        if _is_reparse_or_symlink(resolved_allowed):
+            continue
+        if target_key == os.path.normcase(str(resolved_allowed)):
+            return target, ""
+
+    return None, "Path is not in the allowed media files list."
+
+
+def collect_allowed_files(allowed_files: object = None) -> list[str]:
+    """Normalize configured exact-file allowlist entries as strings."""
+    files: list[str] = []
+    if isinstance(allowed_files, (list, tuple, set, frozenset)):
+        for item in allowed_files:
+            if isinstance(item, (str, Path)) and str(item).strip():
+                text = str(item).strip()
+                if text not in files:
+                    files.append(text)
+    elif isinstance(allowed_files, (str, Path)) and str(allowed_files).strip():
+        files.append(str(allowed_files).strip())
+    return files
+
+
 def is_allowed_media_path(
     raw_path: object,
     *,
     allowed_root: str | Path | None = None,
     allowed_roots: Iterable[str | Path] | None = None,
+    allowed_files: Iterable[str | Path] | None = None,
     unrestricted: bool = False,
     allowed_extensions: Iterable[str] | None = None,
     max_bytes: int = DEFAULT_MAX_MEDIA_BYTES,
 ) -> tuple[bool, str]:
-    """Validate whether ``raw_path`` is an allowed media file inside one of the allowed roots.
+    """Validate whether ``raw_path`` is an allowed media file inside one of the allowed roots or exact ``allowed_files``.
 
+    When ``allowed_files`` is provided (not None), exact canonical file matching is enforced and
+    ``allowed_root``, ``allowed_roots``, and ``unrestricted`` are ignored.
     ``allowed_root`` (a single root) stays for configurations written before ``allowed_roots`` existed.
     ``unrestricted`` lifts only the root bound: the extension, size, absolute-path, UNC/device-path and
     link checks all still apply.
@@ -298,7 +368,12 @@ def is_allowed_media_path(
             return False, reason
 
         target: Path | None
-        if unrestricted:
+        if allowed_files is not None:
+            exact_files = collect_allowed_files(allowed_files)
+            if not exact_files:
+                return False, "Allowed media files list is empty."
+            target, reason = _resolve_in_allowed_files(cleaned_raw, candidate, exact_files)
+        elif unrestricted:
             target, reason = _resolve_unrestricted(cleaned_raw, candidate)
         else:
             roots = collect_media_roots(allowed_root, allowed_roots)
@@ -353,6 +428,7 @@ class MediaReadPolicy:
     """What the native ``read_file`` of one agy process may open: the same rules the hook applies."""
 
     roots: tuple[str, ...] = ()
+    allowed_files: tuple[str, ...] = ()
     unrestricted: bool = False
     extensions: frozenset[str] = ALLOWED_MEDIA_EXTENSIONS
     max_bytes: int = DEFAULT_MAX_MEDIA_BYTES
@@ -361,6 +437,7 @@ class MediaReadPolicy:
         return is_allowed_media_path(
             raw_path,
             allowed_roots=self.roots,
+            allowed_files=self.allowed_files if self.allowed_files else None,
             unrestricted=self.unrestricted,
             allowed_extensions=self.extensions,
             max_bytes=self.max_bytes,
@@ -397,6 +474,13 @@ def decide(payload: Any, config: Any) -> dict[str, str]:
             or not all(isinstance(item, str) for item in raw_roots)
         ):
             return {"decision": "deny", "reason": "Invalid allowed_roots configuration."}
+        has_allowed_files = "allowed_files" in config and config.get("allowed_files") is not None
+        raw_files = config.get("allowed_files") if has_allowed_files else None
+        if has_allowed_files and (
+            not isinstance(raw_files, (list, tuple))
+            or not all(isinstance(item, str) for item in raw_files)
+        ):
+            return {"decision": "deny", "reason": "Invalid allowed_files configuration."}
         raw_unrestricted = config.get("unrestricted", False)
         if not isinstance(raw_unrestricted, bool):
             return {"decision": "deny", "reason": "Invalid unrestricted configuration."}
@@ -414,6 +498,7 @@ def decide(payload: Any, config: Any) -> dict[str, str]:
             raw_path,
             allowed_root=config.get("allowed_root"),
             allowed_roots=raw_roots,
+            allowed_files=raw_files,
             unrestricted=raw_unrestricted,
             allowed_extensions=raw_exts,
             max_bytes=max_bytes,

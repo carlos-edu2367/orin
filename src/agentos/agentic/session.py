@@ -892,6 +892,7 @@ class SubagentCaller:
     depth: int
     permission_mode: str
     read_only: bool = False
+    access_mode: str = "full"
     cancelled: Callable[[dict[str, object]], bool] | None = None
     history: Callable[[], list[dict[str, Any]]] | None = None
     toolset: Any = None
@@ -1298,6 +1299,9 @@ class _SubagentStore:
         task: str,
         *,
         initial_history: list[dict[str, Any]] | None = None,
+        user_content: str | list[dict[str, Any]] | None = None,
+        attachments: Sequence[Mapping[str, object]] = (),
+        allowed_media_files: Sequence[Path | str] = (),
         on_model_step: Callable[[list[dict[str, Any]]], None] | None = None,
         on_tool_activity: Callable[[str, str | None], None] | None = None,
         on_usage_recorded: Callable[[int, int, float | None], None] | None = None,
@@ -1307,6 +1311,11 @@ class _SubagentStore:
         self.agent_id = agent_id
         self.name = name
         self._task = task
+        self._user_content: str | list[dict[str, Any]] = user_content if user_content is not None else task
+        self._attachments: tuple[dict[str, object], ...] = tuple(dict(item) for item in (attachments or ()))
+        self.allowed_media_files: tuple[Path, ...] = tuple(
+            Path(p) for p in (allowed_media_files or ()) if isinstance(p, (str, Path)) and str(p).strip()
+        )
         self._initial_history = [dict(item) for item in initial_history] if initial_history else None
         self._on_model_step = on_model_step
         self._on_tool_activity = on_tool_activity
@@ -1353,8 +1362,11 @@ class _SubagentStore:
 
     def history_for_turn(self, turn: dict[str, object]) -> list[dict[str, Any]]:
         if self._initial_history:
-            return [*self._initial_history, {"role": "user", "content": self._task}]
-        return [{"role": "user", "content": self._task}]
+            return [*self._initial_history, {"role": "user", "content": self._user_content}]
+        return [{"role": "user", "content": self._user_content}]
+
+    def attachments_for_turn(self, turn: dict[str, object]) -> list[dict[str, object]]:
+        return [dict(item) for item in self._attachments]
 
     def delta(self, turn: dict[str, object], text: str) -> None:
         self.text.append(text)
@@ -3001,6 +3013,9 @@ class TurnSession:
         for definition in sorted(catalog.agents.values(), key=lambda item: item.name):
             pinned = self._pinned_models({"definition": definition})
             tag = f" [{pinned.provider}: {' | '.join(pinned.models)}]" if pinned is not None else ""
+            access_val = str(getattr(definition, "access_mode", "") or "").strip().lower()
+            if access_val in {"prompt_only", "read_only"}:
+                tag += f" [access: {access_val}]"
             any_pinned = any_pinned or pinned is not None
             line = f"- {definition.name}{tag}: {' '.join(definition.description.split())[:200]}"
             if used + len(line) > 4_000:
@@ -3152,6 +3167,8 @@ class TurnSession:
         pipeline_run_id: str | None = None,
         output_schema: Mapping[str, Any] | None = None,
         budget: Mapping[str, Any] | BudgetLimits | None = None,
+        access_mode: str | None = None,
+        attachments: Sequence[str] | None = None,
     ) -> ToolOutcome:
         if teammate_name and caller is not None and not caller.is_main:
             return ToolOutcome(
@@ -3164,6 +3181,7 @@ class TurnSession:
                 subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, isolation=isolation, agent_id=agent_id,
                 run_in_background=run_in_background, hook_cancel=hook_cancel, character_name=character_name, caller=caller,
                 pipeline_run_id=pipeline_run_id, output_schema=output_schema, budget=budget,
+                access_mode=access_mode, attachments=attachments,
             )
         refusal = self._teammate_refusal(teammate_name, team_name)
         if refusal is not None:
@@ -3174,6 +3192,7 @@ class TurnSession:
                 subagent_type, task, description=description, provider=provider, model_id=model_id, effort=effort, isolation=isolation, agent_id=agent_id,
                 run_in_background=True, hook_cancel=hook_cancel, teammate_name=clean_name, team_name=team_name, character_name=character_name,
                 pipeline_run_id=pipeline_run_id, output_schema=output_schema, budget=budget,
+                access_mode=access_mode, attachments=attachments,
             )
         except BaseException:
             self._release_teammate(clean_name)  # a start that raised never began
@@ -3202,6 +3221,8 @@ class TurnSession:
         pipeline_run_id: str | None = None,
         output_schema: Mapping[str, Any] | None = None,
         budget: Mapping[str, Any] | BudgetLimits | None = None,
+        access_mode: str | None = None,
+        attachments: Sequence[str] | None = None,
     ) -> ToolOutcome:
         try:
             clean_schema = validate_output_schema(output_schema) if output_schema is not None else None
@@ -3247,7 +3268,84 @@ class TurnSession:
             pipeline_run_id=pipeline_run_id,
             output_schema=clean_schema,
             budget=clean_budget,
+            requested_access_mode=access_mode,
+            attachments=attachments,
         )
+
+    @staticmethod
+    def _resolve_subagent_access_mode(
+        *,
+        caller: SubagentCaller,
+        clean: str,
+        builtin_key: str,
+        builtin_spec: Mapping[str, object] | None,
+        definition: Any | None,
+        record: Mapping[str, object] | None,
+        requested_access_mode: str | None,
+    ) -> tuple[str, ToolOutcome | None]:
+        ranks = {"prompt_only": 0, "read_only": 1, "full": 2}
+        clean_req: str | None = None
+        if requested_access_mode is not None:
+            cand = str(requested_access_mode).strip().lower()
+            if cand not in ranks:
+                return "full", ToolOutcome(
+                    "failed",
+                    "Modo de acesso inválido",
+                    f"access_mode must be one of 'prompt_only', 'read_only', or 'full' (got {requested_access_mode!r}).",
+                    {"tool_kind": "agent"},
+                    "INVALID_ARGUMENTS",
+                )
+            clean_req = cand
+
+        caller_mode = str(getattr(caller, "access_mode", "") or "").strip().lower()
+        if caller_mode not in ranks:
+            caller_mode = "read_only" if getattr(caller, "read_only", False) else "full"
+        elif getattr(caller, "read_only", False) and ranks[caller_mode] > ranks["read_only"]:
+            caller_mode = "read_only"
+
+        if caller_mode == "prompt_only":
+            return "prompt_only", ToolOutcome(
+                "failed",
+                "Delegação bloqueada em modo somente pergunta",
+                "A prompt_only subagent cannot delegate to child subagents.",
+                {"tool_kind": "agent", "max_allowed_access_mode": "prompt_only"},
+                "ACCESS_MODE_ESCALATION_DENIED",
+            )
+
+        ceilings: list[str] = [caller_mode]
+        is_verifier = builtin_key == "verifier" or (definition is not None and getattr(definition, "name", "") == "verifier" and getattr(definition, "origin", "") == "builtin")
+        if bool(builtin_spec and builtin_spec.get("read_only")) or builtin_key in {"explore", "plan"}:
+            ceilings.append("read_only")
+        def_mode = str(getattr(definition, "access_mode", "") or "").strip().lower() if definition is not None else ""
+        if def_mode in ranks:
+            ceilings.append(def_mode)
+        prior_mode = str(record.get("access_mode") or "").strip().lower() if isinstance(record, Mapping) else ""
+        if prior_mode in ranks:
+            ceilings.append(prior_mode)
+
+        ceiling_mode = min(ceilings, key=lambda m: ranks[m])
+
+        if clean_req is not None:
+            # Builtin verifier is non-editing by design and cannot be explicitly escalated to 'full'.
+            if is_verifier and clean_req == "full":
+                return "read_only", ToolOutcome(
+                    "failed",
+                    "Escalonamento de acesso negado",
+                    f"Subagent '{clean}' cannot be escalated to access_mode='full' (maximum allowed: 'read_only').",
+                    {"tool_kind": "agent", "requested_access_mode": clean_req, "max_allowed_access_mode": "read_only"},
+                    "ACCESS_MODE_ESCALATION_DENIED",
+                )
+            if ranks[clean_req] > ranks[ceiling_mode]:
+                return ceiling_mode, ToolOutcome(
+                    "failed",
+                    "Escalonamento de acesso negado",
+                    f"Cannot run subagent '{clean}' in access_mode='{clean_req}': maximum allowed mode is '{ceiling_mode}'.",
+                    {"tool_kind": "agent", "requested_access_mode": clean_req, "max_allowed_access_mode": ceiling_mode},
+                    "ACCESS_MODE_ESCALATION_DENIED",
+                )
+            return clean_req, None
+
+        return ceiling_mode, None
 
     def _ask_agent(
         self,
@@ -3269,6 +3367,8 @@ class TurnSession:
         pipeline_run_id: str | None = None,
         output_schema: Mapping[str, Any] | None = None,
         budget: BudgetLimits | None = None,
+        requested_access_mode: str | None = None,
+        attachments: Sequence[str] | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         max_depth = self._subagent_max_depth()
@@ -3598,11 +3698,84 @@ class TurnSession:
             routing["output_schema"] = output_schema
         if budget is not None and not budget.is_empty:
             routing["budget"] = budget
+        definition_for_access = builtin_spec.get("definition") if builtin_spec is not None else None
+        effective_access_mode, access_refusal = self._resolve_subagent_access_mode(
+            caller=caller,
+            clean=clean,
+            builtin_key=builtin_key,
+            builtin_spec=builtin_spec,
+            definition=definition_for_access,
+            record=record,
+            requested_access_mode=requested_access_mode,
+        )
+        if access_refusal is not None:
+            return access_refusal
+        eff_isolation = requested_isolation or (
+            getattr(definition_for_access, "isolation", None) if definition_for_access is not None else None
+        )
+        if str(eff_isolation or "").strip().lower() == "worktree" and effective_access_mode in {"prompt_only", "read_only"}:
+            return ToolOutcome(
+                "failed",
+                "Worktree incompatível com modo restrito",
+                f"isolation='worktree' cannot be combined with access_mode='{effective_access_mode}'.",
+                {"tool_kind": "agent"},
+                "INVALID_ARGUMENTS",
+            )
+        if effective_access_mode == "prompt_only" and builtin_key == "fork":
+            return ToolOutcome(
+                "failed",
+                "Fork incompatível com prompt_only",
+                "subagent_type='fork' cannot be combined with access_mode='prompt_only'.",
+                {"tool_kind": "agent"},
+                "INVALID_ARGUMENTS",
+            )
+
+        agent_id, task_text = str(record["agent_id"]), str(task)
+        prepared_attachments = None
+        attachment_staging_dir: Path | None = None
+        if attachments:
+            from uuid import uuid4
+            from .subagent_attachments import SubagentAttachmentError, prepare_subagent_attachments
+
+            safe_agent_tag = re.sub(r"[^A-Za-z0-9._-]+", "_", agent_id).strip("._-") or "subagent"
+            cand_staging = self.workspace.root / ".orin" / "subagent-staging" / f"{safe_agent_tag[:48]}_{uuid4().hex[:8]}"
+            native_exts = None
+            if str(child_provider or "").strip().lower() == "google-antigravity":
+                from agentos.providers.antigravity_cli.command import antigravity_native_media_extensions
+
+                native_exts = antigravity_native_media_extensions(child_model_id)
+            try:
+                prepared_attachments = prepare_subagent_attachments(
+                    attachments,
+                    self.workspace,
+                    host_folders=bool(self.host_folders),
+                    model_sees_images=self._sees_images_for(child_model_id, child_provider),
+                    native_media_extensions=native_exts,
+                    staging_dir=cand_staging,
+                )
+            except SubagentAttachmentError as exc:
+                if cand_staging.exists():
+                    shutil.rmtree(cand_staging, ignore_errors=True)
+                summary = (
+                    "Modelo sem suporte a visão"
+                    if exc.code == "SUBAGENT_MODEL_NO_VISION"
+                    else "Anexo inválido para subagente"
+                )
+                return ToolOutcome("failed", summary, str(exc), {"tool_kind": "agent"}, exc.code)
+            if cand_staging.exists():
+                attachment_staging_dir = cand_staging
+        record["access_mode"] = effective_access_mode
+        routing["access_mode"] = effective_access_mode
+        if prepared_attachments is not None:
+            routing["prepared_attachments"] = prepared_attachments
+        if attachment_staging_dir is not None:
+            routing["attachment_staging_dir"] = attachment_staging_dir
         with self._subagent_lock:
             if self._max_subagents_per_turn is not None and self._subagent_runs >= self._max_subagents_per_turn:
+                if attachment_staging_dir is not None and attachment_staging_dir.exists():
+                    shutil.rmtree(attachment_staging_dir, ignore_errors=True)
                 return ToolOutcome("failed", "Limite de subagentes atingido", "The subagent budget for this turn is exhausted; finish the work yourself.", {"tool_kind": "agent"}, "SUBAGENT_LIMIT")
             self._subagent_runs += 1
-        agent_id, task_text = str(record["agent_id"]), str(task)
         from agentos.agentic.tools.agents.agent import remember_subagent_character_name
         with self._subagent_lock:
             prior_char = self._subagent_records.get(agent_id, {}).get("character_name")
@@ -4090,7 +4263,14 @@ class TurnSession:
                     lambda: self._execute_subagent_run_inner(**kwargs),
                     # The same agent again, with its history: the first answer and this note are in front of it.
                     lambda note: self._execute_subagent_run_inner(
-                        **{**kwargs, "task_text": note, "resumed_agent_id": agent_id, "requested_isolation": None}
+                        **{
+                            **kwargs,
+                            "task_text": note,
+                            "resumed_agent_id": agent_id,
+                            "requested_isolation": None,
+                            "prepared_attachments": None,
+                            "attachment_staging_dir": None,
+                        }
                     ),
                     output_schema,
                     answer_of=lambda _outcome: self._last_subagent_answer(agent_id),
@@ -4183,6 +4363,9 @@ class TurnSession:
         requested_effort: str | None = None,
         requested_isolation: str | None = None,
         pipeline_run_id: str | None = None,
+        access_mode: str = "full",
+        prepared_attachments: Any | None = None,
+        attachment_staging_dir: Path | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         if hook_cancel is None:
@@ -4261,6 +4444,9 @@ class TurnSession:
                 requested_effort=requested_effort,
                 requested_isolation=requested_isolation,
                 pipeline_run_id=pipeline_run_id,
+                access_mode=access_mode,
+                prepared_attachments=prepared_attachments,
+                attachment_staging_dir=attachment_staging_dir,
             )
         finally:
             try:
@@ -4376,6 +4562,9 @@ class TurnSession:
         requested_effort: str | None = None,
         requested_isolation: str | None = None,
         pipeline_run_id: str | None = None,
+        access_mode: str = "full",
+        prepared_attachments: Any | None = None,
+        attachment_staging_dir: Path | None = None,
     ) -> ToolOutcome:
         caller = caller if caller is not None else self._main_caller()
         parent_agent_id = caller.agent_id
@@ -4428,20 +4617,43 @@ class TurnSession:
         active_model_id = chain[position]
         is_code_mode = str(self.turn.get("code_mode") or "").strip().lower() == "code"
         subagent_kind = builtin_key if builtin_spec is not None else clean
+        eff_access_mode = str(access_mode or "full").strip().lower()
+        if eff_access_mode not in {"prompt_only", "read_only", "full"}:
+            eff_access_mode = "full"
+        if caller.read_only and eff_access_mode == "full":
+            eff_access_mode = "read_only"
+        attachment_summary_names = (
+            list(prepared_attachments.summary_names)
+            if prepared_attachments is not None and getattr(prepared_attachments, "summary_names", ())
+            else []
+        )
         subagent_turn = {
             **self.turn,
             "model_id": active_model_id,
             "provider": provider_name,
             "is_subagent": True,
             "subagent_type": subagent_kind,
+            "access_mode": eff_access_mode,
         }
         subagent_turn.pop("_change_measure_summary", None)
         subagent_turn.pop("_change_measure_version", None)
+        sent_payload: dict[str, object] = {
+            "agent_name": clean,
+            "recipient_name": clean,
+            "sender_name": caller.name,
+            "label": description[:120] or clean,
+            "content": task_text[:PREVIEW_CHARS],
+            "to_agent_id": agent_id,
+            "tool_kind": "agent",
+            "access_mode": eff_access_mode,
+        }
+        if attachment_summary_names:
+            sent_payload["attachment_count"] = len(attachment_summary_names)
+            sent_payload["attachment_names"] = attachment_summary_names
         self._record(
             AgentActivityEventType.AGENT_MESSAGE_SENT,
             f"Enviou uma tarefa para {clean}",
-            {"agent_name": clean, "recipient_name": clean, "sender_name": caller.name, "label": description[:120] or clean,
-             "content": task_text[:PREVIEW_CHARS], "to_agent_id": agent_id, "tool_kind": "agent"},
+            sent_payload,
             agent_id=parent_agent_id,
             parent_agent_id=None if caller.is_main else self._parent_of(parent_agent_id),
         )
@@ -4459,10 +4671,15 @@ class TurnSession:
         wt_merge_state: str | None = None
         wt_applied_files: tuple[str, ...] = ()
         try:
-            # A read-only caller only starts read-only subagents.
-            read_only_subagent = bool(builtin_spec and builtin_spec.get("read_only")) or caller.read_only
+            # A read-only caller only starts read-only subagents; prompt_only/read_only access modes are non-mutating.
+            read_only_subagent = (
+                eff_access_mode in {"prompt_only", "read_only"}
+                or bool(builtin_spec and builtin_spec.get("read_only"))
+                or caller.read_only
+            )
+            is_prompt_only = eff_access_mode == "prompt_only"
             definition = builtin_spec.get("definition") if builtin_spec is not None else None
-            inherit_context = bool(builtin_spec and builtin_spec.get("inherit_context"))
+            inherit_context = False if is_prompt_only else bool(builtin_spec and builtin_spec.get("inherit_context"))
             initial_history: list[dict[str, Any]] | None = None
             if resumed_agent_id:
                 with self._subagent_lock:
@@ -4494,18 +4711,32 @@ class TurnSession:
                 except Exception:
                     initial_history = None
             sub_memory_view, frozen_agent_memory = self._subagent_memory_context(clean, builtin_key, definition)
+            allowed_media_files = (
+                tuple(prepared_attachments.allowed_media_files)
+                if prepared_attachments is not None
+                else ()
+            )
             enriched_record = {
-                **record, "builtin_type": builtin_key if builtin_spec is not None else None, "definition": definition,
-                **({"agent_memory_summary": frozen_agent_memory} if frozen_agent_memory else {}),
+                **record,
+                "builtin_type": builtin_key if builtin_spec is not None else None,
+                "definition": definition,
+                "access_mode": eff_access_mode,
+                "provider": provider_name,
+                "allowed_media_files": allowed_media_files,
+                **({"agent_memory_summary": frozen_agent_memory} if frozen_agent_memory and not is_prompt_only else {}),
             }
             resolved_effort = self._definition_effort(
                 definition, active_model_id, provider_name,
                 call_effort=requested_effort, subagent_type=builtin_key, agent_id=agent_id,
             )
             from .subagent_worktree import finalize_subagent_worktree, prepare_subagent_worktree, worktree_prompt_notice
-            active_wt = prepare_subagent_worktree(
-                self, agent_id=agent_id, parent_agent_id=parent_agent_id,
-                requested_isolation=requested_isolation, definition=definition,
+            active_wt = (
+                None
+                if eff_access_mode in {"prompt_only", "read_only"}
+                else prepare_subagent_worktree(
+                    self, agent_id=agent_id, parent_agent_id=parent_agent_id,
+                    requested_isolation=requested_isolation, definition=definition,
+                )
             )
             wt_path_str = str(active_wt.worktree.path) if active_wt is not None else None
             if wt_path_str:
@@ -4514,6 +4745,10 @@ class TurnSession:
                     bg_live.worktree_path = wt_path_str
             if run_recorder is not None:
                 try:
+                    run_extra_meta: dict[str, Any] = {"access_mode": eff_access_mode}
+                    if attachment_summary_names:
+                        run_extra_meta["attachment_count"] = len(attachment_summary_names)
+                        run_extra_meta["attachment_names"] = attachment_summary_names
                     run_recorder.start(
                         agent_id=agent_id,
                         user_id=str(self.turn.get("user_id") or ""),
@@ -4531,6 +4766,7 @@ class TurnSession:
                         pipeline_run_id=pipeline_run_id,
                         result_ref=self._agent_output_file(agent_id),
                         initial_history=initial_history,
+                        extra_metadata=run_extra_meta,
                     )
                 except Exception:
                     logger.debug("agent_run_recorder.start failed for %s", agent_id, exc_info=True)
@@ -4565,13 +4801,34 @@ class TurnSession:
             def _on_subagent_usage(in_tok: int, out_tok: int, cost: float | None) -> None:
                 progress_tracker.on_usage(agent_id, input_tokens=in_tok, output_tokens=out_tok, cost_usd=cost)
 
+            rendered_task_text = self._subagent_task(enriched_record, effective_task_text)
+            if attachment_summary_names:
+                transcript_task_text = (
+                    f"{rendered_task_text}\n\n[Attachments: {', '.join(attachment_summary_names)}]"
+                )
+            else:
+                transcript_task_text = rendered_task_text
+            if prepared_attachments is not None and prepared_attachments.content_blocks:
+                sub_user_content: str | list[dict[str, Any]] = [
+                    {"type": "text", "text": rendered_task_text},
+                    *[dict(b) for b in prepared_attachments.content_blocks],
+                ]
+            else:
+                sub_user_content = rendered_task_text
+            sub_turn_attachments = (
+                prepared_attachments.turn_attachments if prepared_attachments is not None else ()
+            )
+
             sub_store = _SubagentStore(
                 self,
                 subagent_turn,
                 agent_id,
                 clean,
-                self._subagent_task(enriched_record, effective_task_text),
+                transcript_task_text,
                 initial_history=initial_history,
+                user_content=sub_user_content,
+                attachments=sub_turn_attachments,
+                allowed_media_files=allowed_media_files,
                 on_model_step=_on_subagent_model_step,
                 on_tool_activity=_on_subagent_tool_activity,
                 on_usage_recorded=_on_subagent_usage,
@@ -4594,7 +4851,7 @@ class TurnSession:
             store_cell = [sub_store]
             child_caller = SubagentCaller(
                 agent_id=agent_id, name=clean, depth=child_depth, permission_mode=sub_permission_mode,
-                read_only=read_only_subagent, cancelled=sub_cancelled,
+                read_only=read_only_subagent, access_mode=eff_access_mode, cancelled=sub_cancelled,
                 history=lambda: [dict(item) for item in store_cell[0].history_for_turn(store_cell[0].load(""))],
                 slot=slot,
             )
@@ -4614,13 +4871,14 @@ class TurnSession:
                 permission_mode=sub_permission_mode,
                 interactive_permissions=bool(self.turn.get("interactive_permissions")),
                 read_only_mode=read_only_subagent,
+                access_mode=eff_access_mode,
                 inherit_context=inherit_context,
                 lifecycle_context={"agent_id": agent_id, "agent_type": public_subagent_type(builtin_key or clean)},
                 non_interactive_ask=self._non_interactive_ask(),
                 # Its own queue (W5): the notices its reads raise (instructions, changed files) reach the subagent itself.
                 reminders=sub_reminders,
                 todos_state=[],
-                memory_override=sub_memory_view,
+                memory_override=None if is_prompt_only else sub_memory_view,
                 workspace_override=active_wt.workspace if active_wt is not None else None,
             )
             subagent_tools.set_allow_deferral(self._tool_deferral_allowed(provider_name))
@@ -4652,9 +4910,13 @@ class TurnSession:
             if definition is not None and definition.max_turns:
                 sub_max_iterations = min(sub_max_iterations or definition.max_turns, definition.max_turns)
             sub_max_actions = (
-                self.limits.subagent_max_actions
-                if self.limits.subagent_max_actions is not None
-                else (None if self.limits.max_actions is None else min(self.limits.max_actions, SUBAGENT_MAX_ACTIONS))
+                0
+                if is_prompt_only
+                else (
+                    self.limits.subagent_max_actions
+                    if self.limits.subagent_max_actions is not None
+                    else (None if self.limits.max_actions is None else min(self.limits.max_actions, SUBAGENT_MAX_ACTIONS))
+                )
             )
             sub_definitions = subagent_tools.definitions()
             runtime = AgenticTurnRuntime(
@@ -4713,6 +4975,7 @@ class TurnSession:
                     "provider": provider_name,
                     "is_subagent": True,
                     "subagent_type": subagent_kind,
+                    "access_mode": eff_access_mode,
                 }
                 subagent_turn.pop("_change_measure_summary", None)
                 subagent_turn.pop("_change_measure_version", None)
@@ -4721,8 +4984,11 @@ class TurnSession:
                     subagent_turn,
                     agent_id,
                     clean,
-                    self._subagent_task(enriched_record, effective_task_text),
+                    transcript_task_text,
                     initial_history=initial_history,
+                    user_content=sub_user_content,
+                    attachments=sub_turn_attachments,
+                    allowed_media_files=allowed_media_files,
                     on_model_step=_on_subagent_model_step,
                     on_tool_activity=_on_subagent_tool_activity,
                     on_usage_recorded=_on_subagent_usage,
@@ -4770,7 +5036,7 @@ class TurnSession:
             )
             acceptable_state = result.state in {"completed", "completed_with_caveats"} or (limit_stopped and bool(answer))
             prior_transcript = [dict(item) for item in initial_history] if initial_history else []
-            prior_transcript.append({"role": "user", "content": self._subagent_task(enriched_record, effective_task_text)})
+            prior_transcript.append({"role": "user", "content": transcript_task_text})
             recent_calls = sub_store.recent_tool_calls(15)
             progress_note = (
                 "Partial progress before interruption:\n" + "\n".join(f"- {c}" for c in recent_calls)
@@ -4888,6 +5154,11 @@ class TurnSession:
                     content += wt_note
             return ToolOutcome("succeeded", f"Recebeu a resposta de {clean}", content, payload)
         finally:
+            if attachment_staging_dir is not None:
+                try:
+                    shutil.rmtree(attachment_staging_dir, ignore_errors=True)
+                except Exception:
+                    logger.debug("cleanup of attachment staging dir failed for %s", agent_id, exc_info=True)
             if active_wt is not None and not wt_finalized:
                 try:
                     if not active_wt.manager.has_agent_changes(active_wt.worktree.path):
@@ -6136,8 +6407,11 @@ class TurnSession:
         except Exception:  # noqa: BLE001 - prompt enrichment never blocks a delegation
             in_shell = ""
         lines = ["", "", "## Session", f"- Working directory: {root}.{in_shell}"]
-        if getattr(toolset, "_read_only_mode", False):
-            lines.append("- You are read-only: inspect and report; never change files or run commands that change state.")
+        if getattr(toolset, "_access_mode", "full") == "read_only" or getattr(toolset, "_read_only_mode", False):
+            lines.append(
+                "- You are read-only (workspace file read/search tools only): inspect and report; "
+                "you have no write, edit, shell, web, MCP, or delegation tools."
+            )
             return "\n".join(lines)
         mode = getattr(getattr(toolset, "_permission_mode", None), "value", None) or str(self.permission_mode)
         exit_label = "`exit_plan_mode`"
@@ -6180,6 +6454,28 @@ class TurnSession:
         }
 
     def _subagent_prompt(self, record: Mapping[str, object], task: str, toolset: AgentToolset) -> str:
+        access_mode = str(getattr(toolset, "_access_mode", None) or record.get("access_mode") or "full").strip().lower()
+        definition = record.get("definition")
+        if access_mode == "prompt_only":
+            parts: list[str] = []
+            if definition is not None and definition.prompt:
+                parts.append(f"You are the '{definition.name}' agent. Your instructions:\n\n{definition.prompt}")
+            parts.append(
+                f"You are '{record['name']}', an isolated specialist subagent inside Orin. Your role: {record['role']}.\n"
+                "You are running in prompt-only mode with zero workspace, shell, web, MCP, or delegation tools.\n"
+                "Answer exclusively from the prompt and any attachments provided to you.\n"
+                "Do not assume access to any repository files or external commands.\n"
+                "Answer in the same language as the task. Be concise, objective, and factual."
+            )
+            provider_slug = str(record.get("provider") or "").strip().lower()
+            allowed_media = record.get("allowed_media_files") or ()
+            if provider_slug == "google-antigravity" and allowed_media:
+                media_lines = "\n".join(f'- "{Path(m).resolve().as_posix()}"' for m in allowed_media)
+                parts.append(
+                    "Attached media files (call your native `read_file` tool with these exact absolute paths to inspect them; "
+                    "every other file path is blocked):\n" + media_lines
+                )
+            return "\n\n".join(parts)
         builtin_type = str(record.get("builtin_type") or "")
         header_lines: list[str] = []
         if builtin_type == "explore":
@@ -6253,16 +6549,25 @@ class TurnSession:
             else "(Unix syntax: forward slashes, /dev/null, $VAR)"
         )
         prompt += self._subagent_session_section(toolset, environment)
-        prompt += (
-            "\n\n## Workspace and environment\n"
-            "- You share the working directory above with the main agent. Prefer paths relative to it.\n"
-            f"- Operating system: {environment['os']}.\n"
-            f"- run_command executes through: {environment['shell']} — use that shell's syntax {shell_syntax_hint}.\n"
-            "- Always prefer dedicated tools (`read_file`, `list_files`, `search_files`, `write_file`, `edit_file`) over shell commands (`run_command`).\n"
-            "- When calling `write_file` or `edit_file`, always provide the `'path'` argument first before `'content'`.\n"
-            f"- Python: {environment['python']}. Also on PATH: {environment['available']}."
-            + "".join(f"\n- {note}" for note in environment_notes(environment))
-        )
+        if access_mode == "read_only":
+            prompt += (
+                "\n\n## Workspace and environment\n"
+                "- You share the working directory above with the main agent. Prefer paths relative to it.\n"
+                f"- Operating system: {environment['os']}.\n"
+                "- You have strictly read-only file/search tools (`read_file`, `view_file`, `transcribe_pdf`, `list_files`, `glob_files`, `search_files`, `search_code`, `project_map`).\n"
+                "- Do not attempt to edit files, run commands, browse the web, or call external MCP tools."
+            )
+        else:
+            prompt += (
+                "\n\n## Workspace and environment\n"
+                "- You share the working directory above with the main agent. Prefer paths relative to it.\n"
+                f"- Operating system: {environment['os']}.\n"
+                f"- run_command executes through: {environment['shell']} — use that shell's syntax {shell_syntax_hint}.\n"
+                "- Always prefer dedicated tools (`read_file`, `list_files`, `search_files`, `write_file`, `edit_file`) over shell commands (`run_command`).\n"
+                "- When calling `write_file` or `edit_file`, always provide the `'path'` argument first before `'content'`.\n"
+                f"- Python: {environment['python']}. Also on PATH: {environment['available']}."
+                + "".join(f"\n- {note}" for note in environment_notes(environment))
+            )
         if toolset.name_translator is not None:
             from agentos.agentic.tools.public_names import public_text
 
@@ -6514,6 +6819,7 @@ class TurnSession:
         permission_mode: str | None = None,
         interactive_permissions: bool = False,
         read_only_mode: bool = False,
+        access_mode: str = "full",
         inherit_context: bool = True,
         lifecycle_context: Mapping[str, str] | None = None,
         reminders: ReminderQueue | None = None,
@@ -6616,6 +6922,7 @@ class TurnSession:
             todos_state=self._todos_state if todos_state is None else todos_state,
             task_board=task_board, task_board_enabled=task_board is not None, task_board_agent_id=actor_id,
             read_only_mode=read_only_mode,
+            access_mode=access_mode,
             default_provider=str(self.turn.get("provider") or "").strip() or None,
             default_model_id=str(self.turn.get("model_id") or "").strip() or None,
             default_workspace_path=str(self.turn.get("workspace_root_path") or "").strip() or None,

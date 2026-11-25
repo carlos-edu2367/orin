@@ -88,6 +88,7 @@ import { formatTurnWorkDuration } from './activitySummary'
 import type { ConversationActivityEvent, StructuredPatchHunk, ToolPermissionDecision } from './activityTypes'
 import type { UserQuestionAnswer } from './UserQuestionCard'
 import { buildMessageTimelines, resolveTurnId } from './turnTimelineFold'
+import { rootTerminalTurns as computeRootTerminalTurns, terminalConversationState } from './turnLiveness'
 import { BtwCard } from './BtwCard'
 import { useBtwChatControls, useBtwSession } from './useBtwSession'
 import { useComposerAttachments } from './useComposerAttachments'
@@ -1400,31 +1401,17 @@ export function ChatPage() {
     [cancelledTurnIds, conversation?.turns],
   )
 
-  const hasTerminalEventForActiveTurn = useMemo(() => {
-    if (!activeTurn) return false
-    return activity.events.some(
-      (event) =>
-        !event.parentAgentId
-        && (!event.turnId || event.turnId === activeTurn.turn_id)
-        && terminalConversationState(event) !== null,
-    )
-  }, [activeTurn, activity.events])
+  // Turns a root (non-subagent) terminal event already ended; `anyTurn` when such an event names no turn. A plan or
+  // permission event the turn moved past (exit_plan_mode then ask_user in the same native turn) does not end it.
+  const rootTerminalTurns = useMemo(() => computeRootTerminalTurns(activity.events), [activity.events])
+  const hasTerminalEventForActiveTurn = Boolean(
+    activeTurn && (rootTerminalTurns.anyTurn || rootTerminalTurns.ids.has(activeTurn.turn_id)),
+  )
 
   const lastRootEvent = useMemo(
     () => [...activity.events].reverse().find((event) => !event.parentAgentId) ?? null,
     [activity.events],
   )
-  // Turns a root (non-subagent) terminal event already ended; `anyTurn` when such an event names no turn.
-  const rootTerminalTurns = useMemo(() => {
-    const ids = new Set<string>()
-    let anyTurn = false
-    for (const event of activity.events) {
-      if (event.parentAgentId || terminalConversationState(event) === null) continue
-      if (event.turnId) ids.add(event.turnId)
-      else anyTurn = true
-    }
-    return { ids, anyTurn }
-  }, [activity.events])
   // A turn that is live now (running, not cancelled, no terminal event). It need not be the last turn: a message
   // queued as a new turn behind it must not hide that the turn asking a question is still waiting for the answer.
   const isLiveTurn = useCallback((turnId: string | undefined | null) => {
@@ -3218,6 +3205,22 @@ export function ChatPage() {
               </div>
             )}
 
+            {!loading && !loadFailure && hasOlderActivities && oldestActivityId !== null && (
+              <div className="flex justify-center py-2">
+                <button
+                  type="button"
+                  data-testid="load-older-activities-top"
+                  disabled={loadingOlderActivities}
+                  onClick={() => { void loadOlderActivities() }}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border-subtle)] bg-[var(--surface-raised)] px-3.5 py-1 text-[12px] text-[var(--text-secondary)] hover:border-[var(--accent-primary)] hover:text-[var(--text-primary)] disabled:opacity-60 transition-colors"
+                >
+                  {loadingOlderActivities
+                    ? 'Carregando ações anteriores…'
+                    : '↑ Carregar ações anteriores'}
+                </button>
+              </div>
+            )}
+
             {!loadFailure && (() => {
               const oldestTurnIdWithActivity = consolidatedEvents.find((ev) => Boolean(ev.turnId))?.turnId
               const matchingOldestIdx = oldestTurnIdWithActivity
@@ -3324,6 +3327,7 @@ export function ChatPage() {
                     defaultModelId={effectiveChatModelId || undefined}
                     models={chatModelsByProvider}
                     isTurnFinished={isTurnFinished}
+                    queuedBehindQuestion={Boolean(liveQuestionTurnId && item.role === 'assistant' && item.status === 'queued' && item.turn_id !== liveQuestionTurnId)}
                     turnStartedAt={isCompletedSuccessTurn ? (matchedTurn?.started_at ?? null) : null}
                     turnFinishedAt={isCompletedSuccessTurn ? (matchedTurn?.finished_at ?? null) : null}
                     turnWorkDurationLabel={turnWorkDurationLabel}
@@ -4095,42 +4099,6 @@ function conversationLoadHeadline(error: unknown): string {
   if (error instanceof ApiError && error.status === 404) return 'Esta conversa não está disponível neste workspace.'
   if (error instanceof ApiError && (error.status === 0 || error.code === 'network_error')) return 'Não foi possível alcançar o backend local. Confirme se o Orin está em execução.'
   return 'A conversa não pôde ser carregada agora. Tente novamente.'
-}
-
-function terminalConversationState(event: ConversationActivityEvent): 'completed' | 'failed' | 'cancelled' | 'waiting_user' | null {
-  if (
-    event.type === 'turn.completed'
-    || event.type === 'TURN_COMPLETED'
-    || event.type === 'code_mode.completed'
-    || event.type === 'code_mode.completed_with_caveats'
-  ) {
-    return 'completed'
-  }
-  if (
-    event.type === 'turn.cancelled'
-    || event.type === 'TURN_CANCELLED'
-    || event.type === 'execution.canceled'
-    || event.type === 'EXECUTION_CANCELED'
-  ) {
-    return 'cancelled'
-  }
-  if (event.type === 'turn.failed' || event.type === 'TURN_FAILED') {
-    return event.state === 'cancelled' || event.status === 'cancelled' || event.errorCode === 'TURN_CANCELLED'
-      ? 'cancelled'
-      : 'failed'
-  }
-  if (
-    (event.type === 'turn.waiting_user' && event.payload?.in_turn !== true)
-    || event.type === 'code_mode.blocked'
-    || event.type === 'code_mode.plan_ready'
-    || event.type === 'tool.permission_required'
-    || Boolean(event.planApproval)
-    || event.tool === 'exit_plan_mode'
-    || event.toolName === 'exit_plan_mode'
-  ) {
-    return 'waiting_user'
-  }
-  return null
 }
 
 function isResyncError(value: unknown): boolean {
