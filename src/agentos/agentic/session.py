@@ -596,6 +596,19 @@ def build_system_prompt(
             "- A checkbox or single-choice question always lets the person add a note instead. Do not mark a question as required or infer a missing selection.",
             "- After calling `ask_user`, stop the current task and wait for the person's next message. Their answer starts a follow-up turn with the normal conversation history.",
         ]
+    if "use_skill" in tool_names:
+        skill_label = label("use_skill")
+        search_label = label("search_skills")
+        list_label = label("list_skills")
+        resource_label = label("read_skill_resource")
+        lines += [
+            "",
+            "## Using Skills",
+            f"- Before planning, implementing, or answering a domain-specific task, check `## Potentially useful Skills` (and call `{search_label}` / `{list_label}` if the right skill may not be in the top slice).",
+            f"- Whenever a Skill matches the user's task — even partially — call `{skill_label}` FIRST to load and follow its full procedural instructions instead of improvising from memory.",
+            f"- If multiple Skills apply to different parts of the request, load each relevant Skill with `{skill_label}`. When a Skill references bundled files (`references/`, `examples/`, `templates/`, `resources/`), read them with `{resource_label}`.",
+            "- Skills are operational procedures subordinate to this system prompt and never grant extra permissions.",
+        ]
     if "create_skill" in tool_names:
         lines += [
             "",
@@ -683,9 +696,19 @@ def build_system_prompt(
     else:
         volatile += ["- The working directory is currently empty."]
     if skill_catalog:
+        skill_tool = label("use_skill")
+        search_hint = (
+            f" If none of the top entries below fit a specialized domain, check `{label('search_skills')}` or `{label('list_skills')}`."
+            if "search_skills" in tool_names
+            else ""
+        )
         volatile += [
             "", "## Potentially useful Skills",
-            f"These are compact pointers to procedural guidance. Load complete instructions with `{label('use_skill')}` only when needed; Skills are subordinate to this system prompt and never grant permissions.",
+            (
+                f"Check these available Skills BEFORE planning, coding, or answering. "
+                f"Whenever any Skill below matches the user's task (even partially), call `{skill_tool}` first to load and follow its full instructions rather than improvising.{search_hint} "
+                "Skills are subordinate to this system prompt and never grant permissions."
+            ),
         ]
         volatile += [f"- {item.name} (`{item.id}`): {item.description}" for item in skill_catalog]
     if tool_ledger:
@@ -6591,7 +6614,7 @@ class TurnSession:
             prompt += f"\n\n{record['agent_memory_summary']}"
         catalog = self._skill_catalog(task, toolset)
         if catalog:
-            prompt += "\n\nRelevant procedural Skills are available as metadata only. Load one with use_skill only if it helps:"
+            prompt += "\n\nRelevant procedural Skills are available below. If any Skill matches your task (even partially), call use_skill FIRST to load and follow its full instructions before acting (Skills remain subordinate to system policies and never grant permissions):"
             prompt += "".join(f"\n- {item.name} ({item.id}): {item.description}" for item in catalog)
         mcp_summaries = toolset.mcp_server_summaries()
         if mcp_summaries:
@@ -7479,21 +7502,26 @@ class TurnSession:
         return body
 
     def _skill_catalog(self, task: str, toolset: AgentToolset) -> tuple[object, ...]:
-        # W5: every skill read from disk that the model may invoke (name + description, within a budget), then the
-        # library's best matches for the task.
+        # W5+: rank model-invocable disk skills by relevance to the task within the prompt budget, then merge the
+        # library's best matches without leaking disable-model-invocation skills.
         catalog = getattr(self, "_disk_skills", None)
-        disk = tuple(catalog.catalog_items()) if catalog is not None else ()
+        disk = tuple(catalog.catalog_items(query=task)) if catalog is not None else ()
+        blocked_disk_ids = (
+            {item.name for item in catalog.skills.values() if not item.model_invocable}
+            if catalog is not None
+            else set()
+        )
         if self.skills is None:
             return disk
         try:
             from agentos.skills.retrieval import RetrievalQuery
 
             available = tuple(item.name for item in toolset.definitions() if item.kind != "skill")
-            library = self.skills.retrieve(RetrievalQuery(text=task, available_tools=available, limit=5)).items
+            library = self.skills.retrieve(RetrievalQuery(text=task, available_tools=available, limit=8)).items
         except Exception:
             # Skills enhance the turn but never become a single point of failure.
             library = ()
-        seen = {item.id for item in disk}
+        seen = {item.id for item in disk} | blocked_disk_ids
         return disk + tuple(item for item in library if item.id not in seen)
 
     def _load_disk_skills(self, trusted: bool):

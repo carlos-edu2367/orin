@@ -48,6 +48,7 @@ def _isolated_settings_dirs(
     for name, sub in (
         ("ORIN_USER_DIR", "orin-user"),
         ("ORIN_CLAUDE_HOME", "claude-user"),
+        ("ORIN_AGENTS_HOME", "agents-user"),
         ("ORIN_MANAGED_DIR", "orin-managed"),
         ("ORIN_CLAUDE_MANAGED_DIR", "claude-managed"),
     ):

@@ -1883,7 +1883,7 @@ class ChatWorker:
 
     def _build_session_for(self, turn: dict[str, object]) -> TurnSession:
         engine = self.store._engine
-        skill_library = PostgresSkillLibraryService(engine)
+        skill_library = PostgresSkillLibraryService(engine, sync_personal_disk_skills=self._capabilities.plugin_hooks)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         turn = self._hydrate_code_mode(turn)
         local_root = turn.get("workspace_root_path")

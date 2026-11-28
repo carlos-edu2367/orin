@@ -1,15 +1,20 @@
-"""Skills and slash commands read from disk, in Claude Code's format (W5).
+"""Skills and slash commands read from disk across Orin and standard agent harnesses (W5 + npx skills add).
 
 Sources, highest precedence first (a name defined twice keeps the first one and records the other as shadowed):
 
 1. managed: ``<managed dir>/skills`` and ``<managed dir>/commands`` (Orin's and Claude Code's managed folders);
-2. user: ``~/.orin/skills``, ``~/.claude/skills``, ``~/.orin/commands``, ``~/.claude/commands``;
-3. project, only once the workspace is trusted: ``.orin/skills``, ``.claude/skills``, ``.orin/commands``, ``.claude/commands``.
+2. user: ``~/.orin/skills``, ``~/.agents/skills``, ``~/.config/agents/skills``, ``~/.claude/skills``,
+   ``~/.codex/skills``, ``~/.cursor/skills``, ``~/.gemini/antigravity/skills``, ``~/.agent/skills``,
+   ``~/.config/opencode/skills``, ``~/.copilot/skills``, ``~/.codeium/windsurf/skills``
+   (plus ``~/.orin/commands`` and ``~/.claude/commands``);
+3. project, only once the workspace is trusted: ``.orin/skills``, ``.agents/skills``, ``.claude/skills``,
+   ``.codex/skills``, ``.cursor/skills``, ``.agent/skills``, ``.opencode/skills``, ``.github/skills``,
+   ``.windsurf/skills`` (plus ``.orin/commands`` and ``.claude/commands``).
 
 A skill is a folder holding ``SKILL.md``; a command is a ``.md`` file under ``commands/`` (a subfolder becomes a
-``dir:name`` prefix). Frontmatter is YAML (``yaml.safe_load``); unknown keys are ignored, so a skill written for
-Claude Code loads unchanged. Nothing here runs anything: ``!`cmd``` blocks are executed by the Skill tool, through
-the Bash permission pipeline, when the skill is invoked.
+``dir:name`` prefix). Frontmatter is YAML (``yaml.safe_load``); unknown keys are ignored, so skills installed by
+``npx skills add`` or written for Claude Code / Codex / Cursor load unchanged. Nothing here runs anything:
+``!`cmd``` blocks are executed by the Skill tool, through the Bash permission pipeline, when the skill is invoked.
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ import functools
 import hashlib
 import itertools
 import logging
+import os
 import re
 import shlex
 import sys
@@ -38,8 +44,32 @@ _FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re
 # W5-R11: frontmatter is capped before it is parsed, and an anchor or an alias in it is refused (see _frontmatter_loader).
 MAX_FRONTMATTER_BYTES = 64 * 1024
 _ORIGINS = ("managed", "user", "project")
+_ALLOWED_RESOURCE_ROOTS = frozenset({"resources", "references", "examples", "templates", "scripts"})
 # ``!`cmd``` in a skill body: the command runs when the skill is invoked and its output replaces the block.
 INLINE_COMMAND = re.compile(r"!`([^`\n]{1,2000})`")
+_WORDS = re.compile(r"[\wÀ-ÿ]{2,}", re.UNICODE)
+
+
+def _terms(value: str) -> set[str]:
+    return {item.lower() for item in _WORDS.findall(value or "")}
+
+
+def _string_list(value: object, *, limit: int = 32) -> tuple[str, ...]:
+    if isinstance(value, str) and value.strip():
+        return (value.strip()[:256],)
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if isinstance(item, (str, int, float)) and not isinstance(item, bool):
+            clean = " ".join(str(item).split())[:256]
+            if clean and clean not in seen:
+                seen.add(clean)
+                result.append(clean)
+                if len(result) >= limit:
+                    break
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +90,12 @@ class DiskSkill:
     agent: str | None = None
     hooks: Mapping[str, Any] | None = None
     digest: str = ""
+    version: str | None = None
+    tags: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
+    when_to_use: tuple[str, ...] = ()
+    when_not_to_use: tuple[str, ...] = ()
+    author: str | None = None
 
     @property
     def id(self) -> str:
@@ -68,6 +104,55 @@ class DiskSkill:
     @property
     def directory(self) -> Path:
         return self.path.parent
+
+    def read_resource(self, resource_path: str) -> str:
+        """Read a UTF-8 resource file inside one of this skill's safe package subdirectories."""
+        from .registry import SkillNotFound, SkillUnavailable
+
+        relative = Path(resource_path)
+        if (
+            not resource_path
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or not relative.parts
+            or relative.parts[0] not in _ALLOWED_RESOURCE_ROOTS
+        ):
+            raise SkillUnavailable("skill resource path must stay within a readable package resource directory")
+        root = self.directory.resolve()
+        candidate = self.directory / relative
+        if candidate.is_symlink():
+            raise SkillUnavailable("skill resource cannot be a symbolic link")
+        target = candidate.resolve()
+        if root not in target.parents or not target.is_file():
+            raise SkillNotFound(f"skill resource '{resource_path}' was not found")
+        if target.stat().st_size > MAX_SKILL_FILE_BYTES:
+            raise SkillUnavailable(f"skill resource '{resource_path}' exceeds size limit")
+        try:
+            return target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as error:
+            raise SkillUnavailable(f"skill resource '{resource_path}' is not UTF-8 text") from error
+
+
+def _score_disk_skill(skill: DiskSkill, wanted: set[str], raw_query: str) -> float:
+    if not wanted:
+        return 0.0
+    name_terms = _terms(skill.name.replace("-", " ").replace(":", " ").replace("_", " "))
+    name_terms.add(skill.name.lower())
+    desc_terms = _terms(skill.description)
+    tag_terms = {tag.lower() for tag in skill.tags}
+    cap_terms = {cap.lower() for cap in skill.capabilities}
+    use_terms = _terms(" ".join(skill.when_to_use))
+    score = (
+        6.0 * len(wanted & name_terms)
+        + 8.0 * len(wanted & tag_terms)
+        + 5.0 * len(wanted & cap_terms)
+        + 4.0 * len(wanted & use_terms)
+        + 3.0 * len(wanted & desc_terms)
+    )
+    query_lower = raw_query.lower()
+    if skill.name.lower() in query_lower:
+        score += 12.0
+    return score
 
 
 @dataclass(slots=True)
@@ -88,11 +173,49 @@ class DiskSkillCatalog:
     def model_invocable(self) -> list[DiskSkill]:
         return [item for item in self.skills.values() if item.model_invocable]
 
-    def catalog_items(self, budget: int = CATALOG_BUDGET_CHARS) -> list["CatalogItem"]:
-        """Name + short description of every skill the model may invoke, within ``budget`` characters."""
+    def search(self, query: str, *, tags: Iterable[str] = (), limit: int = 10) -> list[tuple[DiskSkill, float]]:
+        wanted_tags = {str(tag).strip().lower() for tag in tags if str(tag).strip()}
+        wanted = _terms(query)
+        ranked: list[tuple[float, int, str, DiskSkill]] = []
+        for skill in self.model_invocable():
+            if wanted_tags and not wanted_tags.issubset({tag.lower() for tag in skill.tags}):
+                continue
+            score = _score_disk_skill(skill, wanted, query)
+            if score > 0.0:
+                ranked.append((-score, _ORIGINS.index(skill.origin), skill.name, skill))
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [(item[3], round(-item[0], 6)) for item in ranked[:max(1, limit)]]
+
+    def list_skills(self, *, tags: Iterable[str] = (), limit: int = 100) -> list[DiskSkill]:
+        wanted_tags = {str(tag).strip().lower() for tag in tags if str(tag).strip()}
+        items = [
+            skill
+            for skill in self.model_invocable()
+            if skill.kind == "skill"
+            and (not wanted_tags or wanted_tags.issubset({tag.lower() for tag in skill.tags}))
+        ]
+        items.sort(key=lambda item: (_ORIGINS.index(item.origin), item.name))
+        return items[:max(1, limit)]
+
+    def catalog_items(self, budget: int = CATALOG_BUDGET_CHARS, *, query: str = "") -> list["CatalogItem"]:
+        """Name + short description of every skill the model may invoke, within ``budget`` characters.
+
+        When ``query`` is provided, skills that match the current task are ranked first so large
+        installed libraries (e.g. from ``npx skills add``) surface task-relevant skills before
+        alphabetical entries hit the character budget.
+        """
+        candidates = self.model_invocable()
+        wanted = _terms(query)
+        if wanted:
+            ordered = sorted(
+                candidates,
+                key=lambda item: (-_score_disk_skill(item, wanted, query), _ORIGINS.index(item.origin), item.name),
+            )
+        else:
+            ordered = sorted(candidates, key=lambda item: (_ORIGINS.index(item.origin), item.name))
         items: list[CatalogItem] = []
         used = 0
-        for skill in sorted(self.model_invocable(), key=lambda item: (_ORIGINS.index(item.origin), item.name)):
+        for skill in ordered:
             description = _one_line(skill.description)[:CATALOG_DESCRIPTION_CHARS]
             cost = len(skill.name) * 2 + len(description) + 8
             if used + cost > budget:
@@ -170,7 +293,7 @@ def _tools(value: object) -> tuple[str, ...]:
 
 
 def _optional(value: object, maximum: int = 200) -> str | None:
-    if isinstance(value, (str, int, float)) and str(value).strip():
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value).strip():
         return str(value).strip()[:maximum]
     return None
 
@@ -194,6 +317,9 @@ def parse_disk_skill(path: Path, *, name: str, origin: str, kind: str) -> DiskSk
         description = first[:MAX_DESCRIPTION_CHARS] or final
     context = _optional(meta.get("context"), 20)
     hooks = meta.get("hooks") if isinstance(meta.get("hooks"), dict) else None
+    metadata_block = meta.get("metadata") if isinstance(meta.get("metadata"), dict) else {}
+    version = _optional(meta.get("version"), 64) or _optional(metadata_block.get("version"), 64)
+    author = _optional(meta.get("author"), 256) or _optional(metadata_block.get("author"), 256)
     return DiskSkill(
         name=final, description=description, body=body.strip(), path=path, origin=origin, kind=kind,
         argument_hint=_optional(meta.get("argument-hint"), 200) or "",
@@ -204,35 +330,100 @@ def parse_disk_skill(path: Path, *, name: str, origin: str, kind: str) -> DiskSk
         context="fork" if context and context.lower() == "fork" else None,
         agent=_optional(meta.get("agent"), 64), hooks=hooks,
         digest=hashlib.sha256(data).hexdigest(),
+        version=version,
+        tags=_string_list(meta.get("tags")),
+        capabilities=_string_list(meta.get("capabilities")),
+        when_to_use=_string_list(meta.get("when_to_use") or meta.get("when-to-use")),
+        when_not_to_use=_string_list(meta.get("when_not_to_use") or meta.get("when-not-to-use")),
+        author=author,
     )
 
 
 def skill_roots(*, workspace_root: Path | None, trusted: bool, personal: bool = True) -> list[tuple[str, str, Path]]:
     """``(origin, kind, folder)`` in precedence order. ``personal=False`` leaves out the person's own folders (W5-R5)."""
-    from agentos.settings.paths import claude_managed_dir, claude_user_dir, orin_managed_dir, orin_user_dir
+    from agentos.settings.paths import (
+        claude_managed_dir,
+        claude_user_dir,
+        orin_managed_dir,
+        orin_user_dir,
+        project_skill_dirs,
+        user_skill_dirs,
+    )
 
-    managed = [orin_managed_dir(), claude_managed_dir()]
+    managed_bases = (orin_managed_dir(), claude_managed_dir())
+    user_command_bases = (orin_user_dir(), claude_user_dir()) if personal else ()
+    project_command_bases = (workspace_root / ".orin", workspace_root / ".claude") if (workspace_root is not None and trusted) else ()
+
     roots: list[tuple[str, str, Path]] = []
-    for origin, bases in (
-        ("managed", managed),
-        ("user", [orin_user_dir(), claude_user_dir()] if personal else []),
-        ("project", [workspace_root / ".orin", workspace_root / ".claude"] if (workspace_root is not None and trusted) else []),
-    ):
-        for base in bases:
-            roots.append((origin, "skill", Path(base) / "skills"))
-        for base in bases:
-            roots.append((origin, "command", Path(base) / "commands"))
+    # Managed layer
+    for base in managed_bases:
+        roots.append(("managed", "skill", Path(base) / "skills"))
+    for base in managed_bases:
+        roots.append(("managed", "command", Path(base) / "commands"))
+    # User layer (Orin + standard harness directories: ~/.agents/skills, ~/.claude/skills, ~/.codex/skills, ...)
+    if personal:
+        for folder in user_skill_dirs():
+            roots.append(("user", "skill", Path(folder)))
+    for base in user_command_bases:
+        roots.append(("user", "command", Path(base) / "commands"))
+    # Project layer (workspace-scoped, trusted only)
+    if workspace_root is not None and trusted:
+        for folder in project_skill_dirs(workspace_root):
+            roots.append(("project", "skill", Path(folder)))
+    for base in project_command_bases:
+        roots.append(("project", "command", Path(base) / "commands"))
     return roots
 
 
-def _candidates(kind: str, folder: Path) -> Iterable[tuple[str, Path]]:
+def _is_link_or_junction(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    return bool(callable(is_junction) and is_junction())
+
+
+def _is_within_any(target: Path, allowed_roots: tuple[Path, ...]) -> bool:
+    for root in allowed_roots:
+        try:
+            resolved_root = root.resolve()
+        except OSError:
+            continue
+        if target == resolved_root or resolved_root in target.parents:
+            return True
+    return False
+
+
+def _candidates(
+    kind: str,
+    folder: Path,
+    *,
+    allowed_link_roots: tuple[Path, ...] = (),
+) -> Iterable[tuple[str, Path]]:
     if not folder.is_dir():
         return
     if kind == "skill":
         for child in sorted(itertools.islice(folder.iterdir(), MAX_FOLDER_ENTRIES), key=lambda item: item.name):
+            # Ignore hidden harness metadata folders such as .trash or .system.
+            if child.name.startswith("."):
+                continue
+            if _is_link_or_junction(child):
+                # Support directory symlinks / Windows junctions created by ``npx skills add`` ONLY when
+                # they resolve inside one of the known skill directories for this trust tier.
+                if not allowed_link_roots:
+                    continue
+                try:
+                    resolved_dir = child.resolve(strict=True)
+                except OSError:
+                    continue
+                if not resolved_dir.is_dir() or not _is_within_any(resolved_dir, allowed_link_roots):
+                    continue
+                target = resolved_dir / "SKILL.md"
+                if target.is_file() and not target.is_symlink():
+                    yield child.name, target
+                continue
             target = child / "SKILL.md"
-            # A link (the folder or its SKILL.md) could point anywhere: only real files are read.
-            if child.is_dir() and not child.is_symlink() and target.is_file() and not target.is_symlink():
+            # A linked SKILL.md could point anywhere outside the skill folder: only real files are read.
+            if child.is_dir() and target.is_file() and not target.is_symlink():
                 yield child.name, target
         return
     for path in sorted(itertools.islice(folder.rglob("*.md"), MAX_FOLDER_ENTRIES)):
@@ -246,9 +437,17 @@ def _candidates(kind: str, folder: Path) -> Iterable[tuple[str, Path]]:
 
 def load_disk_skills(*, workspace_root: Path | None, trusted: bool, personal: bool = True) -> DiskSkillCatalog:
     catalog = DiskSkillCatalog()
-    for origin, kind, folder in skill_roots(workspace_root=workspace_root, trusted=trusted, personal=personal):
+    roots = skill_roots(workspace_root=workspace_root, trusted=trusted, personal=personal)
+    # Allowed link targets per origin: symlinks/junctions (e.g. .claude/skills/x -> .agents/skills/x)
+    # may only resolve inside another known skill root of the same trust tier.
+    allowed_by_origin: dict[str, tuple[Path, ...]] = {
+        origin: tuple(folder for o, k, folder in roots if o == origin and k == "skill")
+        for origin in _ORIGINS
+    }
+    seen_canonical_paths: set[str] = set()
+    for origin, kind, folder in roots:
         try:
-            candidates = list(_candidates(kind, folder))
+            candidates = list(_candidates(kind, folder, allowed_link_roots=allowed_by_origin.get(origin, ())))
         except OSError as error:
             catalog.errors.append((str(folder), f"unreadable: {type(error).__name__}"))
             continue
@@ -257,10 +456,18 @@ def load_disk_skills(*, workspace_root: Path | None, trusted: bool, personal: bo
                 catalog.errors.append((str(path), f"more than {MAX_DISK_SKILLS} skills and commands; the rest are ignored"))
                 return catalog
             try:
+                canonical_key = os.path.normcase(str(path.resolve()))
+            except OSError:
+                canonical_key = os.path.normcase(str(path))
+            if canonical_key in seen_canonical_paths:
+                # Same physical SKILL.md exposed through multiple harness links (e.g. .agents + .claude junction).
+                continue
+            try:
                 skill = parse_disk_skill(path, name=name, origin=origin, kind=kind)
             except (OSError, ValueError, UnicodeDecodeError) as error:
                 catalog.errors.append((str(path), str(error)[:200]))
                 continue
+            seen_canonical_paths.add(canonical_key)
             kept = catalog.skills.get(skill.name)
             if kept is not None:
                 catalog.shadowed.append((skill.name, str(kept.path), str(skill.path)))

@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Collection
-from dataclasses import field
-from typing import Any, Mapping, Literal
+from typing import Any, Mapping
 
 from pydantic import Field
 
@@ -98,16 +97,43 @@ class SkillTools:
             "version": item.version, "tags": list(item.tags), "score": getattr(item, "score", None),
         }
 
-    def search_skills(self, query: str, tags: list[str] | None = None, capability: str | None = None, limit: int = 5) -> dict[str, Any]:
-        if self.skills is None:
-            raise AgentToolError("Skills are not available.")
-        from agentos.skills.retrieval import RetrievalQuery
+    @staticmethod
+    def _disk_skill_metadata(skill, *, score: float | None = None) -> dict[str, Any]:
+        return {
+            "id": skill.id,
+            "name": skill.name,
+            "description": skill.description,
+            "version": skill.version or "1.0.0",
+            "tags": list(skill.tags),
+            "score": score,
+        }
 
-        result = self.skills.search(RetrievalQuery(
-            text=str(query), tags=tuple(str(tag) for tag in (tags or ())), capability=capability,
-            limit=max(1, min(int(limit), 20)), available_tools=self._available_tool_names(),
-        ))
-        items = [self._skill_metadata(item) for item in result.items]
+    def search_skills(self, query: str, tags: list[str] | None = None, capability: str | None = None, limit: int = 5) -> dict[str, Any]:
+        disk_catalog = getattr(self, "_disk_skills", None)
+        if self.skills is None and disk_catalog is None:
+            raise AgentToolError("Skills are not available.")
+        capped = max(1, min(int(limit), 20))
+        tag_tuple = tuple(str(tag) for tag in (tags or ()))
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if disk_catalog is not None and not capability:
+            for disk_skill, score in disk_catalog.search(str(query), tags=tag_tuple, limit=capped):
+                if disk_skill.id not in seen:
+                    seen.add(disk_skill.id)
+                    merged.append(self._disk_skill_metadata(disk_skill, score=score))
+        if self.skills is not None:
+            from agentos.skills.retrieval import RetrievalQuery
+
+            result = self.skills.search(RetrievalQuery(
+                text=str(query), tags=tag_tuple, capability=capability,
+                limit=capped, available_tools=self._available_tool_names(),
+            ))
+            for item in result.items:
+                if item.id not in seen:
+                    seen.add(item.id)
+                    merged.append(self._skill_metadata(item))
+        merged.sort(key=lambda item: (-(float(item.get("score") or 0.0)), str(item.get("id") or "")))
+        items = merged[:capped]
         return {
             "summary": f"Encontrou {len(items)} skills relacionadas",
             "content": json.dumps(items, ensure_ascii=False),
@@ -115,17 +141,46 @@ class SkillTools:
         }
 
     def list_skills(self, tag: str | None = None, limit: int = 20) -> dict[str, Any]:
-        if self.skills is None:
+        disk_catalog = getattr(self, "_disk_skills", None)
+        if self.skills is None and disk_catalog is None:
             raise AgentToolError("Skills are not available.")
-        items = self.skills.list(
-            tags=() if not tag else (str(tag),), limit=max(1, min(int(limit), 100)),
-            available_tools=self._available_tool_names(),
-        )
-        public = [{
-            "id": item.id, "name": item.name, "description": item.description,
-            "version": item.version, "tags": list(item.tags), "available": item.available,
-            "reason": item.unavailable_reason,
-        } for item in items]
+        capped = max(1, min(int(limit), 100))
+        tag_tuple = () if not tag else (str(tag),)
+        public: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        if disk_catalog is not None:
+            for disk_skill in disk_catalog.list_skills(tags=tag_tuple, limit=capped):
+                if disk_skill.id not in seen:
+                    seen.add(disk_skill.id)
+                    public.append({
+                        "id": disk_skill.id,
+                        "name": disk_skill.name,
+                        "description": disk_skill.description,
+                        "version": disk_skill.version or "1.0.0",
+                        "tags": list(disk_skill.tags),
+                        "available": True,
+                        "reason": None,
+                    })
+        if self.skills is not None and len(public) < capped:
+            items = self.skills.list(
+                tags=tag_tuple, limit=capped,
+                available_tools=self._available_tool_names(),
+            )
+            for item in items:
+                if item.id in seen:
+                    continue
+                if disk_catalog is not None:
+                    disk_match = disk_catalog.get(item.id)
+                    if disk_match is not None and not disk_match.model_invocable:
+                        continue
+                seen.add(item.id)
+                public.append({
+                    "id": item.id, "name": item.name, "description": item.description,
+                    "version": item.version, "tags": list(item.tags), "available": item.available,
+                    "reason": item.unavailable_reason,
+                })
+                if len(public) >= capped:
+                    break
         return {
             "summary": f"Listou {len(public)} skills",
             "content": json.dumps(public, ensure_ascii=False),
@@ -133,7 +188,7 @@ class SkillTools:
         }
 
     def use_skill(self, skill_id: str, version: str | None = None, args: str | None = None) -> dict[str, Any]:
-        # W5: a skill or command read from disk (Claude Code's format) answers before the skill library.
+        # W5: a skill or command read from disk (Orin / .agents / Claude Code / Codex / Cursor) answers before the skill library.
         disk = self.disk_skill(str(skill_id)) if not version else None
         if disk is not None:
             return self.run_disk_skill(disk, skill_argument_text(args), invoked_by="model")
@@ -173,6 +228,17 @@ class SkillTools:
         }
 
     def read_skill_resource(self, skill_id: str, resource_path: str, version: str | None = None) -> dict[str, Any]:
+        disk = self.disk_skill(str(skill_id)) if not version else None
+        if disk is not None:
+            try:
+                content = disk.read_resource(str(resource_path))
+            except Exception as error:
+                raise AgentToolError(str(error)) from error
+            content, truncated = _bounded(content)
+            return {
+                "summary": f"Leu recurso {resource_path}", "content": content,
+                "payload": {"skill_id": str(skill_id), "version": version, "resource_path": str(resource_path), "truncated": truncated, "tool_kind": "skill", "skill_action": "resource_read"},
+            }
         if self.skills is None:
             raise AgentToolError("Skills are not available.")
         try:
@@ -263,7 +329,7 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="search_skills",
         kind="skill",
         read_only=True,
-        available=lambda self: (self.skills is not None),
+        available=lambda self: (self.skills is not None or getattr(self, "_disk_skills", None) is not None),
         order=400,
     ),
     ToolSpec(
@@ -273,27 +339,27 @@ SPECS: tuple[ToolSpec, ...] = (
         handler="list_skills",
         kind="skill",
         read_only=True,
-        available=lambda self: (self.skills is not None),
+        available=lambda self: (self.skills is not None or getattr(self, "_disk_skills", None) is not None),
         order=410,
     ),
     ToolSpec(
         key="read_skill_resource",
-        description="Read a UTF-8 file from a Skill package resources, references, examples, or templates directory.",
+        description="Read a UTF-8 file from a Skill package resources, references, examples, templates, or scripts directory.",
         legacy_schema=_schema({"skill_id": _TEXT, "resource_path": _TEXT, "version": _TEXT}, ("skill_id", "resource_path")),
         handler="read_skill_resource",
         kind="skill",
         read_only=True,
-        available=lambda self: (self.skills is not None),
+        available=lambda self: (self.skills is not None or getattr(self, "_disk_skills", None) is not None),
         order=420,
     ),
     ToolSpec(
         key="use_skill",
-        description="Load the operational instructions of an available Skill when it is needed for the current task.",
+        description="Load and apply the full procedural instructions of an available Skill. Call this BEFORE planning or acting whenever a listed Skill matches the user's task.",
         legacy_schema=_schema({"skill_id": _TEXT, "version": _TEXT}, ("skill_id",)),
         handler="use_skill",
         kind="skill",
         input_model=SkillInput,
-        public_description="Load a skill's instructions when the task matches it.",
+        public_description="Load and follow a skill's full instructions. Invoke this first whenever the task matches an available skill.",
         # W5: also offered when only skills read from disk exist.
         available=lambda self: (self.skills is not None or getattr(self, "_disk_skills", None) is not None),
         order=430,

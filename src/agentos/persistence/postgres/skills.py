@@ -1,9 +1,10 @@
-"""PostgreSQL-backed Skill library with immutable version rows."""
+"""PostgreSQL-backed Skill library with immutable version rows and automatic external disk skill sync."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
-import re
+import logging
 from pathlib import Path
+import threading
 from typing import Mapping
 
 from sqlalchemy import delete, insert, select, update
@@ -15,6 +16,9 @@ from agentos.skills.builtins import load_builtin_skills
 from agentos.skills.models import Skill, SkillDependencies, SkillScope, SkillSource, semver_key
 from agentos.skills.registry import SkillNotFound, SkillRegistry
 from agentos.skills.service import SKILL_RUNTIME_TOOLS, _id, validate_skill_definition
+from agentos.skills.sync import disk_roots_fingerprint, sync_disk_skills_to_db
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -24,8 +28,11 @@ def _now() -> datetime:
 class PostgresSkillLibraryService:
     """Hydrates the same registry contract used by the runtime from SQL rows."""
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, sync_personal_disk_skills: bool = True) -> None:
         self.engine = engine
+        self._sync_personal_disk_skills = bool(sync_personal_disk_skills)
+        self._disk_sync_lock = threading.Lock()
+        self._disk_sync_fingerprints: dict[str, tuple[tuple[str, int, int], ...]] = {}
         self._seed_builtins()
 
     def _seed_builtins(self) -> None:
@@ -34,6 +41,47 @@ class PostgresSkillLibraryService:
                 self._insert(skill, user_id=None)
             except IntegrityError:
                 continue
+
+    def sync_disk_skills(
+        self,
+        user_id: str,
+        *,
+        workspace_root: Path | None = None,
+        trusted: bool = False,
+        personal: bool | None = None,
+    ) -> dict[str, int]:
+        """Explicitly synchronize discovered disk skills (e.g. ``npx skills add``) for ``user_id``."""
+        use_personal = self._sync_personal_disk_skills if personal is None else bool(personal)
+        with self._disk_sync_lock:
+            result = sync_disk_skills_to_db(
+                self.engine,
+                user_id=user_id,
+                workspace_root=workspace_root,
+                trusted=trusted,
+                personal=use_personal,
+            )
+            self._disk_sync_fingerprints[user_id] = disk_roots_fingerprint(
+                workspace_root=workspace_root,
+                trusted=trusted,
+                personal=use_personal,
+            )
+            return result
+
+    def _ensure_disk_skills_synced(self, user_id: str) -> None:
+        try:
+            fingerprint = disk_roots_fingerprint(personal=self._sync_personal_disk_skills)
+            with self._disk_sync_lock:
+                if self._disk_sync_fingerprints.get(user_id) == fingerprint:
+                    return
+                sync_disk_skills_to_db(
+                    self.engine,
+                    user_id=user_id,
+                    personal=self._sync_personal_disk_skills,
+                )
+                self._disk_sync_fingerprints[user_id] = fingerprint
+        except Exception:
+            # Disk sync must never block Skill API reads or turn startup.
+            logger.debug("disk skill sync skipped for %s", user_id, exc_info=True)
 
     @staticmethod
     def _metadata(skill: Skill) -> dict[str, object]:
@@ -53,6 +101,7 @@ class PostgresSkillLibraryService:
             connection.execute(insert(skill_versions).values(skill_record_id=record_id, version=skill.version, name=skill.name, description=skill.description, metadata=self._metadata(skill), instructions=skill.instructions or "", content_digest=skill.digest or "", published_at=now))
 
     def _skills_for(self, user_id: str) -> tuple[Skill, ...]:
+        self._ensure_disk_skills_synced(user_id)
         statement = select(skills, skill_versions).join(skill_versions, skills.c.id == skill_versions.c.skill_record_id).where((skills.c.user_id.is_(None)) | (skills.c.user_id == user_id))
         with self.engine.connect() as connection:
             rows = connection.execute(statement).mappings().all()
@@ -105,12 +154,20 @@ class PostgresSkillLibraryService:
         user_id, text = str(query["user_id"]), str(query.get("query") or "")
         registry = self.registry_for(user_id)
         available = SKILL_RUNTIME_TOOLS
-        items = registry.retrieve(__import__("agentos.skills.retrieval", fromlist=["RetrievalQuery"]).RetrievalQuery(text=text, available_tools=available, limit=100)).items if text else registry.list(limit=100, available_tools=available)
+        items = registry.retrieve(__import__("agentos.skills.retrieval", fromlist=["RetrievalQuery"]).RetrievalQuery(text=text, available_tools=available, limit=100)).items if text else registry.list(limit=500, available_tools=available)
         source = str(query.get("source") or "")
         metadata = [item.metadata if hasattr(item, "metadata") else item for item in items]
         if source:
             metadata = [item for item in metadata if item.source.value == source]
-        return {"items": [self._summary(item) for item in metadata[:max(1, min(int(query.get("limit") or 20), 100))]], "next_cursor": None}
+        page_size = max(1, min(int(query.get("limit") or 100), 200))
+        raw_cursor = query.get("cursor")
+        try:
+            offset = max(0, int(raw_cursor)) if raw_cursor is not None and str(raw_cursor).strip() else 0
+        except ValueError:
+            offset = 0
+        page = metadata[offset:offset + page_size]
+        next_cursor = str(offset + page_size) if offset + page_size < len(metadata) else None
+        return {"items": [self._summary(item) for item in page], "next_cursor": next_cursor}
 
     def get(self, query: Mapping[str, object]) -> dict[str, object]:
         user_id, skill_id = str(query["user_id"]), str(query["skill_id"])

@@ -58,6 +58,22 @@ class ScheduledChatInput:
     wake_on_pid: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduledChatUpdate:
+    message: str | None = None
+    provider: str | None = None
+    model_id: str | None = None
+    timezone: str | None = None
+    recurrence: str | None = None
+    fire_at: datetime | None = None
+    time_of_day: str | None = None
+    weekday: int | None = None
+    cron: str | None = None
+    project_id: str | None = None
+    project_id_set: bool = False
+    state: str | None = None
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("fire_at must include a timezone")
@@ -186,6 +202,40 @@ class ScheduledChatService:
             candidate += timedelta(days=7 if request.recurrence == "weekly" else 1)
         return candidate.astimezone(UTC)
 
+    @staticmethod
+    def _validate_model(connection, user_id: str, provider_name: str, model_id: str) -> None:
+        # Do not allow a stale or forged UI model selection to persist.
+        model = connection.execute(select(provider_model_catalog.c.id).join(
+            provider_configurations,
+            (provider_configurations.c.user_id == provider_model_catalog.c.user_id)
+            & (provider_configurations.c.provider == provider_model_catalog.c.provider),
+        ).where(
+            provider_model_catalog.c.user_id == user_id,
+            provider_model_catalog.c.provider == provider_name,
+            provider_model_catalog.c.model_id == model_id,
+            provider_configurations.c.enabled.is_(True),
+            (
+                provider_model_catalog.c.is_custom.is_(True)
+                | provider_configurations.c.catalog_refreshed_at.is_not(None)
+            ),
+            (
+                (provider_model_catalog.c.catalog_base_url == provider_configurations.c.base_url)
+                | (
+                    provider_model_catalog.c.catalog_base_url.is_(None)
+                    & provider_configurations.c.base_url.is_(None)
+                )
+            ),
+        )).scalar_one_or_none()
+        if model is None:
+            raise ValueError("model is not authorized")
+        provider = connection.execute(select(provider_configurations.c.user_id).where(
+            provider_configurations.c.user_id == user_id,
+            provider_configurations.c.provider == provider_name,
+            provider_configurations.c.enabled.is_(True),
+        )).scalar_one_or_none()
+        if provider is None:
+            raise ValueError("provider is not enabled")
+
     def create(self, user_id: str, request: ScheduledChatInput, *, idempotency_key: str) -> dict[str, object]:
         message = (
             "\n".join(" ".join(line.split()) for line in request.message.splitlines() if line.strip())
@@ -221,37 +271,7 @@ class ScheduledChatService:
                 )).scalar_one_or_none()
                 if owner != user_id:
                     raise LookupError("conversation not found")
-            # Do not allow a stale or forged UI model selection to persist.
-            model = connection.execute(select(provider_model_catalog.c.id).join(
-                provider_configurations,
-                (provider_configurations.c.user_id == provider_model_catalog.c.user_id)
-                & (provider_configurations.c.provider == provider_model_catalog.c.provider),
-            ).where(
-                provider_model_catalog.c.user_id == user_id,
-                provider_model_catalog.c.provider == request.provider,
-                provider_model_catalog.c.model_id == request.model_id,
-                provider_configurations.c.enabled.is_(True),
-                (
-                    provider_model_catalog.c.is_custom.is_(True)
-                    | provider_configurations.c.catalog_refreshed_at.is_not(None)
-                ),
-                (
-                    (provider_model_catalog.c.catalog_base_url == provider_configurations.c.base_url)
-                    | (
-                        provider_model_catalog.c.catalog_base_url.is_(None)
-                        & provider_configurations.c.base_url.is_(None)
-                    )
-                ),
-            )).scalar_one_or_none()
-            if model is None:
-                raise ValueError("model is not authorized")
-            provider = connection.execute(select(provider_configurations.c.user_id).where(
-                provider_configurations.c.user_id == user_id,
-                provider_configurations.c.provider == request.provider,
-                provider_configurations.c.enabled.is_(True),
-            )).scalar_one_or_none()
-            if provider is None:
-                raise ValueError("provider is not enabled")
+            self._validate_model(connection, user_id, request.provider, request.model_id)
             # The task points back to its schedule through a foreign key. Create
             # the schedule first, then its task, while keeping both writes in
             # this transaction so a partial schedule can never be committed.
@@ -286,11 +306,27 @@ class ScheduledChatService:
         rule = dict(row["rule"] or {})
         return {"schedule_id": str(row["schedule_id"]), "state": str(row["state"]), "next_fire_at": _iso_utc(row["next_fire_at"]), "recurrence": str(rule.get("kind") or "once"), "project_id": None}
 
-    def list(self, user_id: str) -> dict[str, object]:
-        with self._engine.connect() as connection:
-            rows = connection.execute(select(schedules, scheduled_chat_tasks.c.project_id, scheduled_chat_tasks.c.message, scheduled_chat_tasks.c.provider, scheduled_chat_tasks.c.model_id, scheduled_chat_tasks.c.conversation_id)
-                .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
-                .where(schedules.c.user_id == user_id).order_by(schedules.c.created_at.desc())).mappings().all()
+    def _enrich_rows(self, connection, user_id: str, rows) -> list[dict[str, object]]:
+        if not rows:
+            return []
+        model_rows = connection.execute(
+            select(provider_model_catalog.c.provider, provider_model_catalog.c.model_id, provider_model_catalog.c.display_name)
+            .where(provider_model_catalog.c.user_id == user_id)
+        ).all()
+        model_names = {(str(r.provider), str(r.model_id)): str(r.display_name) for r in model_rows if r.display_name}
+
+        conv_ids = list({str(r["conversation_id"]) for r in rows if r["conversation_id"]})
+        conv_meta: dict[str, tuple[str | None, str | None]] = {}
+        if conv_ids:
+            conv_rows = connection.execute(
+                select(conversations.c.conversation_id, conversations.c.title, conversations.c.project_id)
+                .where(conversations.c.user_id == user_id, conversations.c.conversation_id.in_(conv_ids))
+            ).all()
+            conv_meta = {
+                str(r.conversation_id): (str(r.title) if r.title else None, str(r.project_id) if r.project_id else None)
+                for r in conv_rows
+            }
+
         items: list[dict[str, object]] = []
         for row in rows:
             rule = dict(row["rule"] or {})
@@ -298,12 +334,217 @@ class ScheduledChatService:
             # A wakeup or monitor wake that already ran is an implementation detail; pending ones stay cancellable here.
             if source in TOOL_SCHEDULE_SOURCES and row["state"] != "ACTIVE":
                 continue
+            conv_id = str(row["conversation_id"]) if row["conversation_id"] else None
+            conv_title, conv_project_id = conv_meta.get(conv_id, (None, None)) if conv_id else (None, None)
+            provider = str(row["provider"])
+            model_id = str(row["model_id"])
             items.append({
-                **self._public(row), "project_id": row["project_id"], "message": row["message"], "provider": row["provider"],
-                "model_id": row["model_id"], "conversation_id": row["conversation_id"], "source": source,
+                **self._public(row),
+                "project_id": row["project_id"],
+                "conversation_project_id": conv_project_id,
+                "conversation_title": conv_title,
+                "message": row["message"],
+                "provider": provider,
+                "model_id": model_id,
+                "model_display_name": model_names.get((provider, model_id)),
+                "conversation_id": conv_id,
+                "source": source,
+                "timezone": str(row["timezone"]),
                 "cron": rule.get("cron") if rule.get("kind") == "cron" else None,
+                "time_of_day": rule.get("time_of_day"),
+                "weekday": rule.get("weekday"),
+                "fire_at": rule.get("fire_at"),
+                "ends_at": _iso_utc(row["ends_at"]),
+                "created_at": _iso_utc(row["created_at"]),
+                "updated_at": _iso_utc(row["updated_at"]),
             })
+        return items
+
+    def list(self, user_id: str) -> dict[str, object]:
+        with self._engine.connect() as connection:
+            rows = connection.execute(select(schedules, scheduled_chat_tasks.c.project_id, scheduled_chat_tasks.c.message, scheduled_chat_tasks.c.provider, scheduled_chat_tasks.c.model_id, scheduled_chat_tasks.c.conversation_id)
+                .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
+                .where(schedules.c.user_id == user_id).order_by(schedules.c.created_at.desc())).mappings().all()
+            items = self._enrich_rows(connection, user_id, rows)
         return {"items": items}
+
+    def update(self, user_id: str, schedule_id: str, patch: ScheduledChatUpdate) -> dict[str, object]:
+        """Update message, model/provider, recurrence, timezone, project, or ACTIVE/PAUSED state."""
+        now = _utc(self._clock())
+        with self._engine.begin() as connection:
+            row = connection.execute(
+                select(
+                    schedules,
+                    scheduled_chat_tasks.c.task_id,
+                    scheduled_chat_tasks.c.project_id,
+                    scheduled_chat_tasks.c.message,
+                    scheduled_chat_tasks.c.provider,
+                    scheduled_chat_tasks.c.model_id,
+                    scheduled_chat_tasks.c.conversation_id,
+                )
+                .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
+                .where(schedules.c.schedule_id == schedule_id, schedules.c.user_id == user_id)
+            ).mappings().first()
+            if row is None:
+                raise LookupError("schedule not found")
+
+            current_rule = dict(row["rule"] or {})
+            source = str(current_rule.get("source") or "user")
+
+            if patch.message is not None:
+                new_message = "\n".join(line.strip() for line in patch.message.splitlines()).strip()
+                if not new_message or len(new_message) > 16000:
+                    raise ValueError("message must be a bounded non-blank string")
+            else:
+                new_message = str(row["message"])
+
+            if patch.provider is not None or patch.model_id is not None:
+                new_provider = (patch.provider or "").strip()
+                new_model_id = (patch.model_id or "").strip()
+                if not new_provider or not new_model_id:
+                    raise ValueError("provider and model_id are required")
+                self._validate_model(connection, user_id, new_provider, new_model_id)
+            else:
+                new_provider = str(row["provider"])
+                new_model_id = str(row["model_id"])
+
+            if patch.project_id_set:
+                if patch.project_id:
+                    project = connection.execute(select(projects.c.workspace_id).where(
+                        projects.c.project_id == patch.project_id,
+                        projects.c.user_id == user_id,
+                        projects.c.archived_at.is_(None),
+                    )).scalar_one_or_none()
+                    if project is None:
+                        raise LookupError("project not found")
+                    new_project_id: str | None = patch.project_id
+                    new_workspace_id: str | None = str(project)
+                else:
+                    new_project_id = None
+                    new_workspace_id = None
+            else:
+                new_project_id = row["project_id"]
+                new_workspace_id = row["workspace_id"]
+
+            new_timezone = patch.timezone if patch.timezone is not None else str(row["timezone"])
+            self._zone(new_timezone)
+
+            if patch.state is not None:
+                if patch.state not in ("ACTIVE", "PAUSED"):
+                    raise ValueError("state must be ACTIVE or PAUSED")
+                new_state = patch.state
+            else:
+                new_state = str(row["state"])
+
+            recurrence_changed = patch.recurrence is not None
+            timezone_changed = patch.timezone is not None and patch.timezone != str(row["timezone"])
+            becoming_active = new_state == "ACTIVE" and str(row["state"]) != "ACTIVE"
+
+            if recurrence_changed:
+                new_kind = str(patch.recurrence)
+                req = ScheduledChatInput(
+                    message=new_message,
+                    provider=new_provider,
+                    model_id=new_model_id,
+                    timezone=new_timezone,
+                    recurrence=new_kind,
+                    fire_at=patch.fire_at,
+                    time_of_day=patch.time_of_day,
+                    weekday=patch.weekday,
+                    cron=patch.cron,
+                    project_id=new_project_id,
+                    source=source,
+                    wake_on_pid=current_rule.get("wake_on_pid") if isinstance(current_rule.get("wake_on_pid"), int) else None,
+                )
+                if new_state == "ACTIVE":
+                    next_fire: datetime | None = self.next_fire(req)
+                    new_rule = self._rule(req, next_fire)
+                else:
+                    # Validate the rule even while paused so resuming later is always valid.
+                    if new_kind == "once" and req.fire_at is None:
+                        raise ValueError("once schedules require fire_at")
+                    if new_kind == "cron":
+                        parse_cron(str(req.cron or ""))
+                    elif new_kind in ("daily", "weekly"):
+                        self._time(req.time_of_day)
+                        if new_kind == "weekly" and (req.weekday is None or not 0 <= req.weekday <= 6):
+                            raise ValueError("weekly schedules require weekday from 0 to 6")
+                    elif new_kind not in RULES:
+                        raise ValueError("unsupported recurrence")
+                    anchor = _utc(req.fire_at) if (req.fire_at is not None and req.fire_at.tzinfo is not None) else (
+                        req.fire_at.replace(tzinfo=self._zone(new_timezone)).astimezone(UTC) if req.fire_at is not None else now
+                    )
+                    next_fire = None
+                    new_rule = self._rule(req, anchor)
+            elif new_state == "PAUSED":
+                next_fire = None
+                new_rule = current_rule
+            elif timezone_changed or becoming_active:
+                cur_kind = str(current_rule.get("kind") or "once")
+                raw_fire_at = current_rule.get("fire_at")
+                parsed_fire_at = datetime.fromisoformat(raw_fire_at) if isinstance(raw_fire_at, str) and raw_fire_at else None
+                req = ScheduledChatInput(
+                    message=new_message,
+                    provider=new_provider,
+                    model_id=new_model_id,
+                    timezone=new_timezone,
+                    recurrence=cur_kind,
+                    fire_at=parsed_fire_at,
+                    time_of_day=str(current_rule.get("time_of_day")) if current_rule.get("time_of_day") else None,
+                    weekday=current_rule.get("weekday") if isinstance(current_rule.get("weekday"), int) else None,
+                    cron=str(current_rule.get("cron")) if current_rule.get("cron") else None,
+                    project_id=new_project_id,
+                    source=source,
+                    wake_on_pid=current_rule.get("wake_on_pid") if isinstance(current_rule.get("wake_on_pid"), int) else None,
+                )
+                if new_state == "ACTIVE":
+                    next_fire = self.next_fire(req)
+                    new_rule = self._rule(req, next_fire)
+                else:
+                    next_fire = row["next_fire_at"]
+                    new_rule = current_rule
+            else:
+                next_fire = row["next_fire_at"]
+                new_rule = current_rule
+
+            connection.execute(
+                update(schedules)
+                .where(schedules.c.schedule_id == schedule_id, schedules.c.user_id == user_id)
+                .values(
+                    workspace_id=new_workspace_id,
+                    rule=new_rule,
+                    timezone=new_timezone,
+                    state=new_state,
+                    next_fire_at=next_fire,
+                    version=schedules.c.version + 1,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                update(scheduled_chat_tasks)
+                .where(scheduled_chat_tasks.c.schedule_id == schedule_id, scheduled_chat_tasks.c.user_id == user_id)
+                .values(
+                    message=new_message,
+                    provider=new_provider,
+                    model_id=new_model_id,
+                    project_id=new_project_id,
+                    updated_at=now,
+                )
+            )
+            updated_row = connection.execute(
+                select(
+                    schedules,
+                    scheduled_chat_tasks.c.project_id,
+                    scheduled_chat_tasks.c.message,
+                    scheduled_chat_tasks.c.provider,
+                    scheduled_chat_tasks.c.model_id,
+                    scheduled_chat_tasks.c.conversation_id,
+                )
+                .join(scheduled_chat_tasks, scheduled_chat_tasks.c.schedule_id == schedules.c.schedule_id)
+                .where(schedules.c.schedule_id == schedule_id, schedules.c.user_id == user_id)
+            ).mappings().one()
+            enriched = self._enrich_rows(connection, user_id, [updated_row])
+        return enriched[0] if enriched else self._public(updated_row)
 
     def list_for_conversation(self, user_id: str, conversation_id: str, *, sources: tuple[str, ...]) -> list[dict[str, object]]:
         """Active schedules a tool made for one of this person's conversations, oldest first."""
@@ -394,6 +635,30 @@ class ScheduledChatService:
                 schedules.c.state.in_(("ACTIVE", "PAUSED")),
             ).values(state="CANCELLED", version=schedules.c.version + 1, next_fire_at=None, updated_at=now))
         return bool(result.rowcount)
+
+    def delete(self, user_id: str, schedule_id: str) -> bool:
+        """Permanently delete a user's schedule and its occurrences/task, from any state."""
+        with self._engine.begin() as connection:
+            exists = connection.execute(
+                select(schedules.c.schedule_id)
+                .where(schedules.c.schedule_id == schedule_id, schedules.c.user_id == user_id)
+            ).scalar_one_or_none()
+            if exists is None:
+                return False
+            busy = connection.execute(
+                select(schedule_occurrences.c.occurrence_id)
+                .where(
+                    schedule_occurrences.c.schedule_id == schedule_id,
+                    schedule_occurrences.c.state.in_(("CLAIMED", "MATERIALIZED")),
+                )
+                .limit(1)
+            ).first()
+            if busy is not None:
+                raise RuntimeError("schedule has a run in flight")
+            connection.execute(delete(schedule_occurrences).where(schedule_occurrences.c.schedule_id == schedule_id))
+            connection.execute(delete(scheduled_chat_tasks).where(scheduled_chat_tasks.c.schedule_id == schedule_id))
+            connection.execute(delete(schedules).where(schedules.c.schedule_id == schedule_id, schedules.c.user_id == user_id))
+        return True
 
     def run_due(self, *, worker_id: str, due_before: datetime | None = None) -> tuple[str, ...]:
         """Claim due occurrences, create one normal chat turn, and advance safely."""
@@ -521,4 +786,4 @@ class ScheduledChatService:
             ))
 
 
-__all__ = ["ScheduledChatInput", "ScheduledChatService"]
+__all__ = ["ScheduledChatInput", "ScheduledChatService", "ScheduledChatUpdate"]

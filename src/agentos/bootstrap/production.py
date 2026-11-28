@@ -340,7 +340,7 @@ def compose_production_services(engine: Engine, *, localhost_trust_enabled: bool
     # installation's own database URL rather than to fresh entropy.
     cursor_secret = activity_cursor_secret or activity_cursor_fallback(engine)
     provider_repository = PostgresProviderCatalogRepository(engine, cipher=provider_cipher)
-    skill_library = PostgresSkillLibraryService(engine)
+    skill_library = PostgresSkillLibraryService(engine, sync_personal_disk_skills=capabilities.plugin_hooks)
     mcp_service = McpServerService(engine, allow_stdio=capabilities.mcp_stdio)
     mcp_oauth = McpOAuth(engine)
     command_library = CommandLibrary()

@@ -121,6 +121,7 @@ def extensions_section() -> str:
         "### Extensões (MCPs, Plugins e Skills)\n"
         "- Quando a pessoa pedir para instalar ou conectar um servidor MCP, consulte `list_mcp_catalog` e chame `configure_mcp` (informando apenas `secret_names`, nunca valores de credenciais) para exibir o card de aprovação e aguarde a confirmação.\n"
         "- Quando a pessoa pedir para buscar ou instalar um plugin, use `search_plugin` e `install_plugin` (ou `inspect_plugin`) para exibir o card de aprovação e aguarde a confirmação.\n"
+        "- Antes de planejar ou implementar uma tarefa que corresponda a uma Skill disponível em `Potentially useful Skills` (ou descoberta via `search_skills` / `list_skills`), chame `use_skill` primeiro para carregar e seguir as instruções completas.\n"
         "- Quando a pessoa pedir para criar ou atualizar uma Skill reutilizável, pesquise antes com `search_skills` / `list_skills` e use `create_skill` / `edit_skill` com seções explícitas `Workflow` e `Validation`."
     )
 

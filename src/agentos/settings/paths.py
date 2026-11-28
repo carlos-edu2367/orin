@@ -1,4 +1,4 @@
-"""Where each settings layer lives, for Orin and (read-only) for Claude Code."""
+"""Where each settings layer lives, for Orin and (read-only) for Claude Code and standard skill harnesses."""
 
 from __future__ import annotations
 
@@ -43,6 +43,74 @@ def claude_user_dir() -> Path:
     if _is_running_under_pytest():
         return _pytest_fallback_root() / ".claude"
     return Path.home() / ".claude"
+
+
+def agents_user_dir() -> Path:
+    """Canonical cross-harness user skills directory (``~/.agents``, used by ``npx skills add -g``)."""
+    override = _env_path("ORIN_AGENTS_HOME")
+    if override is not None:
+        return override
+    if _is_running_under_pytest():
+        return _pytest_fallback_root() / ".agents"
+    return Path.home() / ".agents"
+
+
+def _skills_home_dir() -> Path:
+    """Home root for discovering external harness skill folders (Codex, Cursor, OpenCode, etc.)."""
+    override = _env_path("ORIN_SKILLS_HOME")
+    if override is not None:
+        return override
+    agents_override = _env_path("ORIN_AGENTS_HOME")
+    if agents_override is not None:
+        return agents_override.parent
+    if _is_running_under_pytest():
+        return _pytest_fallback_root()
+    return Path.home()
+
+
+def _dedupe_paths(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    seen: set[str] = set()
+    result: list[Path] = []
+    for path in paths:
+        key = os.path.normcase(str(path))
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return tuple(result)
+
+
+def user_skill_dirs() -> tuple[Path, ...]:
+    """Global/user skill directories across Orin and standard harnesses (``npx skills add -g``), precedence order."""
+    home = _skills_home_dir()
+    return _dedupe_paths((
+        orin_user_dir() / "skills",
+        agents_user_dir() / "skills",
+        home / ".config" / "agents" / "skills",
+        claude_user_dir() / "skills",
+        home / ".codex" / "skills",
+        home / ".cursor" / "skills",
+        home / ".gemini" / "antigravity" / "skills",
+        home / ".agent" / "skills",
+        home / ".config" / "opencode" / "skills",
+        home / ".copilot" / "skills",
+        home / ".codeium" / "windsurf" / "skills",
+    ))
+
+
+def project_skill_dirs(workspace_root: Path) -> tuple[Path, ...]:
+    """Workspace/project skill directories across Orin and standard harnesses (``npx skills add``), precedence order."""
+    root = Path(workspace_root)
+    return _dedupe_paths((
+        root / ".orin" / "skills",
+        root / ".agents" / "skills",
+        root / ".claude" / "skills",
+        root / ".codex" / "skills",
+        root / ".cursor" / "skills",
+        root / ".agent" / "skills",
+        root / ".opencode" / "skills",
+        root / ".github" / "skills",
+        root / ".windsurf" / "skills",
+    ))
 
 
 def claude_user_config_file() -> Path:

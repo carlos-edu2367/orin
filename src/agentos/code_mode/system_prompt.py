@@ -118,6 +118,16 @@ def render_code_system_prompt(options: CodePromptOptions) -> str:
             )
     if has("ask_user"):
         using.append(f"- Use {t('ask_user')} only when a decision or a missing detail truly blocks progress, then stop and wait for the answer.")
+    if has("use_skill"):
+        discover = (
+            f" (or search with {t('search_skills')} / {t('list_skills')})"
+            if has("search_skills") and has("list_skills")
+            else ""
+        )
+        using.append(
+            f"- Check the available Skills under `Potentially useful Skills`{discover} before planning or editing. "
+            f"Whenever a Skill matches the task — even partially — call {t('use_skill')} first to load and follow its full instructions instead of improvising."
+        )
     if has("search_mcp_tools"):
         if options.deferred_tool_names:
             deferred_labels = ", ".join(sorted(tool_label(name, options.public_names) for name in options.deferred_tool_names))

@@ -152,7 +152,9 @@ describe('SchedulesPage — Phase 6 (ref-09)', () => {
     expect(screen.getByLabelText('Frequência')).toBeInTheDocument()
     expect(screen.getByLabelText('Horário')).toBeInTheDocument()
     expect(screen.getByLabelText('Fuso horário')).toHaveValue('America/Sao_Paulo')
-    expect(screen.getByLabelText('Data e hora')).toBeInTheDocument()
+    expect(screen.getByLabelText('Modelo')).toBeInTheDocument()
+    // Data e hora appears only when "Uma vez" is selected
+    expect(screen.queryByLabelText('Data e hora')).not.toBeInTheDocument()
 
     const submitBtn = screen.getByTestId('schedules-submit-button')
     expect(submitBtn).toHaveTextContent('Criar ação')

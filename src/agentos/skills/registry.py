@@ -109,8 +109,8 @@ class SkillRegistry:
         return replace(skill.metadata, available=reason is None, unavailable_reason=reason)
 
     def list(self, *, tags: Collection[str] = (), limit: int = 20, available_tools: Collection[str] = ()) -> tuple[SkillMetadata, ...]:
-        if not 1 <= limit <= 100:
-            raise ValueError("limit must be between 1 and 100")
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
         wanted = {str(tag).lower() for tag in tags}
         items = []
         for skill in self._current_versions():

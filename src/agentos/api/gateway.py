@@ -222,21 +222,6 @@ class InspectNewWorkspaceFolderRequest(_RequestModel):
     project_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class ScheduleRecurrenceRequest(_RequestModel):
-    kind: str = Field(pattern="^(once|hourly|daily|weekly)$")
-    fire_at: datetime | None = None
-    time_of_day: str | None = Field(default=None, max_length=5)
-    weekday: int | None = Field(default=None, ge=0, le=6)
-
-
-class CreateScheduledChatRequest(_RequestModel):
-    message: str = Field(min_length=1, max_length=16000)
-    selection: ConversationSelectionRequest
-    timezone: str = Field(min_length=1, max_length=128)
-    recurrence: ScheduleRecurrenceRequest
-    project_id: str | None = Field(default=None, min_length=1, max_length=255)
-
-
 class RewindMessageRequest(_RequestModel):
     # W7: "code" restores the files, "conversation" forks the conversation before the message, "both" does both.
     mode: str = Field(default="code", pattern="^(code|conversation|both)$")
@@ -1005,41 +990,8 @@ def create_app(services: ApiServices) -> FastAPI:
         conversation = conversation_record(conversation_id, principal)
         return JSONResponse({**_jsonable(result), "workspace": workspace_state(conversation, principal)})
 
-    @app.post("/v1/schedules", status_code=201)
-    def create_scheduled_chat(payload: CreateScheduledChatRequest, request: Request) -> JSONResponse:
-        from agentos.scheduler.scheduled_chats import ScheduledChatInput
-        principal = principal_for(request, mutable=True)
-        services.security.check_rate_limit(principal, action="schedule.create", origin=request.headers.get("origin"))
-        services.security.authorize(principal, action="schedule.create", resource_id=payload.project_id, purpose="schedule.create")
-        provider = _provider_name(payload.selection.provider)
-        try:
-            result = require_port(services.scheduled_chats).create(  # type: ignore[union-attr]
-                principal.user_id,
-                ScheduledChatInput(
-                    message=payload.message, provider=provider, model_id=payload.selection.model_id,
-                    timezone=payload.timezone, recurrence=payload.recurrence.kind,
-                    fire_at=payload.recurrence.fire_at, time_of_day=payload.recurrence.time_of_day,
-                    weekday=payload.recurrence.weekday, project_id=payload.project_id,
-                ),
-                idempotency_key=_idempotency(request),
-            )
-        except ValueError as error:
-            raise ApplicationValidationError(str(error)) from error
-        return JSONResponse(_jsonable(result), status_code=201)
-
-    @app.get("/v1/schedules")
-    def list_scheduled_chats(request: Request) -> JSONResponse:
-        principal = principal_for(request)
-        services.security.authorize(principal, action="schedule.list", resource_id=None, purpose="schedule.read")
-        return JSONResponse(_jsonable(require_port(services.scheduled_chats).list(principal.user_id)))  # type: ignore[union-attr]
-
-    @app.delete("/v1/schedules/{schedule_id}", status_code=204)
-    def cancel_scheduled_chat(schedule_id: str, request: Request) -> JSONResponse:
-        principal = principal_for(request, mutable=True)
-        services.security.authorize(principal, action="schedule.cancel", resource_id=schedule_id, purpose="schedule.cancel")
-        if not require_port(services.scheduled_chats).cancel(principal.user_id, schedule_id):  # type: ignore[union-attr]
-            raise ApplicationNotFoundError(schedule_id)
-        return JSONResponse(status_code=204, content=None)
+    from .schedule_routes import register_schedule_routes
+    register_schedule_routes(app, services, principal_for, require_port, _jsonable, _provider_name, _idempotency, _error)
 
     @app.post("/v1/projects", status_code=201)
     def create_project(payload: CreateProjectRequest, request: Request) -> JSONResponse:
@@ -2253,11 +2205,11 @@ def create_app(services: ApiServices) -> FastAPI:
         _register_resource_routes(app, resource, services, principal_for)
 
     @app.get("/v1/skills")
-    def list_skills(request: Request, query: str = "", source: str | None = None, limit: int = 20, cursor: str | None = None) -> JSONResponse:
+    def list_skills(request: Request, query: str = "", source: str | None = None, limit: int = 100, cursor: str | None = None) -> JSONResponse:
         principal = principal_for(request)
         services.security.check_rate_limit(principal, action="skills.list", origin=request.headers.get("origin"))
         services.security.authorize(principal, action="skills.list", resource_id=None, purpose="skills.read")
-        result = _require_port(services.skills).list({"user_id": principal.user_id, "query": query, "source": source, "limit": min(max(limit, 1), 100), "cursor": cursor, "purpose": "skills.read"})
+        result = _require_port(services.skills).list({"user_id": principal.user_id, "query": query, "source": source, "limit": min(max(limit, 1), 200), "cursor": cursor, "purpose": "skills.read"})
         return JSONResponse(_jsonable(result))
 
     @app.get("/v1/skills/{skill_id}")
