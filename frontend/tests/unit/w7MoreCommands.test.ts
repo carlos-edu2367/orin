@@ -18,7 +18,7 @@ function deps(overrides: Partial<ChatCommandDeps> = {}): ChatCommandDeps {
     workspacePath: null, navigate: vi.fn(), send: vi.fn(async () => undefined), reload: vi.fn(async () => undefined), notify: vi.fn(),
     openInfo: vi.fn(), openPreferences: vi.fn(), openModelPicker: vi.fn(), setPermissionMode: vi.fn(),
     openRewind: vi.fn(), rename: vi.fn(async () => undefined), branch: vi.fn(async () => undefined), fork: vi.fn(async () => undefined),
-    openTasks: vi.fn(), setAccent: vi.fn(), ...overrides,
+    openTasks: vi.fn(), setAccent: vi.fn(), askBtw: vi.fn(), ...overrides,
   }
 }
 

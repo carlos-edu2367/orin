@@ -1481,6 +1481,7 @@ class ChatWorker:
             num_ctx=num_ctx,
             cipher_required=True,
             require_existing_key=True,
+            require_model_id=False,
             key_adapter_cls=PostgresProviderApiKeyAdapter,
             http_transport_cls=HTTPProviderStreamTransport,
         )
@@ -1883,7 +1884,9 @@ class ChatWorker:
 
     def _build_session_for(self, turn: dict[str, object]) -> TurnSession:
         engine = self.store._engine
-        skill_library = PostgresSkillLibraryService(engine, sync_personal_disk_skills=self._capabilities.plugin_hooks)
+        skill_library = PostgresSkillLibraryService(engine)
+        if hasattr(skill_library, "_sync_personal_disk_skills"):
+            skill_library._sync_personal_disk_skills = bool(self._capabilities.plugin_hooks)
         configured_limits = self._runtime_settings.get(str(turn["user_id"]))
         turn = self._hydrate_code_mode(turn)
         local_root = turn.get("workspace_root_path")

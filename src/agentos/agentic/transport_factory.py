@@ -82,13 +82,14 @@ def build_provider_transport(
     num_ctx: int | None = None,
     cipher_required: bool = True,
     require_existing_key: bool = True,
+    require_model_id: bool = True,
     key_adapter_cls: type[PostgresProviderApiKeyAdapter] | None = None,
     http_transport_cls: type[HTTPProviderStreamTransport] | None = None,
 ) -> object:
     """Build a streaming transport (HTTP multi-key or subscription CLI) for `(user_id, provider, model_id)`."""
     resolved_provider = str(provider or "").strip().lower()
     resolved_model_id = str(model_id or "").strip()
-    if not resolved_provider or not resolved_model_id:
+    if not resolved_provider or (require_model_id and not resolved_model_id):
         raise ValueError("provider and model_id are required")
 
     with engine.connect() as conn:

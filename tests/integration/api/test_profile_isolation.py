@@ -31,7 +31,7 @@ OWNED = {
     ("PUT", "/v1/projects/{project_id}/workspace"), ("DELETE", "/v1/projects/{project_id}/workspace"),
     ("POST", "/v1/projects/{project_id}/archive"), ("POST", "/v1/projects/{project_id}/conversations"),
     ("GET", "/v1/projects/{project_id}/memories"), ("DELETE", "/v1/projects/{project_id}/memories/{memory_id}"),
-    ("DELETE", "/v1/schedules/{schedule_id}"),
+    ("PATCH", "/v1/schedules/{schedule_id}"), ("DELETE", "/v1/schedules/{schedule_id}"),
     ("DELETE", "/v1/memories/{memory_id}"), ("PATCH", "/v1/memories/{memory_id}"),
     ("GET", "/v1/memory/{memory_id}/history"),
     ("POST", "/v1/memory/{memory_id}/approve"),
